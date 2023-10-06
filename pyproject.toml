@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "discord-blue"
+version = "0.1.0"
+description = ""
+authors = ["Chris Busillo <info@shinycomputers.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+
+
+[tool.poetry.group.dev.dependencies]
+setuptools = "^68.2.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
