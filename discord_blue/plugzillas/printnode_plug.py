@@ -34,7 +34,7 @@ from pathlib import Path
 
 if __name__ == '__main__':
     config = Config()
-    test_template = Path("mystic_molds/ansonia.dymo").read_bytes()
+    test_template = Path("../doodads/mystic_molds/ansonia.dymo").read_bytes()
 
     printnode = PrintNodeInterface(config.printnode.api_key, printer_id=config.printnode.front_printer_id)
-    printnode.print_label(base64.b64encode(test_template))
+    # printnode.print_label(base64.b64encode(test_template))

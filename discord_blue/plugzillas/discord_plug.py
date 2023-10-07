@@ -1,6 +1,10 @@
-from typing import TypeVar, Callable
 import logging
+from pathlib import Path
+from typing import Callable, TypeVar
+
 import discord
+from discord.ext import commands
+
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -9,18 +13,29 @@ config = Config()
 T = TypeVar('T', bound=discord.Guild | discord.TextChannel)
 
 
-class BlueBot(discord.Client):
+class BlueBot(commands.Bot):
+    destination_guild: discord.Guild
+    bot_channel: discord.TextChannel
+
     def __init__(self) -> None:
-        intents = discord.Intents.default()
-        super().__init__(intents=intents)
+        super().__init__(intents=discord.Intents.all(), command_prefix="!")
+
+    async def setup_hook(self) -> None:
+        for file in Path("doodads").glob("*.py"):
+            if file.stem == "__init__":
+                continue
+            try:
+                await self.load_extension(f"doodads.{file.stem}")
+            except commands.ExtensionNotFound:
+                logger.warning(f"Could not load extension {file.stem}")
 
     async def on_ready(self) -> None:
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
 
-        destination_guild = await self.blue_guild()
-        destination_channel = await self.blue_bot_channel(destination_guild)
+        self.destination_guild = await self.blue_guild()
+        self.bot_channel = await self.blue_bot_channel(self.destination_guild)
 
-        await destination_channel.send("@cbax new bot, who dis?")
+        await self.bot_channel.send("Connected")
 
     async def blue_guild(self) -> discord.Guild:
         if not config.discord.guild_id:

@@ -10,6 +10,7 @@ python = "^3.11"
 toml = "^0.10.2"
 discord = "^2.3.2"
 printnodeapi = "^0.2.0"
+pynacl = "^1.5.0"
 
 
 [tool.poetry.group.dev.dependencies]

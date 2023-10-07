@@ -8,8 +8,8 @@ logging.basicConfig(level=logging.INFO)
 
 
 def main() -> None:
-    client = BlueBot()
-    client.run(config.discord.token)
+    bot = BlueBot()
+    bot.run(config.discord.token)
 
 
 if __name__ == '__main__':
