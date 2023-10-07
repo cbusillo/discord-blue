@@ -8,14 +8,10 @@ logger = logging.getLogger(__name__)
 class Serializable:
     def to_dict(self) -> dict[str, any]:
         result = {}
-        instance_keys = set(self.__dict__.keys())
-        annotation_keys = set(self.__annotations__.keys()) if hasattr(self, '__annotations__') else set()
-        all_keys = instance_keys | annotation_keys
+        all_keys = Config.get_all_keys(self)
         for key in all_keys:
             if not key.startswith("_"):
                 value = getattr(self, key, None)
-                if value == "from_terminal":
-                    value = input(f"{key} not in configuration. Please enter a value: ")
                 if isinstance(value, Serializable):
                     result[key] = value.to_dict()
                 else:
@@ -23,7 +19,7 @@ class Serializable:
         return result
 
     def from_dict(self, data: dict) -> None:
-        for key, type_hint in self.__annotations__.items():
+        for key, type_hint in getattr(self, '__annotations__', {}).items():
             value = data.get(key, getattr(self, key, None))
 
             try:
@@ -43,52 +39,48 @@ class Serializable:
         self.validate()
 
     def validate(self) -> None:
-        for key, value in self.__annotations__.items():
+        for key, value in getattr(self, '__annotations__', {}).items():
             if getattr(self, key, None) is None:
                 logger.warning(f"Warning: Configuration value '{key}' is missing or None in {self.__class__.__name__}")
 
 
 class DiscordConfig(Serializable):
-    api_key: str = "from_terminal"
-    timeout: int = 10
+    token: str = "from_terminal"
+    guild_id: int = 0
+    bot_channel_id: int = 0
 
 
 class PrintnodeConfig(Serializable):
     api_key: str = "from_terminal"
-    port: int = 80
 
 
 class Config(Serializable):
     _instance = None
-    _filepath = Path.home() / ".config" / Path(__file__).parent.stem.replace("_", "-") / "config.toml"
 
-    debug: bool = True
+    def __init__(self) -> None:
+        self._filepath = Path.home() / ".config" / Path(__file__).parent.stem.replace("_", "-") / "config.toml"
 
-    def __new__(cls) -> "Config":
+        self.debug = True
+
+        self.discord = DiscordConfig()
+        self.printnode = PrintnodeConfig()
+
+        self.load()  # Load config during instance creation
+
+    @classmethod
+    def get_instance(cls) -> "Config":
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-
-            cls._instance.discord = DiscordConfig()
-            cls._instance.printnode = PrintnodeConfig()
-
-            cls._instance._filepath.parent.mkdir(parents=True, exist_ok=True)
-            if cls._instance._filepath.exists():
-                cls._instance.load()
-            cls._instance.save()
+            cls._instance = cls()
         return cls._instance
 
-    def save(self) -> None:
-        try:
-            with self._filepath.open("w") as f:
-                data = self.to_dict()
-                toml.dump(data, f)
-        except (FileNotFoundError, OSError) as error:
-            logger.exception(f"Error saving configuration: {str(error)}")
+    @property
+    def filepath(self) -> Path:
+        return self._filepath
 
     def load(self) -> None:
         try:
-            with self._filepath.open() as f:
-                data = toml.load(f)
+            with self.filepath.open() as file:
+                data = toml.load(file)
                 for key, value in data.items():
                     if key.startswith("_"):  # Skip keys starting with an underscore
                         continue
@@ -97,8 +89,19 @@ class Config(Serializable):
                         attr.from_dict(value)
                     else:
                         setattr(self, key, value)
-        except (FileNotFoundError, OSError, toml.TomlDecodeError) as error:
-            logger.exception(f"Error loading configuration: {str(error)}")
+        except (FileNotFoundError, OSError, toml.TomlDecodeError):
+            logger.exception(f"Error loading configuration")
+            exit(1)
+        self.save()
+
+    def save(self) -> None:
+        self.gather_missing_data(self)
+        data = self.to_dict()
+        try:
+            with self.filepath.open("w") as file:
+                toml.dump(data, file)
+        except (FileNotFoundError, OSError) as error:
+            logger.exception(f"Error saving configuration: {str(error)}")
 
     def update_and_save(self, **kwargs) -> None:
         for key, value in kwargs.items():
@@ -110,10 +113,28 @@ class Config(Serializable):
                 setattr(self, key, value)
         self.save()
 
+    @staticmethod
+    def get_all_keys(instance: object) -> set[str]:
+        instance_keys = set(instance.__dict__.keys())
+        annotation_keys = set(instance.__annotations__.keys()) if hasattr(instance, '__annotations__') else set()
+        return instance_keys | annotation_keys
+
+    @staticmethod
+    def gather_missing_data(instance: Serializable, parent_name: str = None) -> None:
+        all_keys = Config.get_all_keys(instance)
+        for key in all_keys:
+            if not key.startswith("_"):
+                value = getattr(instance, key, None)
+                full_key_name = f"{parent_name}.{key}" if parent_name else key
+                if value == "from_terminal":
+                    new_value = input(f"{full_key_name} not in configuration. Please enter a value: ")
+                    setattr(instance, key, new_value)
+                elif isinstance(value, Serializable):
+                    Config.gather_missing_data(value, full_key_name)  # Recursive call
+
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG)
-    config = Config()
-
-    config.discord.timeout = 20
-    config.save()
+    config = Config.get_instance()
+    print(config.discord.token)
+    # config.discord.api_key = "new_api_key"
+    # update_and_save(discord__timeout=200, printnode__port=8080)
