@@ -52,6 +52,7 @@ class DiscordConfig(Serializable):
 
 class PrintnodeConfig(Serializable):
     api_key: str = "from_terminal"
+    front_printer_id: int = 0
 
 
 class Config(Serializable):
