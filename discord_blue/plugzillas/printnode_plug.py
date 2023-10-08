@@ -6,9 +6,7 @@ config = Config()
 
 
 class PrintNodeInterface:
-    def __init__(
-        self, printer_id: int, api_key: str = config.printnode.api_key
-    ) -> None:
+    def __init__(self, printer_id: int, api_key: str = config.printnode.api_key) -> None:
         self.api_key = api_key
         self.printer_id = printer_id
         self.gateway = self.get_gateway()
@@ -16,7 +14,7 @@ class PrintNodeInterface:
     def get_gateway(self) -> Gateway:
         return Gateway(apikey=self.api_key)
 
-    def get_printers(self) -> list[any]:
+    def get_printers(self) -> list[dict]:
         gateway = self.get_gateway()
         printers = gateway.printers()
         return printers

@@ -1,12 +1,13 @@
 import logging
 import toml
+from typing import Any
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
 class Serializable:
-    def to_dict(self) -> dict[str, any]:
+    def to_dict(self) -> dict[str, Any]:
         result = {}
         all_keys = Config.get_all_keys(self)
         for key in all_keys:
