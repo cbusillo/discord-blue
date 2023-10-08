@@ -1,7 +1,11 @@
+import logging
 import discord
+import functools
 from discord.ext import commands
 from discord import app_commands
-from ..plugzillas.discord_plug import BlueBot
+from discord_blue.plugzillas.discord_plug import BlueBot
+
+logger = logging.getLogger(__name__)
 
 
 class SetupDoodad(commands.Cog):
@@ -12,10 +16,12 @@ class SetupDoodad(commands.Cog):
     @commands.Cog.listener("on_ready")
     async def on_ready(self) -> None:
         self.bot.tree.copy_global_to(guild=self.bot.guilds[0])
-        await self.bot.tree.sync(guild=self.bot.guilds[0])
+        tree_sync = await self.bot.tree.sync(guild=self.bot.guilds[0])
+        logger.info(f"Loaded {len(tree_sync)} commands")
+        await self.bot.bot_channel.send(f"Loaded {len(tree_sync)} commands")
 
     @commands.has_role("Shiny")
-    @app_commands.command(name="clear")  # type: ignore
+    @app_commands.command(name="clear")
     @app_commands.choices(
         scope=[
             app_commands.Choice(name="Bot", value="bot"),
@@ -42,6 +48,21 @@ class SetupDoodad(commands.Cog):
                     await message.delete()
         await temp_message.delete()
 
+    @staticmethod
+    def has_role(required_role: str):
+        def decorator_check_status(coro):
+            @functools.wraps(coro)
+            async def wrapper(self, context: discord.Interaction, choices: str, *args, **kwargs):
+                if not isinstance(context.user, discord.Member):
+                    return
+                if any(role.name == required_role for role in context.user.roles) or choices == "status":
+                    return await coro(self, context, choices, *args, **kwargs)
+                await context.response.send(f"Sorry, not allowed. Feel free to apply to the {required_role} Team")
 
-async def setup(bot: commands.Bot) -> None:
+            return wrapper
+
+        return decorator_check_status
+
+
+async def setup(bot: BlueBot) -> None:
     await bot.add_cog(SetupDoodad(bot))

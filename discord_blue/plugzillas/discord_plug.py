@@ -5,10 +5,9 @@ from typing import Callable, TypeVar
 import discord
 from discord.ext import commands
 
-from config import Config
+from discord_blue.config import Config
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 config = Config()
 T = TypeVar('T', bound=discord.Guild | discord.TextChannel)
 
@@ -16,14 +15,14 @@ T = TypeVar('T', bound=discord.Guild | discord.TextChannel)
 class BlueBot(commands.Bot):
     destination_guild: discord.Guild
     bot_channel: discord.TextChannel
+    config = config
 
     def __init__(self) -> None:
         super().__init__(intents=discord.Intents.all(), command_prefix="!")
 
     async def setup_hook(self) -> None:
-        for file in Path("doodads").glob("*.py"):
-            if file.stem == "__init__":
-                continue
+        doodad_path = Path(__file__).parent.parent / "doodads"
+        for file in (f for f in doodad_path.glob("*.py") if f.stem != "__init__"):
             try:
                 await self.load_extension(f"doodads.{file.stem}")
             except commands.ExtensionNotFound:

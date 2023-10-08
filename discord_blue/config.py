@@ -55,6 +55,11 @@ class PrintnodeConfig(Serializable):
     front_printer_id: int = 0
 
 
+class AssetLabelPrinterConfig(Serializable):
+    schools: dict[str, str] = {}
+    printers: dict[str, int] = {}
+
+
 class Config(Serializable):
     _instance = None
 
@@ -65,6 +70,7 @@ class Config(Serializable):
 
         self.discord = DiscordConfig()
         self.printnode = PrintnodeConfig()
+        self.asset_label_printer = AssetLabelPrinterConfig()
 
         self.load()  # Load config during instance creation
 

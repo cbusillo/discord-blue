@@ -1,9 +1,14 @@
 import base64
 from printnodeapi import Gateway
+from discord_blue.config import Config
+
+config = Config()
 
 
 class PrintNodeInterface:
-    def __init__(self, api_key: str, printer_id: int) -> None:
+    def __init__(
+        self, printer_id: int, api_key: str = config.printnode.api_key
+    ) -> None:
         self.api_key = api_key
         self.printer_id = printer_id
         self.gateway = self.get_gateway()
@@ -16,25 +21,28 @@ class PrintNodeInterface:
         printers = gateway.printers()
         return printers
 
-    def print_label(self, label: base64, quantity: int = 1):
+    def print_label(self, label_str: str, quantity: int = 1):
         gateway = self.gateway
-        label_str = label.decode('utf-8')
+        label_base64 = base64.b64encode(label_str)
+        label_utf = label_base64.decode("utf-8")
         print_job = gateway.PrintJob(
             printer=self.printer_id,
             job_type="raw",
             title="Asset Label",
             options={"copies": quantity},
-            base64=label_str
+            base64=label_utf,
         )
         return print_job
 
 
-from config import Config
+from discord_blue.config import Config
 from pathlib import Path
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     config = Config()
     test_template = Path("../doodads/mystic_molds/ansonia.dymo").read_bytes()
 
-    printnode = PrintNodeInterface(config.printnode.api_key, printer_id=config.printnode.front_printer_id)
-    # printnode.print_label(base64.b64encode(test_template))
+    printnode = PrintNodeInterface(
+        config.printnode.api_key, printer_id=config.printnode.front_printer_id
+    )
+    # printnode.print_label(test_template)
