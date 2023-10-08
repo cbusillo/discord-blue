@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 
 class Serializable:
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any] | Any:
         result = {}
         all_keys = Config.get_all_keys(self)
         for key in all_keys:

@@ -30,7 +30,8 @@ class BlueBot(commands.Bot):
                 logger.warning(f"Could not load extension {file.stem}")
 
     async def on_ready(self) -> None:
-        logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
+        if self.user:
+            logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
 
         self.destination_guild = await self.blue_guild()
         self.bot_channel = await self.blue_bot_channel(self.destination_guild)
@@ -39,15 +40,24 @@ class BlueBot(commands.Bot):
 
     async def blue_guild(self) -> discord.Guild:
         if not config.discord.guild_id:
-            await self.select_object(list(self.guilds), "guild", self.save_config_guild)
+            return await self.select_object(list(self.guilds), "guild", self.save_config_guild)
         else:
-            return self.get_guild(config.discord.guild_id)
+            if guild := self.get_guild(config.discord.guild_id):
+                return guild
+            else:
+                logger.error(f"Could not find guild with ID {config.discord.guild_id}")
+                raise ValueError
 
     async def blue_bot_channel(self, guild: discord.Guild) -> discord.TextChannel:
         if not config.discord.bot_channel_id:
-            await self.select_object(list(guild.text_channels), "channel", self.save_config_bot_channel)
+            return await self.select_object(list(guild.text_channels), "channel", self.save_config_bot_channel)
         else:
-            return self.get_channel(config.discord.bot_channel_id)
+            channel = self.get_channel(config.discord.bot_channel_id)
+            if isinstance(channel, discord.TextChannel):
+                return channel
+            else:
+                logger.error(f"Could not find channel with ID {config.discord.bot_channel_id}")
+                raise ValueError
 
     @staticmethod
     async def select_object(objects: list[T], object_type: str, callback: Callable[[T], None]) -> T:
@@ -56,9 +66,8 @@ class BlueBot(commands.Bot):
             print(f"{index + 1}: {obj.name}")
 
         while True:
-            selected_index = input(f"Select a {object_type}: ")
             try:
-                selected_index = int(selected_index)
+                selected_index = int(input(f"Select a {object_type}: "))
                 if 0 < selected_index <= len(objects):
                     selected_object = objects[selected_index - 1]
                     callback(selected_object)
@@ -77,9 +86,11 @@ class BlueBot(commands.Bot):
         config.save()
 
 
-async def wrap_reply_lines(lines: str, message: discord.Message | discord.Interaction):
+async def wrap_reply_lines(lines: str, message: discord.Message | discord.Interaction) -> None:
     """Break up messages that are longer than 2000
     chars and send multible messages to discord"""
+    if not isinstance(message.channel, discord.TextChannel):
+        return
     if lines is None or lines == "":
         lines = "No lines to send"
     wrap_length = 2000 - len(message.author.mention) if hasattr(message, "author") else 2000

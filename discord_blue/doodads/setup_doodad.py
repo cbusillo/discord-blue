@@ -1,8 +1,11 @@
-import logging
-import discord
 import functools
-from discord.ext import commands
+import logging
+from typing import Callable
+
+import discord
 from discord import app_commands
+from discord.ext import commands
+
 from discord_blue.plugzillas.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
@@ -20,7 +23,7 @@ class SetupDoodad(commands.Cog):
         logger.info(f"Loaded {len(tree_sync)} commands")
         await self.bot.bot_channel.send(f"Loaded {len(tree_sync)} commands")
 
-    @commands.has_role("Shiny")
+    @app_commands.checks.has_role("Shiny")
     @app_commands.command(name="clear")
     @app_commands.choices(
         scope=[
@@ -48,22 +51,6 @@ class SetupDoodad(commands.Cog):
                 if message != temp_message:
                     await message.delete()
         await temp_message.delete()
-
-    @staticmethod
-    def has_role(required_role: str):
-        def decorator_check_status(coro) -> callable:
-            @functools.wraps(coro)
-            async def wrapper(self, context: discord.Interaction, choices: str, *args, **kwargs):
-                if not isinstance(context.user, discord.Member):
-                    return
-                if any(role.name == required_role for role in context.user.roles) or choices == "status":
-                    return await coro(self, context, choices, *args, **kwargs)
-                if isinstance(context.response, discord.InteractionResponse):
-                    await context.response.send_message(f"Sorry, not allowed. Feel free to apply to the {required_role} Team")
-
-            return wrapper
-
-        return decorator_check_status
 
 
 async def setup(bot: BlueBot) -> None:
