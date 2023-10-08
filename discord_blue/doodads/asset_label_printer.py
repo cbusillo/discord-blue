@@ -4,8 +4,13 @@ from pathlib import Path
 from discord.ext import commands
 from discord import app_commands
 from discord.app_commands import Choice
+from discord_blue.plugzillas.discord_plug import wrap_reply_lines
 from discord_blue.plugzillas.discord_plug import BlueBot
 from discord_blue.plugzillas.printnode_plug import PrintNodeInterface
+from discord_blue.config import Config
+
+
+config = Config()
 
 
 class AssetLabelPrinterDoodad(commands.Cog):
@@ -13,8 +18,9 @@ class AssetLabelPrinterDoodad(commands.Cog):
         self.bot = bot
         super().__init__()
 
-    async def get_schools(self, _: discord.Interaction, current: str) -> list[Choice[str]]:
-        schools = list(self.bot.config.asset_label_printer.schools.items())
+    @staticmethod
+    async def get_schools(_: discord.Interaction, current: str) -> list[Choice]:
+        schools = list(config.asset_label_printer.schools.items())
 
         if current:
             schools = [(key, value) for key, value in schools if current.lower() in value.lower()]
@@ -22,10 +28,10 @@ class AssetLabelPrinterDoodad(commands.Cog):
 
         return [Choice(name=school_name, value=school_key) for school_key, school_name in schools]
 
-    async def get_printers(self, _: discord.Interaction, _2: str) -> list[Choice[str]]:
+    @staticmethod
+    async def get_printers(_: discord.Interaction, _2: str) -> list[Choice]:
         return [
-            Choice(name=printer_key, value=printer_id)
-            for printer_key, printer_id in self.bot.config.asset_label_printer.printers.items()
+            Choice(name=printer_key, value=printer_id) for printer_key, printer_id in config.asset_label_printer.printers.items()
         ]
 
     @commands.has_role("Shiny")
@@ -34,7 +40,7 @@ class AssetLabelPrinterDoodad(commands.Cog):
     @app_commands.autocomplete(printer_id=get_printers)
     async def print_asset_tag(
         self,
-        ctx: discord.Interaction,
+        context: discord.Interaction,
         printer_id: int,
         school_key: str,
         id_0: str,
@@ -54,32 +60,31 @@ class AssetLabelPrinterDoodad(commands.Cog):
             id_0=id_0,
             id_1=id_1,
             id_2=id_2,
-            name=self.bot.config.asset_label_printer.schools[school_key],
+            name=self.bot.config.asset_label_printer.schools[school_key].upper(),
         )
         printnode = PrintNodeInterface(printer_id=printer_id)
         printnode.print_label(mold.encode("utf-8"))
-        await ctx.response.send_message(f"{printer_id=} {school_key=}")
+        if isinstance(context.response, discord.InteractionResponse):
+            await context.response.send_message(f"{printer_id=} {school_key=}")
 
     @commands.has_role("Shiny")
     @app_commands.command(name="add-school")
-    async def add_school(self, ctx: discord.Interaction, school_name: str) -> None:
-        if "\n" in school_name:
-            shcool_names = school_name.split("\n")
-        else:
-            school_names = [school_name]
-        for school in school_names:
-            school_short = re.sub(r"[\s-]+", "_", school)
-            school_short = re.sub(r"\W+", "", school_short)
-            school_short = re.sub(r"_+", "_", school_short.lower())
-            self.bot.config.asset_label_printer.schools[school_short] = school
+    async def add_school(self, context: discord.Interaction, school_name: str) -> None:
+        school_short = re.sub(r"[\s-]+", "_", school_name)
+        school_short = re.sub(r"\W+", "", school_short)
+        school_short = re.sub(r"_+", "_", school_short.lower())
+        self.bot.config.asset_label_printer.schools[school_short] = school_name
         self.bot.config.save()
-        message = f"Added {school_name} to the list of schools\n" f"Current Schools:\n"
+        message = f"{context.user.mention} Added {school_name} to the list of schools\n" f"Current Schools:\n"
+        if isinstance(context.response, discord.InteractionResponse):
+            await context.response.send_message(message)
+        message = ""
         for (
             school_key,
             school_name,
         ) in self.bot.config.asset_label_printer.schools.items():
             message += f"{school_key}: {school_name}\n"
-        await ctx.response.send_message(message)
+        await wrap_reply_lines(message, context)
 
 
 async def setup(bot: BlueBot) -> None:

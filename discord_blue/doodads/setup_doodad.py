@@ -37,7 +37,8 @@ class SetupDoodad(commands.Cog):
             await context.channel.send("Cannot use in this channel")
             return
         temp_message = await context.channel.send(f"Clearing messages from {scope}")
-        await context.response.defer()
+        if isinstance(context.response, discord.InteractionResponse):
+            await context.response.defer()
         if scope == "bot":
             async for message in context.channel.history():
                 if message.author == self.bot.user and message != temp_message:
@@ -50,14 +51,15 @@ class SetupDoodad(commands.Cog):
 
     @staticmethod
     def has_role(required_role: str):
-        def decorator_check_status(coro):
+        def decorator_check_status(coro) -> callable:
             @functools.wraps(coro)
             async def wrapper(self, context: discord.Interaction, choices: str, *args, **kwargs):
                 if not isinstance(context.user, discord.Member):
                     return
                 if any(role.name == required_role for role in context.user.roles) or choices == "status":
                     return await coro(self, context, choices, *args, **kwargs)
-                await context.response.send(f"Sorry, not allowed. Feel free to apply to the {required_role} Team")
+                if isinstance(context.response, discord.InteractionResponse):
+                    await context.response.send_message(f"Sorry, not allowed. Feel free to apply to the {required_role} Team")
 
             return wrapper
 

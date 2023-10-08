@@ -1,4 +1,5 @@
 import logging
+import textwrap
 from pathlib import Path
 from typing import Callable, TypeVar
 
@@ -9,7 +10,7 @@ from discord_blue.config import Config
 
 logger = logging.getLogger(__name__)
 config = Config()
-T = TypeVar('T', bound=discord.Guild | discord.TextChannel)
+T = TypeVar("T", bound=discord.Guild | discord.TextChannel)
 
 
 class BlueBot(commands.Bot):
@@ -74,3 +75,21 @@ class BlueBot(commands.Bot):
     def save_config_bot_channel(channel: discord.TextChannel) -> None:
         config.discord.bot_channel_id = channel.id
         config.save()
+
+
+async def wrap_reply_lines(lines: str, message: discord.Message | discord.Interaction):
+    """Break up messages that are longer than 2000
+    chars and send multible messages to discord"""
+    if lines is None or lines == "":
+        lines = "No lines to send"
+    wrap_length = 2000 - len(message.author.mention) if hasattr(message, "author") else 2000
+    lines_list = textwrap.wrap(
+        lines,
+        wrap_length,
+        break_long_words=True,
+        replace_whitespace=False,
+    )
+    if hasattr(message, "author") and message.author.bot is False:
+        lines_list[0] = f"{message.author.mention} {lines_list[0]}"
+    for line in lines_list:
+        await message.channel.send(line)
