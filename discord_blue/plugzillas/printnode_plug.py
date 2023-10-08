@@ -16,12 +16,12 @@ class PrintNodeInterface:
     def get_gateway(self) -> Gateway:
         return Gateway(apikey=self.api_key)
 
-    def get_printers(self):
+    def get_printers(self) -> list[any]:
         gateway = self.get_gateway()
         printers = gateway.printers()
         return printers
 
-    def print_label(self, label_str: str, quantity: int = 1):
+    def print_label(self, label_str: bytes, quantity: int = 1):
         gateway = self.gateway
         label_base64 = base64.b64encode(label_str)
         label_utf = label_base64.decode("utf-8")
@@ -42,7 +42,5 @@ if __name__ == "__main__":
     config = Config()
     test_template = Path("../doodads/mystic_molds/ansonia.dymo").read_bytes()
 
-    printnode = PrintNodeInterface(
-        config.printnode.api_key, printer_id=config.printnode.front_printer_id
-    )
+    printnode = PrintNodeInterface(printer_id=config.printnode.front_printer_id)
     # printnode.print_label(test_template)
