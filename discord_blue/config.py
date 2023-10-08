@@ -19,7 +19,7 @@ class Serializable:
         return result
 
     def from_dict(self, data: dict) -> None:
-        for key, type_hint in getattr(self, '__annotations__', {}).items():
+        for key, type_hint in getattr(self, "__annotations__", {}).items():
             value = data.get(key, getattr(self, key, None))
 
             try:
@@ -39,7 +39,7 @@ class Serializable:
         self.validate()
 
     def validate(self) -> None:
-        for key, value in getattr(self, '__annotations__', {}).items():
+        for key, value in getattr(self, "__annotations__", {}).items():
             if getattr(self, key, None) is None:
                 logger.warning(f"Warning: Configuration value '{key}' is missing or None in {self.__class__.__name__}")
 
@@ -123,11 +123,11 @@ class Config(Serializable):
     @staticmethod
     def get_all_keys(instance: object) -> set[str]:
         instance_keys = set(instance.__dict__.keys())
-        annotation_keys = set(instance.__annotations__.keys()) if hasattr(instance, '__annotations__') else set()
+        annotation_keys = set(instance.__annotations__.keys()) if hasattr(instance, "__annotations__") else set()
         return instance_keys | annotation_keys
 
     @staticmethod
-    def gather_missing_data(instance: Serializable, parent_name: str = None) -> None:
+    def gather_missing_data(instance: Serializable, parent_name: str = "") -> None:
         all_keys = Config.get_all_keys(instance)
         for key in all_keys:
             if not key.startswith("_"):
