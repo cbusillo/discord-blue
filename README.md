@@ -1,7 +1,7 @@
 Justin is a meanie head
 
 Debian install:
-```python
+```bash
 apt install python3.11 python3-poetry
 git clone https://github.com/cbusillo/discord-blue
 cd discord-blue
