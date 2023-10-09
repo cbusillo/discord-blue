@@ -41,9 +41,12 @@ class BlueBot(commands.Bot):
         logger.info("Clearing commands and logging out")
         self.tree.clear_commands(guild=self.guilds[0])
         self.recursively_remove_all_commands()
-        self.clear()
+        all_commands = self.walk_commands()
+        for command in all_commands:
+            self.remove_command(command.name)
         for guild in self.guilds:
             self.tree.clear_commands(guild=guild)
+        self.clear()
         await self.close()
         logging.warning("Logged out")
 
