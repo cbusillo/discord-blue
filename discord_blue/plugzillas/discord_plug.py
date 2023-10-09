@@ -1,5 +1,6 @@
 import logging
 import textwrap
+from time import sleep
 from typing import Callable, TypeVar
 
 import discord
@@ -9,6 +10,7 @@ from discord_blue.config import config
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=discord.Guild | discord.TextChannel)
+DISCORD_TOKEN_TIMEOUT = 300  # seconds
 
 
 class BlueBot(commands.Bot):
@@ -17,7 +19,15 @@ class BlueBot(commands.Bot):
     config = config
 
     def __init__(self) -> None:
-        super().__init__(intents=discord.Intents.all(), command_prefix="!")
+        for count in range(DISCORD_TOKEN_TIMEOUT):
+            try:
+                super().__init__(intents=discord.Intents.all(), command_prefix="!")
+            except discord.errors.PrivilegedIntentsRequired:
+                logger.error("Privileged intents required")
+                logger.error(
+                    "Please enable intents in the discord developer portal https://discord.com/api/oauth2/authorize?client_id=1160954317306613800&permissions=8&scope=bot"
+                )
+                sleep(1)
 
     async def setup_hook(self) -> None:
         await self.load_extension("discord_blue.doodads._doodad_setup")
