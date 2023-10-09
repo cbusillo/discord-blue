@@ -20,9 +20,9 @@ class BlueBot(commands.Bot):
         super().__init__(intents=discord.Intents.all(), command_prefix="!")
 
     async def setup_hook(self) -> None:
-        await self.load_extension("discord-blue.doodads._doodad_setup")
+        await self.load_extension("discord_blue.doodads._doodad_setup")
         for doodad in self.config.discord.loaded_doodads:
-            await self.load_extension(f"discord-blue.doodads.{doodad}")
+            await self.load_extension(f"discord_blue.doodads.{doodad}")
 
     async def on_ready(self) -> None:
         if self.user:
