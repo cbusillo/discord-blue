@@ -6,7 +6,7 @@ from discord.app_commands import Choice
 from discord.ext import commands
 from discord.ext.commands import Context
 from discord_blue.plugzillas.discord_plug import BlueBot
-from discord_blue.plugzillas.discord.checks import has_employee_role
+from discord_blue.plugzillas.discord import checks
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ class SetupDoodad(commands.Cog):
         logger.info(f"Loaded {len(tree_sync)} commands")
         await self.bot.bot_channel.send(f"Loaded {len(tree_sync)} commands")
 
-    @has_employee_role()  # type: ignore[arg-type]
+    @checks.has_employee_role()  # type: ignore[arg-type]
     @commands.hybrid_command(name="sync")
     async def sync_command(self, context: Context) -> None:
         logger.info("Syncing commands")
@@ -43,7 +43,7 @@ class SetupDoodad(commands.Cog):
         app_commands.Choice(name="Bot", value="bot"),
     ]
 
-    @has_employee_role()  # type: ignore[arg-type]
+    @checks.has_employee_role()  # type: ignore[arg-type]
     @app_commands.command(name="clear")
     @app_commands.choices(scope=CLEAR_CHOICES)
     async def clear_command(self, interaction: discord.Interaction, scope: str) -> None:
@@ -89,14 +89,32 @@ class SetupCommands(commands.GroupCog, name="setup"):
 
     doodads_group = app_commands.Group(name="doodads", description="Manage doodads")
 
-    # noinspection PyMethodMayBeStatic
-    async def get_doodads_to_add_autocomplete(self, _: discord.Interaction, current: str) -> list[Choice]:
-        doodad_names = [doodad_path.stem for doodad_path in Path(__file__).parent.glob("*_doodad.py")]
+    def get_loaded_doodads(self) -> list[str]:
+        loaded_doodad_names = [
+            doodad_name.lower().replace("doodads.", "")
+            for doodad_name in self.bot.extensions.keys()
+            if not doodad_name.startswith("doodads._")
+        ]
+        return loaded_doodad_names
+
+    async def get_doodads_to_load_autocomplete(self, _: discord.Interaction, current: str) -> list[Choice]:
+        loaded_doodad_names = self.get_loaded_doodads()
+        doodad_names = [
+            doodad_path.stem
+            for doodad_path in Path(__file__).parent.glob("*_doodad.py")
+            if doodad_path.stem not in loaded_doodad_names
+        ]
         if current:
             doodad_names = [doodad_name for doodad_name in doodad_names if current.lower() in doodad_name.lower()]
         doodad_names = doodad_names[:25]
 
         return [Choice(name=doodad_name, value=doodad_name) for doodad_name in doodad_names]
+
+    async def get_doodads_to_unload_autocomplete(self, _: discord.Interaction, current: str) -> list[Choice]:
+        loaded_doodad_names = self.get_loaded_doodads()
+        if current:
+            loaded_doodad_names = [doodad_name for doodad_name in loaded_doodad_names if current.lower() in doodad_name.lower()]
+        return [Choice(name=doodad_name, value=doodad_name) for doodad_name in loaded_doodad_names]
 
     @doodads_group.command(name="get_all", description="List all doodads")  # type: ignore[arg-type]
     async def list_doodads_command(self, interaction: discord.Interaction) -> None:
@@ -115,13 +133,34 @@ class SetupCommands(commands.GroupCog, name="setup"):
             await interaction.response.send_message(f"{doodads_formatted}")
 
     @doodads_group.command(name="load", description="Load a doodad")  # type: ignore[arg-type]
-    @app_commands.autocomplete(doodad_name=get_doodads_to_add_autocomplete)  # type: ignore[arg-type]
+    @app_commands.autocomplete(doodad_name=get_doodads_to_load_autocomplete)  # type: ignore[arg-type]
     async def load_doodad_command(self, interaction: discord.Interaction, doodad_name: str) -> None:
+        if isinstance(interaction.response, discord.InteractionResponse):
+            await interaction.response.defer()
         await self.bot.load_extension(f"doodads.{doodad_name}")
+        logger.info(f"Loaded {doodad_name}")
+        tree_sync = await self.bot.tree.sync()
+        logger.info(f"Loaded {len(tree_sync)} commands")
         self.bot.config.discord.loaded_doodads.append(doodad_name)
         self.bot.config.save()
+        if isinstance(interaction.channel, checks.TEXT_CHANNELS):
+            await interaction.followup.send(f"Loaded {doodad_name}")
+            await interaction.followup.send(f"Loaded {len(tree_sync)} commands")
+
+    @doodads_group.command(name="unload", description="Unload a doodad")  # type: ignore[arg-type]
+    @app_commands.autocomplete(doodad_name=get_doodads_to_unload_autocomplete)  # type: ignore[arg-type]
+    async def unload_doodad_command(self, interaction: discord.Interaction, doodad_name: str) -> None:
         if isinstance(interaction.response, discord.InteractionResponse):
-            await interaction.response.send_message(f"Loaded {doodad_name}")
+            await interaction.response.defer()
+        await self.bot.unload_extension(f"doodads.{doodad_name}")
+        logger.info(f"Unloaded {doodad_name}")
+        tree_sync = await self.bot.tree.sync()
+        logger.info(f"Loaded {len(tree_sync)} commands")
+        self.bot.config.discord.loaded_doodads.remove(doodad_name)
+        self.bot.config.save()
+        if isinstance(interaction.channel, checks.TEXT_CHANNELS):
+            await interaction.followup.send(f"Unloaded {doodad_name}")
+            await interaction.followup.send(f"Loaded {len(tree_sync)} commands")
 
 
 async def setup(bot: BlueBot) -> None:
