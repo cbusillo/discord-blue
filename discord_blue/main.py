@@ -11,10 +11,14 @@ logging.basicConfig(level=logging.INFO)
 
 
 def main() -> None:
+    login_succes = False
     for count in range(DISCORD_TOKEN_TIMEOUT):
+        if login_succes:
+            break
         try:
             bot = BlueBot()
             bot.run(config.discord.token)
+            login_succes = True
         except PrivilegedIntentsRequired:
             logger.error("Privileged intents required")
             logger.error(
