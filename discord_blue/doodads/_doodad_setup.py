@@ -47,7 +47,7 @@ class SetupDoodad(commands.Cog):
     @app_commands.command(name="clear")
     @app_commands.choices(scope=CLEAR_CHOICES)
     async def clear_command(self, interaction: discord.Interaction, scope: str) -> None:
-        if not isinstance(interaction.channel, discord.TextChannel):
+        if not isinstance(interaction.channel, checks.TEXT_CHANNELS):
             return
         if interaction.channel.id != self.bot.bot_channel.id:
             await interaction.channel.send("Cannot use in this channel")
