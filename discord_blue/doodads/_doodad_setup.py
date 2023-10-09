@@ -2,10 +2,11 @@ import logging
 import discord
 from pathlib import Path
 from discord import app_commands
+from discord.app_commands import Choice
 from discord.ext import commands
 from discord.ext.commands import Context
 from discord_blue.plugzillas.discord_plug import BlueBot
-from discord_blue.plugzillas.checks import has_employee_role
+from discord_blue.plugzillas.discord.checks import has_employee_role
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ class SetupDoodad(commands.Cog):
         logger.info(f"Loaded {len(tree_sync)} commands")
         await self.bot.bot_channel.send(f"Loaded {len(tree_sync)} commands")
 
-    @app_commands.checks.has_role("Shiny")  # type: ignore
+    @has_employee_role()  # type: ignore[arg-type]
     @commands.hybrid_command(name="sync")
     async def sync_command(self, context: Context) -> None:
         logger.info("Syncing commands")
@@ -42,7 +43,7 @@ class SetupDoodad(commands.Cog):
         app_commands.Choice(name="Bot", value="bot"),
     ]
 
-    @app_commands.checks.has_role("Shiny")  # type: ignore
+    @has_employee_role()  # type: ignore[arg-type]
     @app_commands.command(name="clear")
     @app_commands.choices(scope=CLEAR_CHOICES)
     async def clear_command(self, interaction: discord.Interaction, scope: str) -> None:
@@ -73,24 +74,54 @@ class SetupCommands(commands.GroupCog, name="setup"):
 
     permissions_group = app_commands.Group(name="permissions", description="Manage permissions")
 
-    @permissions_group.command(name="get", description="Get role with employee permissions")  # type: ignore
+    @permissions_group.command(name="get", description="Get role with employee permissions")  # type: ignore[arg-type]
     async def get_employee_role_command(self, interaction: discord.Interaction) -> None:
         if isinstance(interaction.response, discord.InteractionResponse):
             message = f"{self.bot.config.discord.employee_role_name} is the role with employee permission"
             await interaction.response.send_message(message)
 
-    @permissions_group.command(name="set", description="Set role with employee permissions")  # type: ignore
+    @permissions_group.command(name="set", description="Set role with employee permissions")  # type: ignore[arg-type]
     async def set_employee_role_command(self, context: discord.Interaction, role: discord.Role) -> None:
         self.bot.config.discord.employee_role_name = role.name
         self.bot.config.save()
         if isinstance(context.response, discord.InteractionResponse):
             await context.response.send_message("Replacing permissions")
 
-    @has_employee_role()  # type: ignore
-    @permissions_group.command(name="list_doodads", description="list all doodads")
-    async def list_doodads_command(self, context: discord.Interaction) -> None:
-        if isinstance(context.response, discord.InteractionResponse):
-            await context.response.send_message(f"{list(Path(__file__).parent.glob('*'))=}")
+    doodads_group = app_commands.Group(name="doodads", description="Manage doodads")
+
+    # noinspection PyMethodMayBeStatic
+    async def get_doodads_to_add_autocomplete(self, _: discord.Interaction, current: str) -> list[Choice]:
+        doodad_names = [doodad_path.stem for doodad_path in Path(__file__).parent.glob("*_doodad.py")]
+        if current:
+            doodad_names = [doodad_name for doodad_name in doodad_names if current.lower() in doodad_name.lower()]
+        doodad_names = doodad_names[:25]
+
+        return [Choice(name=doodad_name, value=doodad_name) for doodad_name in doodad_names]
+
+    @doodads_group.command(name="get_all", description="List all doodads")  # type: ignore[arg-type]
+    async def list_doodads_command(self, interaction: discord.Interaction) -> None:
+        if isinstance(interaction.response, discord.InteractionResponse):
+            doodads = list(Path(__file__).parent.glob("*_doodad.py"))
+            doodads_formatted = "\n".join([doodad.stem for doodad in doodads])
+            await interaction.response.send_message(f"{doodads_formatted}")
+
+    @doodads_group.command(name="get_loaded", description="List loaded doodads")  # type: ignore[arg-type]
+    async def list_running_doodads_command(self, interaction: discord.Interaction) -> None:
+        if isinstance(interaction.response, discord.InteractionResponse):
+            if not self.bot.config.discord.loaded_doodads:
+                await interaction.response.send_message("No doodads loaded")
+                return
+            doodads_formatted = "\n".join(self.bot.config.discord.loaded_doodads)
+            await interaction.response.send_message(f"{doodads_formatted}")
+
+    @doodads_group.command(name="load", description="Load a doodad")  # type: ignore[arg-type]
+    @app_commands.autocomplete(doodad_name=get_doodads_to_add_autocomplete)  # type: ignore[arg-type]
+    async def load_doodad_command(self, interaction: discord.Interaction, doodad_name: str) -> None:
+        await self.bot.load_extension(f"doodads.{doodad_name}")
+        self.bot.config.discord.loaded_doodads.append(doodad_name)
+        self.bot.config.save()
+        if isinstance(interaction.response, discord.InteractionResponse):
+            await interaction.response.send_message(f"Loaded {doodad_name}")
 
 
 async def setup(bot: BlueBot) -> None:

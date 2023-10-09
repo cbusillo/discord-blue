@@ -50,6 +50,7 @@ class DiscordConfig(Serializable):
     guild_id: int = 0
     bot_channel_id: int = 0
     employee_role_name: str = ""
+    loaded_doodads: list[str] = []
 
 
 class PrintnodeConfig(Serializable):

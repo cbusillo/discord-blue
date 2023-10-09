@@ -3,7 +3,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from discord_blue.plugzillas.discord_plug import BlueBot
-from discord_blue.plugzillas.checks import has_employee_role
+from discord_blue.plugzillas.discord.checks import has_employee_role
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +13,7 @@ class TemplateDoodad(commands.Cog):
         self.bot = bot
         super().__init__()
 
-    @has_employee_role()  # type: ignore
+    @has_employee_role()  # type: ignore[arg-type]
     @app_commands.command(name="hello", description="Hello World")
     async def hello_command(self, context: discord.Interaction) -> None:
         if isinstance(context.response, discord.InteractionResponse):

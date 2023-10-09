@@ -1,5 +1,5 @@
 import base64
-from printnodeapi import Gateway  # type: ignore
+from printnodeapi import Gateway  # type: ignore[import]
 from discord_blue.config import config
 
 

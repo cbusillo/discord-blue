@@ -4,6 +4,7 @@ from pathlib import Path
 from discord.ext import commands
 from discord import app_commands
 from discord.app_commands import Choice
+from discord_blue.plugzillas.discord.checks import has_employee_role
 from discord_blue.plugzillas.discord_plug import BlueBot
 from discord_blue.plugzillas.printnode_plug import PrintNodeInterface
 
@@ -13,24 +14,23 @@ class AssetLabelPrinterDoodad(commands.Cog):
         self.bot = bot
         super().__init__()
 
-    async def get_schools(self, _: discord.Interaction, current: str) -> list[Choice]:
+    async def get_schools_autocomplete(self, _: discord.Interaction, current: str) -> list[Choice]:
         schools = list(self.bot.config.asset_label_printer.schools.items())
-
         if current:
             schools = [(key, value) for key, value in schools if current.lower() in value.lower()]
-        schools = schools[0:25]
+        schools = schools[:25]
 
         return [Choice(name=school_name, value=school_key) for school_key, school_name in schools]
 
-    async def get_printers(self, _: discord.Interaction, _2: str) -> list[Choice]:
+    async def get_printers_autocomplete(self, _: discord.Interaction, _2: str) -> list[Choice]:
         return [
             Choice(name=printer_key, value=printer_id)
             for printer_key, printer_id in self.bot.config.asset_label_printer.printers.items()
-        ]
+        ][:25]
 
-    @app_commands.checks.has_role("Shiny")  # type: ignore
+    @has_employee_role()  # type: ignore[arg-type]
     @app_commands.command(name="asset-tag", description="Print an asset tag")
-    @app_commands.autocomplete(school_key=get_schools, printer_id=get_printers)  # type: ignore
+    @app_commands.autocomplete(school_key=get_schools_autocomplete, printer_id=get_printers_autocomplete)  # type: ignore[arg-type]
     @app_commands.describe(printer_id="Printer Name", school_key="School Name", id_0="First ID", id_1="Second ID", id_2="Third ID")
     async def print_asset_tag(
         self,
@@ -61,7 +61,7 @@ class AssetLabelPrinterDoodad(commands.Cog):
         if isinstance(context.response, discord.InteractionResponse):
             await context.response.send_message(f"{printer_id=} {school_key=}")
 
-    @app_commands.checks.has_role("Shiny")  # type: ignore
+    @has_employee_role()  # type: ignore[arg-type]
     @app_commands.command(name="add-school", description="Add a school to the list of schools")
     @app_commands.describe(school_name="School Name")
     async def add_school(self, context: discord.Interaction, school_name: str) -> None:
