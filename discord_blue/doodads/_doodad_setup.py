@@ -92,9 +92,9 @@ class SetupCommands(commands.GroupCog, name="setup"):
 
     def get_loaded_doodads(self) -> list[str]:
         loaded_doodad_names = [
-            doodad_name.lower().replace("doodads.", "")
+            doodad_name.lower().replace("discord_blue.doodads.", "")
             for doodad_name in self.bot.extensions.keys()
-            if not doodad_name.startswith("doodads._")
+            if not doodad_name.startswith("discord_blue.doodads._")
         ]
         return loaded_doodad_names
 
@@ -105,6 +105,8 @@ class SetupCommands(commands.GroupCog, name="setup"):
             for doodad_path in Path(__file__).parent.glob("*_doodad.py")
             if doodad_path.stem not in loaded_doodad_names
         ]
+        logger.info(f"{doodad_names=}")
+        logger.info(f"{loaded_doodad_names=}")
         if current:
             doodad_names = [doodad_name for doodad_name in doodad_names if current.lower() in doodad_name.lower()]
         doodad_names = doodad_names[:25]
@@ -156,12 +158,12 @@ class SetupCommands(commands.GroupCog, name="setup"):
         await self.bot.unload_extension(f"discord_blue.doodads.{doodad_name}")
         logger.info(f"Unloaded {doodad_name}")
         tree_sync = await self.bot.tree.sync()
-        logger.info(f"Loaded {len(tree_sync)} commands")
+        logger.info(f"Unloaded {len(tree_sync)} commands")
         self.bot.config.discord.loaded_doodads.remove(doodad_name)
         self.bot.config.save()
         if isinstance(interaction.channel, checks.TEXT_CHANNELS):
             await interaction.followup.send(f"Unloaded {doodad_name}")
-            await interaction.followup.send(f"Loaded {len(tree_sync)} commands")
+            await interaction.followup.send(f"Unloaded {len(tree_sync)} commands")
 
 
 async def setup(bot: BlueBot) -> None:
