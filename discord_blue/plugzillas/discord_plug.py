@@ -39,6 +39,7 @@ class BlueBot(commands.Bot):
 
     async def clear_commands_and_logout(self) -> None:
         logger.info("Clearing commands and logging out")
+        self.tree.clear_commands(guild=self.guilds[0])
         self.recursively_remove_all_commands()
         self.clear()
         for guild in self.guilds:
