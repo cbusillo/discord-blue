@@ -18,6 +18,7 @@ class SetupDoodad(commands.Cog):
 
     @commands.Cog.listener("on_ready")
     async def my_on_ready(self) -> None:
+        self.bot.tree.clear_commands(guild=self.bot.guilds[0])
         self.bot.tree.copy_global_to(guild=self.bot.guilds[0])
         tree_sync = await self.bot.tree.sync()
         logger.info(f"Loaded {len(tree_sync)} commands")
