@@ -11,9 +11,9 @@ logging.basicConfig(level=logging.INFO)
 
 
 def main() -> None:
-    bot = BlueBot()
     for count in range(DISCORD_TOKEN_TIMEOUT):
         try:
+            bot = BlueBot()
             bot.run(config.discord.token)
         except PrivilegedIntentsRequired:
             logger.error("Privileged intents required")
