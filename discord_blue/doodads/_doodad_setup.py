@@ -114,7 +114,7 @@ class SetupCommands(commands.GroupCog, name="setup"):
             doodads_formatted = "\n".join(self.bot.config.discord.loaded_doodads)
             await interaction.response.send_message(f"{doodads_formatted}")
 
-    @doodads_group.command(name="load", description="Load a doodad")
+    @doodads_group.command(name="load", description="Load a doodad")  # type: ignore[arg-type]
     @app_commands.autocomplete(doodad_name=get_doodads_to_add_autocomplete)  # type: ignore[arg-type]
     async def load_doodad_command(self, interaction: discord.Interaction, doodad_name: str) -> None:
         await self.bot.load_extension(f"doodads.{doodad_name}")
