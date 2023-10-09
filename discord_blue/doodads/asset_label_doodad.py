@@ -34,7 +34,7 @@ class AssetLabelPrinterDoodad(commands.Cog):
     @app_commands.describe(printer_id="Printer Name", school_key="School Name", id_0="First ID", id_1="Second ID", id_2="Third ID")
     async def print_asset_tag(
         self,
-        context: discord.Interaction,
+        interaction: discord.Interaction,
         printer_id: int,
         school_key: str,
         id_0: str,
@@ -58,28 +58,28 @@ class AssetLabelPrinterDoodad(commands.Cog):
         )
         printnode = PrintNodeInterface(printer_id=printer_id)
         printnode.print_label(mold.encode("utf-8"))
-        if isinstance(context.response, discord.InteractionResponse):
-            await context.response.send_message(f"{printer_id=} {school_key=}")
+        if isinstance(interaction.response, discord.InteractionResponse):
+            await interaction.response.send_message(f"{printer_id=} {school_key=}")
 
     @has_employee_role()  # type: ignore[arg-type]
     @app_commands.command(name="add-school", description="Add a school to the list of schools")
     @app_commands.describe(school_name="School Name")
-    async def add_school(self, context: discord.Interaction, school_name: str) -> None:
+    async def add_school(self, interactions: discord.Interaction, school_name: str) -> None:
         school_short = re.sub(r"[\s-]+", "_", school_name)
         school_short = re.sub(r"\W+", "", school_short)
         school_short = re.sub(r"_+", "_", school_short.lower())
         self.bot.config.asset_label_printer.schools[school_short] = school_name
         self.bot.config.save()
-        message = f"{context.user.mention} Added {school_name} to the list of schools\n" f"Current Schools:\n"
-        if isinstance(context.response, discord.InteractionResponse):
-            await context.response.send_message(message)
+        message = f"{interactions.user.mention} Added {school_name} to the list of schools\n" f"Current Schools:\n"
+        if isinstance(interactions.response, discord.InteractionResponse):
+            await interactions.response.send_message(message)
         message = ""
         for (
             school_key,
             school_name,
         ) in self.bot.config.asset_label_printer.schools.items():
             message += f"{school_key}: {school_name}\n"
-        await self.bot.wrap_reply_lines(message, context)
+        await self.bot.wrap_reply_lines(message, interactions)
 
 
 async def setup(bot: BlueBot) -> None:
