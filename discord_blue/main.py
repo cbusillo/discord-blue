@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import signal
 from time import sleep
 
 from discord.errors import PrivilegedIntentsRequired
@@ -13,13 +14,15 @@ logging.basicConfig(level=logging.INFO)
 
 def main() -> None:
     login_succes = False
-    bot = None
     for count in range(DISCORD_TOKEN_TIMEOUT):
         if login_succes:
             break
         try:
             bot = BlueBot()
-            bot.run(config.discord.token)
+            loop = asyncio.get_event_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, lambda current_signal=sig: asyncio.create_task(bot.on_signal(current_signal)))
+            loop.run_until_complete(bot.start(config.discord.token))
             login_succes = True
         except PrivilegedIntentsRequired:
             logger.error("Privileged intents required")
@@ -27,9 +30,6 @@ def main() -> None:
                 "Please enable intents in the discord developer portal https://discord.com/api/oauth2/authorize?client_id=1160954317306613800&permissions=8&scope=bot"
             )
             sleep(5)
-        finally:
-            if bot:
-                asyncio.run(bot.clear_commands_and_logout())
 
 
 if __name__ == "__main__":

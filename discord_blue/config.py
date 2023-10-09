@@ -55,12 +55,11 @@ class DiscordConfig(Serializable):
 
 class PrintnodeConfig(Serializable):
     api_key: str = "from_terminal"
-    front_printer_id: int = 0
+    printers: dict[str, int] = {}
 
 
 class AssetLabelPrinterConfig(Serializable):
     schools: dict[str, str] = {}
-    printers: dict[str, int] = {}
 
 
 class Config(Serializable):

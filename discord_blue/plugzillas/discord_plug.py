@@ -33,12 +33,18 @@ class BlueBot(commands.Bot):
 
         await self.bot_channel.send("Connected")
 
+    async def on_signal(self, signal: int) -> None:
+        logger.info(f"Received signal {signal}")
+        await self.clear_commands_and_logout()
+
     async def clear_commands_and_logout(self) -> None:
+        logger.info("Clearing commands and logging out")
         self.recursively_remove_all_commands()
         self.clear()
         for guild in self.guilds:
             self.tree.clear_commands(guild=guild)
         await self.close()
+        logging.warning("Logged out")
 
     async def blue_guild(self) -> discord.Guild:
         if not config.discord.guild_id:
