@@ -1,8 +1,7 @@
 import logging
 from discord_blue.plugzillas.discord_plug import BlueBot
-from discord_blue.config import Config
+from discord_blue.config import config
 
-config = Config()
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 

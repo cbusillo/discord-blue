@@ -1,8 +1,6 @@
 import base64
-from printnodeapi import Gateway
-from discord_blue.config import Config
-
-config = Config()
+from printnodeapi import Gateway  # type: ignore
+from discord_blue.config import config
 
 
 class PrintNodeInterface:
@@ -33,12 +31,8 @@ class PrintNodeInterface:
         return print_job
 
 
-from discord_blue.config import Config
-from pathlib import Path
-
 if __name__ == "__main__":
-    config = Config()
-    test_template = Path("../doodads/mystic_molds/ansonia.dymo").read_bytes()
-
-    printnode = PrintNodeInterface(printer_id=config.printnode.front_printer_id)
+    pass
+    # test_template = Path("../doodads/mystic_molds/ansonia.dymo").read_bytes()
+    # printnode = PrintNodeInterface(printer_id=config.printnode.front_printer_id)
     # printnode.print_label(test_template)

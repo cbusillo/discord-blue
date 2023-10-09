@@ -49,6 +49,7 @@ class DiscordConfig(Serializable):
     token: str = "from_terminal"
     guild_id: int = 0
     bot_channel_id: int = 0
+    employee_role_name: str = ""
 
 
 class PrintnodeConfig(Serializable):
@@ -140,6 +141,8 @@ class Config(Serializable):
                 elif isinstance(value, Serializable):
                     Config.gather_missing_data(value, full_key_name)  # Recursive call
 
+
+config = Config()
 
 if __name__ == "__main__":
     config = Config.get_instance()

@@ -4,7 +4,6 @@ from pathlib import Path
 from discord.ext import commands
 from discord import app_commands
 from discord.app_commands import Choice
-from discord_blue.plugzillas.discord_plug import wrap_reply_lines
 from discord_blue.plugzillas.discord_plug import BlueBot
 from discord_blue.plugzillas.printnode_plug import PrintNodeInterface
 
@@ -31,8 +30,7 @@ class AssetLabelPrinterDoodad(commands.Cog):
 
     @app_commands.checks.has_role("Shiny")  # type: ignore
     @app_commands.command(name="asset-tag", description="Print an asset tag")
-    @app_commands.autocomplete(school_key=get_schools)  # type: ignore
-    @app_commands.autocomplete(printer_id=get_printers)  # type: ignore
+    @app_commands.autocomplete(school_key=get_schools, printer_id=get_printers)  # type: ignore
     @app_commands.describe(printer_id="Printer Name", school_key="School Name", id_0="First ID", id_1="Second ID", id_2="Third ID")
     async def print_asset_tag(
         self,
@@ -64,7 +62,8 @@ class AssetLabelPrinterDoodad(commands.Cog):
             await context.response.send_message(f"{printer_id=} {school_key=}")
 
     @app_commands.checks.has_role("Shiny")  # type: ignore
-    @app_commands.command(name="add-school")
+    @app_commands.command(name="add-school", description="Add a school to the list of schools")
+    @app_commands.describe(school_name="School Name")
     async def add_school(self, context: discord.Interaction, school_name: str) -> None:
         school_short = re.sub(r"[\s-]+", "_", school_name)
         school_short = re.sub(r"\W+", "", school_short)
@@ -80,7 +79,7 @@ class AssetLabelPrinterDoodad(commands.Cog):
             school_name,
         ) in self.bot.config.asset_label_printer.schools.items():
             message += f"{school_key}: {school_name}\n"
-        await wrap_reply_lines(message, context)
+        await self.bot.wrap_reply_lines(message, context)
 
 
 async def setup(bot: BlueBot) -> None:

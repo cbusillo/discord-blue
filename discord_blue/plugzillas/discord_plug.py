@@ -1,15 +1,13 @@
 import logging
 import textwrap
-from pathlib import Path
 from typing import Callable, TypeVar
 
 import discord
 from discord.ext import commands
 
-from discord_blue.config import Config
+from discord_blue.config import config
 
 logger = logging.getLogger(__name__)
-config = Config()
 T = TypeVar("T", bound=discord.Guild | discord.TextChannel)
 
 
@@ -22,12 +20,8 @@ class BlueBot(commands.Bot):
         super().__init__(intents=discord.Intents.all(), command_prefix="!")
 
     async def setup_hook(self) -> None:
-        doodad_path = Path(__file__).parent.parent / "doodads"
-        for file in (f for f in doodad_path.glob("*.py") if f.stem != "__init__"):
-            try:
-                await self.load_extension(f"doodads.{file.stem}")
-            except commands.ExtensionNotFound:
-                logger.warning(f"Could not load extension {file.stem}")
+        await self.load_extension("doodads.setup_doodad")
+        await self.load_extension("doodads.error_doodad")
 
     async def on_ready(self) -> None:
         if self.user:
@@ -85,22 +79,22 @@ class BlueBot(commands.Bot):
         config.discord.bot_channel_id = channel.id
         config.save()
 
-
-async def wrap_reply_lines(lines: str, message: discord.Message | discord.Interaction) -> None:
-    """Break up messages that are longer than 2000
-    chars and send multible messages to discord"""
-    if not isinstance(message.channel, discord.TextChannel):
-        return
-    if lines is None or lines == "":
-        lines = "No lines to send"
-    wrap_length = 2000 - len(message.author.mention) if hasattr(message, "author") else 2000
-    lines_list = textwrap.wrap(
-        lines,
-        wrap_length,
-        break_long_words=True,
-        replace_whitespace=False,
-    )
-    if hasattr(message, "author") and message.author.bot is False:
-        lines_list[0] = f"{message.author.mention} {lines_list[0]}"
-    for line in lines_list:
-        await message.channel.send(line)
+    @staticmethod
+    async def wrap_reply_lines(lines: str, message: discord.Message | discord.Interaction) -> None:
+        """Break up messages that are longer than 2000
+        chars and sends multible messages to discord"""
+        if not isinstance(message.channel, discord.TextChannel):
+            return
+        if lines is None or lines == "":
+            lines = "No lines to send"
+        wrap_length = 2000 - len(message.author.mention) if hasattr(message, "author") else 2000
+        lines_list = textwrap.wrap(
+            lines,
+            wrap_length,
+            break_long_words=True,
+            replace_whitespace=False,
+        )
+        if hasattr(message, "author") and message.author.bot is False:
+            lines_list[0] = f"{message.author.mention} {lines_list[0]}"
+        for line in lines_list:
+            await message.channel.send(line)
