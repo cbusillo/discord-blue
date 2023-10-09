@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from time import sleep
 
@@ -12,6 +13,7 @@ logging.basicConfig(level=logging.INFO)
 
 def main() -> None:
     login_succes = False
+    bot = None
     for count in range(DISCORD_TOKEN_TIMEOUT):
         if login_succes:
             break
@@ -25,6 +27,9 @@ def main() -> None:
                 "Please enable intents in the discord developer portal https://discord.com/api/oauth2/authorize?client_id=1160954317306613800&permissions=8&scope=bot"
             )
             sleep(5)
+        finally:
+            if bot:
+                asyncio.run(bot.clear_commands_and_logout())
 
 
 if __name__ == "__main__":

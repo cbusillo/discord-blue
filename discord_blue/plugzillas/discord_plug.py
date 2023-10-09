@@ -33,6 +33,13 @@ class BlueBot(commands.Bot):
 
         await self.bot_channel.send("Connected")
 
+    async def clear_commands_and_logout(self) -> None:
+        self.recursively_remove_all_commands()
+        self.clear()
+        for guild in self.guilds:
+            self.tree.clear_commands(guild=guild)
+        await self.close()
+
     async def blue_guild(self) -> discord.Guild:
         if not config.discord.guild_id:
             return await self.select_object(list(self.guilds), "guild", self.save_config_guild)
