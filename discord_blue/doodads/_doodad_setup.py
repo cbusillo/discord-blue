@@ -138,7 +138,7 @@ class SetupCommands(commands.GroupCog, name="setup"):
     async def load_doodad_command(self, interaction: discord.Interaction, doodad_name: str) -> None:
         if isinstance(interaction.response, discord.InteractionResponse):
             await interaction.response.defer()
-        await self.bot.load_extension(f"doodads.{doodad_name}")
+        await self.bot.load_extension(f"discord_blue.doodads.{doodad_name}")
         logger.info(f"Loaded {doodad_name}")
         tree_sync = await self.bot.tree.sync()
         logger.info(f"Loaded {len(tree_sync)} commands")
@@ -153,7 +153,7 @@ class SetupCommands(commands.GroupCog, name="setup"):
     async def unload_doodad_command(self, interaction: discord.Interaction, doodad_name: str) -> None:
         if isinstance(interaction.response, discord.InteractionResponse):
             await interaction.response.defer()
-        await self.bot.unload_extension(f"doodads.{doodad_name}")
+        await self.bot.unload_extension(f"discord_blue.doodads.{doodad_name}")
         logger.info(f"Unloaded {doodad_name}")
         tree_sync = await self.bot.tree.sync()
         logger.info(f"Loaded {len(tree_sync)} commands")
