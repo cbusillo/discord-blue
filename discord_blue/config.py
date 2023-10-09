@@ -68,6 +68,9 @@ class Config(Serializable):
 
     def __init__(self) -> None:
         self._filepath = Path.home() / ".config" / Path(__file__).parent.stem.replace("_", "-") / "config.toml"
+        if not self.filepath.exists():
+            self.filepath.parent.mkdir(parents=True, exist_ok=True)
+            self.filepath.touch()
 
         self.debug = True
 
