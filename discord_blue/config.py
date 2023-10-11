@@ -54,7 +54,11 @@ class DiscordConfig(Serializable):
 
 
 class PrintnodeConfig(Serializable):
-    api_key: str = "from_terminal"
+    api_key: str = ""
+
+
+class ShippoConfig(Serializable):
+    api_key: str = ""
 
 
 class AssetLabelPrinterConfig(Serializable):
@@ -76,6 +80,7 @@ class Config(Serializable):
         self.discord = DiscordConfig()
         self.printnode = PrintnodeConfig()
         self.asset_label_printer = AssetLabelPrinterConfig()
+        self.shippo = ShippoConfig()
 
         self.load()  # Load config during instance creation
 
