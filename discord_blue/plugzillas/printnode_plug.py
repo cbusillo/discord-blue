@@ -1,4 +1,6 @@
 import base64
+import io
+
 from printnodeapi import Gateway  # type: ignore[import]
 from discord_blue.config import config
 
@@ -17,13 +19,13 @@ class PrintNodeInterface:
         printers = gateway.printers()
         return printers
 
-    def print_label(self, label_str: bytes, quantity: int = 1):
+    def print_label(self, label_pdf: io.BytesIO, quantity: int = 1):
         gateway = self.gateway
-        label_base64 = base64.b64encode(label_str)
+        label_base64 = base64.b64encode(label_pdf.getvalue())
         label_utf = label_base64.decode("utf-8")
         print_job = gateway.PrintJob(
             printer=self.printer_id,
-            job_type="raw",
+            job_type="pdf",
             title="Asset Label",
             options={"copies": quantity},
             base64=label_utf,

@@ -1,4 +1,7 @@
+import io
+import os
 import re
+import cairosvg  # type: ignore[import]
 import discord
 from pathlib import Path
 from discord.ext import commands
@@ -41,25 +44,33 @@ class AssetLabelPrinterDoodad(commands.Cog):
         id_1: str = "",
         id_2: str = "",
     ) -> None:
-        mold_file = Path(__file__).parent / "molds" / f"{school_key}.dymo"
+        mold_path = Path(__file__).parent / "molds"
+        mold_file = mold_path / f"4x2_asset_{school_key}.svg"
         if mold_file.exists():
             mold = mold_file.read_text()
         elif id_0 and id_1 and id_2:
-            mold = (Path(__file__).parent / "molds" / "3.dymo").read_text()
+            mold = (mold_path / "4x2_asset_3x.svg").read_text()
         elif id_0 and id_1:
-            mold = (Path(__file__).parent / "molds" / "2.dymo").read_text()
+            mold = (mold_path / "4x2_asset_2x.svg").read_text()
         else:
-            mold = (Path(__file__).parent / "molds" / "1.dymo").read_text()
+            mold = (mold_path / "4x2_asset_1x.svg").read_text()
         mold = mold.format(
             id_0=id_0,
             id_1=id_1,
             id_2=id_2,
             name=self.bot.config.asset_label_printer.schools[school_key].upper(),
         )
+        label_pdf = io.BytesIO()
+        os.environ["FONTCONFIG_PATH"] = (mold_path / "fonts").as_posix()
+        cairosvg.svg2pdf(bytestring=mold.encode("utf-8"), write_to=label_pdf)
+
         printnode = PrintNodeInterface(printer_id=printer_id)
-        printnode.print_label(mold.encode("utf-8"))
+        printnode.print_label(label_pdf)
         if isinstance(interaction.response, discord.InteractionResponse):
             await interaction.response.send_message(f"{printer_id=} {school_key=}")
+        with open(mold_path / "test.pdf", "wb") as file:
+            file.write(label_pdf.getvalue())
+        exit()
 
     @has_employee_role()  # type: ignore[arg-type]
     @app_commands.command(name="add-school", description="Add a school to the list of schools")
