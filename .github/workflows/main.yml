@@ -7,7 +7,7 @@ on:
 env:  
   PRODUCTION_SERVER: ${{ vars.PRODUCTION_SERVER }}
   PRODUCTION_USER: ${{ vars.PRODUCTION_USER }}
-  TEST: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+  TEST: kkoTND1CNTRL
 
 jobs:
   deploy:
@@ -17,7 +17,7 @@ jobs:
     - name: Tailscale
       uses: tailscale/github-action@v2
       with:
-        oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+        oauth-client-id: kkoTND1CNTRL
         oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
     - name: Create SSH key
       run: |
