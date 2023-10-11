@@ -38,6 +38,7 @@ jobs:
       run: |
         ssh ${{ env.PRODUCTION_USER }}@${{ env.PRODUCTION_SERVER }} "cd /opt/discord-blue; \
         git pull; \ 
+        poetry lock; \
         poetry install; \
         systemctl restart discord-blue"
       shell: bash
