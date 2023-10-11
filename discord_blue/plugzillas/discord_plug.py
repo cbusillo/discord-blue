@@ -14,9 +14,9 @@ T = TypeVar("T", bound=discord.Guild | discord.TextChannel)
 class BlueBot(commands.Bot):
     destination_guild: discord.Guild
     bot_channel: discord.TextChannel
-    config = config
 
     def __init__(self) -> None:
+        self.config = config
         super().__init__(intents=discord.Intents.all(), command_prefix="!")
 
     async def setup_hook(self) -> None:
@@ -37,15 +37,15 @@ class BlueBot(commands.Bot):
         logger.info(f"Received signal {signal}")
         await self.clear_commands_and_logout()
 
+    async def on_disconnect(self) -> None:
+        logger.warning("Disconnected from Discord")
+        await self.clear_commands_and_logout()
+
     async def clear_commands_and_logout(self) -> None:
         logger.info("Clearing commands and logging out")
-        self.tree.clear_commands(guild=self.guilds[0])
-        self.recursively_remove_all_commands()
-        all_commands = self.walk_commands()
-        for command in all_commands:
-            self.remove_command(command.name)
         for guild in self.guilds:
             self.tree.clear_commands(guild=guild)
+        await self.tree.sync()
         self.clear()
         await self.close()
         logging.warning("Logged out")
