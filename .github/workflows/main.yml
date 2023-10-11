@@ -6,7 +6,7 @@ on:
     branches:
       - main
 
-env:  
+env:
   PRODUCTION_SERVER: ${{ vars.PRODUCTION_SERVER }}
   PRODUCTION_USER: ${{ vars.PRODUCTION_USER }}
 jobs:
@@ -14,33 +14,34 @@ jobs:
     runs-on: ubuntu-latest
     environment: master
     steps:
-    - name: Tailscale
-      uses: tailscale/github-action@v2
-      with:
-        oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-        oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-        tags: tag:ci
-    - name: Create SSH key
-      run: |
-        mkdir -p ~/.ssh
-        echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_ed25519
-        chmod 600 ~/.ssh/id_ed25519
-        chmod 700 ~/.ssh
-      shell: bash
+      - name: Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+      - name: Create SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          chmod 700 ~/.ssh
+        shell: bash
 
-    - name: Add SSH Host
-      run: |
-        ssh-keyscan -H ${{ env.PRODUCTION_SERVER }} >> ~/.ssh/known_hosts
-      shell: bash
+      - name: Add SSH Host
+        run: |
+          ssh-keyscan -H ${{ env.PRODUCTION_SERVER }} >> ~/.ssh/known_hosts
+        shell: bash
 
-    - name: Checkout
-      uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v3
 
-    - name: Clone & Install
-      run: |
-        ssh ${{ env.PRODUCTION_USER }}@${{ env.PRODUCTION_SERVER }} "cd /opt/discord-blue; \
-        git pull; \ 
-        poetry lock -n; \
-        poetry install; \
-        systemctl restart discord-blue"
-      shell: bash
+      - name: Clone & Install
+        run: |
+          ssh ${{ env.PRODUCTION_USER }}@${{ env.PRODUCTION_SERVER }} "cd /opt/discord-blue; \
+          git pull; \ 
+          source $HOME/.poetry/env; \
+          poetry lock -n; \
+          poetry install; \
+          systemctl restart discord-blue"
+        shell: bash
