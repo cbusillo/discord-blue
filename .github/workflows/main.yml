@@ -39,8 +39,8 @@ jobs:
       - name: Clone & Install
         run: |
           ssh ${{ env.PRODUCTION_USER }}@${{ env.PRODUCTION_SERVER }} "cd /opt/discord-blue; \
+          export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring; \
           git pull; \ 
-          source $HOME/.poetry/env; \
           poetry lock -n; \
           poetry install; \
           systemctl restart discord-blue"
