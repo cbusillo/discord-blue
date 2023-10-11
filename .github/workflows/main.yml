@@ -1,9 +1,8 @@
 name: Deploy to Production
 
 on:
-  push:
-    branches:
-      - master
+  workflow_dispatch:
+
 
 env:  
   PRODUCTION_SERVER: ${{ vars.PRODUCTION_SERVER }}
