@@ -26,6 +26,8 @@ jobs:
           echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           chmod 700 ~/.ssh
+          ping -c 4 ${{ env.PRODUCTION_SERVER }}
+          ping -c 4 100.122.16.3
           ssh-keyscan -H ${{ env.PRODUCTION_SERVER }} >> ~/.ssh/known_hosts
         shell: bash
 
