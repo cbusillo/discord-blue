@@ -13,9 +13,9 @@ logging.basicConfig(level=logging.INFO)
 
 
 def main() -> None:
-    login_succes = False
+    login_success = False
     for count in range(DISCORD_TOKEN_TIMEOUT):
-        if login_succes:
+        if login_success:
             break
         try:
             bot = BlueBot()
@@ -23,7 +23,7 @@ def main() -> None:
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.add_signal_handler(sig, lambda current_signal=sig: asyncio.create_task(bot.on_signal(current_signal)))
             loop.run_until_complete(bot.start(config.discord.token))
-            login_succes = True
+            login_success = True
         except PrivilegedIntentsRequired:
             logger.error("Privileged intents required")
             logger.error(
