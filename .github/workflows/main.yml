@@ -6,9 +6,6 @@ on:
     branches:
       - main
 
-env:
-  PRODUCTION_SERVER: ${{ vars.PRODUCTION_SERVER }}
-  PRODUCTION_USER: ${{ vars.PRODUCTION_USER }}
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -26,13 +23,13 @@ jobs:
           echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           chmod 700 ~/.ssh
-          ping -c 1 ${{ env.PRODUCTION_SERVER }}
-          ssh-keyscan -H ${{ env.PRODUCTION_SERVER }} >> ~/.ssh/known_hosts
+          ping -c 1 $PRODUCTION_SERVER
+          ssh-keyscan -H $PRODUCTION_SERVER >> ~/.ssh/known_hosts
         shell: bash
 
       - name: Clone & Install
         run: |
-          ssh ${{ env.PRODUCTION_USER }}@${{ env.PRODUCTION_SERVER }} "cd /opt/discord-blue; \
+          ssh $PRODUCTION_USER@$PRODUCTION_SERVER "cd /opt/discord-blue; \
           export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring; \
           git pull; \ 
           poetry lock -n; \
