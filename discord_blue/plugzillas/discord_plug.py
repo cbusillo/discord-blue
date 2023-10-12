@@ -37,18 +37,16 @@ class BlueBot(commands.Bot):
         logger.info(f"Received signal {signal}")
         await self.clear_commands_and_logout()
 
-    async def on_disconnect(self) -> None:
-        logger.warning("Disconnected from Discord")
-        await self.clear_commands_and_logout()
-
     async def clear_commands_and_logout(self) -> None:
-        logger.info("Clearing commands and logging out")
-        for guild in self.guilds:
-            self.tree.clear_commands(guild=guild)
-        await self.tree.sync()
+        logger.info("Starting command clearance and logout process...")
+        installed_commands = self.tree.get_commands()
+        for command in installed_commands:
+            self.tree.remove_command(command.name)
+            logger.info(f"Successfully deleted command: {command.name}")
+        sync_result = await self.tree.sync()
+        logger.info(f"Sync result: {sync_result}")
         self.clear()
         await self.close()
-        logging.warning("Logged out")
 
     async def blue_guild(self) -> discord.Guild:
         if not config.discord.guild_id:
