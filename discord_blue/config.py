@@ -19,7 +19,7 @@ class Serializable:
                     result[key] = value
         return result
 
-    def from_dict(self, data: dict) -> None:
+    def from_dict(self, data: dict[str, Any]) -> None:
         for key, type_hint in getattr(self, "__annotations__", {}).items():
             value = data.get(key, getattr(self, key, None))
 
@@ -120,7 +120,7 @@ class Config(Serializable):
         except (FileNotFoundError, OSError) as error:
             logger.exception(f"Error saving configuration: {str(error)}")
 
-    def update_and_save(self, **kwargs) -> None:
+    def update_and_save(self, **kwargs: Any) -> None:
         for key, value in kwargs.items():
             parts = key.split("__")
             if len(parts) > 1 and hasattr(self, parts[0]):

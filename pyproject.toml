@@ -27,3 +27,8 @@ discord-blue = 'discord_blue.__main__:main'
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
+[tool.mypy]
+strict = true
+python_version = 3.11
+warn_any_return = false
+warn_no_untyped_call = false

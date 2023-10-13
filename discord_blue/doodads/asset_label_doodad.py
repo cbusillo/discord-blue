@@ -17,7 +17,7 @@ class AssetLabelPrinterDoodad(commands.Cog):
         self.bot = bot
         super().__init__()
 
-    async def get_schools_autocomplete(self, _: discord.Interaction, current: str) -> list[Choice]:
+    async def get_schools_autocomplete(self, _: discord.Interaction[commands.Bot], current: str) -> list[Choice[str]]:
         schools = list(self.bot.config.asset_label_printer.schools.items())
         if current:
             schools = [(key, value) for key, value in schools if current.lower() in value.lower()]
@@ -25,7 +25,7 @@ class AssetLabelPrinterDoodad(commands.Cog):
 
         return [Choice(name=school_name, value=school_key) for school_key, school_name in schools]
 
-    async def get_printers_autocomplete(self, _: discord.Interaction, _2: str) -> list[Choice]:
+    async def get_printers_autocomplete(self, _: discord.Interaction[commands.Bot], _2: str) -> list[Choice[int]]:
         return [
             Choice(name=printer_key, value=printer_id)
             for printer_key, printer_id in self.bot.config.asset_label_printer.printers.items()
@@ -33,11 +33,11 @@ class AssetLabelPrinterDoodad(commands.Cog):
 
     @has_employee_role()  # type: ignore[arg-type]
     @app_commands.command(name="asset-tag", description="Print an asset tag")
-    @app_commands.autocomplete(school_key=get_schools_autocomplete, printer_id=get_printers_autocomplete)  # type: ignore[arg-type]
+    @app_commands.autocomplete(school_key=get_schools_autocomplete, printer_id=get_printers_autocomplete)  # type: ignore[arg-type, unused-ignore, misc]
     @app_commands.describe(printer_id="Printer Name", school_key="School Name", id_0="First ID", id_1="Second ID", id_2="Third ID")
     async def print_asset_tag(
         self,
-        interaction: discord.Interaction,
+        interaction: discord.Interaction[commands.Bot],
         printer_id: int,
         school_key: str,
         id_0: str,
@@ -75,7 +75,7 @@ class AssetLabelPrinterDoodad(commands.Cog):
     @has_employee_role()  # type: ignore[arg-type]
     @app_commands.command(name="add-school", description="Add a school to the list of schools")
     @app_commands.describe(school_name="School Name")
-    async def add_school(self, interactions: discord.Interaction, school_name: str) -> None:
+    async def add_school(self, interactions: discord.Interaction[commands.Bot], school_name: str) -> None:
         school_short = re.sub(r"[\s-]+", "_", school_name)
         school_short = re.sub(r"\W+", "", school_short)
         school_short = re.sub(r"_+", "_", school_short.lower())
