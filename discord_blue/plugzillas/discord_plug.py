@@ -104,14 +104,17 @@ class BlueBot(commands.Bot):
             return
         if lines is None or lines == "":
             lines = "No lines to send"
-        wrap_length = 2000 - len(message.author.mention) if hasattr(message, "author") else 2000
+        if isinstance(message, discord.Message):
+            wrap_length = 2000 - len(message.author.mention)
+        else:
+            wrap_length = 2000
         lines_list = textwrap.wrap(
             lines,
             wrap_length,
             break_long_words=True,
             replace_whitespace=False,
         )
-        if hasattr(message, "author") and message.author.bot is False:
+        if isinstance(message, discord.Message) and message.author.bot is False:
             lines_list[0] = f"{message.author.mention} {lines_list[0]}"
         for line in lines_list:
             await message.channel.send(line)
