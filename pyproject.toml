@@ -1,3 +1,7 @@
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
 [tool.poetry]
 name = "discord-blue"
 version = "0.1.0"
@@ -14,7 +18,6 @@ pynacl = "^1.5.0"
 modern-shippo = "3.0.1"
 cairosvg = ">=2.7.1"
 
-
 [tool.poetry.group.dev.dependencies]
 setuptools = "^68.2.2"
 black = "^23.9.1"
@@ -22,10 +25,6 @@ types-toml = "^0.10.8.7"
 
 [tool.poetry.scripts]
 discord-blue = 'discord_blue.__main__:main'
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
 
 [tool.mypy]
 strict = true
