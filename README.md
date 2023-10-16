@@ -33,7 +33,7 @@ apt install git curl python3.11
 
 4. Install Dependencies using Poetry:
    ```
-   poetry install
+   /root/.local/bin/poetry install
    ```
 
 5. Setup and Start the Systemd Service:
