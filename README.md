@@ -44,4 +44,8 @@ apt install git curl python3.11
    systemctl start discord-blue
    ```
 
-**Note**: Always ensure you're running trusted scripts, especially with piped commands like \`curl | python3\`.
+**Note**: Make sure to run once to create the config file and input your discord token along with server and bot channel.
+
+   ```
+   /root/.local/bin/poetry run discord-blue
+   ```
