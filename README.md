@@ -1,7 +1,7 @@
-# Discord Blue Installation Guide
+# Discord Blue LXC Installation Guide
 
 Discord Blue is a new basic discord bot plugin system. This guide provides step-by-step instructions for setting it up on
-Debian-based systems.
+Debian-based LXC.
 
 ## Prerequisites
 
@@ -9,7 +9,7 @@ Ensure you have \`git\`, \`curl\`, and \`python3\` installed.
 
 ```
 apt update
-apt install git curl python3
+apt install git curl python3.11
 ```
 
 ## Installation Steps
@@ -19,28 +19,24 @@ apt install git curl python3
    apt update
    ```
 
-2. Navigate to the /opt Directory:
+2. Install Python Poetry:
+   ```
+   curl -sSL https://install.python-poetry.org | python3.11 -
+   ```
+
+3. Clone the Discord Blue Repository:
    ```
    cd /opt
-   ```
-
-3. Install Python Poetry:
-   ```
-   curl -sSL https://install.python-poetry.org | python3 -
-   ```
-
-4. Clone the Discord Blue Repository:
-   ```
    git clone https://github.com/cbusillo/discord-blue
    cd discord-blue
    ```
 
-5. Install Dependencies using Poetry:
+4. Install Dependencies using Poetry:
    ```
-   poetry install
+   /root/.local/bin/poetry install
    ```
 
-6. Setup and Start the Systemd Service:
+5. Setup and Start the Systemd Service:
    ```
    cp discord-blue.service /etc/systemd/system/
    systemctl daemon-reload
@@ -48,4 +44,8 @@ apt install git curl python3
    systemctl start discord-blue
    ```
 
-**Note**: Always ensure you're running trusted scripts, especially with piped commands like \`curl | python3\`.
+**Note**: Make sure to run once to create the config file and input your discord token along with server and bot channel.
+
+```
+/root/.local/bin/poetry run discord-blue
+```
