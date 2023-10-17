@@ -9,7 +9,7 @@ Ensure you have \`git\`, \`curl\`, and \`python3\` installed.
 
 ```
 apt update
-apt install git curl python3.11
+apt install git curl python3.11 libcario2
 ```
 
 ## Installation Steps
