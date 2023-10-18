@@ -61,7 +61,6 @@ class AssetLabelPrinterDoodad(commands.Cog):
             name=self.bot.config.asset_label_printer.schools[school_key].upper(),
         )
         label_pdf = io.BytesIO()
-        os.environ["FONTCONFIG_PATH"] = (mold_path / "fonts").as_posix()
         cairosvg.svg2pdf(bytestring=mold.encode("utf-8"), write_to=label_pdf)
 
         printnode = PrintNodeInterface(printer_id=printer_id)
