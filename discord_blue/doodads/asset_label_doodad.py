@@ -68,8 +68,9 @@ class AssetLabelPrinterDoodad(commands.Cog):
         printnode.print_label(label_pdf)
         if isinstance(interaction.response, discord.InteractionResponse):
             await interaction.response.send_message(f"{printer_id=} {school_key=}")
-        with open(mold_path / "test.pdf", "wb") as file:
-            file.write(label_pdf.getvalue())
+        if self.bot.config.debug:
+            with open(mold_path / "test.pdf", "wb") as file:
+                file.write(label_pdf.getvalue())
         
     @has_employee_role()  # type: ignore[arg-type]
     @app_commands.command(name="add-school", description="Add a school to the list of schools")
