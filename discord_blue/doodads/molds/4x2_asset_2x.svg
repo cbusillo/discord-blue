@@ -6,6 +6,20 @@
         id="svg3"
         xmlns="http://www.w3.org/2000/svg"
 >
+    <defs>
+        <style type="text/css">
+            <![CDATA[
+                @font-face {
+                    font-family: 'ArialMT';
+                    src: url('molds/fonts/Arial.ttf');
+                }
+                @font-face {
+                    font-family: 'LibreBarcode128Text-Regular';
+                    src: url('molds/fonts/LibreBarcode128Text-Regular.ttf');
+                }
+            ]]>
+        </style>
+    </defs>
     <text
             x="51mm"
             y="9mm"
