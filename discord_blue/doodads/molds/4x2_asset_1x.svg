@@ -9,14 +9,14 @@
     <defs>
         <style type="text/css">
             <![CDATA[
-                @font-face {
+                @font-face {{
                     font-family: 'ArialMT';
-                    src: url('molds/fonts/Arial.ttf');
-                }
-                @font-face {
+                    src: url('{font_dir}/Arial.ttf');
+                }}
+                @font-face {{
                     font-family: 'LibreBarcode128Text-Regular';
-                    src: url('molds/fonts/LibreBarcode128Text-Regular.ttf');
-                }
+                    src: url('{font_dir}/LibreBarcode128Text-Regular.ttf');
+                }}
             ]]>
         </style>
     </defs>

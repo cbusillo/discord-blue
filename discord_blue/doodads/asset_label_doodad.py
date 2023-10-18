@@ -59,17 +59,19 @@ class AssetLabelPrinterDoodad(commands.Cog):
             id_1=id_1,
             id_2=id_2,
             name=self.bot.config.asset_label_printer.schools[school_key].upper(),
+            font_dir=mold_path / "fonts",
         )
         label_pdf = io.BytesIO()
         cairosvg.svg2pdf(bytestring=mold.encode("utf-8"), write_to=label_pdf)
+        if self.bot.config.debug:
+            with open(mold_path / "test.pdf", "wb") as file:
+                file.write(label_pdf.getvalue())
 
         printnode = PrintNodeInterface(printer_id=printer_id)
         printnode.print_label(label_pdf)
         if isinstance(interaction.response, discord.InteractionResponse):
             await interaction.response.send_message(f"{printer_id=} {school_key=}")
-        if self.bot.config.debug:
-            with open(mold_path / "test.pdf", "wb") as file:
-                file.write(label_pdf.getvalue())
+
         
     @has_employee_role()  # type: ignore[arg-type]
     @app_commands.command(name="add-school", description="Add a school to the list of schools")
