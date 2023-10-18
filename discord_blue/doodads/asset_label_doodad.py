@@ -70,8 +70,7 @@ class AssetLabelPrinterDoodad(commands.Cog):
             await interaction.response.send_message(f"{printer_id=} {school_key=}")
         with open(mold_path / "test.pdf", "wb") as file:
             file.write(label_pdf.getvalue())
-        exit()
-
+        
     @has_employee_role()  # type: ignore[arg-type]
     @app_commands.command(name="add-school", description="Add a school to the list of schools")
     @app_commands.describe(school_name="School Name")
