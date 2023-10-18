@@ -5,7 +5,7 @@ Debian-based LXC.
 
 ## Prerequisites
 
-Ensure you have \`git\`, \`curl\`, and \`python3\` installed.
+Ensure you have `git`, `curl`, `libcairo2`, and `python3` installed.
 
 ```
 apt update
