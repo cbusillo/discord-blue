@@ -27,6 +27,7 @@ jobs:
           ssh ${{ vars.PRODUCTION_USER }}@${{ vars.PRODUCTION_SERVER }} "cd /opt/discord-blue; \
           export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring; \
           git pull; \ 
+          poetry lock; \
           poetry install; \
           systemctl restart discord-blue"
         shell: bash
