@@ -64,6 +64,7 @@ class ShippoConfig(Serializable):
 class AssetLabelPrinterConfig(Serializable):
     schools: dict[str, str] = {}
     printers: dict[str, int] = {}
+    label_size: tuple[int, int] = (4, 2)
 
 
 class Config(Serializable):
