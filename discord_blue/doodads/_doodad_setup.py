@@ -168,6 +168,14 @@ class SetupCommands(commands.GroupCog, name="setup"):
             await interaction.followup.send(f"Unloaded {doodad_name}")
             await interaction.followup.send(f"Unloaded {len(tree_sync)} commands")
 
+    @app_commands.command(name="reload", description="config")  # type: ignore[arg-type, unused-ignore]
+    async def reload_config_command(self, interaction: discord.Interaction[commands.Bot]) -> None:
+        if isinstance(interaction.response, discord.InteractionResponse):
+            await interaction.response.defer()
+        self.bot.config.load()
+        if isinstance(interaction.channel, Messageable):
+            await interaction.followup.send(f"Reloaded config")
+
 
 async def setup(bot: BlueBot) -> None:
     await bot.add_cog(SetupDoodad(bot))
