@@ -11,7 +11,7 @@
             y="9mm"
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
-            font-size="26px"
+            font-size="16px"
             id="text2">SERIAL NUMBER
     </text>
     <text
@@ -19,8 +19,16 @@
             y="29.5mm"
             text-anchor="middle"
             font-family="LibreBarcode128-Regular, 'Libre Barcode 128'"
-            font-size="64px"
+            font-size="48px"
             id="text3">{id_0_128}
+    </text>
+    <text
+            x="51mm"
+            y="35mm"
+            text-anchor="middle"
+            font-family="ArialMT, Arial, sans-serif"
+            font-size="10px"
+            id="text4">{id_0}
     </text>
     <text
             x="51mm"

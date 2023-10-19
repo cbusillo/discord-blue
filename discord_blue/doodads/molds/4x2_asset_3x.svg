@@ -11,7 +11,7 @@
             y="9mm"
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
-            font-size="12px"
+            font-size="10px"
             id="text2">ASSET TAG NUMBER
     </text>
     <text
@@ -19,15 +19,23 @@
             y="19mm"
             text-anchor="middle"
             font-family="LibreBarcode128-Regular, 'Libre Barcode 128'"
-            font-size="36px"
+            font-size="30px"
             id="text1">{id_0_128}
+    </text>
+    <text
+            x="30mm"
+            y="23mm"
+            text-anchor="middle"
+            font-family="ArialMT, Arial, sans-serif"
+            font-size="10px"
+            id="text4">{id_0}
     </text>
     <text
             x="70mm"
             y="9mm"
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
-            font-size="12px"
+            font-size="10px"
             id="text2">OLD SERIAL NUMBER
     </text>
     <text
@@ -35,15 +43,23 @@
             y="19mm"
             text-anchor="middle"
             font-family="LibreBarcode128-Regular, 'Libre Barcode 128'"
-            font-size="36px"
+            font-size="30px"
             id="text3">{id_1_128}
+    </text>
+        <text
+            x="70mm"
+            y="23mm"
+            text-anchor="middle"
+            font-family="ArialMT, Arial, sans-serif"
+            font-size="10px"
+            id="text4">{id_1}
     </text>
     <text
             x="51mm"
             y="30.5mm"
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
-            font-size="20px"
+            font-size="16px"
             id="text4">NEW SERIAL NUMBER
     </text>
     <text
@@ -51,15 +67,23 @@
             y="40mm"
             text-anchor="middle"
             font-family="LibreBarcode128-Regular, 'Libre Barcode 128'"
-            font-size="48px"
+            font-size="36px"
             id="text5">{id_2_128}
+    </text>
+    <text
+            x="51mm"
+            y="45mm"
+            text-anchor="middle"
+            font-family="ArialMT, Arial, sans-serif"
+            font-size="12px"
+            id="text4">{id_2}
     </text>
     <text
             x="51mm"
             y="50mm"
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
-            font-size="9px"
+            font-size="6px"
             id="text6">{name}
     </text>
 </svg>

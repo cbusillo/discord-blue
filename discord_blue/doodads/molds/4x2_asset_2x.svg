@@ -8,10 +8,10 @@
 >
     <text
             x="51mm"
-            y="9mm"
+            y="7mm"
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
-            font-size="20px"
+            font-size="12px"
             id="text2">ASSET TAG
     </text>
     <text
@@ -24,15 +24,23 @@
     </text>
     <text
             x="51mm"
-            y="30.5mm"
+            y="23mm"
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
-            font-size="20px"
+            font-size="10px"
+            id="text4">{id_0}
+    </text>
+    <text
+            x="51mm"
+            y="30mm"
+            text-anchor="middle"
+            font-family="ArialMT, Arial, sans-serif"
+            font-size="12px"
             id="text4">SERIAL NUMBER
     </text>
     <text
             x="51mm"
-            y="40mm"
+            y="42mm"
             text-anchor="middle"
             font-family="LibreBarcode128-Regular, 'Libre Barcode 128'"
             font-size="48px"
@@ -40,10 +48,18 @@
     </text>
     <text
             x="51mm"
-            y="50mm"
+            y="46mm"
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
-            font-size="9px"
+            font-size="10px"
+            id="text4">{id_1}
+    </text>
+    <text
+            x="51mm"
+            y="52mm"
+            text-anchor="middle"
+            font-family="ArialMT, Arial, sans-serif"
+            font-size="6px"
             id="text6">{name}
     </text>
 </svg>
