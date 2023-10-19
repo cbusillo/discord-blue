@@ -10,6 +10,7 @@ from discord import app_commands
 from discord.app_commands import Choice
 from svglib.svglib import svg2rlg
 
+from discord_blue.plugzillas.barcode_encoder_plug import BarcodeEncoder
 from discord_blue.plugzillas.discord.checks import has_employee_role
 from discord_blue.plugzillas.discord_plug import BlueBot
 from discord_blue.plugzillas.printnode_plug import PrintNodeInterface
@@ -38,31 +39,11 @@ class AssetLabelPrinterDoodad(commands.Cog):
         else:
             return (mold_path / f"{label_size_str}_asset_1x.svg").read_text()
 
-    @staticmethod
-    def list_join(seq) -> list:
-        return [x for sub in seq for x in sub]
-
-    def encode_128(self, text: str) -> str:
-        code128b_mapping = dict((chr(c), [98, c + 64] if c < 32 else [c - 32]) for c in range(128))
-        code128c_mapping = dict([("%02d" % i, [i]) for i in range(100)] + [("%d" % i, [100, 16 + i]) for i in range(10)])
-        code128_chars = "".join(chr(c) for c in [212] + list(range(33, 126 + 1)) + list(range(200, 211 + 1)))
-        code128_chars = code128_chars[:105] + "Í" + code128_chars[106:]
-        code128_chars = code128_chars[:106] + "Î" + code128_chars[107:]
-
-        if text.isdigit() and len(text) >= 2:
-            codes = [105] + self.list_join(code128c_mapping[text[i : i + 2]] for i in range(0, len(text), 2))
-        else:
-            codes = [104] + self.list_join(code128b_mapping[c] for c in text)
-        check_digit = (codes[0] + sum(i * x for i, x in enumerate(codes))) % 103
-        codes.append(check_digit)
-        codes.append(106)  # stop code
-        full_code = "".join(code128_chars[x] for x in codes)
-        return full_code
-
     def format_mold(self, mold: str, school_key: str, id_0: str, id_1: str, id_2: str) -> str:
-        id_0_128 = self.encode_128(id_0)
-        id_1_128 = self.encode_128(id_1)
-        id_2_128 = self.encode_128(id_2)
+        encoder = BarcodeEncoder()
+        id_0_128 = encoder.encode_128(id_0)
+        id_1_128 = encoder.encode_128(id_1)
+        id_2_128 = encoder.encode_128(id_2)
         return mold.format(
             id_0=id_0,
             id_0_128=id_0_128,
@@ -184,5 +165,5 @@ if __name__ == "__main__":
     test_instance = AssetLabelPrinterDoodad(mock_bot)
     loop = asyncio.get_event_loop()
     # noinspection PyTypeChecker,PyProtectedMember
-    loop.run_until_complete(test_instance._print_asset_tag(None, 0, "ansonia", "1234567890", "1234567890", "1234567890"))
+    loop.run_until_complete(test_instance._print_asset_tag(None, 0, "ansonia", "11111", "abcd", "ABCD-1234-FGHJ"))
     loop.close()
