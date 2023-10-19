@@ -1,5 +1,5 @@
 class BarcodeEncoder:
-    C128CHARS = r'Â!"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~ÃÄÅÆÇÈÉÊËÌÍÎ'
+    C128CHARS = "Â!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~ÃÄÅÆÇÈÉÊËÌÍÎ"
 
     def encode_128(self, string_input: str) -> str:
         def only_digits(string_input_to_digits: str) -> int:
