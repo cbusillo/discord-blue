@@ -6,18 +6,6 @@
         id="svg3"
         xmlns="http://www.w3.org/2000/svg"
 >
-    <defs>
-        <style type="text/css">
-            @font-face {{
-            font-family: 'ArialMT';
-            src: url('{font_dir}/Arial.ttf') format('truetype');
-            }}
-            @font-face {{
-            font-family: 'LibreBarcode128Text-Regular';
-            src: url('{font_dir}/LibreBarcode128Text-Regular.ttf') format('truetype');
-            }}
-        </style>
-    </defs>
     <text
             x="51mm"
             y="9mm"
@@ -30,9 +18,9 @@
             x="51mm"
             y="29.5mm"
             text-anchor="middle"
-            font-family="LibreBarcode128Text-Regular, 'Libre Barcode 128 Text'"
+            font-family="LibreBarcode128-Regular, 'Libre Barcode 128'"
             font-size="64px"
-            id="text3">{id_0}
+            id="text3">{id_0_128}
     </text>
     <text
             x="51mm"
