@@ -8,16 +8,14 @@
 >
     <defs>
         <style type="text/css">
-            <![CDATA[
-                @font-face {
-                    font-family: 'ArialMT';
-                    src: url('{font_dir}/Arial.ttf');
-                }
-                @font-face {
-                    font-family: 'LibreBarcode128Text-Regular';
-                    src: url('{font_dir}/LibreBarcode128Text-Regular.ttf');
-                }
-            ]]>
+            @font-face {{
+            font-family: 'ArialMT';
+            src: url('{font_dir}/Arial.ttf') format('truetype');
+            }}
+            @font-face {{
+            font-family: 'LibreBarcode128Text-Regular';
+            src: url('{font_dir}/LibreBarcode128Text-Regular.ttf') format('truetype');
+            }}
         </style>
     </defs>
     <text

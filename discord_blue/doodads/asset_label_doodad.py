@@ -1,12 +1,15 @@
 import io
-import os
 import re
-import cairosvg  # type: ignore[import]
 import discord
+from reportlab.graphics import renderPDF
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from pathlib import Path
 from discord.ext import commands
 from discord import app_commands
 from discord.app_commands import Choice
+from svglib.svglib import svg2rlg
+
 from discord_blue.plugzillas.discord.checks import has_employee_role
 from discord_blue.plugzillas.discord_plug import BlueBot
 from discord_blue.plugzillas.printnode_plug import PrintNodeInterface
@@ -45,6 +48,9 @@ class AssetLabelPrinterDoodad(commands.Cog):
         id_2: str = "",
     ) -> None:
         mold_path = Path(__file__).parent / "molds"
+        font_path = mold_path / "fonts"
+        for font in font_path.glob("*.[ot]tf"):
+            pdfmetrics.registerFont(TTFont(font.stem, font))
         mold_file = mold_path / f"4x2_asset_{school_key}.svg"
         if mold_file.exists():
             mold = mold_file.read_text()
@@ -62,7 +68,8 @@ class AssetLabelPrinterDoodad(commands.Cog):
             font_dir=mold_path / "fonts",
         )
         label_pdf = io.BytesIO()
-        cairosvg.svg2pdf(bytestring=mold.encode("utf-8"), write_to=label_pdf)
+        drawing = svg2rlg(io.BytesIO(mold.encode("utf-8")))
+        renderPDF.drawToFile(drawing, label_pdf)
         if self.bot.config.debug:
             with open(mold_path / "test.pdf", "wb") as file:
                 file.write(label_pdf.getvalue())
