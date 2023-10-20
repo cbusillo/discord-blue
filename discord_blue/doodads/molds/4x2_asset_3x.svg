@@ -46,7 +46,7 @@
             font-size="30px"
             id="text3">{id_1_128}
     </text>
-        <text
+    <text
             x="70mm"
             y="23mm"
             text-anchor="middle"
