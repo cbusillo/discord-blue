@@ -12,7 +12,7 @@
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
             font-size="9px"
-            id="text2">ASSET TAG
+            id="text1">ASSET TAG
     </text>
     <text
             x="38.25mm"
@@ -20,7 +20,7 @@
             text-anchor="middle"
             font-family="LibreBarcode128-Regular, 'Libre Barcode 128'"
             font-size="36px"
-            id="text3">{id_0_128}
+            id="text2">{id_0_128}
     </text>
     <text
             x="38.25mm"
@@ -28,7 +28,7 @@
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
             font-size="7.5px"
-            id="text4">{id_0}
+            id="text3">{id_0}
     </text>
     <text
             x="38.25mm"
@@ -52,7 +52,7 @@
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
             font-size="7.5px"
-            id="text4">{id_1}
+            id="text6">{id_1}
     </text>
     <text
             x="38.25mm"
@@ -60,6 +60,6 @@
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
             font-size="4.5px"
-            id="text6">{name}
+            id="text7">{name}
     </text>
 </svg>

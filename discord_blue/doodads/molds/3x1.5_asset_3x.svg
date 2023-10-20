@@ -12,7 +12,7 @@
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
             font-size="7.5px"
-            id="text2">ASSET TAG NUMBER
+            id="text1">ASSET TAG NUMBER
     </text>
     <text
             x="22.5mm"
@@ -20,7 +20,7 @@
             text-anchor="middle"
             font-family="LibreBarcode128-Regular, 'Libre Barcode 128'"
             font-size="22.5px"
-            id="text1">{id_0_128}
+            id="text2">{id_0_128}
     </text>
     <text
             x="22.5mm"
@@ -28,7 +28,7 @@
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
             font-size="7.5px"
-            id="text4">{id_0}
+            id="text3">{id_0}
     </text>
     <text
             x="52.5mm"
@@ -36,7 +36,7 @@
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
             font-size="7.5px"
-            id="text2">OLD SERIAL NUMBER
+            id="text4">OLD SERIAL NUMBER
     </text>
     <text
             x="52.5mm"
@@ -44,7 +44,7 @@
             text-anchor="middle"
             font-family="LibreBarcode128-Regular, 'Libre Barcode 128'"
             font-size="22.5px"
-            id="text3">{id_1_128}
+            id="text5">{id_1_128}
     </text>
     <text
             x="52.5mm"
@@ -52,7 +52,7 @@
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
             font-size="7.5px"
-            id="text4">{id_1}
+            id="text6">{id_1}
     </text>
     <text
             x="38.25mm"
@@ -60,7 +60,7 @@
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
             font-size="12px"
-            id="text4">NEW SERIAL NUMBER
+            id="text7">NEW SERIAL NUMBER
     </text>
     <text
             x="38.25mm"
@@ -68,7 +68,7 @@
             text-anchor="middle"
             font-family="LibreBarcode128-Regular, 'Libre Barcode 128'"
             font-size="27px"
-            id="text5">{id_2_128}
+            id="text8">{id_2_128}
     </text>
     <text
             x="38.25mm"
@@ -76,7 +76,7 @@
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
             font-size="9px"
-            id="text4">{id_2}
+            id="text9">{id_2}
     </text>
     <text
             x="38.25mm"
@@ -84,6 +84,6 @@
             text-anchor="middle"
             font-family="ArialMT, Arial, sans-serif"
             font-size="4.5px"
-            id="text6">{name}
+            id="text10">{name}
     </text>
 </svg>
