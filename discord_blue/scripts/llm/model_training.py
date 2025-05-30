@@ -118,7 +118,7 @@ def train_model(file_paths: list[Path], model_name: str) -> None:
 
 def generate_dataset(training_data: list[TrainingConversation]) -> Dataset:
     logger.info(f"Generating dataset with {len(training_data)} conversations for user {training_data[0].target.username}")
-    training_examples = {"input": [], "output": []}
+    training_examples: dict[str, list[str]] = {"input": [], "output": []}
 
     for conversation in training_data:
         context_text = "\n".join([f"{message.username}: {message.message}" for message in conversation.context])

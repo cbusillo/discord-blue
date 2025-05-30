@@ -53,7 +53,7 @@ class BlueBot(commands.Bot):
         await self.bot_channel.send(f"Deleted {len(installed_commands)} commands")
         sync_result = await self.tree.sync()
         logger.info(f"Sync result: {sync_result}")
-        await self.clear()
+        self.clear()
         await self.close()
 
     async def blue_guild(self) -> discord.Guild:
