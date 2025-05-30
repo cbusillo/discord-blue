@@ -10,10 +10,10 @@ from nextcord import app_commands
 from nextcord.app_commands import Choice
 from svglib.svglib import svg2rlg
 
-from discord_blue.plugzillas.barcode_encoder_plug import BarcodeEncoder
-from discord_blue.plugzillas.discord.checks import has_employee_role
-from discord_blue.plugzillas.discord_plug import BlueBot
-from discord_blue.plugzillas.printnode_plug import PrintNodeInterface
+from discord_blue.plugs.barcode_encoder_plug import BarcodeEncoder
+from discord_blue.plugs.discord.checks import has_employee_role
+from discord_blue.plugs.discord_plug import BlueBot
+from discord_blue.plugs.printnode_plug import PrintNodeInterface
 
 
 class AssetLabelPrinterDoodad(commands.Cog):

@@ -2,7 +2,7 @@ import logging
 import nextcord as discord
 from nextcord import app_commands
 from nextcord.ext import commands
-from discord_blue.plugzillas.discord_plug import BlueBot
+from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
 

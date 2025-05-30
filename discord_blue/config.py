@@ -1,7 +1,8 @@
 import logging
-import toml
-from typing import Any
 from pathlib import Path
+from typing import Any
+
+import toml
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,8 @@ class Serializable:
                 value = getattr(self, key, None)
                 if isinstance(value, Serializable):
                     result[key] = value.to_dict()
+                elif isinstance(value, dict):
+                    result[key] = {k: v.to_dict() if isinstance(v, Serializable) else v for k, v in value.items()}
                 else:
                     result[key] = value
         return result
@@ -45,6 +48,22 @@ class Serializable:
                 logger.warning(f"Warning: Configuration value '{key}' is missing or None in {self.__class__.__name__}")
 
 
+class ChannelConfig(Serializable):
+    def __init__(self, name: str, last_message_id: int = 0) -> None:
+        self.name = name
+        self.last_message_id = last_message_id
+
+
+class LLMTrainingConfig(Serializable):
+    channels: dict[str, ChannelConfig] = {}
+
+    def add_channel(self, channel_id: int, name: str, last_message_id: int) -> None:
+        self.channels[str(channel_id)] = ChannelConfig(name, last_message_id)
+
+    def get_channel(self, channel_id: int) -> ChannelConfig | None:
+        return self.channels.get(str(channel_id))
+
+
 class DiscordConfig(Serializable):
     token: str = "from_terminal"
     guild_id: int = 0
@@ -67,6 +86,10 @@ class AssetLabelPrinterConfig(Serializable):
     label_size: tuple[float, float] = (4, 2)
 
 
+class HuggingFaceConfig(Serializable):
+    token: str = "from_terminal"
+
+
 class Config(Serializable):
     _instance = None
 
@@ -82,6 +105,8 @@ class Config(Serializable):
         self.printnode = PrintnodeConfig()
         self.asset_label_printer = AssetLabelPrinterConfig()
         self.shippo = ShippoConfig()
+        self.llm_training = LLMTrainingConfig()
+        self.hugging_face = HuggingFaceConfig()
 
         self.load()  # Load config during instance creation
 
@@ -116,8 +141,11 @@ class Config(Serializable):
         self.gather_missing_data(self)
         data = self.to_dict()
         try:
-            with self.filepath.open("w") as file:
-                toml.dump(data, file)
+            toml_data = toml.dumps(data)
+            self.filepath.write_text(toml_data)
+        except KeyError as key_error:
+            logger.error(f"KeyError when saving configuration: {key_error}")
+            logger.debug(f"Configuration data: {data}")
         except (FileNotFoundError, OSError) as error:
             logger.exception(f"Error saving configuration: {str(error)}")
 
