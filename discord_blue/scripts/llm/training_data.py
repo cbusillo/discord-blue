@@ -4,6 +4,7 @@ from pathlib import Path
 
 import aiofiles
 import discord
+from typing import Any, Awaitable, Callable
 
 from discord_blue.classes.training import TrainingMessage, TrainingConversation
 from discord_blue.config import config
@@ -74,11 +75,11 @@ async def convert_jsonl_to_json(jsonl_file_path: Path) -> None:
     logger.info(f"Converted {jsonl_file_path} to {json_file_path}")
 
 
-async def connect_to_discord_and_run(function_to_run, *args, **kwargs) -> None:
+async def connect_to_discord_and_run(function_to_run: Callable[..., Awaitable[None]], *args: Any, **kwargs: Any) -> None:
     client = discord.Client(intents=discord.Intents.all())
 
     @client.event
-    async def on_ready():
+    async def on_ready() -> None:
         logger.info(f"{client.user} has connected to Discord!")
         await function_to_run(client, *args, **kwargs)
         await client.close()
@@ -120,10 +121,10 @@ async def get_training_data(
         logger.info(f"Checking channel #{number_of_channels} {channel.name} with ID: {channel.id}")
         if not isinstance(channel, discord.TextChannel):
             continue
-        history_kwargs = {"limit": None, "oldest_first": True}
+        history_kwargs: dict[str, Any] = {"limit": None, "oldest_first": True}
         saved_channel = config.llm_training.get_channel(channel.id)
         if saved_channel:
-            last_message_id = saved_channel.get("last_message_id")
+            last_message_id = saved_channel.last_message_id
             history_kwargs["after"] = discord.Object(id=last_message_id)
 
         try:

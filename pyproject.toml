@@ -28,6 +28,7 @@ dev = [
     "types-toml",
     "mypy",
     "hatchling",
+    "ruff",
 ]
 
 [project.scripts]

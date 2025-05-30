@@ -16,8 +16,8 @@ class TemplateDoodad(commands.Cog):
         self.bot = bot
         super().__init__()
 
-    @checks.has_employee_role()
     @app_commands.command(name="hello", description="Hello World")
+    @checks.has_employee_role()
     async def hello_command(self, context: discord.Interaction[commands.Bot]) -> None:
         if isinstance(context.response, discord.InteractionResponse):
             await context.response.defer()

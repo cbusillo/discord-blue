@@ -3,11 +3,15 @@ import json
 import logging
 import shutil
 from pathlib import Path
+from typing import Any, cast
 
 import torch
 from datasets import Dataset
 from huggingface_hub import login
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, EarlyStoppingCallback
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.trainer import Trainer
+from transformers.trainer_callback import EarlyStoppingCallback
+from transformers.training_args import TrainingArguments
 
 from discord_blue.classes.training import TrainingConversation
 from discord_blue.config import config
@@ -65,8 +69,11 @@ def train_model(file_paths: list[Path], model_name: str) -> None:
 
     dataset = generate_dataset(training_data)
 
-    def tokenize_function(examples):
-        inputs = tokenizer(examples["input"], padding="max_length", truncation=True, max_length=512)
+    def tokenize_function(examples: dict[str, list[str]]) -> dict[str, Any]:
+        inputs = cast(
+            dict[str, Any],
+            tokenizer(examples["input"], padding="max_length", truncation=True, max_length=512),
+        )
         inputs["labels"] = inputs["input_ids"].copy()
 
         inputs["labels"] = [

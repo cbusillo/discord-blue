@@ -27,8 +27,8 @@ class SetupDoodad(commands.Cog):
         logger.info(f"Loaded {len(tree_sync)} commands")
         await self.bot.bot_channel.send(f"Loaded {len(tree_sync)} commands")
 
-    @checks.has_employee_role()
     @commands.hybrid_command(name="sync")
+    @checks.has_employee_role()
     async def sync_command(self, context: Context[commands.Bot]) -> None:
         logger.info("Syncing commands")
         if (
@@ -47,9 +47,9 @@ class SetupDoodad(commands.Cog):
         app_commands.Choice(name="Bot", value="bot"),
     ]
 
-    @checks.has_employee_role()
     @app_commands.command(name="clear")
     @app_commands.choices(scope=CLEAR_CHOICES)
+    @checks.has_employee_role()
     async def clear_command(self, interaction: discord.Interaction[commands.Bot], scope: str) -> None:
         if not isinstance(interaction.channel, discord.TextChannel):
             return
