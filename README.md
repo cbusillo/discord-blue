@@ -51,3 +51,23 @@ apt install git curl python3.12 libcairo2
 ```
 /root/.local/bin/poetry run discord-blue
 ```
+
+## Docker
+
+A `Dockerfile` is provided to build a containerized version of the bot. It
+uses the [`ghcr.io/astral-sh/uv:debian`](https://github.com/astral-sh/uv) base
+image so `uv` is already available for dependency installation.
+
+Build the image:
+```bash
+docker build -t discord-blue .
+```
+
+Run the bot:
+```bash
+docker run --rm discord-blue
+```
+
+The container entrypoint uses `uv run` so any project dependencies are
+isolated and executed with the version pinned in `pyproject.toml`.
+
