@@ -49,3 +49,18 @@ apt install git curl python3.11 libcairo2
 ```
 /root/.local/bin/poetry run discord-blue
 ```
+
+## Docker
+
+A `Dockerfile` is provided to build a containerized version of the bot.
+
+The container uses `uv` to manage its own virtual environment. To build and
+run it:
+```bash
+# Build the image
+docker build -t discord-blue .
+
+# Run the bot
+docker run --rm discord-blue
+```
+
