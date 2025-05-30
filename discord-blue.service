@@ -1,5 +1,5 @@
 [Unit]
-Description=Discord Blue
+Description=Discord Blue (nextcord)
 After=multi-user.target
 After=network-online.target
 Wants=network-online.target

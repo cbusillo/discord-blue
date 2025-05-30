@@ -1,13 +1,13 @@
 import io
 import re
-import discord
+import nextcord as discord
 from reportlab.graphics import renderPDF
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from pathlib import Path
-from discord.ext import commands
-from discord import app_commands
-from discord.app_commands import Choice
+from nextcord.ext import commands
+from nextcord import app_commands
+from nextcord.app_commands import Choice
 from svglib.svglib import svg2rlg
 
 from discord_blue.plugzillas.barcode_encoder_plug import BarcodeEncoder
@@ -26,7 +26,9 @@ class AssetLabelPrinterDoodad(commands.Cog):
         for font in font_path.glob("*.[ot]tf"):
             pdfmetrics.registerFont(TTFont(font.stem, font))
 
-    def get_mold_str(self, mold_path: Path, school_key: str, id_0: str, id_1: str, id_2: str) -> str:
+    def get_mold_str(
+        self, mold_path: Path, school_key: str, id_0: str, id_1: str, id_2: str
+    ) -> str:
         label_size = self.bot.config.asset_label_printer.label_size
         label_size_str = "x".join(map(str, label_size))
         mold_file = mold_path / f"{label_size_str}_asset_{school_key}.svg"
@@ -39,7 +41,9 @@ class AssetLabelPrinterDoodad(commands.Cog):
         else:
             return (mold_path / f"{label_size_str}_asset_1x.svg").read_text()
 
-    def format_mold(self, mold: str, school_key: str, id_0: str, id_1: str, id_2: str) -> str:
+    def format_mold(
+        self, mold: str, school_key: str, id_0: str, id_1: str, id_2: str
+    ) -> str:
         encoder = BarcodeEncoder()
         id_0_128 = encoder.encode_128(id_0)
         id_1_128 = encoder.encode_128(id_1)
@@ -66,15 +70,26 @@ class AssetLabelPrinterDoodad(commands.Cog):
         printnode = PrintNodeInterface(printer_id=printer_id)
         printnode.print_label(pdf)
 
-    async def get_schools_autocomplete(self, _: discord.Interaction[commands.Bot], current: str) -> list[Choice[str]]:
+    async def get_schools_autocomplete(
+        self, _: discord.Interaction[commands.Bot], current: str
+    ) -> list[Choice[str]]:
         schools = list(self.bot.config.asset_label_printer.schools.items())
         if current:
-            schools = [(key, value) for key, value in schools if current.lower() in value.lower()]
+            schools = [
+                (key, value)
+                for key, value in schools
+                if current.lower() in value.lower()
+            ]
         schools = schools[:25]
 
-        return [Choice(name=school_name, value=school_key) for school_key, school_name in schools]
+        return [
+            Choice(name=school_name, value=school_key)
+            for school_key, school_name in schools
+        ]
 
-    async def get_printers_autocomplete(self, _: discord.Interaction[commands.Bot], _2: str) -> list[Choice[int]]:
+    async def get_printers_autocomplete(
+        self, _: discord.Interaction[commands.Bot], _2: str
+    ) -> list[Choice[int]]:
         return [
             Choice(name=printer_key, value=printer_id)
             for printer_key, printer_id in self.bot.config.asset_label_printer.printers.items()
@@ -83,7 +98,13 @@ class AssetLabelPrinterDoodad(commands.Cog):
     @has_employee_role()  # type: ignore[arg-type]
     @app_commands.command(name="asset-tag", description="Print an asset tag")
     @app_commands.autocomplete(school_key=get_schools_autocomplete, printer_id=get_printers_autocomplete)  # type: ignore[arg-type, unused-ignore, misc]
-    @app_commands.describe(printer_id="Printer Name", school_key="School Name", id_0="First ID", id_1="Second ID", id_2="Third ID")
+    @app_commands.describe(
+        printer_id="Printer Name",
+        school_key="School Name",
+        id_0="First ID",
+        id_1="Second ID",
+        id_2="Third ID",
+    )
     async def print_asset_tag(
         self,
         interaction: discord.Interaction[commands.Bot],
@@ -93,7 +114,9 @@ class AssetLabelPrinterDoodad(commands.Cog):
         id_1: str = "",
         id_2: str = "",
     ) -> None:
-        await self._print_asset_tag(interaction, printer_id, school_key, id_0, id_1, id_2)
+        await self._print_asset_tag(
+            interaction, printer_id, school_key, id_0, id_1, id_2
+        )
 
     async def _print_asset_tag(
         self,
@@ -121,15 +144,22 @@ class AssetLabelPrinterDoodad(commands.Cog):
             await interaction.response.send_message(f"{printer_id=} {school_key=}")
 
     @has_employee_role()  # type: ignore[arg-type]
-    @app_commands.command(name="add-school", description="Add a school to the list of schools")
+    @app_commands.command(
+        name="add-school", description="Add a school to the list of schools"
+    )
     @app_commands.describe(school_name="School Name")
-    async def add_school(self, interactions: discord.Interaction[commands.Bot], school_name: str) -> None:
+    async def add_school(
+        self, interactions: discord.Interaction[commands.Bot], school_name: str
+    ) -> None:
         school_short = re.sub(r"[\s-]+", "_", school_name)
         school_short = re.sub(r"\W+", "", school_short)
         school_short = re.sub(r"_+", "_", school_short.lower())
         self.bot.config.asset_label_printer.schools[school_short] = school_name
         self.bot.config.save()
-        message = f"{interactions.user.mention} Added {school_name} to the list of schools\n" f"Current Schools:\n"
+        message = (
+            f"{interactions.user.mention} Added {school_name} to the list of schools\n"
+            f"Current Schools:\n"
+        )
         if isinstance(interactions.response, discord.InteractionResponse):
             await interactions.response.send_message(message)
         message = ""
@@ -165,5 +195,9 @@ if __name__ == "__main__":
     test_instance = AssetLabelPrinterDoodad(mock_bot)
     loop = asyncio.get_event_loop()
     # noinspection PyTypeChecker,PyProtectedMember
-    loop.run_until_complete(test_instance._print_asset_tag(None, 0, "ansonia", "11111", "abcd", "ABCD-1234-FGHJ"))
+    loop.run_until_complete(
+        test_instance._print_asset_tag(
+            None, 0, "ansonia", "11111", "abcd", "ABCD-1234-FGHJ"
+        )
+    )
     loop.close()
