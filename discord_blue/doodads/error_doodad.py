@@ -1,7 +1,7 @@
 import logging
-import discord
-from discord import app_commands
-from discord.ext import commands
+import nextcord as discord
+from nextcord import app_commands
+from nextcord.ext import commands
 from discord_blue.plugzillas.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
@@ -15,7 +15,9 @@ class ExceptionDoodad(commands.Cog):
 
     @commands.Cog.listener()
     async def on_app_command_error(
-        self, interaction: discord.Interaction[commands.Bot], error: app_commands.AppCommandError
+        self,
+        interaction: discord.Interaction[commands.Bot],
+        error: app_commands.AppCommandError,
     ) -> None:
         if isinstance(error, commands.errors.CheckFailure):
             message = "You do not have permission to use this command"

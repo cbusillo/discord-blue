@@ -1,8 +1,8 @@
 import logging
-import discord
-from discord import app_commands
-from discord.ext import commands
-from discord.abc import Messageable
+import nextcord as discord
+from nextcord import app_commands
+from nextcord.ext import commands
+from nextcord.abc import Messageable
 from discord_blue.plugzillas.discord_plug import BlueBot
 from discord_blue.plugzillas.discord import checks
 

@@ -3,7 +3,7 @@ import logging
 import signal
 from time import sleep
 
-from discord.errors import PrivilegedIntentsRequired
+from nextcord.errors import PrivilegedIntentsRequired
 from discord_blue.plugzillas.discord_plug import BlueBot
 from discord_blue.config import config
 
@@ -21,7 +21,12 @@ def main() -> None:
             bot = BlueBot()
             loop = asyncio.get_event_loop()
             for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.add_signal_handler(sig, lambda current_signal=sig: asyncio.create_task(bot.on_signal(current_signal)))
+                loop.add_signal_handler(
+                    sig,
+                    lambda current_signal=sig: asyncio.create_task(
+                        bot.on_signal(current_signal)
+                    ),
+                )
             loop.run_until_complete(bot.start(config.discord.token))
             login_success = True
         except PrivilegedIntentsRequired:
