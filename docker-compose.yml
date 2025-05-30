@@ -1,0 +1,8 @@
+services:
+  discord-blue:
+    build:
+      context: .
+    container_name: discord-blue
+    volumes:
+      - "${HOME}/.config/discord-blue:/root/.config/discord-blue"
+    restart: unless-stopped

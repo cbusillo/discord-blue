@@ -27,6 +27,7 @@ dev = [
     "black",
     "types-toml",
     "mypy",
+    "hatchling",
 ]
 
 [project.scripts]
@@ -39,3 +40,6 @@ default-groups = "all"
 [tool.mypy]
 strict = true
 python_version = 3.13
+
+[tool.black]
+line-length = 133

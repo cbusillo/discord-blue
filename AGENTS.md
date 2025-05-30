@@ -2,12 +2,6 @@
 
 ## Development Commands
 
-Use these commands for local development:
-
-- `uv pip install -e .`
-- `black --line-length 133 discord_blue`
-- `mypy discord_blue`
-
-Python 3.14 or higher is recommended.
-
+Use black and mypy to check and format code
+Python 3.13
 Please update `README.md` for any user-facing changes.
