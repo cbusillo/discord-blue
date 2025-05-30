@@ -1,6 +1,10 @@
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+
+requires-python = ">=3.12"
 
 [tool.poetry]
 name = "discord-blue"
@@ -10,7 +14,7 @@ authors = ["Chris Busillo <info@shinycomputers.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "^3.12"
 toml = "^0.10.2"
 nextcord = "^2.5.1"
 printnodeapi = "^0.2.0"
@@ -29,4 +33,6 @@ discord-blue = 'discord_blue.__main__:main'
 
 [tool.mypy]
 strict = true
-python_version = 3.11
+python_version = 3.12
+warn_any_return = false
+warn_no_untyped_call = false
