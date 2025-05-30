@@ -35,7 +35,7 @@ Debian-based LXC.
    ```
 
 **Note**: Make sure to run once to create the config file and input the discord token along with the server and the bot
-channel.
+channel. Slash commands are synced directly to the first guild the bot joins so they appear immediately.
 
 ```
 uv run discord_blue
