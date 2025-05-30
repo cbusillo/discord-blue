@@ -26,8 +26,7 @@ jobs:
         run: |
           ssh ${{ vars.PRODUCTION_USER }}@${{ vars.PRODUCTION_SERVER }} "cd /opt/discord-blue; \
           export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring; \
-          git pull; \ 
-          poetry lock; \
-          poetry install; \
+          git pull; \
+          uv venv --upgrade --dev; \
           systemctl restart discord-blue"
         shell: bash
