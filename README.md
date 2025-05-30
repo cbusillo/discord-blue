@@ -1,11 +1,12 @@
 # Discord Blue LXC Installation Guide
 
-Discord Blue is a basic Discord bot plugin system built with the **nextcord** library. This guide provides step-by-step instructions for setting it up on
+Discord Blue is a basic Discord bot plugin system built with the **nextcord** library. This guide provides step-by-step
+instructions for setting it up on
 Debian-based LXC.
 
 ## Prerequisites
 
-Ensure you have `git`, `curl`, `libcairo2`, and `python3.12` installed.
+Have `git`, `curl`, `libcairo2`, and `python3.12` installed.
 
 ```
 apt update
@@ -31,7 +32,7 @@ apt install git curl python3.12 libcairo2
    uv venv --dev
    ```
 
-4. Setup and Start the Systemd Service:
+4. Set up and Start the Systemd Service:
    ```
    cp discord-blue.service /etc/systemd/system/
    systemctl daemon-reload
@@ -41,7 +42,8 @@ apt install git curl python3.12 libcairo2
    The service now runs using `/opt/discord-blue/.venv/bin/python` to match the
    Python version created by `uv venv`.
 
-**Note**: Make sure to run once to create the config file and input your discord token along with server and bot channel.
+**Note**: Make sure to run once to create the config file and input the discord token along with the server and the bot
+channel.
 
 ```
 uv run python -m discord_blue
@@ -54,11 +56,13 @@ uses the [`ghcr.io/astral-sh/uv:debian`](https://github.com/astral-sh/uv) base
 image so `uv` is already available for dependency installation.
 
 Build the image:
+
 ```bash
 docker build -t discord-blue .
 ```
 
 Run the bot:
+
 ```bash
 docker run --rm discord-blue
 ```
