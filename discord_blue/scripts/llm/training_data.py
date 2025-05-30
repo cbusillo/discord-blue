@@ -3,7 +3,7 @@ import logging
 from pathlib import Path
 
 import aiofiles
-import nextcord as discord
+import discord
 
 from discord_blue.classes.training import TrainingMessage, TrainingConversation
 from discord_blue.config import config

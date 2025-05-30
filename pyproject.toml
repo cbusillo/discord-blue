@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.27.0"]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
@@ -12,13 +12,14 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "toml",
-    "nextcord",
+    "discord.py",
     "torch",
     "pydantic",
     "numpy",
     "transformers",
     "datasets",
-    "aiofiles"
+    "aiofiles",
+    "PyNaCl"
 ]
 
 [dependency-groups]

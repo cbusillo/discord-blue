@@ -94,7 +94,6 @@ def train_model(file_paths: list[Path], model_name: str) -> None:
         dataloader_num_workers=2,
         dataloader_pin_memory=True,
         load_best_model_at_end=True,
-        evaluation_strategy="steps",
         eval_steps=500,
     )
 

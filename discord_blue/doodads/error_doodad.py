@@ -1,7 +1,9 @@
 import logging
-import nextcord as discord
-from nextcord import app_commands
-from nextcord.ext import commands
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
