@@ -7,7 +7,7 @@
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
       <excludePattern pattern="poetry.lock" />
     </content>
-    <orderEntry type="jdk" jdkName="Poetry (discord-blue)" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="uv (discord-blue)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

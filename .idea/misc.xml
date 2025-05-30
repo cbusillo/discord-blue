@@ -7,5 +7,5 @@
     <option name="pathToExecutable" value="/opt/homebrew/bin/black" />
     <option name="sdkName" value="Poetry (discord-blue)" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="Poetry (discord-blue)" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="uv (discord-blue)" project-jdk-type="Python SDK" />
 </project>
