@@ -176,7 +176,7 @@ class SetupCommands(commands.GroupCog, name="setup"):
             await interaction.response.defer()
         self.bot.config.load()
         if isinstance(interaction.channel, Messageable):
-            await interaction.followup.send(f"Reloaded config")
+            await interaction.followup.send("Reloaded config")
 
 
 async def setup(bot: BlueBot) -> None:

@@ -116,7 +116,7 @@ class Config(Serializable):
                     else:
                         setattr(self, key, value)
         except (FileNotFoundError, OSError, toml.TomlDecodeError):
-            logger.exception(f"Error loading configuration")
+            logger.exception("Error loading configuration")
             exit(1)
         self.save()
 

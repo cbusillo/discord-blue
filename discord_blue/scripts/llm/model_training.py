@@ -3,11 +3,11 @@ import json
 import logging
 import shutil
 from pathlib import Path
-from typing import Any, cast
 
+import polars as pl
 import torch
-from datasets import Dataset
 from huggingface_hub import login
+from torch.utils.data import Dataset as TorchDataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.trainer import Trainer
 from transformers.trainer_callback import EarlyStoppingCallback
@@ -67,23 +67,8 @@ def train_model(file_paths: list[Path], model_name: str) -> None:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    dataset = generate_dataset(training_data)
-
-    def tokenize_function(examples: dict[str, list[str]]) -> dict[str, Any]:
-        inputs = cast(
-            dict[str, Any],
-            tokenizer(examples["input"], padding="max_length", truncation=True, max_length=512),
-        )
-        inputs["labels"] = inputs["input_ids"].copy()
-
-        inputs["labels"] = [
-            [(label if label != tokenizer.pad_token_id else -100) for label in label_list] for label_list in inputs["labels"]
-        ]
-
-        return inputs
-
-    tokenized_datasets = dataset.map(tokenize_function, batched=True)
-    tokenized_datasets.set_format("torch", columns=["input_ids", "attention_mask", "labels"])
+    dataframe = generate_dataset(training_data)
+    dataset = ConversationDataset(dataframe, tokenizer)
 
     output_dir = file_paths[0].parent / "fine_tuned_models" / training_data[0].target.username
     training_args = TrainingArguments(
@@ -107,7 +92,7 @@ def train_model(file_paths: list[Path], model_name: str) -> None:
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=tokenized_datasets,
+        train_dataset=dataset,
         callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
     )
 
@@ -123,17 +108,41 @@ def train_model(file_paths: list[Path], model_name: str) -> None:
     logger.info(f"Model trained and saved to {output_dir}")
 
 
-def generate_dataset(training_data: list[TrainingConversation]) -> Dataset:
+def generate_dataset(training_data: list[TrainingConversation]) -> pl.DataFrame:
     logger.info(f"Generating dataset with {len(training_data)} conversations for user {training_data[0].target.username}")
-    training_examples: dict[str, list[str]] = {"input": [], "output": []}
+    records: list[dict[str, str]] = []
 
     for conversation in training_data:
-        context_text = "\n".join([f"{message.username}: {message.message}" for message in conversation.context])
-
+        context_text = "\n".join(f"{message.username}: {message.message}" for message in conversation.context)
         if conversation.replied:
             context_text += f"\n{conversation.replied.username}: {conversation.replied.message}"
+        records.append({"input": context_text, "output": conversation.target.message})
 
-        training_examples["input"].append(context_text)
-        training_examples["output"].append(conversation.target.message)
+    return pl.DataFrame(records)
 
-    return Dataset.from_dict(training_examples)
+
+class ConversationDataset(TorchDataset):
+    def __init__(self, dataframe: pl.DataFrame, tokenizer) -> None:
+        pad_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+        self._examples = []
+        for row in dataframe.iter_rows(named=True):
+            encoded = tokenizer(
+                row["input"],
+                padding="max_length",
+                truncation=True,
+                max_length=512,
+            )
+            labels = [token if token != pad_id else -100 for token in encoded["input_ids"]]
+            self._examples.append(
+                {
+                    "input_ids": torch.tensor(encoded["input_ids"]),
+                    "attention_mask": torch.tensor(encoded["attention_mask"]),
+                    "labels": torch.tensor(labels),
+                }
+            )
+
+    def __len__(self) -> int:
+        return len(self._examples)
+
+    def __getitem__(self, index: int):
+        return self._examples[index]

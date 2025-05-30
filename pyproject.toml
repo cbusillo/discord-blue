@@ -17,15 +17,16 @@ dependencies = [
     "pydantic",
     "numpy",
     "transformers",
-    "datasets",
+    "polars",
     "aiofiles",
     "PyNaCl"
 ]
 
 [dependency-groups]
 dev = [
-    "black",
     "types-toml",
+    "types-aiofiles",
+    "black",
     "mypy",
     "hatchling",
     "ruff",
