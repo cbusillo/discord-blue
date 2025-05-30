@@ -66,20 +66,3 @@ Run the bot:
 ```bash
 docker run --rm discord-blue
 ```
-
-The container entrypoint uses `uv run` so any project dependencies are
-isolated and executed with the version pinned in `pyproject.toml`.
-
-## Codex Setup
-
-If you are working in the Codex environment, run the helper script to install
-`uv` and all required dependencies before network access is removed:
-
-```bash
-./setup_codex.sh
-```
-
-The script creates a `.venv` with `uv` and installs all project and
-development dependencies declared in `pyproject.toml` (the `dev` group) for
-local testing.
-

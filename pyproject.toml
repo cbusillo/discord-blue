@@ -1,6 +1,5 @@
-
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -10,23 +9,22 @@ description = ""
 authors = [{ name = "Chris Busillo", email = "info@shinycomputers.com" }]
 readme = "README.md"
 
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = [
     "toml>=0.10.2",
     "nextcord>=2.5.1",
-    "pynacl>=1.5.0",
+    "torch>=2.7.0"
 ]
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "setuptools>=68.2.2",
     "black>=23.9.1",
     "types-toml>=0.10.8.7",
+    "mypy>=1.4.2",
 ]
 [project.scripts]
 discord-blue = "discord_blue.__main__:main"
 
 [tool.mypy]
 strict = true
-python_version = 3.14
-warn_any_return = false
-warn_no_untyped_call = false
+python_version = 3.13

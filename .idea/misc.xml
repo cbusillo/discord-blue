@@ -5,7 +5,7 @@
     <option name="enabledOnReformat" value="true" />
     <option name="enabledOnSave" value="true" />
     <option name="pathToExecutable" value="/opt/homebrew/bin/black" />
-    <option name="sdkName" value="Poetry (discord-blue)" />
+    <option name="sdkName" value="uv (discord-blue)" />
   </component>
   <component name="ProjectRootManager" version="2" project-jdk-name="uv (discord-blue)" project-jdk-type="Python SDK" />
   <component name="PythonCompatibilityInspectionAdvertiser">

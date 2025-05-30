@@ -72,20 +72,6 @@ class DiscordConfig(Serializable):
     loaded_doodads: list[str] = []
 
 
-class PrintnodeConfig(Serializable):
-    api_key: str = ""
-
-
-class ShippoConfig(Serializable):
-    api_key: str = ""
-
-
-class AssetLabelPrinterConfig(Serializable):
-    schools: dict[str, str] = {}
-    printers: dict[str, int] = {}
-    label_size: tuple[float, float] = (4, 2)
-
-
 class HuggingFaceConfig(Serializable):
     token: str = "from_terminal"
 
@@ -102,9 +88,6 @@ class Config(Serializable):
             self.filepath.touch()
 
         self.discord = DiscordConfig()
-        self.printnode = PrintnodeConfig()
-        self.asset_label_printer = AssetLabelPrinterConfig()
-        self.shippo = ShippoConfig()
         self.llm_training = LLMTrainingConfig()
         self.hugging_face = HuggingFaceConfig()
 
@@ -184,5 +167,3 @@ config = Config()
 if __name__ == "__main__":
     config = Config.get_instance()
     print(config.discord.token)
-    # config.discord.api_key = "new_api_key"
-    # update_and_save(discord__timeout=200, printnode__port=8080)
