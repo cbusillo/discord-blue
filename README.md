@@ -5,11 +5,11 @@ Debian-based LXC.
 
 ## Prerequisites
 
-Ensure you have `git`, `curl`, `libcairo2`, and `python3` installed.
+Ensure you have `git`, `curl`, `libcairo2`, and `python3.12` installed.
 
 ```
 apt update
-apt install git curl python3.11 libcairo2
+apt install git curl python3.12 libcairo2
 ```
 
 ## Installation Steps
@@ -21,7 +21,7 @@ apt install git curl python3.11 libcairo2
 
 2. Install Python Poetry:
    ```
-   curl -sSL https://install.python-poetry.org | python3.11 -
+   curl -sSL https://install.python-poetry.org | python3.12 -
    ```
 
 3. Clone the Discord Blue Repository:
