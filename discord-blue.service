@@ -5,7 +5,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/root/.local/bin/poetry run discord-blue
+# Use the same Python version installed with uv venv
+ExecStart=/opt/discord-blue/.venv/bin/python -m discord_blue
 User=root
 Group=root
 Type=idle
