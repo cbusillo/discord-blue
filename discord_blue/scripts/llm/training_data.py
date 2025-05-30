@@ -140,7 +140,7 @@ async def get_training_data(
                 )
                 conversation = await fetch_conversation(channel, message, context_size)
                 if username == "all":
-                    user_file_path = output_path / f"{message.author.name.replace('_', '').replace('.','')}_training_data.jsonl"
+                    user_file_path = output_path / f"{message.author.name.replace('_', '').replace('.', '')}_training_data.jsonl"
                 else:
                     user_file_path = output_path / f"{username}_training_data.jsonl"
                 await save_conversation(conversation, user_file_path)

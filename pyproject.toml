@@ -44,3 +44,6 @@ python_version = 3.13
 
 [tool.black]
 line-length = 133
+
+[tool.ruff]
+line-length = 133

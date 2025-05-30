@@ -1,7 +1,12 @@
-# Contributing Guidelines
+# Project Coding Agent Guide — Codex Cloud
 
-## Development Commands
+## Runtime
 
-Use black and mypy to check and format code
-Python 3.13
-Please update `README.md` for any user-facing changes.
+* **OS:** Ubuntu 24.04 (noble)
+* **Python:** 3.13
+* **Env manager:** uv
+
+use `/workspace/discord-blue/.venv/bin/python` as the interpreter
+use `uv run mypy .` for static type checking
+use `uv run ruff check .` for linting
+use `uv run ruff format .` for formatting
