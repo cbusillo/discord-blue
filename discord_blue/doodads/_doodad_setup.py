@@ -23,7 +23,7 @@ class SetupDoodad(commands.Cog):
     async def my_on_ready(self) -> None:
         self.bot.tree.clear_commands(guild=self.bot.guilds[0])
         self.bot.tree.copy_global_to(guild=self.bot.guilds[0])
-        tree_sync = await self.bot.tree.sync()
+        tree_sync = await self.bot.tree.sync(guild=self.bot.guilds[0])
         logger.info(f"Loaded {len(tree_sync)} commands")
         await self.bot.bot_channel.send(f"Loaded {len(tree_sync)} commands")
 
@@ -38,7 +38,7 @@ class SetupDoodad(commands.Cog):
         ):
             await context.interaction.response.defer()
         self.bot.tree.clear_commands(guild=self.bot.guilds[0])
-        tree_sync = await self.bot.tree.sync()
+        tree_sync = await self.bot.tree.sync(guild=self.bot.guilds[0])
         logger.info(f"Loaded {len(tree_sync)} commands")
         await context.send(f"Loaded {len(tree_sync)} commands")
 
@@ -147,7 +147,7 @@ class SetupCommands(commands.GroupCog, name="setup"):
             await interaction.response.defer()
         await self.bot.load_extension(f"discord_blue.doodads.{doodad_name}")
         logger.info(f"Loaded {doodad_name}")
-        tree_sync = await self.bot.tree.sync()
+        tree_sync = await self.bot.tree.sync(guild=self.bot.guilds[0])
         logger.info(f"Loaded {len(tree_sync)} commands")
         self.bot.config.discord.loaded_doodads.append(doodad_name)
         self.bot.config.save()
@@ -162,7 +162,7 @@ class SetupCommands(commands.GroupCog, name="setup"):
             await interaction.response.defer()
         await self.bot.unload_extension(f"discord_blue.doodads.{doodad_name}")
         logger.info(f"Unloaded {doodad_name}")
-        tree_sync = await self.bot.tree.sync()
+        tree_sync = await self.bot.tree.sync(guild=self.bot.guilds[0])
         logger.info(f"Unloaded {len(tree_sync)} commands")
         self.bot.config.discord.loaded_doodads.remove(doodad_name)
         self.bot.config.save()
