@@ -11,19 +11,29 @@ readme = "README.md"
 
 requires-python = ">=3.13"
 dependencies = [
-    "toml>=0.10.2",
-    "nextcord>=2.5.1",
-    "torch>=2.7.0"
+    "toml",
+    "nextcord",
+    "torch",
+    "pydantic",
+    "numpy",
+    "transformers",
+    "datasets",
+    "aiofiles"
 ]
+
 [dependency-groups]
 dev = [
-    "setuptools>=68.2.2",
-    "black>=23.9.1",
-    "types-toml>=0.10.8.7",
-    "mypy>=1.4.2",
+    "black",
+    "types-toml",
+    "mypy",
 ]
+
 [project.scripts]
 discord-blue = "discord_blue.__main__:main"
+
+[tool.uv]
+default-groups = "all"
+
 
 [tool.mypy]
 strict = true
