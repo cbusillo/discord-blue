@@ -43,6 +43,8 @@ apt install git curl python3.11 libcairo2
    systemctl enable discord-blue
    systemctl start discord-blue
    ```
+   The service now runs using `/opt/discord-blue/.venv/bin/python` to match the
+   Python version created by `uv venv`.
 
 **Note**: Make sure to run once to create the config file and input your discord token along with server and bot channel.
 
