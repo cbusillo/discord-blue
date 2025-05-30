@@ -1,35 +1,34 @@
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-
-requires-python = ">=3.12"
-
-[tool.poetry]
+[project]
 name = "discord-blue"
 version = "0.1.0"
 description = ""
-authors = ["Chris Busillo <info@shinycomputers.com>"]
+authors = [{ name = "Chris Busillo", email = "info@shinycomputers.com" }]
 readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "toml>=0.10.2",
+    "nextcord>=2.5.1",
+    "printnodeapi>=0.2.0",
+    "pynacl>=1.5.0",
+    "modern-shippo==3.0.1",
+    "reportlab>=4.0.6",
+    "svglib>=1.5.1",
+]
 
-[tool.poetry.dependencies]
-python = "^3.12"
-toml = "^0.10.2"
-nextcord = "^2.5.1"
-printnodeapi = "^0.2.0"
-pynacl = "^1.5.0"
-modern-shippo = "3.0.1"
-reportlab = "^4.0.6"
-svglib = "^1.5.1"
+[project.optional-dependencies]
+dev = [
+    "setuptools>=68.2.2",
+    "black>=23.9.1",
+    "types-toml>=0.10.8.7",
+]
 
-[tool.poetry.group.dev.dependencies]
-setuptools = "^68.2.2"
-black = "^23.9.1"
-types-toml = "^0.10.8.7"
-
-[tool.poetry.scripts]
-discord-blue = 'discord_blue.__main__:main'
+[project.scripts]
+discord-blue = "discord_blue.__main__:main"
 
 [tool.mypy]
 strict = true

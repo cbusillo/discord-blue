@@ -19,24 +19,19 @@ apt install git curl python3.12 libcairo2
    apt update
    ```
 
-2. Install Python Poetry:
-   ```
-   curl -sSL https://install.python-poetry.org | python3.12 -
-   ```
-
-3. Clone the Discord Blue Repository:
+2. Clone the Discord Blue Repository:
    ```
    cd /opt
    git clone https://github.com/cbusillo/discord-blue
    cd discord-blue
    ```
 
-4. Install Dependencies using Poetry:
+3. Install Dependencies with uv:
    ```
-   /root/.local/bin/poetry install
+   uv venv --dev
    ```
 
-5. Setup and Start the Systemd Service:
+4. Setup and Start the Systemd Service:
    ```
    cp discord-blue.service /etc/systemd/system/
    systemctl daemon-reload
@@ -49,7 +44,7 @@ apt install git curl python3.12 libcairo2
 **Note**: Make sure to run once to create the config file and input your discord token along with server and bot channel.
 
 ```
-/root/.local/bin/poetry run discord-blue
+uv run python -m discord_blue
 ```
 
 ## Docker
@@ -70,4 +65,17 @@ docker run --rm discord-blue
 
 The container entrypoint uses `uv run` so any project dependencies are
 isolated and executed with the version pinned in `pyproject.toml`.
+
+## Codex Setup
+
+If you are working in the Codex environment, run the helper script to install
+`uv` and all required dependencies before network access is removed:
+
+```bash
+./setup_codex.sh
+```
+
+The script creates a `.venv` with `uv` and installs all project and
+development dependencies declared in `pyproject.toml` (the `dev` group) for
+local testing.
 
