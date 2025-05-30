@@ -3,8 +3,8 @@ import nextcord as discord
 from nextcord import app_commands
 from nextcord.ext import commands
 from nextcord.abc import Messageable
-from discord_blue.plugzillas.discord_plug import BlueBot
-from discord_blue.plugzillas.discord import checks
+from discord_blue.plugs.discord_plug import BlueBot
+from discord_blue.plugs.discord import checks
 
 logger = logging.getLogger(__name__)
 
