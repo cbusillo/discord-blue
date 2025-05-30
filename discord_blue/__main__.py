@@ -25,6 +25,7 @@ def setup_logging(log_level: str) -> None:
     logging.basicConfig(level=numeric_log_level)
 
 
+# noinspection Annotator
 def parse_args() -> Namespace:
     def parse_path(path_string: str) -> Path:
         path = Path(path_string).expanduser().resolve()

@@ -91,7 +91,7 @@ class Config(Serializable):
         self.llm_training = LLMTrainingConfig()
         self.hugging_face = HuggingFaceConfig()
 
-        self.load()  # Load config during instance creation
+        self.load()
 
     @classmethod
     def get_instance(cls) -> "Config":
@@ -108,7 +108,7 @@ class Config(Serializable):
             with self.filepath.open() as file:
                 data = toml.load(file)
                 for key, value in data.items():
-                    if key.startswith("_"):  # Skip keys starting with an underscore
+                    if key.startswith("_"):
                         continue
                     attr = getattr(self, key, None)
                     if isinstance(attr, Serializable):
@@ -159,7 +159,7 @@ class Config(Serializable):
                     new_value = input(f"{full_key_name} not in configuration. Please enter a value: ")
                     setattr(instance, key, new_value)
                 elif isinstance(value, Serializable):
-                    Config.gather_missing_data(value, full_key_name)  # Recursive call
+                    Config.gather_missing_data(value, full_key_name)
 
 
 config = Config()
