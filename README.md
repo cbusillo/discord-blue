@@ -1,6 +1,6 @@
 # Discord Blue LXC Installation Guide
 
-Discord Blue is a new basic discord bot plugin system. This guide provides step-by-step instructions for setting it up on
+Discord Blue is a basic Discord bot plugin system built with the **nextcord** library. This guide provides step-by-step instructions for setting it up on
 Debian-based LXC.
 
 ## Prerequisites

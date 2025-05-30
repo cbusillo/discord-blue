@@ -1,11 +1,11 @@
 import logging
-import discord
+import nextcord as discord
 from pathlib import Path
-from discord import app_commands
-from discord.abc import Messageable
-from discord.app_commands import Choice
-from discord.ext import commands
-from discord.ext.commands import Context
+from nextcord import app_commands
+from nextcord.abc import Messageable
+from nextcord.app_commands import Choice
+from nextcord.ext import commands
+from nextcord.ext.commands import Context
 from discord_blue.plugzillas.discord_plug import BlueBot
 from discord_blue.plugzillas.discord import checks
 
@@ -48,7 +48,9 @@ class SetupDoodad(commands.Cog):
     @checks.has_employee_role()  # type: ignore[arg-type]
     @app_commands.command(name="clear")
     @app_commands.choices(scope=CLEAR_CHOICES)
-    async def clear_command(self, interaction: discord.Interaction[commands.Bot], scope: str) -> None:
+    async def clear_command(
+        self, interaction: discord.Interaction[commands.Bot], scope: str
+    ) -> None:
         if not isinstance(interaction.channel, discord.TextChannel):
             return
         if not interaction.channel:
@@ -76,16 +78,22 @@ class SetupCommands(commands.GroupCog, name="setup"):
         self.bot = bot
         super().__init__()
 
-    permissions_group = app_commands.Group(name="permissions", description="Manage permissions")
+    permissions_group = app_commands.Group(
+        name="permissions", description="Manage permissions"
+    )
 
     @permissions_group.command(name="get", description="Get role with employee permissions")  # type: ignore[arg-type]
-    async def get_employee_role_command(self, interaction: discord.Interaction[commands.Bot]) -> None:
+    async def get_employee_role_command(
+        self, interaction: discord.Interaction[commands.Bot]
+    ) -> None:
         if isinstance(interaction.response, discord.InteractionResponse):
             message = f"{self.bot.config.discord.employee_role_name} is the role with employee permission"
             await interaction.response.send_message(message)
 
     @permissions_group.command(name="set", description="Set role with employee permissions")  # type: ignore[arg-type]
-    async def set_employee_role_command(self, context: discord.Interaction[commands.Bot], role: discord.Role) -> None:
+    async def set_employee_role_command(
+        self, context: discord.Interaction[commands.Bot], role: discord.Role
+    ) -> None:
         self.bot.config.discord.employee_role_name = role.name
         self.bot.config.save()
         if isinstance(context.response, discord.InteractionResponse):
@@ -101,7 +109,9 @@ class SetupCommands(commands.GroupCog, name="setup"):
         ]
         return loaded_doodad_names
 
-    async def get_doodads_to_load_autocomplete(self, _: discord.Interaction[commands.Bot], current: str) -> list[Choice[str]]:
+    async def get_doodads_to_load_autocomplete(
+        self, _: discord.Interaction[commands.Bot], current: str
+    ) -> list[Choice[str]]:
         loaded_doodad_names = self.get_loaded_doodads()
         doodad_names = [
             doodad_path.stem
@@ -111,26 +121,45 @@ class SetupCommands(commands.GroupCog, name="setup"):
         logger.info(f"{doodad_names=}")
         logger.info(f"{loaded_doodad_names=}")
         if current:
-            doodad_names = [doodad_name for doodad_name in doodad_names if current.lower() in doodad_name.lower()]
+            doodad_names = [
+                doodad_name
+                for doodad_name in doodad_names
+                if current.lower() in doodad_name.lower()
+            ]
         doodad_names = doodad_names[:25]
 
-        return [Choice(name=doodad_name, value=doodad_name) for doodad_name in doodad_names]
+        return [
+            Choice(name=doodad_name, value=doodad_name) for doodad_name in doodad_names
+        ]
 
-    async def get_doodads_to_unload_autocomplete(self, _: discord.Interaction[commands.Bot], current: str) -> list[Choice[str]]:
+    async def get_doodads_to_unload_autocomplete(
+        self, _: discord.Interaction[commands.Bot], current: str
+    ) -> list[Choice[str]]:
         loaded_doodad_names = self.get_loaded_doodads()
         if current:
-            loaded_doodad_names = [doodad_name for doodad_name in loaded_doodad_names if current.lower() in doodad_name.lower()]
-        return [Choice(name=doodad_name, value=doodad_name) for doodad_name in loaded_doodad_names]
+            loaded_doodad_names = [
+                doodad_name
+                for doodad_name in loaded_doodad_names
+                if current.lower() in doodad_name.lower()
+            ]
+        return [
+            Choice(name=doodad_name, value=doodad_name)
+            for doodad_name in loaded_doodad_names
+        ]
 
     @doodads_group.command(name="get_all", description="List all doodads")  # type: ignore[arg-type]
-    async def list_doodads_command(self, interaction: discord.Interaction[commands.Bot]) -> None:
+    async def list_doodads_command(
+        self, interaction: discord.Interaction[commands.Bot]
+    ) -> None:
         if isinstance(interaction.response, discord.InteractionResponse):
             doodads = list(Path(__file__).parent.glob("*_doodad.py"))
             doodads_formatted = "\n".join([doodad.stem for doodad in doodads])
             await interaction.response.send_message(f"{doodads_formatted}")
 
     @doodads_group.command(name="get_loaded", description="List loaded doodads")  # type: ignore[arg-type]
-    async def list_running_doodads_command(self, interaction: discord.Interaction[commands.Bot]) -> None:
+    async def list_running_doodads_command(
+        self, interaction: discord.Interaction[commands.Bot]
+    ) -> None:
         if isinstance(interaction.response, discord.InteractionResponse):
             if not self.bot.config.discord.loaded_doodads:
                 await interaction.response.send_message("No doodads loaded")
@@ -140,7 +169,9 @@ class SetupCommands(commands.GroupCog, name="setup"):
 
     @doodads_group.command(name="load", description="Load a doodad")  # type: ignore[arg-type]
     @app_commands.autocomplete(doodad_name=get_doodads_to_load_autocomplete)  # type: ignore[arg-type, unused-ignore]
-    async def load_doodad_command(self, interaction: discord.Interaction[commands.Bot], doodad_name: str) -> None:
+    async def load_doodad_command(
+        self, interaction: discord.Interaction[commands.Bot], doodad_name: str
+    ) -> None:
         if isinstance(interaction.response, discord.InteractionResponse):
             await interaction.response.defer()
         await self.bot.load_extension(f"discord_blue.doodads.{doodad_name}")
@@ -155,7 +186,9 @@ class SetupCommands(commands.GroupCog, name="setup"):
 
     @doodads_group.command(name="unload", description="Unload a doodad")  # type: ignore[arg-type, unused-ignore]
     @app_commands.autocomplete(doodad_name=get_doodads_to_unload_autocomplete)  # type: ignore[arg-type, unused-ignore]
-    async def unload_doodad_command(self, interaction: discord.Interaction[commands.Bot], doodad_name: str) -> None:
+    async def unload_doodad_command(
+        self, interaction: discord.Interaction[commands.Bot], doodad_name: str
+    ) -> None:
         if isinstance(interaction.response, discord.InteractionResponse):
             await interaction.response.defer()
         await self.bot.unload_extension(f"discord_blue.doodads.{doodad_name}")
@@ -169,7 +202,9 @@ class SetupCommands(commands.GroupCog, name="setup"):
             await interaction.followup.send(f"Unloaded {len(tree_sync)} commands")
 
     @app_commands.command(name="reload", description="config")  # type: ignore[arg-type, unused-ignore]
-    async def reload_config_command(self, interaction: discord.Interaction[commands.Bot]) -> None:
+    async def reload_config_command(
+        self, interaction: discord.Interaction[commands.Bot]
+    ) -> None:
         if isinstance(interaction.response, discord.InteractionResponse):
             await interaction.response.defer()
         self.bot.config.load()
