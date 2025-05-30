@@ -51,7 +51,7 @@ class BlueBot(commands.Bot):
             self.tree.remove_command(command.name)
             logger.info(f"Successfully deleted command: {command.name}")
         await self.bot_channel.send(f"Deleted {len(installed_commands)} commands")
-        sync_result = await self.tree.sync()
+        sync_result = await self.tree.sync(guild=self.guilds[0])
         logger.info(f"Sync result: {sync_result}")
         self.clear()
         await self.close()
