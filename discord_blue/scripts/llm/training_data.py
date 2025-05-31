@@ -63,7 +63,7 @@ async def save_conversation(conversation: TrainingConversation, output_file_path
 
 
 async def convert_jsonl_to_json(jsonl_file_path: Path) -> None:
-    jsons = jsonl_file_path.read_text().strip().split("\n")
+    jsons = [json.loads(line) for line in jsonl_file_path.read_text().splitlines() if line]
 
     json_file_path = jsonl_file_path.with_suffix(".json")
     if json_file_path.exists():

@@ -8,7 +8,7 @@ import polars as pl
 import torch
 from huggingface_hub import login
 from torch.utils.data import Dataset as TorchDataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase, IntervalStrategy
 from transformers.trainer import Trainer
 from transformers.trainer_callback import EarlyStoppingCallback
 from transformers.training_args import TrainingArguments
@@ -82,7 +82,7 @@ def train_model(file_paths: list[Path], model_name: str) -> None:
         bf16=True,
         bf16_full_eval=True,
         logging_steps=500,
-        eval_strategy="no",
+        evaluation_strategy=IntervalStrategy.NO,
         dataloader_num_workers=2,
         dataloader_pin_memory=True,
         load_best_model_at_end=True,
