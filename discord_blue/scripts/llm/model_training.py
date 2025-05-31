@@ -8,7 +8,7 @@ import polars as pl
 import torch
 from huggingface_hub import login
 from torch.utils.data import Dataset as TorchDataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
 from transformers.trainer import Trainer
 from transformers.trainer_callback import EarlyStoppingCallback
 from transformers.training_args import TrainingArguments
@@ -122,7 +122,7 @@ def generate_dataset(training_data: list[TrainingConversation]) -> pl.DataFrame:
 
 
 class ConversationDataset(TorchDataset):
-    def __init__(self, dataframe: pl.DataFrame, tokenizer) -> None:
+    def __init__(self, dataframe: pl.DataFrame, tokenizer: PreTrainedTokenizerBase) -> None:
         pad_id = tokenizer.pad_token_id or tokenizer.eos_token_id
         self._examples = []
         for row in dataframe.iter_rows(named=True):
@@ -144,5 +144,5 @@ class ConversationDataset(TorchDataset):
     def __len__(self) -> int:
         return len(self._examples)
 
-    def __getitem__(self, index: int):
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         return self._examples[index]

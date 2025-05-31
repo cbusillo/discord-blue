@@ -18,7 +18,7 @@ class TemplateDoodad(commands.Cog):
 
     @app_commands.command(name="hello", description="Hello World")
     @checks.has_employee_role()
-    async def hello_command(self, context: discord.Interaction[commands.Bot]) -> None:
+    async def hello_command(self, context: discord.Interaction[BlueBot]) -> None:
         if isinstance(context.response, discord.InteractionResponse):
             await context.response.defer()
             if isinstance(context.channel, Messageable):

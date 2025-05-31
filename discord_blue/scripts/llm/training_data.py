@@ -75,7 +75,7 @@ async def convert_jsonl_to_json(jsonl_file_path: Path) -> None:
     logger.info(f"Converted {jsonl_file_path} to {json_file_path}")
 
 
-async def connect_to_discord_and_run(function_to_run: Callable[..., Awaitable[None]], *args: Any, **kwargs: Any) -> None:
+async def connect_to_discord_and_run(function_to_run: Callable[..., Awaitable[None]], *args: object, **kwargs: object) -> None:
     client = discord.Client(intents=discord.Intents.all())
 
     @client.event

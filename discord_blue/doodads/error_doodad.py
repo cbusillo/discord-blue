@@ -12,15 +12,10 @@ logger = logging.getLogger(__name__)
 class ExceptionDoodad(commands.Cog):
     def __init__(self, bot: BlueBot) -> None:
         self.bot = bot
-        self.bot.tree.error(self.on_app_command_error)
         super().__init__()
 
     @commands.Cog.listener()
-    async def on_app_command_error(
-        self,
-        interaction: discord.Interaction[commands.Bot],
-        error: app_commands.AppCommandError,
-    ) -> None:
+    async def on_app_command_error(self, interaction: discord.Interaction[BlueBot], error: app_commands.AppCommandError) -> None:
         if isinstance(error, commands.errors.CheckFailure):
             message = "You do not have permission to use this command"
         elif isinstance(error, commands.errors.MissingRequiredArgument):

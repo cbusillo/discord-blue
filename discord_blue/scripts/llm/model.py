@@ -21,8 +21,7 @@ def generate_response(username: str, models_path: Path, message: str) -> str:
 
     input_ids = tokenizer.encode(message, return_tensors="pt").to(device)
 
-    attention_mask = input_ids != tokenizer.pad_token_id
-    attention_mask = attention_mask.clone().detach().to(torch.long).to(device)
+    attention_mask: torch.Tensor = input_ids.ne(tokenizer.pad_token_id).clone().detach().to(torch.long).to(device)
 
     output = model.generate(
         input_ids,

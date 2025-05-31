@@ -63,10 +63,10 @@ def start_bot() -> None:
             loop = asyncio.get_event_loop()
             for signal_to_add in (signal.SIGINT, signal.SIGTERM):
 
-                def handler(current_signal: signal.Signals = signal_to_add) -> None:
+                def handler(current_signal: signal.Signals) -> None:
                     asyncio.create_task(bot.on_signal(current_signal))
 
-                loop.add_signal_handler(signal_to_add, handler)
+                loop.add_signal_handler(signal_to_add, handler, signal_to_add)
             loop.run_until_complete(bot.start(config.discord.token))
             login_success = True
         except PrivilegedIntentsRequired:

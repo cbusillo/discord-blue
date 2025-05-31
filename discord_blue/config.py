@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 
 class Serializable:
-    def to_dict(self) -> dict[str, Any] | Any:
+    def to_dict(self) -> dict[str, Any]:
         result = {}
         all_keys = Config.get_all_keys(self)
         for key in all_keys:
@@ -132,7 +132,7 @@ class Config(Serializable):
         except (FileNotFoundError, OSError) as error:
             logger.exception(f"Error saving configuration: {str(error)}")
 
-    def update_and_save(self, **kwargs: Any) -> None:
+    def update_and_save(self, **kwargs: object) -> None:
         for key, value in kwargs.items():
             parts = key.split("__")
             if len(parts) > 1 and hasattr(self, parts[0]):

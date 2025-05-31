@@ -19,13 +19,16 @@ dependencies = [
     "transformers",
     "polars",
     "aiofiles",
-    "PyNaCl"
+    "PyNaCl",
+    "types-torch>=0.1.1",
 ]
 
 [dependency-groups]
 dev = [
-    "types-toml",
     "types-aiofiles",
+    "types-toml",
+    "types-transformers",
+    "types-torch",
     "black",
     "mypy",
     "hatchling",
@@ -38,13 +41,11 @@ discord-blue = "discord_blue.__main__:main"
 [tool.uv]
 default-groups = "all"
 
-
-[tool.mypy]
-strict = true
-python_version = 3.13
-
 [tool.black]
 line-length = 133
 
 [tool.ruff]
 line-length = 133
+select = ["ANN"]
+#ignore = ["ANN401"]
+
