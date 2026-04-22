@@ -169,9 +169,9 @@ class EveryCodeBridge:
 
         candidates = list(channel.threads)
         try:
-            async for thread in channel.archived_threads(joined=True, limit=50):
+            async for thread in channel.archived_threads(private=True, joined=True, limit=50):
                 candidates.append(thread)
-        except discord.DiscordException:
+        except (discord.DiscordException, ValueError):
             logger.warning("Unable to scan archived Every Code threads")
 
         closed = 0
@@ -576,7 +576,7 @@ class EveryCodeBridge:
             channel = await get_every_code_channel(self.bot)
             message = await channel.fetch_message(message_id)
             await message.delete()
-        except discord.DiscordException:
+        except (discord.DiscordException, ValueError):
             logger.warning("Unable to delete Every Code notification message %s", message_id)
 
     async def get_thread(self, thread_id: int) -> discord.Thread | None:
