@@ -31,22 +31,10 @@ def session_start_message(hello: SessionHello) -> str:
     )
 
 
-def session_notification_message(hello: SessionHello, thread: discord.Thread, role: discord.Role | None) -> str:
+def session_notification_message(hello: SessionHello, thread: discord.Thread) -> str:
     repo = Path(hello.cwd).name or "session"
-    target = f"{role.mention} " if role is not None else ""
     branch = f" on `{hello.branch}`" if hello.branch else ""
-    return f"{target}Every Code session connected for `{repo}`{branch}: <#{thread.id}>"
-
-
-def get_operator_role(bot: BlueBot) -> discord.Role | None:
-    role_name = bot.config.every_code.operator_role_name or bot.config.discord.employee_role_name
-    if not role_name:
-        return None
-
-    role = discord.utils.get(bot.destination_guild.roles, name=role_name)
-    if role is None:
-        logger.warning("Every Code operator role %r was not found", role_name)
-    return role
+    return f"Every Code session connected for `{repo}`{branch}: <#{thread.id}>"
 
 
 async def get_every_code_channel(bot: BlueBot) -> discord.TextChannel:
@@ -63,10 +51,9 @@ async def create_session_thread(bot: BlueBot, hello: SessionHello) -> discord.Th
         name=session_thread_name(hello),
         auto_archive_duration=1440,
     )
-    role = get_operator_role(bot)
     await channel.send(
-        session_notification_message(hello, thread, role),
-        allowed_mentions=discord.AllowedMentions(roles=True, users=False, everyone=False),
+        session_notification_message(hello, thread),
+        allowed_mentions=discord.AllowedMentions.none(),
     )
     await thread.send(session_start_message(hello))
     return thread
