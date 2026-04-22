@@ -162,4 +162,4 @@ cython_debug/
 
 # Mac OS
 .DS_Store
-uv.lock
+.code/
