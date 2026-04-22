@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 from aiohttp import web
 
-from discord_blue.every_code.protocol import SessionHello
+from discord_blue.doodads.every_code.protocol import SessionHello
 
 
 @dataclass(slots=True)

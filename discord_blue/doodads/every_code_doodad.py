@@ -5,7 +5,7 @@ import logging
 import discord
 from discord.ext import commands
 
-from discord_blue.every_code.bridge import EveryCodeBridge
+from discord_blue.doodads.every_code.bridge import EveryCodeBridge
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)

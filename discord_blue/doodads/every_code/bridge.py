@@ -9,21 +9,22 @@ from typing import Literal
 import discord
 from aiohttp import WSMsgType, web
 
-from discord_blue.every_code.protocol import (
+from discord_blue.doodads.every_code.protocol import (
     RemoteApprovalDecision,
     RemoteApprovalRequest,
     RemoteCommand,
     SessionHello,
     SessionStatus,
+    UserMessage,
 )
-from discord_blue.every_code.sessions import (
+from discord_blue.doodads.every_code.sessions import (
     EveryCodeSession,
     EveryCodeSessionRegistry,
     PendingRemoteApproval,
     PendingRemoteCommand,
 )
-from discord_blue.every_code.threads import create_session_thread
-from discord_blue.every_code.threads import get_every_code_channel
+from discord_blue.doodads.every_code.threads import create_session_thread
+from discord_blue.doodads.every_code.threads import get_every_code_channel
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
@@ -190,6 +191,9 @@ class EveryCodeBridge:
                 )
             elif message_type == "heartbeat" and session is not None:
                 session.touch()
+            elif message_type == "user_message":
+                user_message = UserMessage.from_payload(payload)
+                await self.handle_user_message(user_message)
             elif message_type in {"status_changed", "turn_complete", "error"}:
                 status = SessionStatus.from_payload(payload)
                 await self.handle_session_status(message_type, status)
@@ -411,6 +415,18 @@ class EveryCodeBridge:
             await self.post_assistant_message(session.thread_id, status.assistant_message)
         if message_type == "turn_complete":
             await self.update_active_command_reaction(session, REACTION_FINISHED, clear=True)
+
+    async def handle_user_message(self, user_message: UserMessage) -> None:
+        session = self.sessions.get(user_message.session_id)
+        if session is None or session.thread_id is None:
+            logger.warning("Every Code user message for unknown session: %s", user_message.session_id)
+            return
+        if user_message.session_epoch != session.session_epoch:
+            logger.warning("Every Code user message for stale session epoch: %s", user_message.session_id)
+            return
+        if not user_message.message.strip():
+            return
+        await self.post_thread_notice(session.thread_id, f"**You**\n{user_message.message}")
 
     async def update_active_command_reaction(
         self,

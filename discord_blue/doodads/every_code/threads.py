@@ -6,7 +6,7 @@ from pathlib import Path
 
 import discord
 
-from discord_blue.every_code.protocol import SessionHello
+from discord_blue.doodads.every_code.protocol import SessionHello
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)

@@ -47,6 +47,21 @@ class SessionStatus:
 
 
 @dataclass(slots=True)
+class UserMessage:
+    session_id: str
+    session_epoch: str
+    message: str
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "UserMessage":
+        return cls(
+            session_id=str(payload["session_id"]),
+            session_epoch=str(payload["session_epoch"]),
+            message=str(payload.get("message") or ""),
+        )
+
+
+@dataclass(slots=True)
 class RemoteApprovalRequest:
     approval_id: str
     call_id: str
