@@ -23,6 +23,7 @@ from discord_blue.every_code.sessions import (
     PendingRemoteCommand,
 )
 from discord_blue.every_code.threads import create_session_thread
+from discord_blue.every_code.threads import get_every_code_channel
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
@@ -32,12 +33,14 @@ DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
 REACTION_QUEUED = "⏳"
 REACTION_DELIVERED = "📬"
 REACTION_IN_PROGRESS = "🔄"
+REACTION_COMPACTING = "🧹"
 REACTION_FINISHED = "✅"
 REACTION_REJECTED = "❌"
 STATUS_REACTIONS = {
     REACTION_QUEUED,
     REACTION_DELIVERED,
     REACTION_IN_PROGRESS,
+    REACTION_COMPACTING,
     REACTION_FINISHED,
     REACTION_REJECTED,
 }
@@ -133,9 +136,15 @@ class EveryCodeBridge:
                 hello = SessionHello.from_payload(payload)
                 session = EveryCodeSession(hello=hello, websocket=websocket)
                 self.sessions.register(session)
-                thread = await create_session_thread(self.bot, hello)
-                self.sessions.bind_thread(hello.session_id, thread.id)
-                await websocket.send_json({"type": "hello_ack", "thread_id": thread.id})
+                session_thread = await create_session_thread(self.bot, hello)
+                self.sessions.bind_thread(
+                    hello.session_id,
+                    session_thread.thread.id,
+                    session_thread.notification_message_id,
+                )
+                await websocket.send_json(
+                    {"type": "hello_ack", "thread_id": session_thread.thread.id}
+                )
             elif message_type == "heartbeat" and session is not None:
                 session.touch()
             elif message_type in {"status_changed", "turn_complete", "error"}:
@@ -159,8 +168,8 @@ class EveryCodeBridge:
 
         if session is not None:
             removed = self.sessions.remove(session.session_id)
-            if removed and removed.thread_id is not None:
-                await self.post_thread_notice(removed.thread_id, "Every Code session disconnected")
+            if removed is not None:
+                await self.close_session_thread(removed)
 
         return websocket
 
@@ -341,11 +350,13 @@ class EveryCodeBridge:
             return
 
         if message_type == "status_changed":
-            reaction = (
-                REACTION_REJECTED
-                if (status.message or "").lower() == "turn aborted"
-                else REACTION_IN_PROGRESS
-            )
+            status_message = (status.message or "").lower()
+            if status_message == "turn aborted":
+                reaction = REACTION_REJECTED
+            elif "compact" in status_message:
+                reaction = REACTION_COMPACTING
+            else:
+                reaction = REACTION_IN_PROGRESS
             await self.update_active_command_reaction(session, reaction)
             return
 
@@ -409,6 +420,78 @@ class EveryCodeBridge:
                 text[:DISCORD_MESSAGE_LIMIT],
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+
+    async def close_session_thread(self, session: EveryCodeSession) -> None:
+        if session.notification_message_id is not None:
+            await self.delete_session_notification(session.notification_message_id)
+
+        if session.thread_id is None:
+            return
+
+        thread = await self.get_thread(session.thread_id)
+        if thread is None:
+            return
+
+        try:
+            await thread.send(
+                "Every Code session disconnected",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.DiscordException:
+            logger.warning("Unable to post close notice in Every Code thread %s", thread.id)
+        await self.remove_thread_members(thread)
+
+        try:
+            await thread.edit(
+                archived=True,
+                locked=True,
+                reason="Every Code session disconnected",
+            )
+        except discord.DiscordException:
+            logger.warning("Unable to archive Every Code thread %s", thread.id)
+
+        try:
+            await thread.leave()
+        except discord.DiscordException:
+            logger.warning("Unable to leave Every Code thread %s", thread.id)
+
+    async def delete_session_notification(self, message_id: int) -> None:
+        try:
+            channel = await get_every_code_channel(self.bot)
+            message = await channel.fetch_message(message_id)
+            await message.delete()
+        except discord.DiscordException:
+            logger.warning("Unable to delete Every Code notification message %s", message_id)
+
+    async def get_thread(self, thread_id: int) -> discord.Thread | None:
+        channel = self.bot.get_channel(thread_id)
+        if isinstance(channel, discord.Thread):
+            return channel
+        try:
+            fetched = await self.bot.fetch_channel(thread_id)
+        except discord.DiscordException:
+            return None
+        return fetched if isinstance(fetched, discord.Thread) else None
+
+    async def remove_thread_members(self, thread: discord.Thread) -> None:
+        bot_user = self.bot.user
+        bot_user_id = bot_user.id if bot_user is not None else None
+        try:
+            members = await thread.fetch_members()
+        except discord.DiscordException:
+            members = thread.members
+
+        for member in members:
+            if member.id == bot_user_id:
+                continue
+            try:
+                await thread.remove_user(discord.Object(id=member.id))
+            except discord.DiscordException:
+                logger.warning(
+                    "Unable to remove user %s from Every Code thread %s",
+                    member.id,
+                    thread.id,
+                )
 
     def is_operator(self, user: discord.User | discord.Member) -> bool:
         role_name = (

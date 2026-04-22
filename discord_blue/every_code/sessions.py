@@ -27,6 +27,7 @@ class EveryCodeSession:
     hello: SessionHello
     websocket: web.WebSocketResponse
     thread_id: int | None = None
+    notification_message_id: int | None = None
     last_seen: datetime = field(default_factory=lambda: datetime.now(UTC))
     pending_commands: dict[str, PendingRemoteCommand] = field(default_factory=dict)
     pending_approvals: dict[str, PendingRemoteApproval] = field(default_factory=dict)
@@ -54,9 +55,15 @@ class EveryCodeSessionRegistry:
         if session.thread_id is not None:
             self.by_thread[session.thread_id] = session.session_id
 
-    def bind_thread(self, session_id: str, thread_id: int) -> None:
+    def bind_thread(
+        self,
+        session_id: str,
+        thread_id: int,
+        notification_message_id: int | None = None,
+    ) -> None:
         if session := self.by_session.get(session_id):
             session.thread_id = thread_id
+            session.notification_message_id = notification_message_id
             self.by_thread[thread_id] = session_id
 
     def get_by_thread(self, thread_id: int) -> EveryCodeSession | None:

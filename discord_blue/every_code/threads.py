@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 import discord
@@ -9,6 +10,12 @@ from discord_blue.every_code.protocol import SessionHello
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class SessionThread:
+    thread: discord.Thread
+    notification_message_id: int
 
 
 def session_thread_name(hello: SessionHello) -> str:
@@ -45,15 +52,15 @@ async def get_every_code_channel(bot: BlueBot) -> discord.TextChannel:
     raise ValueError(f"Every Code channel {channel_id} is not available")
 
 
-async def create_session_thread(bot: BlueBot, hello: SessionHello) -> discord.Thread:
+async def create_session_thread(bot: BlueBot, hello: SessionHello) -> SessionThread:
     channel = await get_every_code_channel(bot)
     thread = await channel.create_thread(
         name=session_thread_name(hello),
         auto_archive_duration=1440,
     )
-    await channel.send(
+    notification = await channel.send(
         session_notification_message(hello, thread),
         allowed_mentions=discord.AllowedMentions.none(),
     )
     await thread.send(session_start_message(hello))
-    return thread
+    return SessionThread(thread=thread, notification_message_id=notification.id)
