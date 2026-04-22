@@ -115,7 +115,6 @@ class EveryCodeBridge:
     async def stop(self) -> None:
         if self._runner is None:
             return
-        await self.close_active_sessions()
         await self._runner.cleanup()
         self._runner = None
         self._site = None
