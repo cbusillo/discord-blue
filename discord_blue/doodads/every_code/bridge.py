@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import shlex
@@ -94,9 +95,6 @@ class EveryCodeBridge:
         if self._runner is not None:
             return
 
-        await self.cleanup_stale_session_notifications()
-        await self.cleanup_stale_session_threads()
-
         app = web.Application()
         app.router.add_get("/every-code/connect", self.handle_connect)
         self._runner = web.AppRunner(app)
@@ -112,6 +110,7 @@ class EveryCodeBridge:
             self.bot.config.every_code.listen_host,
             self.bot.config.every_code.listen_port,
         )
+        asyncio.create_task(self.cleanup_stale_sessions())
 
     async def stop(self) -> None:
         if self._runner is None:
@@ -126,6 +125,10 @@ class EveryCodeBridge:
             session = self.sessions.remove(session_id)
             if session is not None:
                 await self.close_session_thread(session)
+
+    async def cleanup_stale_sessions(self) -> None:
+        await self.cleanup_stale_session_notifications()
+        await self.cleanup_stale_session_threads()
 
     async def cleanup_stale_session_notifications(self) -> None:
         try:
@@ -180,7 +183,11 @@ class EveryCodeBridge:
             if thread.id in seen:
                 continue
             seen.add(thread.id)
+            if thread.id in self.sessions.by_thread:
+                continue
             if not await self.is_every_code_session_thread(thread):
+                continue
+            if thread.id in self.sessions.by_thread:
                 continue
             await self.close_thread(thread)
             closed += 1
