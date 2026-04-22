@@ -26,6 +26,21 @@ class SessionHello:
 
 
 @dataclass(slots=True)
+class SessionStatus:
+    session_id: str
+    session_epoch: str
+    message: str | None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "SessionStatus":
+        return cls(
+            session_id=str(payload["session_id"]),
+            session_epoch=str(payload["session_epoch"]),
+            message=str(payload["message"]) if payload.get("message") is not None else None,
+        )
+
+
+@dataclass(slots=True)
 class RemoteCommand:
     command_id: str
     session_id: str

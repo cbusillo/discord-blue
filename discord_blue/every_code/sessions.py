@@ -48,6 +48,9 @@ class EveryCodeSessionRegistry:
             return None
         return self.by_session.get(session_id)
 
+    def get(self, session_id: str) -> EveryCodeSession | None:
+        return self.by_session.get(session_id)
+
     def remove(self, session_id: str) -> EveryCodeSession | None:
         session = self.by_session.pop(session_id, None)
         if session and session.thread_id is not None:

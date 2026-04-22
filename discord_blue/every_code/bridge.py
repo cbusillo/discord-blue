@@ -7,7 +7,7 @@ import uuid
 import discord
 from aiohttp import WSMsgType, web
 
-from discord_blue.every_code.protocol import RemoteCommand, SessionHello
+from discord_blue.every_code.protocol import RemoteCommand, SessionHello, SessionStatus
 from discord_blue.every_code.sessions import EveryCodeSession, EveryCodeSessionRegistry
 from discord_blue.every_code.threads import create_session_thread
 from discord_blue.plugs.discord_plug import BlueBot
@@ -76,6 +76,9 @@ class EveryCodeBridge:
                 await websocket.send_json({"type": "hello_ack", "thread_id": thread.id})
             elif message_type == "heartbeat" and session is not None:
                 session.touch()
+            elif message_type in {"status_changed", "turn_complete", "error"}:
+                status = SessionStatus.from_payload(payload)
+                await self.handle_session_status(message_type, status)
             elif message_type == "command_ack":
                 logger.info("Every Code command ack: %s", payload.get("command_id"))
             elif message_type == "command_reject":
@@ -113,6 +116,18 @@ class EveryCodeBridge:
         await session.websocket.send_json(command.to_message())
         return True
 
+    async def handle_session_status(self, message_type: str, status: SessionStatus) -> None:
+        session = self.sessions.get(status.session_id)
+        if session is None or session.thread_id is None:
+            logger.warning("Every Code status for unknown session: %s", status.session_id)
+            return
+        if status.session_epoch != session.session_epoch:
+            logger.warning("Every Code status for stale session epoch: %s", status.session_id)
+            return
+
+        text = status.message or self._default_status_message(message_type)
+        await self.post_thread_notice(session.thread_id, text)
+
     async def post_thread_notice(self, thread_id: int, text: str) -> None:
         channel = self.bot.get_channel(thread_id)
         if isinstance(channel, discord.Thread):
@@ -124,3 +139,11 @@ class EveryCodeBridge:
             return False
         expected = f"Bearer {token}"
         return request.headers.get("Authorization") == expected
+
+    @staticmethod
+    def _default_status_message(message_type: str) -> str:
+        if message_type == "turn_complete":
+            return "Turn complete. Replies here will start the next turn."
+        if message_type == "error":
+            return "Every Code reported an error."
+        return "Every Code status changed."
