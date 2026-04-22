@@ -9,11 +9,19 @@ from discord_blue.every_code.protocol import SessionHello
 
 
 @dataclass(slots=True)
+class PendingRemoteCommand:
+    thread_id: int
+    message_id: int
+
+
+@dataclass(slots=True)
 class EveryCodeSession:
     hello: SessionHello
     websocket: web.WebSocketResponse
     thread_id: int | None = None
     last_seen: datetime = field(default_factory=lambda: datetime.now(UTC))
+    pending_commands: dict[str, PendingRemoteCommand] = field(default_factory=dict)
+    active_command_id: str | None = None
 
     @property
     def session_id(self) -> str:

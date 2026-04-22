@@ -8,7 +8,11 @@ import discord
 from aiohttp import WSMsgType, web
 
 from discord_blue.every_code.protocol import RemoteCommand, SessionHello, SessionStatus
-from discord_blue.every_code.sessions import EveryCodeSession, EveryCodeSessionRegistry
+from discord_blue.every_code.sessions import (
+    EveryCodeSession,
+    EveryCodeSessionRegistry,
+    PendingRemoteCommand,
+)
 from discord_blue.every_code.threads import create_session_thread
 from discord_blue.plugs.discord_plug import BlueBot
 
@@ -16,6 +20,18 @@ logger = logging.getLogger(__name__)
 
 DISCORD_MESSAGE_LIMIT = 2000
 DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
+REACTION_QUEUED = "⏳"
+REACTION_DELIVERED = "📬"
+REACTION_IN_PROGRESS = "🔄"
+REACTION_FINISHED = "✅"
+REACTION_REJECTED = "❌"
+STATUS_REACTIONS = {
+    REACTION_QUEUED,
+    REACTION_DELIVERED,
+    REACTION_IN_PROGRESS,
+    REACTION_FINISHED,
+    REACTION_REJECTED,
+}
 
 
 class EveryCodeBridge:
@@ -84,8 +100,10 @@ class EveryCodeBridge:
                 await self.handle_session_status(message_type, status)
             elif message_type == "command_ack":
                 logger.info("Every Code command ack: %s", payload.get("command_id"))
+                await self.handle_command_ack(payload)
             elif message_type == "command_reject":
                 logger.warning("Every Code command reject: %s", payload)
+                await self.handle_command_reject(payload)
 
         if session is not None:
             removed = self.sessions.remove(session.session_id)
@@ -116,8 +134,40 @@ class EveryCodeBridge:
             text=text,
             issued_by=str(message.author.id),
         )
+        session.pending_commands[command.command_id] = PendingRemoteCommand(
+            thread_id=message.channel.id,
+            message_id=message.id,
+        )
+        await self.set_message_reaction(message.channel.id, message.id, REACTION_QUEUED)
         await session.websocket.send_json(command.to_message())
         return True
+
+    async def handle_command_ack(self, payload: dict[str, object]) -> None:
+        command_id = str(payload.get("command_id") or "")
+        session_id = str(payload.get("session_id") or "")
+        if not command_id or not session_id:
+            return
+        session = self.sessions.get(session_id)
+        if session is None:
+            return
+        command = session.pending_commands.get(command_id)
+        if command is not None:
+            session.active_command_id = command_id
+            await self.set_message_reaction(command.thread_id, command.message_id, REACTION_DELIVERED)
+
+    async def handle_command_reject(self, payload: dict[str, object]) -> None:
+        command_id = str(payload.get("command_id") or "")
+        session_id = str(payload.get("session_id") or "")
+        if not command_id or not session_id:
+            return
+        session = self.sessions.get(session_id)
+        if session is None:
+            return
+        command = session.pending_commands.pop(command_id, None)
+        if session.active_command_id == command_id:
+            session.active_command_id = None
+        if command is not None:
+            await self.set_message_reaction(command.thread_id, command.message_id, REACTION_REJECTED)
 
     async def handle_session_status(self, message_type: str, status: SessionStatus) -> None:
         session = self.sessions.get(status.session_id)
@@ -128,11 +178,63 @@ class EveryCodeBridge:
             logger.warning("Every Code status for stale session epoch: %s", status.session_id)
             return
 
+        if message_type == "status_changed":
+            reaction = (
+                REACTION_REJECTED
+                if (status.message or "").lower() == "turn aborted"
+                else REACTION_IN_PROGRESS
+            )
+            await self.update_active_command_reaction(session, reaction)
+            return
+
+        if message_type == "error":
+            await self.update_active_command_reaction(session, REACTION_REJECTED)
+            return
+
         if message_type == "turn_complete" and status.assistant_message:
             await self.post_assistant_message(session.thread_id, status.assistant_message)
+        if message_type == "turn_complete":
+            await self.update_active_command_reaction(session, REACTION_FINISHED, clear=True)
 
-        text = status.message or self._default_status_message(message_type)
-        await self.post_thread_notice(session.thread_id, text)
+    async def update_active_command_reaction(
+        self,
+        session: EveryCodeSession,
+        reaction: str,
+        *,
+        clear: bool = False,
+    ) -> None:
+        command_id = session.active_command_id
+        if command_id is None:
+            return
+        command = session.pending_commands.get(command_id)
+        if command is None:
+            return
+        await self.set_message_reaction(command.thread_id, command.message_id, reaction)
+        if clear:
+            session.pending_commands.pop(command_id, None)
+            session.active_command_id = None
+
+    async def set_message_reaction(self, thread_id: int, message_id: int, reaction: str) -> None:
+        channel = self.bot.get_channel(thread_id)
+        if not isinstance(channel, discord.Thread):
+            return
+        try:
+            message = await channel.fetch_message(message_id)
+        except discord.DiscordException:
+            logger.warning("Unable to fetch Every Code reply message %s", message_id)
+            return
+
+        bot_user = self.bot.user
+        try:
+            if bot_user is not None:
+                for existing in STATUS_REACTIONS - {reaction}:
+                    try:
+                        await message.remove_reaction(existing, bot_user)
+                    except discord.DiscordException:
+                        pass
+            await message.add_reaction(reaction)
+        except discord.DiscordException:
+            logger.warning("Unable to update Every Code reply reaction %s", message_id)
 
     async def post_assistant_message(self, thread_id: int, text: str) -> None:
         for chunk in self._split_discord_message(text, DISCORD_ASSISTANT_CHUNK_LIMIT):
@@ -152,14 +254,6 @@ class EveryCodeBridge:
             return False
         expected = f"Bearer {token}"
         return request.headers.get("Authorization") == expected
-
-    @staticmethod
-    def _default_status_message(message_type: str) -> str:
-        if message_type == "turn_complete":
-            return "Turn complete. Replies here will start the next turn."
-        if message_type == "error":
-            return "Every Code reported an error."
-        return "Every Code status changed."
 
     @staticmethod
     def _split_discord_message(text: str, limit: int) -> list[str]:
