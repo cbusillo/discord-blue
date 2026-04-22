@@ -2,15 +2,24 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 import uuid
+from typing import Literal
 
 import discord
 from aiohttp import WSMsgType, web
 
-from discord_blue.every_code.protocol import RemoteCommand, SessionHello, SessionStatus
+from discord_blue.every_code.protocol import (
+    RemoteApprovalDecision,
+    RemoteApprovalRequest,
+    RemoteCommand,
+    SessionHello,
+    SessionStatus,
+)
 from discord_blue.every_code.sessions import (
     EveryCodeSession,
     EveryCodeSessionRegistry,
+    PendingRemoteApproval,
     PendingRemoteCommand,
 )
 from discord_blue.every_code.threads import create_session_thread
@@ -32,6 +41,40 @@ STATUS_REACTIONS = {
     REACTION_FINISHED,
     REACTION_REJECTED,
 }
+
+
+class ApprovalView(discord.ui.View):
+    def __init__(self, bridge: EveryCodeBridge, session_id: str, approval_id: str) -> None:
+        super().__init__(timeout=None)
+        self.bridge = bridge
+        self.session_id = session_id
+        self.approval_id = approval_id
+
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success)
+    async def approve(
+        self,
+        interaction: discord.Interaction[BlueBot],
+        _button: discord.ui.Button[ApprovalView],
+    ) -> None:
+        await self.bridge.handle_approval_interaction(
+            interaction,
+            self.session_id,
+            self.approval_id,
+            "approved",
+        )
+
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger)
+    async def deny(
+        self,
+        interaction: discord.Interaction[BlueBot],
+        _button: discord.ui.Button[ApprovalView],
+    ) -> None:
+        await self.bridge.handle_approval_interaction(
+            interaction,
+            self.session_id,
+            self.approval_id,
+            "denied",
+        )
 
 
 class EveryCodeBridge:
@@ -98,6 +141,15 @@ class EveryCodeBridge:
             elif message_type in {"status_changed", "turn_complete", "error"}:
                 status = SessionStatus.from_payload(payload)
                 await self.handle_session_status(message_type, status)
+            elif message_type == "approval_request":
+                approval = RemoteApprovalRequest.from_payload(payload)
+                await self.handle_approval_request(approval)
+            elif message_type == "approval_decision_ack":
+                logger.info("Every Code approval decision ack: %s", payload.get("approval_id"))
+                await self.handle_approval_decision_ack(payload)
+            elif message_type == "approval_decision_reject":
+                logger.warning("Every Code approval decision reject: %s", payload)
+                await self.handle_approval_decision_reject(payload)
             elif message_type == "command_ack":
                 logger.info("Every Code command ack: %s", payload.get("command_id"))
                 await self.handle_command_ack(payload)
@@ -168,6 +220,116 @@ class EveryCodeBridge:
             session.active_command_id = None
         if command is not None:
             await self.set_message_reaction(command.thread_id, command.message_id, REACTION_REJECTED)
+
+    async def handle_approval_request(self, approval: RemoteApprovalRequest) -> None:
+        session = self.sessions.get(approval.session_id)
+        if session is None or session.thread_id is None:
+            logger.warning("Every Code approval for unknown session: %s", approval.session_id)
+            return
+        if approval.session_epoch != session.session_epoch:
+            logger.warning("Every Code approval for stale session epoch: %s", approval.session_id)
+            return
+
+        channel = self.bot.get_channel(session.thread_id)
+        if not isinstance(channel, discord.Thread):
+            return
+
+        view = ApprovalView(self, approval.session_id, approval.approval_id)
+        message = await channel.send(
+            self.format_approval_request(approval),
+            allowed_mentions=discord.AllowedMentions.none(),
+            view=view,
+        )
+        session.pending_approvals[approval.approval_id] = PendingRemoteApproval(
+            thread_id=session.thread_id,
+            message_id=message.id,
+        )
+
+    async def handle_approval_interaction(
+        self,
+        interaction: discord.Interaction[BlueBot],
+        session_id: str,
+        approval_id: str,
+        decision: Literal["approved", "denied"],
+    ) -> None:
+        if not self.is_operator(interaction.user):
+            await interaction.response.send_message(
+                "Only Every Code operators can respond to approvals.",
+                ephemeral=True,
+            )
+            return
+
+        session = self.sessions.get(session_id)
+        if session is None or session.websocket.closed:
+            await interaction.response.send_message(
+                "Every Code session is offline; approval was not delivered.",
+                ephemeral=True,
+            )
+            return
+
+        pending = session.pending_approvals.get(approval_id)
+        if pending is None:
+            await interaction.response.send_message(
+                "This approval is no longer active.",
+                ephemeral=True,
+            )
+            return
+
+        pending.decision = decision
+        pending.decided_by = interaction.user.id
+        await session.websocket.send_json(
+            RemoteApprovalDecision(
+                approval_id=approval_id,
+                session_id=session.session_id,
+                session_epoch=session.session_epoch,
+                decision=decision,
+            ).to_message()
+        )
+        await interaction.response.edit_message(
+            content=self.format_approval_pending(decision, interaction.user),
+            view=self.disabled_approval_view(session_id, approval_id),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def handle_approval_decision_ack(self, payload: dict[str, object]) -> None:
+        session_id = str(payload.get("session_id") or "")
+        approval_id = str(payload.get("approval_id") or "")
+        session = self.sessions.get(session_id)
+        if session is None or not approval_id:
+            return
+        pending = session.pending_approvals.pop(approval_id, None)
+        if pending is None:
+            return
+        await self.edit_approval_message(
+            pending,
+            self.format_approval_finished(pending.decision, pending.decided_by),
+        )
+
+    async def handle_approval_decision_reject(self, payload: dict[str, object]) -> None:
+        session_id = str(payload.get("session_id") or "")
+        approval_id = str(payload.get("approval_id") or "")
+        reason = str(payload.get("reason") or "approval was rejected")
+        session = self.sessions.get(session_id)
+        if session is None or not approval_id:
+            return
+        pending = session.pending_approvals.pop(approval_id, None)
+        if pending is None:
+            return
+        await self.edit_approval_message(pending, f"**Approval expired**\n{reason}")
+
+    async def edit_approval_message(self, pending: PendingRemoteApproval, content: str) -> None:
+        channel = self.bot.get_channel(pending.thread_id)
+        if not isinstance(channel, discord.Thread):
+            return
+        try:
+            message = await channel.fetch_message(pending.message_id)
+            await message.edit(
+                content=content[:DISCORD_MESSAGE_LIMIT],
+                view=None,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.DiscordException:
+            logger.warning("Unable to edit Every Code approval message %s", pending.message_id)
 
     async def handle_session_status(self, message_type: str, status: SessionStatus) -> None:
         session = self.sessions.get(status.session_id)
@@ -247,6 +409,52 @@ class EveryCodeBridge:
                 text[:DISCORD_MESSAGE_LIMIT],
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+
+    def is_operator(self, user: discord.User | discord.Member) -> bool:
+        role_name = (
+            self.bot.config.every_code.operator_role_name
+            or self.bot.config.discord.employee_role_name
+        )
+        if not role_name:
+            return True
+        if not isinstance(user, discord.Member):
+            return False
+        return any(role.name == role_name for role in user.roles)
+
+    def disabled_approval_view(self, session_id: str, approval_id: str) -> ApprovalView:
+        view = ApprovalView(self, session_id, approval_id)
+        for child in view.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        return view
+
+    @staticmethod
+    def format_approval_request(approval: RemoteApprovalRequest) -> str:
+        command = shlex.join(approval.command) if approval.command else ""
+        parts = [
+            "**Approval requested**",
+            "",
+            f"```sh\n{command[:1600]}\n```",
+        ]
+        if approval.cwd:
+            parts.append(f"cwd: `{approval.cwd}`")
+        if approval.reason:
+            parts.extend(["", approval.reason[:500]])
+        return "\n".join(parts)[:DISCORD_MESSAGE_LIMIT]
+
+    @staticmethod
+    def format_approval_pending(
+        decision: Literal["approved", "denied"],
+        user: discord.User | discord.Member,
+    ) -> str:
+        label = "Approval sent" if decision == "approved" else "Denial sent"
+        return f"**{label}**\nWaiting for local Every Code to accept the decision.\nby: `{user}`"
+
+    @staticmethod
+    def format_approval_finished(decision: str | None, decided_by: int | None) -> str:
+        label = "Approved" if decision == "approved" else "Denied"
+        by = f"\nby: `{decided_by}`" if decided_by is not None else ""
+        return f"**{label}**{by}"
 
     def _authorized(self, request: web.Request) -> bool:
         token = self.bot.config.every_code.token

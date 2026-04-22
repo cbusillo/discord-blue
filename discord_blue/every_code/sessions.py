@@ -15,12 +15,21 @@ class PendingRemoteCommand:
 
 
 @dataclass(slots=True)
+class PendingRemoteApproval:
+    thread_id: int
+    message_id: int
+    decision: str | None = None
+    decided_by: int | None = None
+
+
+@dataclass(slots=True)
 class EveryCodeSession:
     hello: SessionHello
     websocket: web.WebSocketResponse
     thread_id: int | None = None
     last_seen: datetime = field(default_factory=lambda: datetime.now(UTC))
     pending_commands: dict[str, PendingRemoteCommand] = field(default_factory=dict)
+    pending_approvals: dict[str, PendingRemoteApproval] = field(default_factory=dict)
     active_command_id: str | None = None
 
     @property

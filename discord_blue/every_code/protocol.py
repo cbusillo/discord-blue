@@ -47,6 +47,51 @@ class SessionStatus:
 
 
 @dataclass(slots=True)
+class RemoteApprovalRequest:
+    approval_id: str
+    call_id: str
+    turn_id: str
+    session_id: str
+    session_epoch: str
+    command: list[str]
+    cwd: str
+    reason: str | None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "RemoteApprovalRequest":
+        command = payload.get("command")
+        if not isinstance(command, list):
+            command = []
+        return cls(
+            approval_id=str(payload["approval_id"]),
+            call_id=str(payload.get("call_id") or ""),
+            turn_id=str(payload.get("turn_id") or ""),
+            session_id=str(payload["session_id"]),
+            session_epoch=str(payload["session_epoch"]),
+            command=[str(part) for part in command],
+            cwd=str(payload.get("cwd") or ""),
+            reason=str(payload["reason"]) if payload.get("reason") is not None else None,
+        )
+
+
+@dataclass(slots=True)
+class RemoteApprovalDecision:
+    approval_id: str
+    session_id: str
+    session_epoch: str
+    decision: Literal["approved", "denied"]
+
+    def to_message(self) -> dict[str, Any]:
+        return {
+            "type": "approval_decision",
+            "approval_id": self.approval_id,
+            "session_id": self.session_id,
+            "session_epoch": self.session_epoch,
+            "decision": self.decision,
+        }
+
+
+@dataclass(slots=True)
 class RemoteCommand:
     command_id: str
     session_id: str

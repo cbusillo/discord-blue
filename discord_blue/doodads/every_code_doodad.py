@@ -28,7 +28,7 @@ class EveryCodeDoodad(commands.Cog):
             return
         if not self.bot.config.every_code.enabled:
             return
-        if not self._is_operator(message.author):
+        if not self.bridge.is_operator(message.author):
             return
         delivered = await self.bridge.send_thread_reply(message)
         if delivered:
@@ -36,18 +36,6 @@ class EveryCodeDoodad(commands.Cog):
 
     async def cog_unload(self) -> None:
         await self.bridge.stop()
-
-    def _is_operator(self, user: discord.User | discord.Member) -> bool:
-        role_name = (
-            self.bot.config.every_code.operator_role_name
-            or self.bot.config.discord.employee_role_name
-        )
-        if not role_name:
-            return True
-        if not isinstance(user, discord.Member):
-            return False
-        return any(role.name == role_name for role in user.roles)
-
 
 async def setup(bot: BlueBot) -> None:
     await bot.add_cog(EveryCodeDoodad(bot))
