@@ -63,4 +63,17 @@ async def create_session_thread(bot: BlueBot, hello: SessionHello) -> SessionThr
         allowed_mentions=discord.AllowedMentions.none(),
     )
     await thread.send(session_start_message(hello))
+    await auto_join_configured_users(bot, thread)
     return SessionThread(thread=thread, notification_message_id=notification.id)
+
+
+async def auto_join_configured_users(bot: BlueBot, thread: discord.Thread) -> None:
+    for user_id in bot.config.every_code.auto_join_user_ids:
+        try:
+            await thread.add_user(discord.Object(id=user_id))
+        except discord.DiscordException:
+            logger.warning(
+                "Unable to auto-join user %s to Every Code thread %s",
+                user_id,
+                thread.id,
+            )

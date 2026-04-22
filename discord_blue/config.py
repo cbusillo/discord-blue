@@ -63,6 +63,7 @@ class EveryCodeConfig(Serializable):
     token: str = ""
     channel_id: int = 0
     operator_role_name: str = ""
+    auto_join_user_ids: list[int] = []
 
 
 class Config(Serializable):
