@@ -399,13 +399,13 @@ class EveryCodeBridge:
 
         bot_user = self.bot.user
         try:
+            await message.add_reaction(reaction)
             if bot_user is not None:
                 for existing in STATUS_REACTIONS - {reaction}:
                     try:
                         await message.remove_reaction(existing, bot_user)
                     except discord.DiscordException:
                         pass
-            await message.add_reaction(reaction)
         except discord.DiscordException:
             logger.warning("Unable to update Every Code reply reaction %s", message_id)
 
