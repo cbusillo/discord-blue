@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 DISCORD_MESSAGE_LIMIT = 2000
 DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
+SESSION_NOTIFICATION_PREFIX = "Every Code session connected for "
 REACTION_QUEUED = "⏳"
 REACTION_DELIVERED = "📬"
 REACTION_IN_PROGRESS = "🔄"
@@ -91,6 +92,8 @@ class EveryCodeBridge:
         if self._runner is not None:
             return
 
+        await self.cleanup_stale_session_notifications()
+
         app = web.Application()
         app.router.add_get("/every-code/connect", self.handle_connect)
         self._runner = web.AppRunner(app)
@@ -110,9 +113,49 @@ class EveryCodeBridge:
     async def stop(self) -> None:
         if self._runner is None:
             return
+        await self.close_active_sessions()
         await self._runner.cleanup()
         self._runner = None
         self._site = None
+
+    async def close_active_sessions(self) -> None:
+        for session_id in list(self.sessions.by_session):
+            session = self.sessions.remove(session_id)
+            if session is not None:
+                await self.close_session_thread(session)
+
+    async def cleanup_stale_session_notifications(self) -> None:
+        try:
+            channel = await get_every_code_channel(self.bot)
+        except ValueError:
+            logger.warning("Unable to clean Every Code notifications: channel is unavailable")
+            return
+
+        bot_user = self.bot.user
+        if bot_user is None:
+            return
+
+        deleted = 0
+        try:
+            async for message in channel.history(limit=100):
+                if message.author.id != bot_user.id:
+                    continue
+                if not message.content.startswith(SESSION_NOTIFICATION_PREFIX):
+                    continue
+                try:
+                    await message.delete()
+                    deleted += 1
+                except discord.DiscordException:
+                    logger.warning(
+                        "Unable to delete stale Every Code notification %s",
+                        message.id,
+                    )
+        except discord.DiscordException:
+            logger.warning("Unable to scan Every Code channel for stale notifications")
+            return
+
+        if deleted:
+            logger.info("Deleted %s stale Every Code notification(s)", deleted)
 
     async def handle_connect(self, request: web.Request) -> web.WebSocketResponse:
         if not self._authorized(request):
