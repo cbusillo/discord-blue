@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 DISCORD_MESSAGE_LIMIT = 2000
 DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
+SESSION_START_PREFIX = "Every Code session connected"
 SESSION_NOTIFICATION_PREFIX = "Every Code session connected for "
 REACTION_QUEUED = "⏳"
 REACTION_DELIVERED = "📬"
@@ -94,6 +95,7 @@ class EveryCodeBridge:
             return
 
         await self.cleanup_stale_session_notifications()
+        await self.cleanup_stale_session_threads()
 
         app = web.Application()
         app.router.add_get("/every-code/connect", self.handle_connect)
@@ -157,6 +159,48 @@ class EveryCodeBridge:
 
         if deleted:
             logger.info("Deleted %s stale Every Code notification(s)", deleted)
+
+    async def cleanup_stale_session_threads(self) -> None:
+        try:
+            channel = await get_every_code_channel(self.bot)
+        except ValueError:
+            logger.warning("Unable to clean Every Code threads: channel is unavailable")
+            return
+
+        candidates = list(channel.threads)
+        try:
+            async for thread in channel.archived_threads(joined=True, limit=50):
+                candidates.append(thread)
+        except discord.DiscordException:
+            logger.warning("Unable to scan archived Every Code threads")
+
+        closed = 0
+        seen: set[int] = set()
+        for thread in candidates:
+            if thread.id in seen:
+                continue
+            seen.add(thread.id)
+            if not await self.is_every_code_session_thread(thread):
+                continue
+            await self.close_thread(thread)
+            closed += 1
+
+        if closed:
+            logger.info("Closed %s stale Every Code thread(s)", closed)
+
+    async def is_every_code_session_thread(self, thread: discord.Thread) -> bool:
+        bot_user = self.bot.user
+        if bot_user is None:
+            return False
+        try:
+            async for message in thread.history(limit=10, oldest_first=True):
+                if message.author.id != bot_user.id:
+                    continue
+                if message.content.startswith(SESSION_START_PREFIX):
+                    return True
+        except discord.DiscordException:
+            logger.warning("Unable to inspect Every Code thread %s", thread.id)
+        return False
 
     async def handle_connect(self, request: web.Request) -> web.WebSocketResponse:
         if not self._authorized(request):
@@ -490,6 +534,19 @@ class EveryCodeBridge:
         thread = await self.get_thread(session.thread_id)
         if thread is None:
             return
+
+        await self.close_thread(thread)
+
+    async def close_thread(self, thread: discord.Thread) -> None:
+        if thread.archived:
+            try:
+                await thread.edit(
+                    archived=False,
+                    locked=False,
+                    reason="Preparing to close Every Code session thread",
+                )
+            except discord.DiscordException:
+                logger.warning("Unable to unarchive Every Code thread %s", thread.id)
 
         try:
             await thread.send(
