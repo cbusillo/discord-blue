@@ -45,7 +45,7 @@ STATUS_REACTIONS = {
 
 class ApprovalView(discord.ui.View):
     def __init__(self, bridge: EveryCodeBridge, session_id: str, approval_id: str) -> None:
-        super().__init__(timeout=None)
+        super().__init__(timeout=3600)
         self.bridge = bridge
         self.session_id = session_id
         self.approval_id = approval_id
