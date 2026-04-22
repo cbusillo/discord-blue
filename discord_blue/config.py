@@ -48,22 +48,6 @@ class Serializable:
                 logger.warning(f"Warning: Configuration value '{key}' is missing or None in {self.__class__.__name__}")
 
 
-class ChannelConfig(Serializable):
-    def __init__(self, name: str, last_message_id: int = 0) -> None:
-        self.name = name
-        self.last_message_id = last_message_id
-
-
-class LLMTrainingConfig(Serializable):
-    channels: dict[str, ChannelConfig] = {}
-
-    def add_channel(self, channel_id: int, name: str, last_message_id: int) -> None:
-        self.channels[str(channel_id)] = ChannelConfig(name, last_message_id)
-
-    def get_channel(self, channel_id: int) -> ChannelConfig | None:
-        return self.channels.get(str(channel_id))
-
-
 class DiscordConfig(Serializable):
     token: str = "from_terminal"
     guild_id: int = 0
@@ -81,10 +65,6 @@ class EveryCodeConfig(Serializable):
     operator_role_name: str = ""
 
 
-class HuggingFaceConfig(Serializable):
-    token: str = "from_terminal"
-
-
 class Config(Serializable):
     _instance = None
 
@@ -98,8 +78,6 @@ class Config(Serializable):
 
         self.discord = DiscordConfig()
         self.every_code = EveryCodeConfig()
-        self.llm_training = LLMTrainingConfig()
-        self.hugging_face = HuggingFaceConfig()
 
         self.load()
 
@@ -119,6 +97,9 @@ class Config(Serializable):
                 data = toml.load(file)
                 for key, value in data.items():
                     if key.startswith("_"):
+                        continue
+                    if not hasattr(self, key):
+                        logger.warning(f"Unknown configuration section '{key}'. Skipping...")
                         continue
                     attr = getattr(self, key, None)
                     if isinstance(attr, Serializable):

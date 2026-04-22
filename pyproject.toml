@@ -14,22 +14,12 @@ dependencies = [
     "aiohttp",
     "toml",
     "discord.py",
-    "torch",
-    "pydantic",
-    "numpy",
-    "transformers",
-    "polars",
-    "aiofiles",
     "PyNaCl",
-    "types-torch>=0.1.1",
 ]
 
 [dependency-groups]
 dev = [
-    "types-aiofiles",
     "types-toml",
-    "types-transformers",
-    "types-torch",
     "black",
     "mypy",
     "hatchling",
