@@ -30,6 +30,7 @@ class SessionStatus:
     session_id: str
     session_epoch: str
     message: str | None
+    assistant_message: str | None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "SessionStatus":
@@ -37,6 +38,11 @@ class SessionStatus:
             session_id=str(payload["session_id"]),
             session_epoch=str(payload["session_epoch"]),
             message=str(payload["message"]) if payload.get("message") is not None else None,
+            assistant_message=(
+                str(payload["assistant_message"])
+                if payload.get("assistant_message") is not None
+                else None
+            ),
         )
 
 

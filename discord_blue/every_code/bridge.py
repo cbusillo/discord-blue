@@ -14,6 +14,9 @@ from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
 
+DISCORD_MESSAGE_LIMIT = 2000
+DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
+
 
 class EveryCodeBridge:
     def __init__(self, bot: BlueBot) -> None:
@@ -125,13 +128,23 @@ class EveryCodeBridge:
             logger.warning("Every Code status for stale session epoch: %s", status.session_id)
             return
 
+        if message_type == "turn_complete" and status.assistant_message:
+            await self.post_assistant_message(session.thread_id, status.assistant_message)
+
         text = status.message or self._default_status_message(message_type)
         await self.post_thread_notice(session.thread_id, text)
+
+    async def post_assistant_message(self, thread_id: int, text: str) -> None:
+        for chunk in self._split_discord_message(text, DISCORD_ASSISTANT_CHUNK_LIMIT):
+            await self.post_thread_notice(thread_id, f"**Assistant**\n{chunk}")
 
     async def post_thread_notice(self, thread_id: int, text: str) -> None:
         channel = self.bot.get_channel(thread_id)
         if isinstance(channel, discord.Thread):
-            await channel.send(text)
+            await channel.send(
+                text[:DISCORD_MESSAGE_LIMIT],
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     def _authorized(self, request: web.Request) -> bool:
         token = self.bot.config.every_code.token
@@ -147,3 +160,23 @@ class EveryCodeBridge:
         if message_type == "error":
             return "Every Code reported an error."
         return "Every Code status changed."
+
+    @staticmethod
+    def _split_discord_message(text: str, limit: int) -> list[str]:
+        normalized = text.strip()
+        if not normalized:
+            return []
+
+        chunks: list[str] = []
+        remaining = normalized
+        while len(remaining) > limit:
+            split_at = remaining.rfind("\n", 0, limit)
+            if split_at < limit // 2:
+                split_at = remaining.rfind(" ", 0, limit)
+            if split_at < limit // 2:
+                split_at = limit
+            chunks.append(remaining[:split_at].rstrip())
+            remaining = remaining[split_at:].lstrip()
+        if remaining:
+            chunks.append(remaining)
+        return chunks
