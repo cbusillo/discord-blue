@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 class Serializable:
     def to_dict(self) -> dict[str, Any]:
-        result = {}
+        result: dict[str, Any] = {}
         all_keys = Config.get_all_keys(self)
         for key in all_keys:
             if not key.startswith("_"):
@@ -72,6 +72,15 @@ class DiscordConfig(Serializable):
     loaded_doodads: list[str] = []
 
 
+class EveryCodeConfig(Serializable):
+    enabled: bool = False
+    listen_host: str = "0.0.0.0"
+    listen_port: int = 8787
+    token: str = ""
+    channel_id: int = 0
+    operator_role_name: str = ""
+
+
 class HuggingFaceConfig(Serializable):
     token: str = "from_terminal"
 
@@ -88,6 +97,7 @@ class Config(Serializable):
             self.filepath.touch()
 
         self.discord = DiscordConfig()
+        self.every_code = EveryCodeConfig()
         self.llm_training = LLMTrainingConfig()
         self.hugging_face = HuggingFaceConfig()
 
