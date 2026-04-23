@@ -683,6 +683,36 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             "Reattaching live Every Code session after bridge restart",
         )
 
+    async def test_same_session_reconnect_reuses_current_thread(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        hello = make_hello()
+        original_thread = FakeThread(555)
+        add_bot_message(original_thread, 1, session_start_message(hello))
+        add_bot_message(original_thread, 2, "**Assistant**\nLast useful answer")
+        channel = FakeTextChannel(321, [original_thread])
+        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+
+        old_session = EveryCodeSession(
+            hello=hello,
+            websocket=FakeWebSocket(),
+            thread_id=original_thread.id,
+        )
+        bridge.sessions.register(old_session)
+        new_session = EveryCodeSession(hello=hello, websocket=FakeWebSocket())
+        bridge.sessions.register(new_session)
+
+        session_thread = await bridge.find_or_create_session_thread(hello)
+        bridge.sessions.bind_thread(
+            hello.session_id,
+            session_thread.thread.id,
+            session_thread.notification_message_id,
+        )
+
+        self.assertIs(session_thread.thread, original_thread)
+        self.assertIsNone(bridge.sessions.remove_if_current(old_session))
+        self.assertIs(bridge.sessions.get(hello.session_id), new_session)
+
     async def test_reconnect_ignores_thread_for_different_session_metadata(self) -> None:
         config = Config()
         config.every_code.channel_id = 321

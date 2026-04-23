@@ -336,7 +336,7 @@ class EveryCodeBridge:
                 await self.handle_command_reject(payload)
 
         if session is not None:
-            removed = self.sessions.remove(session.session_id)
+            removed = self.sessions.remove_if_current(session)
             if removed is not None:
                 await self.close_session_thread(removed)
 
@@ -374,7 +374,8 @@ class EveryCodeBridge:
             if thread.id in seen:
                 continue
             seen.add(thread.id)
-            if thread.id in self.sessions.by_thread:
+            mapped_session_id = self.sessions.by_thread.get(thread.id)
+            if mapped_session_id is not None and mapped_session_id != hello.session_id:
                 continue
             if not await self.session_thread_matches(thread, expected_start):
                 continue

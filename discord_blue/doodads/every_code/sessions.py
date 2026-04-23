@@ -65,6 +65,9 @@ class EveryCodeSessionRegistry:
         notification_message_id: int | None = None,
     ) -> None:
         if session := self.by_session.get(session_id):
+            for existing_thread_id, existing_session_id in list(self.by_thread.items()):
+                if existing_session_id == session_id:
+                    self.by_thread.pop(existing_thread_id, None)
             session.thread_id = thread_id
             session.notification_message_id = notification_message_id
             self.by_thread[thread_id] = session_id
@@ -83,3 +86,9 @@ class EveryCodeSessionRegistry:
         if session and session.thread_id is not None:
             self.by_thread.pop(session.thread_id, None)
         return session
+
+    def remove_if_current(self, session: EveryCodeSession) -> EveryCodeSession | None:
+        current = self.by_session.get(session.session_id)
+        if current is not session:
+            return None
+        return self.remove(session.session_id)
