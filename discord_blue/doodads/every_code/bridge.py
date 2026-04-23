@@ -10,7 +10,7 @@ import uuid
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import discord
 from aiohttp import WSMsgType, web
@@ -97,26 +97,22 @@ class ApprovalView(discord.ui.View):
         )
 
 
-class SessionControlView(discord.ui.View):
+class SessionContinueButton(discord.ui.Button[discord.ui.LayoutView]):
     def __init__(self, bridge: EveryCodeBridge) -> None:
-        super().__init__(timeout=None)
+        super().__init__(label="Continue", style=discord.ButtonStyle.primary)
         self.bridge = bridge
 
-    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.primary)
-    async def go_ahead(
-        self,
-        interaction: discord.Interaction[BlueBot],
-        _button: discord.ui.Button[SessionControlView],
-    ) -> None:
-        await self.bridge.handle_go_ahead_interaction(interaction)
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.bridge.handle_go_ahead_interaction(cast(discord.Interaction[BlueBot], interaction))
 
-    @discord.ui.button(emoji="📋", style=discord.ButtonStyle.secondary)
-    async def status(
-        self,
-        interaction: discord.Interaction[BlueBot],
-        _button: discord.ui.Button[SessionControlView],
-    ) -> None:
-        await self.bridge.handle_status_interaction(interaction)
+
+class SessionStatusButton(discord.ui.Button[discord.ui.LayoutView]):
+    def __init__(self, bridge: EveryCodeBridge) -> None:
+        super().__init__(label="Status", style=discord.ButtonStyle.secondary)
+        self.bridge = bridge
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.bridge.handle_status_interaction(cast(discord.Interaction[BlueBot], interaction))
 
 
 class EveryCodeBridge:
@@ -917,11 +913,25 @@ class EveryCodeBridge:
         if not isinstance(channel, discord.Thread):
             return
         message = await channel.send(
-            self.format_waiting_for_direction(session),
             allowed_mentions=discord.AllowedMentions.none(),
-            view=SessionControlView(self),
+            view=self.session_control_view(session),
         )
         session.control_message_id = message.id
+
+    def session_control_view(self, session: EveryCodeSession) -> discord.ui.LayoutView:
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(self.format_waiting_for_direction(session)),
+                discord.ui.Separator(),
+                discord.ui.ActionRow(
+                    SessionContinueButton(self),
+                    SessionStatusButton(self),
+                ),
+                accent_color=discord.Color.blurple(),
+            )
+        )
+        return view
 
     async def clear_session_controls(self, session: EveryCodeSession, content: str) -> None:
         if session.thread_id is None or session.control_message_id is None:
@@ -1090,7 +1100,7 @@ class EveryCodeBridge:
         status = session.last_status_message or "Turn complete"
         return "\n".join(
             [
-                status,
+                f"**{status}**",
                 f"`{repo}`{branch}",
             ]
         )[:DISCORD_MESSAGE_LIMIT]

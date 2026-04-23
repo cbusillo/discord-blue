@@ -122,10 +122,11 @@ class FakeThread:
         for message in messages:
             yield message
 
-    async def send(self, content: str, **kwargs: object) -> FakeReplyMessage:
-        self.sent_messages.append(content)
+    async def send(self, content: str | None = None, **kwargs: object) -> FakeReplyMessage:
+        stored_content = content or ""
+        self.sent_messages.append(stored_content)
         self.sent_views.append(kwargs.get("view"))
-        message = FakeReplyMessage(900 + len(self.sent_messages), self, content)
+        message = FakeReplyMessage(900 + len(self.sent_messages), self, stored_content)
         self.add_message(message)
         return message
 
@@ -563,14 +564,16 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             thread.sent_messages,
             [
                 "**Assistant**\nDone.",
-                "Waiting for direction\n`project` · `main`",
+                "",
             ],
         )
         self.assertIsNone(thread.sent_views[0])
         self.assertIsNotNone(thread.sent_views[1])
-        buttons = cast(Any, thread.sent_views[1]).children
-        self.assertEqual([button.label for button in buttons], [None, None])
-        self.assertEqual([str(button.emoji) for button in buttons], ["▶️", "📋"])
+        items = list(cast(Any, thread.sent_views[1]).walk_children())
+        texts = [item.content for item in items if isinstance(item, bridge_module.discord.ui.TextDisplay)]
+        buttons = [item for item in items if isinstance(item, bridge_module.discord.ui.Button)]
+        self.assertEqual(texts, ["**Waiting for direction**\n`project` · `main`"])
+        self.assertEqual([button.label for button in buttons], ["Continue", "Status"])
         self.assertEqual(session.control_message_id, 902)
 
     async def test_status_changed_clears_contextual_controls(self) -> None:
