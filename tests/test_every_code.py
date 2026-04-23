@@ -445,6 +445,33 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(websocket.sent_json[0]["kind"], "continue_autonomously")
 
+    async def test_active_sessions_summary_lists_live_sessions(self) -> None:
+        config = Config()
+        bridge = EveryCodeBridge(FakeBot(config))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        self.assertEqual(
+            bridge.active_sessions_summary(),
+            "\n".join(
+                [
+                    "Live Every Code sessions:",
+                    "- `project` on `main` (online, Mac Studio) <#555>",
+                ]
+            ),
+        )
+
+    async def test_active_sessions_summary_handles_empty_registry(self) -> None:
+        config = Config()
+        bridge = EveryCodeBridge(FakeBot(config))
+
+        self.assertEqual(bridge.active_sessions_summary(), "No live Every Code sessions.")
+
 
 if __name__ == "__main__":
     unittest.main()

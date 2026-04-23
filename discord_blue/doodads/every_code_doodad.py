@@ -52,6 +52,26 @@ class EveryCodeDoodad(commands.Cog):
         )
         await interaction.response.send_message(response, ephemeral=True)
 
+    @code_group.command(
+        name="active",
+        description="Show live Every Code sessions.",
+    )
+    async def active_command(self, interaction: discord.Interaction[BlueBot]) -> None:
+        if not self.bot.config.every_code.enabled:
+            await interaction.response.send_message("Every Code is not enabled.", ephemeral=True)
+            return
+        if not self.bridge.is_operator(interaction.user):
+            await interaction.response.send_message(
+                "Only Every Code operators can list sessions.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            self.bridge.active_sessions_summary(),
+            ephemeral=True,
+        )
+
     async def cog_unload(self) -> None:
         await self.bridge.stop()
 

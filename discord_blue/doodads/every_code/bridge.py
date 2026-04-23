@@ -7,6 +7,7 @@ import shlex
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Literal
 
 import discord
@@ -401,6 +402,22 @@ class EveryCodeBridge:
             allowed_mentions=discord.AllowedMentions.none(),
             view=SessionControlView(self),
         )
+
+    def active_sessions_summary(self) -> str:
+        sessions = list(self.sessions.by_session.values())
+        if not sessions:
+            return "No live Every Code sessions."
+
+        lines = ["Live Every Code sessions:"]
+        for session in sessions:
+            repo = Path(session.hello.cwd).name or "session"
+            branch = f" on `{session.hello.branch}`" if session.hello.branch else ""
+            thread = f" <#{session.thread_id}>" if session.thread_id is not None else ""
+            state = "offline" if session.websocket.closed else "online"
+            lines.append(
+                f"- `{repo}`{branch} ({state}, {session.hello.host_label}){thread}"
+            )
+        return "\n".join(lines)
 
     async def handle_command_ack(self, payload: dict[str, object]) -> None:
         command_id = str(payload.get("command_id") or "")
