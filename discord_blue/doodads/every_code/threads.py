@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class SessionThread:
     thread: discord.Thread
-    notification_message_id: int
+    notification_message_id: int | None
 
 
 def session_thread_name(hello: SessionHello) -> str:

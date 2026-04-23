@@ -27,14 +27,18 @@ from discord_blue.doodads.every_code.sessions import (
     PendingRemoteApproval,
     PendingRemoteCommand,
 )
+from discord_blue.doodads.every_code.threads import SessionThread
+from discord_blue.doodads.every_code.threads import auto_join_configured_users
 from discord_blue.doodads.every_code.threads import create_session_thread
 from discord_blue.doodads.every_code.threads import get_every_code_channel
+from discord_blue.doodads.every_code.threads import session_start_message
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
 
 DISCORD_MESSAGE_LIMIT = 2000
 DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
+STARTUP_RECONNECT_GRACE_SECONDS = 20
 SESSION_START_PREFIX = "Every Code session connected"
 SESSION_NOTIFICATION_PREFIX = "Every Code session connected for "
 REACTION_QUEUED = "⏳"
@@ -164,6 +168,7 @@ class EveryCodeBridge:
                 await self.close_session_thread(session)
 
     async def cleanup_stale_sessions(self) -> None:
+        await asyncio.sleep(STARTUP_RECONNECT_GRACE_SECONDS)
         await self.cleanup_stale_session_notifications()
         await self.cleanup_stale_session_threads()
 
@@ -231,12 +236,7 @@ class EveryCodeBridge:
             logger.warning("Unable to clean Every Code threads: channel is unavailable")
             return
 
-        candidates = list(channel.threads)
-        try:
-            async for thread in channel.archived_threads(private=True, joined=True, limit=50):
-                candidates.append(thread)
-        except (discord.DiscordException, ValueError):
-            logger.warning("Unable to scan archived Every Code threads")
+        candidates = await self.session_thread_candidates(channel)
 
         closed = 0
         seen: set[int] = set()
@@ -292,7 +292,7 @@ class EveryCodeBridge:
                 hello = SessionHello.from_payload(payload)
                 session = EveryCodeSession(hello=hello, websocket=websocket)
                 self.sessions.register(session)
-                session_thread = await create_session_thread(self.bot, hello)
+                session_thread = await self.find_or_create_session_thread(hello)
                 self.sessions.bind_thread(
                     hello.session_id,
                     session_thread.thread.id,
@@ -331,6 +331,95 @@ class EveryCodeBridge:
                 await self.close_session_thread(removed)
 
         return websocket
+
+    async def find_or_create_session_thread(self, hello: SessionHello) -> SessionThread:
+        thread = await self.find_existing_session_thread(hello)
+        if thread is None:
+            return await create_session_thread(self.bot, hello)
+
+        if thread.archived or thread.locked:
+            try:
+                await thread.edit(
+                    archived=False,
+                    locked=False,
+                    reason="Reattaching live Every Code session after bridge restart",
+                )
+            except discord.DiscordException:
+                logger.warning("Unable to reopen Every Code thread %s", thread.id)
+        await auto_join_configured_users(self.bot, thread)
+        return SessionThread(thread=thread, notification_message_id=None)
+
+    async def find_existing_session_thread(self, hello: SessionHello) -> discord.Thread | None:
+        try:
+            channel = await get_every_code_channel(self.bot)
+        except ValueError:
+            logger.warning("Unable to find reusable Every Code thread: channel is unavailable")
+            return None
+
+        expected_start = session_start_message(hello)
+        best_thread: discord.Thread | None = None
+        best_score: tuple[int, int, int] | None = None
+        seen: set[int] = set()
+        for thread in await self.session_thread_candidates(channel):
+            if thread.id in seen:
+                continue
+            seen.add(thread.id)
+            if thread.id in self.sessions.by_thread:
+                continue
+            if not await self.session_thread_matches(thread, expected_start):
+                continue
+            score = await self.score_session_thread(thread)
+            if best_score is None or score > best_score:
+                best_thread = thread
+                best_score = score
+        return best_thread
+
+    async def session_thread_candidates(
+        self,
+        channel: discord.TextChannel,
+    ) -> list[discord.Thread]:
+        candidates = list(channel.threads)
+        for private in (False, True):
+            try:
+                async for thread in channel.archived_threads(
+                    private=private,
+                    joined=True,
+                    limit=50,
+                ):
+                    candidates.append(thread)
+            except (discord.DiscordException, ValueError):
+                logger.warning("Unable to scan archived Every Code threads")
+        return candidates
+
+    async def session_thread_matches(
+        self,
+        thread: discord.Thread,
+        expected_start: str,
+    ) -> bool:
+        bot_user = self.bot.user
+        if bot_user is None:
+            return False
+        try:
+            async for message in thread.history(limit=10, oldest_first=True):
+                if message.author.id != bot_user.id:
+                    continue
+                if message.content == expected_start:
+                    return True
+        except discord.DiscordException:
+            logger.warning("Unable to inspect Every Code thread %s", thread.id)
+        return False
+
+    async def score_session_thread(self, thread: discord.Thread) -> tuple[int, int, int]:
+        assistant_messages = 0
+        messages = 0
+        try:
+            async for message in thread.history(limit=50):
+                messages += 1
+                if message.content.startswith("**Assistant**"):
+                    assistant_messages += 1
+        except discord.DiscordException:
+            logger.warning("Unable to score Every Code thread %s", thread.id)
+        return (assistant_messages, messages, thread.id)
 
     async def send_thread_reply(self, message: discord.Message) -> bool:
         if not isinstance(message.channel, discord.Thread):

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, AsyncIterator, TypeAlias
 
 if TYPE_CHECKING:
     from discord_blue.config import Config as ConfigType
@@ -95,17 +95,31 @@ class FakeReplyMessage:
 
 
 class FakeThread:
-    def __init__(self, thread_id: int) -> None:
+    def __init__(self, thread_id: int, *, archived: bool = False, locked: bool = False) -> None:
         self.id = thread_id
+        self.archived = archived
+        self.locked = locked
         self._messages: dict[int, FakeReplyMessage] = {}
+        self._history: list[FakeReplyMessage] = []
         self.sent_messages: list[str] = []
         self.sent_views: list[object] = []
+        self.edits: list[dict[str, object]] = []
 
     def add_message(self, message: FakeReplyMessage) -> None:
         self._messages[message.id] = message
+        self._history.append(message)
 
     async def fetch_message(self, message_id: int) -> FakeReplyMessage:
         return self._messages[message_id]
+
+    async def history(
+        self,
+        limit: int,
+        oldest_first: bool = False,
+    ) -> AsyncIterator[FakeReplyMessage]:
+        messages = self._history[:limit] if oldest_first else list(reversed(self._history))[:limit]
+        for message in messages:
+            yield message
 
     async def send(self, content: str, **kwargs: object) -> FakeReplyMessage:
         self.sent_messages.append(content)
@@ -113,6 +127,24 @@ class FakeThread:
         message = FakeReplyMessage(900 + len(self.sent_messages), self, content)
         self.add_message(message)
         return message
+
+    async def edit(self, **kwargs: object) -> None:
+        if "archived" in kwargs:
+            self.archived = bool(kwargs["archived"])
+        if "locked" in kwargs:
+            self.locked = bool(kwargs["locked"])
+        self.edits.append(kwargs)
+
+
+class FakeTextChannel:
+    def __init__(self, channel_id: int, threads: list[FakeThread]) -> None:
+        self.id = channel_id
+        self.threads = [thread for thread in threads if not thread.archived]
+        self._archived_threads = [thread for thread in threads if thread.archived]
+
+    async def archived_threads(self, **_: object) -> AsyncIterator[FakeThread]:
+        for thread in self._archived_threads:
+            yield thread
 
 
 class FakeInteractionResponse:
@@ -137,14 +169,22 @@ class FakeInteraction:
 
 
 class FakeBot:
-    def __init__(self, config: ConfigType, thread: FakeThread | None = None) -> None:
+    def __init__(
+        self,
+        config: ConfigType,
+        thread: FakeThread | None = None,
+        channel: FakeTextChannel | None = None,
+    ) -> None:
         self.config = config
         self.user = SimpleNamespace(id=999)
         self._thread = thread
+        self._channel = channel
 
-    def get_channel(self, thread_id: int) -> FakeThread | None:
-        if self._thread is not None and self._thread.id == thread_id:
+    def get_channel(self, channel_id: int) -> FakeThread | FakeTextChannel | None:
+        if self._thread is not None and self._thread.id == channel_id:
             return self._thread
+        if self._channel is not None and self._channel.id == channel_id:
+            return self._channel
         return None
 
 
@@ -157,6 +197,13 @@ def make_hello() -> SessionHelloType:
         branch="main",
         pid=42,
     )
+
+
+def add_bot_message(thread: FakeThread, message_id: int, content: str) -> FakeReplyMessage:
+    message = FakeReplyMessage(message_id, thread, content)
+    message.author = SimpleNamespace(id=999)
+    thread.add_message(message)
+    return message
 
 
 class ConfigTests(unittest.TestCase):
@@ -326,10 +373,13 @@ class ThreadFormattingTests(unittest.TestCase):
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.original_thread_type = bridge_module.discord.Thread
+        self.original_text_channel_type = bridge_module.discord.TextChannel
         bridge_module.discord.Thread = FakeThread
+        bridge_module.discord.TextChannel = FakeTextChannel
 
     async def asyncTearDown(self) -> None:
         bridge_module.discord.Thread = self.original_thread_type
+        bridge_module.discord.TextChannel = self.original_text_channel_type
 
     async def test_websocket_auth_rejects_missing_or_wrong_token(self) -> None:
         config = Config()
@@ -608,6 +658,48 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 ]
             ),
         )
+
+    async def test_reconnect_reuses_matching_thread_with_assistant_history(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        hello = make_hello()
+        empty_reconnect_thread = FakeThread(556)
+        add_bot_message(empty_reconnect_thread, 1, session_start_message(hello))
+        original_thread = FakeThread(555, archived=True, locked=True)
+        add_bot_message(original_thread, 2, session_start_message(hello))
+        add_bot_message(original_thread, 3, "**Assistant**\nLast useful answer")
+        channel = FakeTextChannel(321, [empty_reconnect_thread, original_thread])
+        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+
+        session_thread = await bridge.find_or_create_session_thread(hello)
+
+        self.assertIs(session_thread.thread, original_thread)
+        self.assertIsNone(session_thread.notification_message_id)
+        self.assertFalse(original_thread.archived)
+        self.assertFalse(original_thread.locked)
+        self.assertEqual(
+            original_thread.edits[0]["reason"],
+            "Reattaching live Every Code session after bridge restart",
+        )
+
+    async def test_reconnect_ignores_thread_for_different_session_metadata(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        hello = make_hello()
+        other_thread = FakeThread(555)
+        other_hello = SessionHello(
+            session_id="session-2",
+            session_epoch="epoch-1",
+            host_label="Mac Studio",
+            cwd="/tmp/other-project",
+            branch="main",
+            pid=42,
+        )
+        add_bot_message(other_thread, 1, session_start_message(other_hello))
+        channel = FakeTextChannel(321, [other_thread])
+        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+
+        self.assertIsNone(await bridge.find_existing_session_thread(hello))
 
 
 if __name__ == "__main__":
