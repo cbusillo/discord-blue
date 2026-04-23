@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shlex
+import subprocess
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -41,6 +43,10 @@ DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
 STARTUP_RECONNECT_GRACE_SECONDS = 20
 SESSION_START_PREFIX = "Every Code session connected"
 SESSION_NOTIFICATION_PREFIX = "Every Code session connected for "
+RESUME_SESSION_RE = re.compile(
+    r"\bresume\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b",
+    re.IGNORECASE,
+)
 REACTION_QUEUED = "⏳"
 REACTION_DELIVERED = "📬"
 REACTION_IN_PROGRESS = "🔄"
@@ -298,6 +304,10 @@ class EveryCodeBridge:
                     session_thread.thread.id,
                     session_thread.notification_message_id,
                 )
+                await self.backfill_latest_assistant_message(
+                    session_thread.thread,
+                    hello,
+                )
                 await websocket.send_json(
                     {"type": "hello_ack", "thread_id": session_thread.thread.id}
                 )
@@ -420,6 +430,107 @@ class EveryCodeBridge:
         except discord.DiscordException:
             logger.warning("Unable to score Every Code thread %s", thread.id)
         return (assistant_messages, messages, thread.id)
+
+    async def backfill_latest_assistant_message(
+        self,
+        thread: discord.Thread,
+        hello: SessionHello,
+    ) -> None:
+        if await self.thread_has_assistant_message(thread):
+            return
+        assistant_message = await asyncio.to_thread(
+            self.recover_latest_assistant_message,
+            hello,
+        )
+        if assistant_message is None:
+            return
+        await thread.send(
+            f"**Assistant**\n{assistant_message}"[:DISCORD_MESSAGE_LIMIT],
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def thread_has_assistant_message(self, thread: discord.Thread) -> bool:
+        try:
+            async for message in thread.history(limit=50):
+                if message.content.startswith("**Assistant**"):
+                    return True
+        except discord.DiscordException:
+            logger.warning("Unable to inspect Every Code assistant history %s", thread.id)
+        return False
+
+    def recover_latest_assistant_message(self, hello: SessionHello) -> str | None:
+        session_id = self.resume_session_id_for_pid(hello.pid)
+        if session_id is None:
+            return None
+        rollout_path = self.rollout_path_for_session(session_id)
+        if rollout_path is None:
+            return None
+        return self.latest_assistant_message_from_rollout(rollout_path)
+
+    @staticmethod
+    def resume_session_id_for_pid(pid: int) -> str | None:
+        if pid <= 0:
+            return None
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        match = RESUME_SESSION_RE.search(result.stdout)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def rollout_path_for_session(session_id: str) -> Path | None:
+        code_home = Path.home() / ".code"
+        catalog_path = code_home / "sessions" / "index" / "catalog.jsonl"
+        try:
+            lines = catalog_path.read_text(errors="replace").splitlines()
+        except OSError:
+            return None
+        for line in reversed(lines):
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("session_id") != session_id:
+                continue
+            rollout_path = entry.get("rollout_path")
+            if not isinstance(rollout_path, str) or not rollout_path:
+                return None
+            return code_home / rollout_path
+        return None
+
+    @staticmethod
+    def latest_assistant_message_from_rollout(rollout_path: Path) -> str | None:
+        try:
+            lines = rollout_path.read_text(errors="replace").splitlines()
+        except OSError:
+            return None
+        latest: str | None = None
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            payload = entry.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            message = payload.get("msg")
+            if not isinstance(message, dict):
+                continue
+            if message.get("type") != "agent_message":
+                continue
+            text = message.get("message")
+            if isinstance(text, str) and text.strip():
+                latest = text.strip()
+        return latest
 
     async def send_thread_reply(self, message: discord.Message) -> bool:
         if not isinstance(message.channel, discord.Thread):

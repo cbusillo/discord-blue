@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import importlib
 import tempfile
@@ -700,6 +701,62 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge = EveryCodeBridge(FakeBot(config, channel=channel))
 
         self.assertIsNone(await bridge.find_existing_session_thread(hello))
+
+    async def test_backfill_posts_latest_assistant_when_thread_has_none(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge.recover_latest_assistant_message = lambda _hello: "Recovered answer"  # type: ignore[method-assign]
+
+        await bridge.backfill_latest_assistant_message(thread, make_hello())
+
+        self.assertEqual(thread.sent_messages, ["**Assistant**\nRecovered answer"])
+
+    async def test_backfill_skips_thread_with_existing_assistant(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        add_bot_message(thread, 1, "**Assistant**\nAlready present")
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge.recover_latest_assistant_message = lambda _hello: "Recovered answer"  # type: ignore[method-assign]
+
+        await bridge.backfill_latest_assistant_message(thread, make_hello())
+
+        self.assertEqual(thread.sent_messages, [])
+
+    def test_latest_assistant_message_from_rollout_reads_last_agent_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            rollout = Path(tmp) / "rollout.jsonl"
+            rollout.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "payload": {
+                                    "msg": {
+                                        "type": "agent_message",
+                                        "message": "First",
+                                    }
+                                }
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "payload": {
+                                    "msg": {
+                                        "type": "agent_message",
+                                        "message": "Second",
+                                    }
+                                }
+                            }
+                        ),
+                    ]
+                )
+            )
+
+            self.assertEqual(
+                EveryCodeBridge.latest_assistant_message_from_rollout(rollout),
+                "Second",
+            )
 
 
 if __name__ == "__main__":
