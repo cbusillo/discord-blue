@@ -39,5 +39,5 @@ line-length = 133
 line-length = 133
 
 [tool.ruff.lint]
-select = ["ANN"]
+select = ["ANN", "B", "E", "F", "RUF"]
 #ignore = ["ANN401"]

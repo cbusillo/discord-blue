@@ -3,6 +3,7 @@ import asyncio
 import logging
 import signal
 from argparse import Namespace
+from collections.abc import Callable
 from time import sleep
 
 from discord.errors import PrivilegedIntentsRequired
@@ -12,6 +13,20 @@ from discord_blue.plugs.discord_plug import BlueBot
 
 DISCORD_TOKEN_TIMEOUT = 120
 logger = logging.getLogger(__name__)
+BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
+
+
+def track_background_task(task: asyncio.Task[None]) -> None:
+    BACKGROUND_TASKS.add(task)
+    task.add_done_callback(BACKGROUND_TASKS.discard)
+
+
+def create_signal_handler(bot: BlueBot) -> Callable[[signal.Signals], None]:
+    def handler(current_signal: signal.Signals) -> None:
+        loop = asyncio.get_running_loop()
+        track_background_task(loop.create_task(bot.on_signal(current_signal)))
+
+    return handler
 
 
 def setup_logging(log_level: str) -> None:
@@ -35,17 +50,14 @@ def parse_args() -> Namespace:
 
 def start_bot() -> None:
     login_success = False
-    for count in range(DISCORD_TOKEN_TIMEOUT):
+    for _count in range(DISCORD_TOKEN_TIMEOUT):
         if login_success:
             break
         try:
             bot = BlueBot()
             loop = asyncio.get_event_loop()
+            handler = create_signal_handler(bot)
             for signal_to_add in (signal.SIGINT, signal.SIGTERM):
-
-                def handler(current_signal: signal.Signals) -> None:
-                    asyncio.create_task(bot.on_signal(current_signal))
-
                 loop.add_signal_handler(signal_to_add, handler, signal_to_add)
             loop.run_until_complete(bot.start(config.discord.token))
             login_success = True

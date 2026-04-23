@@ -23,7 +23,7 @@ class Serializable:
         return result
 
     def from_dict(self, data: dict[str, Any]) -> None:
-        for key, type_hint in getattr(self, "__annotations__", {}).items():
+        for key in getattr(self, "__annotations__", {}):
             value = data.get(key, getattr(self, key, None))
 
             try:
@@ -43,7 +43,7 @@ class Serializable:
         self.validate()
 
     def validate(self) -> None:
-        for key, value in getattr(self, "__annotations__", {}).items():
+        for key in getattr(self, "__annotations__", {}):
             if getattr(self, key, None) is None:
                 logger.warning(f"Warning: Configuration value '{key}' is missing or None in {self.__class__.__name__}")
 
@@ -53,7 +53,10 @@ class DiscordConfig(Serializable):
     guild_id: int = 0
     bot_channel_id: int = 0
     employee_role_name: str = ""
-    loaded_doodads: list[str] = []
+    loaded_doodads: list[str]
+
+    def __init__(self) -> None:
+        self.loaded_doodads = []
 
 
 class EveryCodeConfig(Serializable):
@@ -63,9 +66,12 @@ class EveryCodeConfig(Serializable):
     token: str = ""
     channel_id: int = 0
     operator_role_name: str = ""
-    auto_join_user_ids: list[int] = []
+    auto_join_user_ids: list[int]
     heartbeat_timeout_seconds: int = 120
     heartbeat_check_interval_seconds: int = 30
+
+    def __init__(self) -> None:
+        self.auto_join_user_ids = []
 
 
 class Config(Serializable):
@@ -124,7 +130,7 @@ class Config(Serializable):
             logger.error(f"KeyError when saving configuration: {key_error}")
             logger.debug(f"Configuration data: {data}")
         except (FileNotFoundError, OSError) as error:
-            logger.exception(f"Error saving configuration: {str(error)}")
+            logger.exception(f"Error saving configuration: {error!s}")
 
     def update_and_save(self, **kwargs: object) -> None:
         for key, value in kwargs.items():

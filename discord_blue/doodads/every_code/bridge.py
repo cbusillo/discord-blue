@@ -92,6 +92,7 @@ class EveryCodeBridge:
         self.sessions = EveryCodeSessionRegistry()
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
+        self._cleanup_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -113,12 +114,17 @@ class EveryCodeBridge:
             self.bot.config.every_code.listen_host,
             self.bot.config.every_code.listen_port,
         )
-        asyncio.create_task(self.cleanup_stale_sessions())
+        self._cleanup_task = asyncio.create_task(self.cleanup_stale_sessions())
         self._heartbeat_task = asyncio.create_task(self.monitor_heartbeats())
 
     async def stop(self) -> None:
         if self._runner is None:
             return
+        if self._cleanup_task is not None:
+            self._cleanup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._cleanup_task
+            self._cleanup_task = None
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -544,10 +550,8 @@ class EveryCodeBridge:
             await message.add_reaction(reaction)
             if bot_user is not None:
                 for existing in STATUS_REACTIONS - {reaction}:
-                    try:
+                    with suppress(discord.DiscordException):
                         await message.remove_reaction(existing, bot_user)
-                    except discord.DiscordException:
-                        pass
         except discord.DiscordException:
             logger.warning("Unable to update Every Code reply reaction %s", message_id)
 

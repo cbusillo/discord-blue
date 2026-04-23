@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from typing import ClassVar
 
 import discord
 from discord import app_commands
@@ -42,7 +43,7 @@ class SetupDoodad(commands.Cog):
         logger.info(f"Loaded {len(tree_sync)} commands")
         await context.send(f"Loaded {len(tree_sync)} commands")
 
-    CLEAR_CHOICES = [
+    CLEAR_CHOICES: ClassVar[list[app_commands.Choice[str]]] = [
         app_commands.Choice(name="All", value="all"),
         app_commands.Choice(name="Bot", value="bot"),
     ]
@@ -98,7 +99,7 @@ class SetupCommands(commands.GroupCog, name="setup"):
     def get_loaded_doodads(self) -> list[str]:
         loaded_doodad_names = [
             doodad_name.lower().replace("discord_blue.doodads.", "")
-            for doodad_name in self.bot.extensions.keys()
+            for doodad_name in self.bot.extensions
             if not doodad_name.startswith("discord_blue.doodads._")
         ]
         return loaded_doodad_names
