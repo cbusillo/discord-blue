@@ -111,7 +111,7 @@ class RemoteCommand:
     command_id: str
     session_id: str
     session_epoch: str
-    kind: Literal["reply", "status_request"]
+    kind: Literal["reply", "continue_autonomously", "status_request"]
     text: str | None = None
     issued_by: str | None = None
 

@@ -339,6 +339,37 @@ class EveryCodeBridge:
         await session.websocket.send_json(command.to_message())
         return True
 
+    async def send_continue_autonomously(
+        self,
+        channel: object,
+        user: discord.User | discord.Member,
+    ) -> str:
+        if not isinstance(channel, discord.Thread):
+            return "Use `/code go-ahead` inside an Every Code session thread."
+        if not self.is_operator(user):
+            return "Only Every Code operators can ask a session to continue."
+
+        session = self.sessions.get_by_thread(channel.id)
+        if session is None:
+            return "This thread is not attached to a live Every Code session."
+        if session.websocket.closed:
+            return "Every Code session is offline; go-ahead was not delivered."
+
+        command = RemoteCommand(
+            command_id=str(uuid.uuid4()),
+            session_id=session.session_id,
+            session_epoch=session.session_epoch,
+            kind="continue_autonomously",
+            issued_by=str(user.id),
+        )
+        session.pending_commands[command.command_id] = PendingRemoteCommand(
+            thread_id=channel.id,
+            message_id=None,
+            notify_on_reject=True,
+        )
+        await session.websocket.send_json(command.to_message())
+        return "Asked Every Code to go ahead until it needs you."
+
     async def handle_command_ack(self, payload: dict[str, object]) -> None:
         command_id = str(payload.get("command_id") or "")
         session_id = str(payload.get("session_id") or "")
@@ -350,7 +381,8 @@ class EveryCodeBridge:
         command = session.pending_commands.get(command_id)
         if command is not None:
             session.active_command_id = command_id
-            await self.set_message_reaction(command.thread_id, command.message_id, REACTION_DELIVERED)
+            if command.message_id is not None:
+                await self.set_message_reaction(command.thread_id, command.message_id, REACTION_DELIVERED)
 
     async def handle_command_reject(self, payload: dict[str, object]) -> None:
         command_id = str(payload.get("command_id") or "")
@@ -364,7 +396,11 @@ class EveryCodeBridge:
         if session.active_command_id == command_id:
             session.active_command_id = None
         if command is not None:
-            await self.set_message_reaction(command.thread_id, command.message_id, REACTION_REJECTED)
+            if command.message_id is not None:
+                await self.set_message_reaction(command.thread_id, command.message_id, REACTION_REJECTED)
+            elif command.notify_on_reject:
+                reason = str(payload.get("reason") or "command was rejected")
+                await self.post_thread_notice(command.thread_id, f"Every Code could not go ahead: {reason}")
 
     async def handle_approval_request(self, approval: RemoteApprovalRequest) -> None:
         session = self.sessions.get(approval.session_id)
@@ -530,7 +566,8 @@ class EveryCodeBridge:
         command = session.pending_commands.get(command_id)
         if command is None:
             return
-        await self.set_message_reaction(command.thread_id, command.message_id, reaction)
+        if command.message_id is not None:
+            await self.set_message_reaction(command.thread_id, command.message_id, reaction)
         if clear:
             session.pending_commands.pop(command_id, None)
             session.active_command_id = None

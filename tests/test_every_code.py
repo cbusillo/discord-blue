@@ -6,6 +6,14 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, TypeAlias
+
+if TYPE_CHECKING:
+    from discord_blue.config import Config as ConfigType
+    from discord_blue.doodads.every_code.protocol import SessionHello as SessionHelloType
+else:
+    ConfigType: TypeAlias = object
+    SessionHelloType: TypeAlias = object
 
 _TEST_HOME = tempfile.TemporaryDirectory()
 os.environ["HOME"] = _TEST_HOME.name
@@ -84,6 +92,7 @@ class FakeThread:
     def __init__(self, thread_id: int) -> None:
         self.id = thread_id
         self._messages: dict[int, FakeReplyMessage] = {}
+        self.sent_messages: list[str] = []
 
     def add_message(self, message: FakeReplyMessage) -> None:
         self._messages[message.id] = message
@@ -91,9 +100,13 @@ class FakeThread:
     async def fetch_message(self, message_id: int) -> FakeReplyMessage:
         return self._messages[message_id]
 
+    async def send(self, content: str, **_: object) -> SimpleNamespace:
+        self.sent_messages.append(content)
+        return SimpleNamespace(id=900 + len(self.sent_messages))
+
 
 class FakeBot:
-    def __init__(self, config: Config, thread: FakeThread | None = None) -> None:
+    def __init__(self, config: ConfigType, thread: FakeThread | None = None) -> None:
         self.config = config
         self.user = SimpleNamespace(id=999)
         self._thread = thread
@@ -104,7 +117,7 @@ class FakeBot:
         return None
 
 
-def make_hello() -> SessionHello:
+def make_hello() -> SessionHelloType:
     return SessionHello(
         session_id="session-1",
         session_epoch="epoch-1",
@@ -209,6 +222,28 @@ class ProtocolTests(unittest.TestCase):
                 "session_epoch": "epoch-1",
                 "kind": "reply",
                 "text": "run tests",
+                "issued_by": "123",
+            },
+        )
+
+    def test_continue_command_serializes_bridge_message(self) -> None:
+        command = RemoteCommand(
+            command_id="cmd-1",
+            session_id="session-1",
+            session_epoch="epoch-1",
+            kind="continue_autonomously",
+            issued_by="123",
+        )
+
+        self.assertEqual(
+            command.to_message(),
+            {
+                "type": "command",
+                "command_id": "cmd-1",
+                "session_id": "session-1",
+                "session_epoch": "epoch-1",
+                "kind": "continue_autonomously",
+                "text": None,
                 "issued_by": "123",
             },
         )
@@ -322,6 +357,59 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             message.replies,
             ["Every Code session is offline; reply was not delivered."],
         )
+
+    async def test_continue_autonomously_routes_to_registered_session_websocket(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        websocket = FakeWebSocket()
+        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        response = await bridge.send_continue_autonomously(thread, SimpleNamespace(id=123))
+
+        self.assertEqual(response, "Asked Every Code to go ahead until it needs you.")
+        self.assertEqual(len(websocket.sent_json), 1)
+        sent = websocket.sent_json[0]
+        self.assertEqual(sent["type"], "command")
+        self.assertEqual(sent["session_id"], "session-1")
+        self.assertEqual(sent["session_epoch"], "epoch-1")
+        self.assertEqual(sent["kind"], "continue_autonomously")
+        self.assertIsNone(sent["text"])
+        self.assertEqual(sent["issued_by"], "123")
+        pending = session.pending_commands[str(sent["command_id"])]
+        self.assertEqual(pending.thread_id, 555)
+        self.assertIsNone(pending.message_id)
+        self.assertTrue(pending.notify_on_reject)
+
+    async def test_continue_autonomously_reports_reject_in_thread(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        websocket = FakeWebSocket()
+        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        await bridge.send_continue_autonomously(thread, SimpleNamespace(id=123))
+        command_id = str(websocket.sent_json[0]["command_id"])
+        await bridge.handle_command_reject(
+            {
+                "command_id": command_id,
+                "session_id": "session-1",
+                "session_epoch": "epoch-1",
+                "reason": "Auto Drive is already running",
+            }
+        )
+
+        self.assertEqual(
+            thread.sent_messages,
+            ["Every Code could not go ahead: Auto Drive is already running"],
+        )
+        self.assertNotIn(command_id, session.pending_commands)
 
 
 if __name__ == "__main__":

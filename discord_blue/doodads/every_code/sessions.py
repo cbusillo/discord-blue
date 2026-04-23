@@ -11,7 +11,8 @@ from discord_blue.doodads.every_code.protocol import SessionHello
 @dataclass(slots=True)
 class PendingRemoteCommand:
     thread_id: int
-    message_id: int
+    message_id: int | None
+    notify_on_reject: bool = False
 
 
 @dataclass(slots=True)
