@@ -41,19 +41,7 @@ class BlueBot(commands.Bot):
 
     async def on_signal(self, signal: int) -> None:
         logger.info(f"Received signal {signal}")
-        await self.clear_commands_and_logout()
-
-    async def clear_commands_and_logout(self) -> None:
-        logger.info("Starting command clearance and logout process...")
-
-        installed_commands = self.tree.get_commands()
-        for command in installed_commands:
-            self.tree.remove_command(command.name)
-            logger.info(f"Successfully deleted command: {command.name}")
-        await self.bot_channel.send(f"Deleted {len(installed_commands)} commands")
-        sync_result = await self.tree.sync(guild=self.guilds[0])
-        logger.info(f"Sync result: {sync_result}")
-        self.clear()
+        logger.info("Closing Discord client")
         await self.close()
 
     async def blue_guild(self) -> discord.Guild:
