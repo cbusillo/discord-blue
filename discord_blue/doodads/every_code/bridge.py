@@ -100,6 +100,14 @@ class SessionControlView(discord.ui.View):
     ) -> None:
         await self.bridge.handle_go_ahead_interaction(interaction)
 
+    @discord.ui.button(label="Status", style=discord.ButtonStyle.secondary)
+    async def status(
+        self,
+        interaction: discord.Interaction[BlueBot],
+        _button: discord.ui.Button[SessionControlView],
+    ) -> None:
+        await self.bridge.handle_status_interaction(interaction)
+
 
 class EveryCodeBridge:
     def __init__(self, bot: BlueBot) -> None:
@@ -290,7 +298,6 @@ class EveryCodeBridge:
                     session_thread.thread.id,
                     session_thread.notification_message_id,
                 )
-                await self.post_session_controls(session_thread.thread)
                 await websocket.send_json(
                     {"type": "hello_ack", "thread_id": session_thread.thread.id}
                 )
@@ -395,13 +402,38 @@ class EveryCodeBridge:
             interaction.user,
         )
         await interaction.response.send_message(response, ephemeral=True)
+        if response == "Asked Every Code to go ahead until it needs you.":
+            await self.clear_interaction_controls(interaction, "Every Code is continuing.")
 
-    async def post_session_controls(self, thread: discord.Thread) -> None:
-        await thread.send(
-            "Every Code controls",
-            allowed_mentions=discord.AllowedMentions.none(),
-            view=SessionControlView(self),
+    async def handle_status_interaction(
+        self,
+        interaction: discord.Interaction[BlueBot],
+    ) -> None:
+        await interaction.response.send_message(
+            self.session_status_summary(interaction.channel, interaction.user),
+            ephemeral=True,
         )
+
+    async def clear_interaction_controls(
+        self,
+        interaction: discord.Interaction[BlueBot],
+        content: str,
+    ) -> None:
+        message = interaction.message
+        if message is None:
+            return
+        if isinstance(interaction.channel, discord.Thread):
+            session = self.sessions.get_by_thread(interaction.channel.id)
+            if session is not None and session.control_message_id == message.id:
+                session.control_message_id = None
+        try:
+            await message.edit(
+                content=content,
+                view=None,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.DiscordException:
+            logger.warning("Unable to clear Every Code control message %s", message.id)
 
     def active_sessions_summary(self) -> str:
         sessions = list(self.sessions.by_session.values())
@@ -606,10 +638,12 @@ class EveryCodeBridge:
                 reaction = REACTION_COMPACTING
             else:
                 reaction = REACTION_IN_PROGRESS
+            await self.clear_session_controls(session, "Every Code is working.")
             await self.update_active_command_reaction(session, reaction)
             return
 
         if message_type == "error":
+            await self.clear_session_controls(session, "Every Code hit an error.")
             await self.update_active_command_reaction(session, REACTION_REJECTED)
             return
 
@@ -617,6 +651,7 @@ class EveryCodeBridge:
             await self.post_assistant_message(session.thread_id, status.assistant_message)
         if message_type == "turn_complete":
             await self.update_active_command_reaction(session, REACTION_FINISHED, clear=True)
+            await self.post_session_controls(session)
 
     async def handle_user_message(self, user_message: UserMessage) -> None:
         session = self.sessions.get(user_message.session_id)
@@ -672,6 +707,41 @@ class EveryCodeBridge:
     async def post_assistant_message(self, thread_id: int, text: str) -> None:
         for chunk in self._split_discord_message(text, DISCORD_ASSISTANT_CHUNK_LIMIT):
             await self.post_thread_notice(thread_id, f"**Assistant**\n{chunk}")
+
+    async def post_session_controls(self, session: EveryCodeSession) -> None:
+        if session.thread_id is None:
+            return
+        await self.clear_session_controls(session, "Every Code is no longer waiting here.")
+        channel = self.bot.get_channel(session.thread_id)
+        if not isinstance(channel, discord.Thread):
+            return
+        message = await channel.send(
+            self.format_waiting_for_direction(session),
+            allowed_mentions=discord.AllowedMentions.none(),
+            view=SessionControlView(self),
+        )
+        session.control_message_id = message.id
+
+    async def clear_session_controls(self, session: EveryCodeSession, content: str) -> None:
+        if session.thread_id is None or session.control_message_id is None:
+            return
+        channel = self.bot.get_channel(session.thread_id)
+        if not isinstance(channel, discord.Thread):
+            return
+        try:
+            message = await channel.fetch_message(session.control_message_id)
+            await message.edit(
+                content=content[:DISCORD_MESSAGE_LIMIT],
+                view=None,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.DiscordException:
+            logger.warning(
+                "Unable to clear Every Code control message %s",
+                session.control_message_id,
+            )
+        finally:
+            session.control_message_id = None
 
     async def post_thread_notice(self, thread_id: int, text: str) -> None:
         channel = self.bot.get_channel(thread_id)
@@ -811,6 +881,18 @@ class EveryCodeBridge:
         label = "Approved" if decision == "approved" else "Denied"
         by = f"\nby: `{decided_by}`" if decided_by is not None else ""
         return f"**{label}**{by}"
+
+    @staticmethod
+    def format_waiting_for_direction(session: EveryCodeSession) -> str:
+        repo = Path(session.hello.cwd).name or "session"
+        branch = f" on `{session.hello.branch}`" if session.hello.branch else ""
+        status = session.last_status_message or "Turn complete"
+        return "\n".join(
+            [
+                f"Every Code `{repo}`{branch}",
+                status,
+            ]
+        )[:DISCORD_MESSAGE_LIMIT]
 
     def _authorized(self, request: web.Request) -> bool:
         token = self.bot.config.every_code.token

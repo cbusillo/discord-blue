@@ -76,6 +76,7 @@ class FakeReplyMessage:
         self.author = SimpleNamespace(id=123)
         self.reactions: list[str] = []
         self.replies: list[str] = []
+        self.edits: list[tuple[str, bool]] = []
 
     async def add_reaction(self, reaction: str) -> None:
         self.reactions.append(reaction)
@@ -88,12 +89,17 @@ class FakeReplyMessage:
         del mention_author
         self.replies.append(content)
 
+    async def edit(self, content: str, **kwargs: object) -> None:
+        self.content = content
+        self.edits.append((content, kwargs.get("view") is None))
+
 
 class FakeThread:
     def __init__(self, thread_id: int) -> None:
         self.id = thread_id
         self._messages: dict[int, FakeReplyMessage] = {}
         self.sent_messages: list[str] = []
+        self.sent_views: list[object] = []
 
     def add_message(self, message: FakeReplyMessage) -> None:
         self._messages[message.id] = message
@@ -101,9 +107,12 @@ class FakeThread:
     async def fetch_message(self, message_id: int) -> FakeReplyMessage:
         return self._messages[message_id]
 
-    async def send(self, content: str, **_: object) -> SimpleNamespace:
+    async def send(self, content: str, **kwargs: object) -> FakeReplyMessage:
         self.sent_messages.append(content)
-        return SimpleNamespace(id=900 + len(self.sent_messages))
+        self.sent_views.append(kwargs.get("view"))
+        message = FakeReplyMessage(900 + len(self.sent_messages), self, content)
+        self.add_message(message)
+        return message
 
 
 class FakeInteractionResponse:
@@ -115,9 +124,15 @@ class FakeInteractionResponse:
 
 
 class FakeInteraction:
-    def __init__(self, channel: FakeThread, user_id: int = 123) -> None:
+    def __init__(
+        self,
+        channel: FakeThread,
+        user_id: int = 123,
+        message: FakeReplyMessage | None = None,
+    ) -> None:
         self.channel = channel
         self.user = SimpleNamespace(id=user_id)
+        self.message = message
         self.response = FakeInteractionResponse()
 
 
@@ -334,7 +349,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = EveryCodeBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=websocket,
+            thread_id=555,
+            control_message_id=901,
+        )
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
         message = FakeReplyMessage(777, thread, "run the focused test")
@@ -445,6 +465,87 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             [("Asked Every Code to go ahead until it needs you.", True)],
         )
         self.assertEqual(websocket.sent_json[0]["kind"], "continue_autonomously")
+
+    async def test_go_ahead_interaction_clears_contextual_controls(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        websocket = FakeWebSocket()
+        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+        control_message = FakeReplyMessage(901, thread, "Every Code `project` on `main`")
+        thread.add_message(control_message)
+        interaction = FakeInteraction(thread, message=control_message)
+
+        await bridge.handle_go_ahead_interaction(interaction)
+
+        self.assertEqual(control_message.content, "Every Code is continuing.")
+        self.assertEqual(control_message.edits, [("Every Code is continuing.", True)])
+        self.assertIsNone(session.control_message_id)
+        self.assertEqual(websocket.sent_json[0]["kind"], "continue_autonomously")
+
+    async def test_turn_complete_posts_contextual_controls(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        await bridge.handle_session_status(
+            "turn_complete",
+            SessionStatus(
+                session_id="session-1",
+                session_epoch="epoch-1",
+                message="Waiting for direction",
+                assistant_message="Done.",
+            ),
+        )
+
+        self.assertEqual(
+            thread.sent_messages,
+            [
+                "**Assistant**\nDone.",
+                "Every Code `project` on `main`\nWaiting for direction",
+            ],
+        )
+        self.assertIsNone(thread.sent_views[0])
+        self.assertIsNotNone(thread.sent_views[1])
+        self.assertEqual(session.control_message_id, 902)
+
+    async def test_status_changed_clears_contextual_controls(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        control_message = FakeReplyMessage(901, thread, "Waiting")
+        thread.add_message(control_message)
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+            control_message_id=901,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        await bridge.handle_session_status(
+            "status_changed",
+            SessionStatus(
+                session_id="session-1",
+                session_epoch="epoch-1",
+                message="Turn started",
+                assistant_message=None,
+            ),
+        )
+
+        self.assertEqual(control_message.content, "Every Code is working.")
+        self.assertIsNone(session.control_message_id)
 
     async def test_active_sessions_summary_lists_live_sessions(self) -> None:
         config = Config()
