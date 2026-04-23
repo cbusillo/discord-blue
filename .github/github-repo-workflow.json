@@ -1,0 +1,13 @@
+{
+  "defaultBranch": "main",
+  "importantWorkflows": ["Deploy to Production", "CodeQL"],
+  "qaLabels": [],
+  "deployLabels": [],
+  "healthUrls": [],
+  "relatedRepos": [],
+  "validatedThrough": [],
+  "cleanup": {
+    "deleteMergedLocalBranches": true,
+    "removeMergedCleanWorktrees": true
+  }
+}
