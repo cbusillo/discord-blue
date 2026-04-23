@@ -64,6 +64,8 @@ class EveryCodeConfig(Serializable):
     channel_id: int = 0
     operator_role_name: str = ""
     auto_join_user_ids: list[int] = []
+    heartbeat_timeout_seconds: int = 120
+    heartbeat_check_interval_seconds: int = 30
 
 
 class Config(Serializable):

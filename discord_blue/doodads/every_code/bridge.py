@@ -5,6 +5,8 @@ import json
 import logging
 import shlex
 import uuid
+from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import discord
@@ -90,6 +92,7 @@ class EveryCodeBridge:
         self.sessions = EveryCodeSessionRegistry()
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
+        self._heartbeat_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         if self._runner is not None:
@@ -111,10 +114,16 @@ class EveryCodeBridge:
             self.bot.config.every_code.listen_port,
         )
         asyncio.create_task(self.cleanup_stale_sessions())
+        self._heartbeat_task = asyncio.create_task(self.monitor_heartbeats())
 
     async def stop(self) -> None:
         if self._runner is None:
             return
+        if self._heartbeat_task is not None:
+            self._heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._heartbeat_task
+            self._heartbeat_task = None
         await self._runner.cleanup()
         self._runner = None
         self._site = None
@@ -128,6 +137,30 @@ class EveryCodeBridge:
     async def cleanup_stale_sessions(self) -> None:
         await self.cleanup_stale_session_notifications()
         await self.cleanup_stale_session_threads()
+
+    async def monitor_heartbeats(self) -> None:
+        while True:
+            await asyncio.sleep(self.bot.config.every_code.heartbeat_check_interval_seconds)
+            await self.close_timed_out_sessions()
+
+    async def close_timed_out_sessions(self) -> None:
+        timeout = timedelta(seconds=self.bot.config.every_code.heartbeat_timeout_seconds)
+        now = datetime.now(UTC)
+        for session_id, session in list(self.sessions.by_session.items()):
+            if now - session.last_seen <= timeout:
+                continue
+
+            removed = self.sessions.remove(session_id)
+            if removed is None:
+                continue
+
+            logger.warning(
+                "Every Code session %s timed out after %s seconds without heartbeat",
+                session_id,
+                self.bot.config.every_code.heartbeat_timeout_seconds,
+            )
+            await removed.websocket.close(message=b"heartbeat timeout")
+            await self.close_session_thread(removed)
 
     async def cleanup_stale_session_notifications(self) -> None:
         try:
