@@ -102,7 +102,7 @@ class SessionControlView(discord.ui.View):
         super().__init__(timeout=None)
         self.bridge = bridge
 
-    @discord.ui.button(label="Go ahead", style=discord.ButtonStyle.primary)
+    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.primary)
     async def go_ahead(
         self,
         interaction: discord.Interaction[BlueBot],
@@ -110,7 +110,7 @@ class SessionControlView(discord.ui.View):
     ) -> None:
         await self.bridge.handle_go_ahead_interaction(interaction)
 
-    @discord.ui.button(label="Status", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(emoji="📋", style=discord.ButtonStyle.secondary)
     async def status(
         self,
         interaction: discord.Interaction[BlueBot],
@@ -1086,12 +1086,12 @@ class EveryCodeBridge:
     @staticmethod
     def format_waiting_for_direction(session: EveryCodeSession) -> str:
         repo = Path(session.hello.cwd).name or "session"
-        branch = f" on `{session.hello.branch}`" if session.hello.branch else ""
+        branch = f" · `{session.hello.branch}`" if session.hello.branch else ""
         status = session.last_status_message or "Turn complete"
         return "\n".join(
             [
-                f"Every Code `{repo}`{branch}",
                 status,
+                f"`{repo}`{branch}",
             ]
         )[:DISCORD_MESSAGE_LIMIT]
 

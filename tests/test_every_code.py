@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, AsyncIterator, TypeAlias
+from typing import TYPE_CHECKING, Any, AsyncIterator, TypeAlias, cast
 
 if TYPE_CHECKING:
     from discord_blue.config import Config as ConfigType
@@ -563,11 +563,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             thread.sent_messages,
             [
                 "**Assistant**\nDone.",
-                "Every Code `project` on `main`\nWaiting for direction",
+                "Waiting for direction\n`project` · `main`",
             ],
         )
         self.assertIsNone(thread.sent_views[0])
         self.assertIsNotNone(thread.sent_views[1])
+        buttons = cast(Any, thread.sent_views[1]).children
+        self.assertEqual([button.label for button in buttons], [None, None])
+        self.assertEqual([str(button.emoji) for button in buttons], ["▶️", "📋"])
         self.assertEqual(session.control_message_id, 902)
 
     async def test_status_changed_clears_contextual_controls(self) -> None:
