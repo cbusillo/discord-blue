@@ -33,6 +33,7 @@ class EveryCodeSession:
     pending_commands: dict[str, PendingRemoteCommand] = field(default_factory=dict)
     pending_approvals: dict[str, PendingRemoteApproval] = field(default_factory=dict)
     active_command_id: str | None = None
+    last_status_message: str | None = None
 
     @property
     def session_id(self) -> str:

@@ -49,6 +49,7 @@ EveryCodeBridge = bridge_module.EveryCodeBridge
 protocol_module = importlib.import_module("discord_blue.doodads.every_code.protocol")
 RemoteCommand = protocol_module.RemoteCommand
 SessionHello = protocol_module.SessionHello
+SessionStatus = protocol_module.SessionStatus
 sessions_module = importlib.import_module("discord_blue.doodads.every_code.sessions")
 EveryCodeSession = sessions_module.EveryCodeSession
 EveryCodeSessionRegistry = sessions_module.EveryCodeSessionRegistry
@@ -471,6 +472,41 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge = EveryCodeBridge(FakeBot(config))
 
         self.assertEqual(bridge.active_sessions_summary(), "No live Every Code sessions.")
+
+    async def test_session_status_summary_uses_last_status(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        await bridge.handle_session_status(
+            "status_changed",
+            SessionStatus(
+                session_id="session-1",
+                session_epoch="epoch-1",
+                message="Turn started",
+                assistant_message=None,
+            ),
+        )
+
+        self.assertEqual(
+            bridge.session_status_summary(thread, SimpleNamespace(id=123)),
+            "\n".join(
+                [
+                    "Every Code `project` on `main`",
+                    "state: online",
+                    "host: Mac Studio",
+                    "status: Turn started",
+                ]
+            ),
+        )
 
 
 if __name__ == "__main__":

@@ -419,6 +419,33 @@ class EveryCodeBridge:
             )
         return "\n".join(lines)
 
+    def session_status_summary(
+        self,
+        channel: object,
+        user: discord.User | discord.Member,
+    ) -> str:
+        if not isinstance(channel, discord.Thread):
+            return "Use `/code status` inside an Every Code session thread."
+        if not self.is_operator(user):
+            return "Only Every Code operators can inspect session status."
+
+        session = self.sessions.get_by_thread(channel.id)
+        if session is None:
+            return "This thread is not attached to a live Every Code session."
+
+        repo = Path(session.hello.cwd).name or "session"
+        branch = f" on `{session.hello.branch}`" if session.hello.branch else ""
+        state = "offline" if session.websocket.closed else "online"
+        status = session.last_status_message or "No status update received yet."
+        return "\n".join(
+            [
+                f"Every Code `{repo}`{branch}",
+                f"state: {state}",
+                f"host: {session.hello.host_label}",
+                f"status: {status}",
+            ]
+        )
+
     async def handle_command_ack(self, payload: dict[str, object]) -> None:
         command_id = str(payload.get("command_id") or "")
         session_id = str(payload.get("session_id") or "")
@@ -569,6 +596,7 @@ class EveryCodeBridge:
         if status.session_epoch != session.session_epoch:
             logger.warning("Every Code status for stale session epoch: %s", status.session_id)
             return
+        session.last_status_message = status.message
 
         if message_type == "status_changed":
             status_message = (status.message or "").lower()
