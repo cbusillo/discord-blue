@@ -105,6 +105,21 @@ class FakeThread:
         return SimpleNamespace(id=900 + len(self.sent_messages))
 
 
+class FakeInteractionResponse:
+    def __init__(self) -> None:
+        self.messages: list[tuple[str, bool]] = []
+
+    async def send_message(self, content: str, *, ephemeral: bool) -> None:
+        self.messages.append((content, ephemeral))
+
+
+class FakeInteraction:
+    def __init__(self, channel: FakeThread, user_id: int = 123) -> None:
+        self.channel = channel
+        self.user = SimpleNamespace(id=user_id)
+        self.response = FakeInteractionResponse()
+
+
 class FakeBot:
     def __init__(self, config: ConfigType, thread: FakeThread | None = None) -> None:
         self.config = config
@@ -410,6 +425,25 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             ["Every Code could not go ahead: Auto Drive is already running"],
         )
         self.assertNotIn(command_id, session.pending_commands)
+
+    async def test_go_ahead_interaction_replies_ephemerally(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        websocket = FakeWebSocket()
+        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+        interaction = FakeInteraction(thread)
+
+        await bridge.handle_go_ahead_interaction(interaction)
+
+        self.assertEqual(
+            interaction.response.messages,
+            [("Asked Every Code to go ahead until it needs you.", True)],
+        )
+        self.assertEqual(websocket.sent_json[0]["kind"], "continue_autonomously")
 
 
 if __name__ == "__main__":

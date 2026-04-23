@@ -86,6 +86,20 @@ class ApprovalView(discord.ui.View):
         )
 
 
+class SessionControlView(discord.ui.View):
+    def __init__(self, bridge: EveryCodeBridge) -> None:
+        super().__init__(timeout=None)
+        self.bridge = bridge
+
+    @discord.ui.button(label="Go ahead", style=discord.ButtonStyle.primary)
+    async def go_ahead(
+        self,
+        interaction: discord.Interaction[BlueBot],
+        _button: discord.ui.Button[SessionControlView],
+    ) -> None:
+        await self.bridge.handle_go_ahead_interaction(interaction)
+
+
 class EveryCodeBridge:
     def __init__(self, bot: BlueBot) -> None:
         self.bot = bot
@@ -275,6 +289,7 @@ class EveryCodeBridge:
                     session_thread.thread.id,
                     session_thread.notification_message_id,
                 )
+                await self.post_session_controls(session_thread.thread)
                 await websocket.send_json(
                     {"type": "hello_ack", "thread_id": session_thread.thread.id}
                 )
@@ -369,6 +384,23 @@ class EveryCodeBridge:
         )
         await session.websocket.send_json(command.to_message())
         return "Asked Every Code to go ahead until it needs you."
+
+    async def handle_go_ahead_interaction(
+        self,
+        interaction: discord.Interaction[BlueBot],
+    ) -> None:
+        response = await self.send_continue_autonomously(
+            interaction.channel,
+            interaction.user,
+        )
+        await interaction.response.send_message(response, ephemeral=True)
+
+    async def post_session_controls(self, thread: discord.Thread) -> None:
+        await thread.send(
+            "Every Code controls",
+            allowed_mentions=discord.AllowedMentions.none(),
+            view=SessionControlView(self),
+        )
 
     async def handle_command_ack(self, payload: dict[str, object]) -> None:
         command_id = str(payload.get("command_id") or "")
