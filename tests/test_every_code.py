@@ -727,6 +727,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         session.pending_commands["cmd-1"] = sessions_module.PendingRemoteCommand(
             thread_id=555,
             message_id=901,
+            kind="continue_autonomously",
         )
         session.active_command_id = "cmd-1"
 
@@ -762,6 +763,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         session.pending_commands["cmd-1"] = sessions_module.PendingRemoteCommand(
             thread_id=555,
             message_id=901,
+            kind="continue_autonomously",
         )
         session.active_command_id = "cmd-1"
 
@@ -775,10 +777,49 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        self.assertEqual(control_message.reactions, [bridge_module.REACTION_IN_PROGRESS])
+        self.assertEqual(
+            control_message.reactions,
+            [
+                bridge_module.REACTION_IN_PROGRESS,
+                bridge_module.REACTION_CONTROL_PAUSE,
+                bridge_module.REACTION_CONTROL_END,
+            ],
+        )
         self.assertFalse(control_message.deleted)
 
-    async def test_end_session_reaction_queues_remote_command(self) -> None:
+    async def test_pause_reaction_queues_remote_command(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        websocket = FakeWebSocket()
+        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        await bridge.handle_session_status(
+            "turn_complete",
+            SessionStatus(
+                session_id="session-1",
+                session_epoch="epoch-1",
+                message="Waiting for direction",
+                assistant_message=None,
+            ),
+        )
+
+        handled = await bridge.handle_thread_reaction(
+            cast(Any, thread),
+            901,
+            "⏸️",
+            cast(Any, SimpleNamespace(id=123)),
+        )
+
+        self.assertTrue(handled)
+        control_message = await thread.fetch_message(901)
+        self.assertEqual(control_message.reactions, [bridge_module.REACTION_QUEUED])
+        self.assertEqual(websocket.sent_json[0]["kind"], "pause_current_turn")
+
+    async def test_end_session_reaction_requires_confirmation(self) -> None:
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
@@ -807,8 +848,58 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         control_message = await thread.fetch_message(901)
+        self.assertEqual(control_message.reactions, ["✅", "✖️"])
+        self.assertEqual(websocket.sent_json, [])
+
+        handled = await bridge.handle_thread_reaction(
+            cast(Any, thread),
+            901,
+            "✅",
+            cast(Any, SimpleNamespace(id=123)),
+        )
+
+        self.assertTrue(handled)
         self.assertEqual(control_message.reactions, [bridge_module.REACTION_QUEUED])
         self.assertEqual(websocket.sent_json[0]["kind"], "end_session")
+
+    async def test_end_session_confirmation_cancel_restores_controls(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        websocket = FakeWebSocket()
+        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        await bridge.handle_session_status(
+            "turn_complete",
+            SessionStatus(
+                session_id="session-1",
+                session_epoch="epoch-1",
+                message="Waiting for direction",
+                assistant_message=None,
+            ),
+        )
+
+        await bridge.handle_thread_reaction(
+            cast(Any, thread),
+            901,
+            "⏹️",
+            cast(Any, SimpleNamespace(id=123)),
+        )
+
+        handled = await bridge.handle_thread_reaction(
+            cast(Any, thread),
+            901,
+            "✖️",
+            cast(Any, SimpleNamespace(id=123)),
+        )
+
+        self.assertTrue(handled)
+        control_message = await thread.fetch_message(901)
+        self.assertEqual(control_message.reactions, ["▶️", "ℹ️", "⏹️"])
+        self.assertEqual(websocket.sent_json, [])
 
     async def test_approval_reaction_edits_message_pending_state(self) -> None:
         config = Config()

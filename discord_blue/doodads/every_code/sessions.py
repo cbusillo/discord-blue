@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Literal
 
 from aiohttp import web
 
@@ -12,6 +13,7 @@ from discord_blue.doodads.every_code.protocol import SessionHello
 class PendingRemoteCommand:
     thread_id: int
     message_id: int | None
+    kind: str
     reject_notice: str | None = None
 
 
@@ -43,6 +45,8 @@ class EveryCodeSession:
     pending_user_inputs: dict[str, PendingRemoteUserInput] = field(default_factory=dict)
     active_command_id: str | None = None
     last_status_message: str | None = None
+    control_status_reaction: str | None = None
+    pending_control_confirmation: Literal["end_session"] | None = None
 
     @property
     def session_id(self) -> str:
