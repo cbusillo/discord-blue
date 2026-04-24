@@ -1033,11 +1033,49 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(select.placeholder, "Summary")
         self.assertEqual([option.label for option in select.options], ["Open answer form"])
 
-    async def test_status_changed_clears_contextual_controls(self) -> None:
+    async def test_status_changed_clears_contextual_controls_for_active_reply_command(self) -> None:
         config = Config()
         thread = FakeThread(555)
         bridge = EveryCodeBridge(FakeBot(config, thread))
         control_message = FakeReplyMessage(901, thread, "Waiting")
+        reply_message = FakeReplyMessage(902, thread, "Continue")
+        thread.add_message(control_message)
+        thread.add_message(reply_message)
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+            control_message_id=901,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+        session.pending_commands["cmd-1"] = sessions_module.PendingRemoteCommand(
+            thread_id=555,
+            message_id=902,
+            kind="reply",
+        )
+        session.active_command_id = "cmd-1"
+
+        await bridge.handle_session_status(
+            "status_changed",
+            SessionStatus(
+                session_id="session-1",
+                session_epoch="epoch-1",
+                message="Turn started",
+                assistant_message=None,
+            ),
+        )
+
+        self.assertTrue(control_message.deleted)
+        self.assertIsNone(session.control_message_id)
+        self.assertEqual(reply_message.reactions, [bridge_module.REACTION_IN_PROGRESS])
+
+    async def test_status_changed_uses_existing_control_anchor_without_active_command(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        control_message = FakeReplyMessage(901, thread, "Waiting")
+        control_message.reactions = ["▶️", "ℹ️", "⏹️"]
         thread.add_message(control_message)
         session = EveryCodeSession(
             hello=make_hello(),
@@ -1053,13 +1091,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             SessionStatus(
                 session_id="session-1",
                 session_epoch="epoch-1",
-                message="Turn started",
+                message="Compacting conversation history",
                 assistant_message=None,
             ),
         )
 
-        self.assertTrue(control_message.deleted)
-        self.assertIsNone(session.control_message_id)
+        self.assertFalse(control_message.deleted)
+        self.assertEqual(control_message.reactions, [bridge_module.REACTION_COMPACTING])
+        self.assertEqual(session.control_message_id, 901)
+        self.assertEqual(session.control_status_reaction, bridge_module.REACTION_COMPACTING)
 
     async def test_handle_user_message_formats_distinct_notice(self) -> None:
         config = Config()

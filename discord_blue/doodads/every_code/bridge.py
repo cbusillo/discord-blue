@@ -1267,23 +1267,23 @@ class EveryCodeBridge:
                 reaction = REACTION_COMPACTING
             else:
                 reaction = REACTION_IN_PROGRESS
-            if not self.active_command_uses_control_message(session):
+            if session.active_command_id is not None and not self.active_command_uses_control_message(session):
                 await self.clear_session_controls(session)
             await self.clear_pending_user_inputs(
                 session,
                 "Every Code is no longer waiting on this prompt.",
             )
-            await self.update_active_command_reaction(session, reaction)
+            await self.update_session_status_reaction(session, reaction)
             return
 
         if message_type == "error":
-            if not self.active_command_uses_control_message(session):
+            if session.active_command_id is not None and not self.active_command_uses_control_message(session):
                 await self.clear_session_controls(session)
             await self.clear_pending_user_inputs(
                 session,
                 "Every Code stopped waiting on this prompt.",
             )
-            await self.update_active_command_reaction(session, REACTION_REJECTED)
+            await self.update_session_status_reaction(session, REACTION_REJECTED)
             return
 
         if message_type == "turn_complete" and status.assistant_message:
@@ -1345,6 +1345,22 @@ class EveryCodeBridge:
             session.active_command_id = None
             if command.message_id == session.control_message_id:
                 session.control_status_reaction = None
+
+    async def update_session_status_reaction(
+        self,
+        session: EveryCodeSession,
+        reaction: str,
+    ) -> None:
+        if session.active_command_id is not None:
+            await self.update_active_command_reaction(session, reaction)
+            return
+        if session.thread_id is None or session.control_message_id is None:
+            return
+        channel = self.bot.get_channel(session.thread_id)
+        if not isinstance(channel, discord.Thread):
+            return
+        session.control_status_reaction = reaction
+        await self.refresh_session_controls(session, channel)
 
     async def set_message_reaction(self, thread_id: int, message_id: int, reaction: str) -> None:
         channel = self.bot.get_channel(thread_id)
