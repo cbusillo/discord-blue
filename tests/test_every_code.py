@@ -49,6 +49,10 @@ bridge_module = importlib.import_module("discord_blue.doodads.every_code.bridge"
 EveryCodeBridge = bridge_module.EveryCodeBridge
 protocol_module = importlib.import_module("discord_blue.doodads.every_code.protocol")
 RemoteCommand = protocol_module.RemoteCommand
+RemoteApprovalRequest = protocol_module.RemoteApprovalRequest
+RemoteRequestUserInput = protocol_module.RemoteRequestUserInput
+RequestUserInputQuestion = protocol_module.RequestUserInputQuestion
+RequestUserInputQuestionOption = protocol_module.RequestUserInputQuestionOption
 SessionHello = protocol_module.SessionHello
 SessionStatus = protocol_module.SessionStatus
 sessions_module = importlib.import_module("discord_blue.doodads.every_code.sessions")
@@ -78,6 +82,7 @@ class FakeReplyMessage:
         self.reactions: list[str] = []
         self.replies: list[str] = []
         self.edits: list[tuple[str, bool]] = []
+        self.deleted = False
 
     async def add_reaction(self, reaction: str) -> None:
         self.reactions.append(reaction)
@@ -86,6 +91,9 @@ class FakeReplyMessage:
         if reaction in self.reactions:
             self.reactions.remove(reaction)
 
+    async def clear_reactions(self) -> None:
+        self.reactions.clear()
+
     async def reply(self, content: str, *, mention_author: bool) -> None:
         del mention_author
         self.replies.append(content)
@@ -93,6 +101,9 @@ class FakeReplyMessage:
     async def edit(self, content: str, **kwargs: object) -> None:
         self.content = content
         self.edits.append((content, kwargs.get("view") is None))
+
+    async def delete(self) -> None:
+        self.deleted = True
 
 
 class FakeThread:
@@ -152,9 +163,17 @@ class FakeTextChannel:
 class FakeInteractionResponse:
     def __init__(self) -> None:
         self.messages: list[tuple[str, bool]] = []
+        self.edits: list[tuple[str, bool]] = []
+        self.modals: list[object] = []
 
     async def send_message(self, content: str, *, ephemeral: bool) -> None:
         self.messages.append((content, ephemeral))
+
+    async def edit_message(self, content: str, **kwargs: object) -> None:
+        self.edits.append((content, kwargs.get("view") is None))
+
+    async def send_modal(self, modal: object) -> None:
+        self.modals.append(modal)
 
 
 class FakeInteraction:
@@ -324,6 +343,59 @@ class ProtocolTests(unittest.TestCase):
                 "session_epoch": "epoch-1",
                 "kind": "continue_autonomously",
                 "text": None,
+                "issued_by": "123",
+            },
+        )
+
+    def test_request_user_input_from_payload_preserves_questions(self) -> None:
+        request = RemoteRequestUserInput.from_payload(
+            {
+                "call_id": "call-1",
+                "turn_id": "turn-1",
+                "session_id": "session-1",
+                "session_epoch": "epoch-1",
+                "questions": [
+                    {
+                        "id": "mode",
+                        "header": "Build mode",
+                        "question": "Choose a mode",
+                        "options": [
+                            {"label": "Fast", "description": "Skip extras"},
+                            {"label": "Safe", "description": "Full validation"},
+                        ],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(request.call_id, "call-1")
+        self.assertEqual(request.turn_id, "turn-1")
+        self.assertEqual(request.session_id, "session-1")
+        self.assertEqual(request.questions[0].header, "Build mode")
+        self.assertEqual(request.questions[0].options[1].label, "Safe")
+
+    def test_request_user_input_response_command_serializes_bridge_message(self) -> None:
+        command = RemoteCommand(
+            command_id="cmd-1",
+            session_id="session-1",
+            session_epoch="epoch-1",
+            kind="request_user_input_response",
+            turn_id="turn-1",
+            response={"answers": {"mode": {"answers": ["Safe"]}}},
+            issued_by="123",
+        )
+
+        self.assertEqual(
+            command.to_message(),
+            {
+                "type": "command",
+                "command_id": "cmd-1",
+                "session_id": "session-1",
+                "session_epoch": "epoch-1",
+                "kind": "request_user_input_response",
+                "text": None,
+                "turn_id": "turn-1",
+                "response": {"answers": {"mode": {"answers": ["Safe"]}}},
                 "issued_by": "123",
             },
         )
@@ -533,8 +605,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         await bridge.handle_go_ahead_interaction(interaction)
 
-        self.assertEqual(control_message.content, "Every Code is continuing.")
-        self.assertEqual(control_message.edits, [("Every Code is continuing.", True)])
+        self.assertTrue(control_message.deleted)
         self.assertIsNone(session.control_message_id)
         self.assertEqual(websocket.sent_json[0]["kind"], "continue_autonomously")
 
@@ -564,17 +635,211 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             thread.sent_messages,
             [
                 "**Assistant**\nDone.",
-                "",
+                "\u200b",
             ],
         )
         self.assertIsNone(thread.sent_views[0])
-        self.assertIsNotNone(thread.sent_views[1])
-        items = list(cast(Any, thread.sent_views[1]).walk_children())
-        texts = [item.content for item in items if isinstance(item, bridge_module.discord.ui.TextDisplay)]
-        buttons = [item for item in items if isinstance(item, bridge_module.discord.ui.Button)]
-        self.assertEqual(texts, ["**Waiting for direction**\n`project` · `main`"])
-        self.assertEqual([button.label for button in buttons], ["Continue", "Status"])
+        self.assertIsNone(thread.sent_views[1])
+        control_message = await thread.fetch_message(902)
+        self.assertEqual(control_message.reactions, ["▶️", "ℹ️"])
         self.assertEqual(session.control_message_id, 902)
+
+    async def test_approval_request_posts_compact_reactions(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        await bridge.handle_approval_request(
+            RemoteApprovalRequest(
+                approval_id="approval-1",
+                call_id="call-1",
+                turn_id="turn-1",
+                session_id="session-1",
+                session_epoch="epoch-1",
+                command=["git", "status"],
+                cwd="/repo",
+                reason="Need approval",
+            )
+        )
+
+        self.assertEqual(len(thread.sent_messages), 1)
+        self.assertIn("Need approval", thread.sent_messages[0])
+        self.assertIn("Quick review", thread.sent_messages[0])
+        self.assertIsNone(thread.sent_views[0])
+        approval_message = await thread.fetch_message(901)
+        self.assertEqual(approval_message.reactions, ["✅", "✖️"])
+
+    async def test_continue_reaction_clears_control_message(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        websocket = FakeWebSocket()
+        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        await bridge.handle_session_status(
+            "turn_complete",
+            SessionStatus(
+                session_id="session-1",
+                session_epoch="epoch-1",
+                message="Waiting for direction",
+                assistant_message=None,
+            ),
+        )
+
+        handled = await bridge.handle_thread_reaction(
+            cast(Any, thread),
+            901,
+            "▶️",
+            cast(Any, SimpleNamespace(id=123)),
+        )
+
+        self.assertTrue(handled)
+        control_message = await thread.fetch_message(901)
+        self.assertTrue(control_message.deleted)
+        self.assertIsNone(session.control_message_id)
+        self.assertEqual(websocket.sent_json[0]["kind"], "continue_autonomously")
+
+    async def test_approval_reaction_edits_message_pending_state(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        websocket = FakeWebSocket()
+        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        await bridge.handle_approval_request(
+            RemoteApprovalRequest(
+                approval_id="approval-1",
+                call_id="call-1",
+                turn_id="turn-1",
+                session_id="session-1",
+                session_epoch="epoch-1",
+                command=["git", "status"],
+                cwd="/repo",
+                reason="Need approval",
+            )
+        )
+
+        handled = await bridge.handle_thread_reaction(
+            cast(Any, thread),
+            901,
+            "✅",
+            cast(Any, SimpleNamespace(id=123)),
+        )
+
+        self.assertTrue(handled)
+        approval_message = await thread.fetch_message(901)
+        self.assertIn("Approval sent", approval_message.content)
+        self.assertEqual(approval_message.reactions, [])
+        self.assertEqual(websocket.sent_json[0]["decision"], "approved")
+
+    async def test_request_user_input_posts_select_prompt(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        await bridge.handle_request_user_input(
+            RemoteRequestUserInput(
+                call_id="call-1",
+                turn_id="turn-1",
+                session_id="session-1",
+                session_epoch="epoch-1",
+                questions=[
+                    RequestUserInputQuestion(
+                        id="mode",
+                        header="Build mode",
+                        question="Choose a mode",
+                        is_other=False,
+                        is_secret=False,
+                        options=[
+                            RequestUserInputQuestionOption(
+                                label="Fast",
+                                description="Skip extra checks",
+                            ),
+                            RequestUserInputQuestionOption(
+                                label="Safe",
+                                description="Run the full path",
+                            ),
+                        ],
+                    )
+                ],
+            )
+        )
+
+        self.assertEqual(len(thread.sent_messages), 1)
+        self.assertIn("Build mode", thread.sent_messages[0])
+        self.assertIn("Choose a mode", thread.sent_messages[0])
+        self.assertIsNotNone(thread.sent_views[0])
+        children = list(cast(Any, thread.sent_views[0]).children)
+        selects = [child for child in children if isinstance(child, bridge_module.discord.ui.Select)]
+        self.assertEqual(len(selects), 1)
+        self.assertEqual([option.label for option in selects[0].options], ["Fast", "Safe"])
+        self.assertIn("turn-1", session.pending_user_inputs)
+
+    async def test_request_user_input_modal_prompt_uses_open_form_select(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        await bridge.handle_request_user_input(
+            RemoteRequestUserInput(
+                call_id="call-1",
+                turn_id="turn-2",
+                session_id="session-1",
+                session_epoch="epoch-1",
+                questions=[
+                    RequestUserInputQuestion(
+                        id="summary",
+                        header="Summary",
+                        question="What should we tell the user?",
+                        is_other=True,
+                        is_secret=False,
+                        options=[],
+                    ),
+                    RequestUserInputQuestion(
+                        id="token",
+                        header="Token",
+                        question="Provide a secret token",
+                        is_other=True,
+                        is_secret=True,
+                        options=[],
+                    ),
+                ],
+            )
+        )
+
+        children = list(cast(Any, thread.sent_views[0]).children)
+        self.assertEqual(len(children), 1)
+        select = children[0]
+        self.assertIsInstance(select, bridge_module.discord.ui.Select)
+        self.assertEqual(select.placeholder, "Summary")
+        self.assertEqual([option.label for option in select.options], ["Open answer form"])
 
     async def test_status_changed_clears_contextual_controls(self) -> None:
         config = Config()
@@ -601,7 +866,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        self.assertEqual(control_message.content, "Every Code is working.")
+        self.assertTrue(control_message.deleted)
         self.assertIsNone(session.control_message_id)
 
     async def test_active_sessions_summary_lists_live_sessions(self) -> None:

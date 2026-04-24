@@ -62,6 +62,75 @@ class UserMessage:
 
 
 @dataclass(slots=True)
+class RequestUserInputQuestionOption:
+    label: str
+    description: str
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "RequestUserInputQuestionOption":
+        return cls(
+            label=str(payload.get("label") or ""),
+            description=str(payload.get("description") or ""),
+        )
+
+
+@dataclass(slots=True)
+class RequestUserInputQuestion:
+    id: str
+    header: str
+    question: str
+    is_other: bool
+    is_secret: bool
+    options: list[RequestUserInputQuestionOption]
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "RequestUserInputQuestion":
+        options_payload = payload.get("options")
+        options = []
+        if isinstance(options_payload, list):
+            options = [
+                RequestUserInputQuestionOption.from_payload(option)
+                for option in options_payload
+                if isinstance(option, dict)
+            ]
+        return cls(
+            id=str(payload.get("id") or ""),
+            header=str(payload.get("header") or ""),
+            question=str(payload.get("question") or ""),
+            is_other=bool(payload.get("isOther") or False),
+            is_secret=bool(payload.get("isSecret") or False),
+            options=options,
+        )
+
+
+@dataclass(slots=True)
+class RemoteRequestUserInput:
+    call_id: str
+    turn_id: str
+    session_id: str
+    session_epoch: str
+    questions: list[RequestUserInputQuestion]
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "RemoteRequestUserInput":
+        questions_payload = payload.get("questions")
+        questions = []
+        if isinstance(questions_payload, list):
+            questions = [
+                RequestUserInputQuestion.from_payload(question)
+                for question in questions_payload
+                if isinstance(question, dict)
+            ]
+        return cls(
+            call_id=str(payload.get("call_id") or ""),
+            turn_id=str(payload.get("turn_id") or ""),
+            session_id=str(payload.get("session_id") or ""),
+            session_epoch=str(payload.get("session_epoch") or ""),
+            questions=questions,
+        )
+
+
+@dataclass(slots=True)
 class RemoteApprovalRequest:
     approval_id: str
     call_id: str
@@ -111,12 +180,19 @@ class RemoteCommand:
     command_id: str
     session_id: str
     session_epoch: str
-    kind: Literal["reply", "continue_autonomously", "status_request"]
+    kind: Literal[
+        "reply",
+        "continue_autonomously",
+        "request_user_input_response",
+        "status_request",
+    ]
     text: str | None = None
+    turn_id: str | None = None
+    response: dict[str, Any] | None = None
     issued_by: str | None = None
 
     def to_message(self) -> dict[str, Any]:
-        return {
+        message = {
             "type": "command",
             "command_id": self.command_id,
             "session_id": self.session_id,
@@ -125,3 +201,8 @@ class RemoteCommand:
             "text": self.text,
             "issued_by": self.issued_by,
         }
+        if self.turn_id is not None:
+            message["turn_id"] = self.turn_id
+        if self.response is not None:
+            message["response"] = self.response
+        return message

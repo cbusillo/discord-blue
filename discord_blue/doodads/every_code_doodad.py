@@ -37,6 +37,40 @@ class EveryCodeDoodad(commands.Cog):
         if delivered:
             logger.info("Delivered Every Code thread reply from %s", message.author.id)
 
+    @commands.Cog.listener("on_raw_reaction_add")
+    async def route_quick_reaction(
+        self,
+        payload: discord.RawReactionActionEvent,
+    ) -> None:
+        if not self.bot.config.every_code.enabled:
+            return
+        if self.bot.user is not None and payload.user_id == self.bot.user.id:
+            return
+
+        member = payload.member
+        if member is None or member.bot:
+            return
+
+        channel = self.bot.get_channel(payload.channel_id)
+        if channel is None:
+            fetched = await self.bot.fetch_channel(payload.channel_id)
+            channel = fetched if isinstance(fetched, discord.Thread) else None
+        if not isinstance(channel, discord.Thread):
+            return
+
+        handled = await self.bridge.handle_thread_reaction(
+            channel,
+            payload.message_id,
+            str(payload.emoji),
+            member,
+        )
+        if handled:
+            logger.info(
+                "Handled Every Code quick reaction %s from %s",
+                payload.emoji,
+                payload.user_id,
+            )
+
     @code_group.command(
         name="go-ahead",
         description="Ask this Every Code session to continue until it needs you.",

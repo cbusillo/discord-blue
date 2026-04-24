@@ -16,9 +16,11 @@ import discord
 from aiohttp import WSMsgType, web
 
 from discord_blue.doodads.every_code.protocol import (
+    RequestUserInputQuestion,
     RemoteApprovalDecision,
     RemoteApprovalRequest,
     RemoteCommand,
+    RemoteRequestUserInput,
     SessionHello,
     SessionStatus,
     UserMessage,
@@ -28,6 +30,7 @@ from discord_blue.doodads.every_code.sessions import (
     EveryCodeSessionRegistry,
     PendingRemoteApproval,
     PendingRemoteCommand,
+    PendingRemoteUserInput,
 )
 from discord_blue.doodads.every_code.threads import SessionThread
 from discord_blue.doodads.every_code.threads import auto_join_configured_users
@@ -61,58 +64,129 @@ STATUS_REACTIONS = {
     REACTION_FINISHED,
     REACTION_REJECTED,
 }
+REACTION_CONTROL_CONTINUE = "▶️"
+REACTION_CONTROL_STATUS = "ℹ️"
+REACTION_APPROVAL_APPROVE = "✅"
+REACTION_APPROVAL_DENY = "✖️"
 
 
-class ApprovalView(discord.ui.View):
-    def __init__(self, bridge: EveryCodeBridge, session_id: str, approval_id: str) -> None:
-        super().__init__(timeout=3600)
+class RequestUserInputSelect(discord.ui.Select[discord.ui.View]):
+    def __init__(
+        self,
+        bridge: EveryCodeBridge,
+        session_id: str,
+        turn_id: str,
+        question: RequestUserInputQuestion,
+    ) -> None:
+        options = [
+            discord.SelectOption(
+                label=option.label[:100],
+                description=(option.description[:100] or None),
+            )
+            for option in question.options[:25]
+        ]
+        placeholder = (question.header or question.question or "Choose an answer")[:150]
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
         self.bridge = bridge
         self.session_id = session_id
-        self.approval_id = approval_id
+        self.turn_id = turn_id
+        self.question = question
 
-    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success)
-    async def approve(
-        self,
-        interaction: discord.Interaction[BlueBot],
-        _button: discord.ui.Button[ApprovalView],
-    ) -> None:
-        await self.bridge.handle_approval_interaction(
-            interaction,
+    async def callback(self, interaction: discord.Interaction) -> None:
+        answer = self.values[0] if self.values else ""
+        await self.bridge.handle_request_user_input_interaction(
+            cast(discord.Interaction[BlueBot], interaction),
             self.session_id,
-            self.approval_id,
-            "approved",
-        )
-
-    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger)
-    async def deny(
-        self,
-        interaction: discord.Interaction[BlueBot],
-        _button: discord.ui.Button[ApprovalView],
-    ) -> None:
-        await self.bridge.handle_approval_interaction(
-            interaction,
-            self.session_id,
-            self.approval_id,
-            "denied",
+            self.turn_id,
+            {"answers": {self.question.id: {"answers": [answer]}}},
         )
 
 
-class SessionContinueButton(discord.ui.Button[discord.ui.LayoutView]):
-    def __init__(self, bridge: EveryCodeBridge) -> None:
-        super().__init__(label="Continue", style=discord.ButtonStyle.primary)
+class RequestUserInputModal(discord.ui.Modal):
+    def __init__(
+        self,
+        bridge: EveryCodeBridge,
+        session_id: str,
+        turn_id: str,
+        questions: list[RequestUserInputQuestion],
+    ) -> None:
+        super().__init__(title="Every Code input")
         self.bridge = bridge
+        self.session_id = session_id
+        self.turn_id = turn_id
+        self.questions = questions[:5]
+        self.inputs: list[discord.ui.TextInput[RequestUserInputModal]] = []
+        for index, question in enumerate(self.questions, start=1):
+            label_source = question.header or question.question or f"Question {index}"
+            label = label_source[:45]
+            details = []
+            if question.options:
+                details.append(
+                    "Options: " + ", ".join(option.label for option in question.options[:5])
+                )
+            if question.is_other:
+                details.append("Custom answers allowed")
+            placeholder = " | ".join(details)[:100] if details else None
+            field = discord.ui.TextInput(
+                label=label,
+                placeholder=placeholder,
+                default=None,
+                required=not question.is_other,
+                style=discord.TextStyle.short,
+            )
+            self.inputs.append(field)
+            self.add_item(field)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        answers = {
+            question.id: {"answers": [field.value.strip()]}
+            for question, field in zip(self.questions, self.inputs, strict=False)
+        }
+        await self.bridge.handle_request_user_input_interaction(
+            cast(discord.Interaction[BlueBot], interaction),
+            self.session_id,
+            self.turn_id,
+            {"answers": answers},
+        )
+
+
+class RequestUserInputModalSelect(discord.ui.Select[discord.ui.View]):
+    def __init__(
+        self,
+        bridge: EveryCodeBridge,
+        session_id: str,
+        turn_id: str,
+        questions: list[RequestUserInputQuestion],
+    ) -> None:
+        placeholder = (questions[0].header or questions[0].question or "Open answer form")[:150]
+        super().__init__(
+            placeholder=placeholder,
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label="Open answer form",
+                    value="open_modal",
+                    description="Respond in a modal dialog",
+                )
+            ],
+        )
+        self.bridge = bridge
+        self.session_id = session_id
+        self.turn_id = turn_id
+        self.questions = questions
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        await self.bridge.handle_go_ahead_interaction(cast(discord.Interaction[BlueBot], interaction))
-
-
-class SessionStatusButton(discord.ui.Button[discord.ui.LayoutView]):
-    def __init__(self, bridge: EveryCodeBridge) -> None:
-        super().__init__(label="Status", style=discord.ButtonStyle.secondary)
-        self.bridge = bridge
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await self.bridge.handle_status_interaction(cast(discord.Interaction[BlueBot], interaction))
+        if not self.values or self.values[0] != "open_modal":
+            return
+        await interaction.response.send_modal(
+            RequestUserInputModal(
+                self.bridge,
+                self.session_id,
+                self.turn_id,
+                self.questions,
+            )
+        )
 
 
 class EveryCodeBridge:
@@ -318,6 +392,9 @@ class EveryCodeBridge:
             elif message_type == "approval_request":
                 approval = RemoteApprovalRequest.from_payload(payload)
                 await self.handle_approval_request(approval)
+            elif message_type == "request_user_input":
+                request_user_input = RemoteRequestUserInput.from_payload(payload)
+                await self.handle_request_user_input(request_user_input)
             elif message_type == "approval_decision_ack":
                 logger.info("Every Code approval decision ack: %s", payload.get("approval_id"))
                 await self.handle_approval_decision_ack(payload)
@@ -600,7 +677,7 @@ class EveryCodeBridge:
         )
         await interaction.response.send_message(response, ephemeral=True)
         if response == "Asked Every Code to go ahead until it needs you.":
-            await self.clear_interaction_controls(interaction, "Every Code is continuing.")
+            await self.clear_interaction_controls(interaction)
 
     async def handle_status_interaction(
         self,
@@ -614,23 +691,23 @@ class EveryCodeBridge:
     async def clear_interaction_controls(
         self,
         interaction: discord.Interaction[BlueBot],
-        content: str,
     ) -> None:
         message = interaction.message
         if message is None:
             return
+        session: EveryCodeSession | None = None
         if isinstance(interaction.channel, discord.Thread):
             session = self.sessions.get_by_thread(interaction.channel.id)
+        try:
+            await message.delete()
+        except discord.NotFound:
             if session is not None and session.control_message_id == message.id:
                 session.control_message_id = None
-        try:
-            await message.edit(
-                content=content,
-                view=None,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
         except discord.DiscordException:
             logger.warning("Unable to clear Every Code control message %s", message.id)
+        else:
+            if session is not None and session.control_message_id == message.id:
+                session.control_message_id = None
 
     def active_sessions_summary(self) -> str:
         sessions = list(self.sessions.by_session.values())
@@ -720,15 +797,102 @@ class EveryCodeBridge:
         if not isinstance(channel, discord.Thread):
             return
 
-        view = ApprovalView(self, approval.session_id, approval.approval_id)
         message = await channel.send(
             self.format_approval_request(approval),
             allowed_mentions=discord.AllowedMentions.none(),
-            view=view,
+        )
+        await self.add_message_reactions(
+            message,
+            [REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY],
         )
         session.pending_approvals[approval.approval_id] = PendingRemoteApproval(
             thread_id=session.thread_id,
             message_id=message.id,
+        )
+
+    async def handle_request_user_input(self, request: RemoteRequestUserInput) -> None:
+        session = self.sessions.get(request.session_id)
+        if session is None or session.thread_id is None:
+            logger.warning("Every Code request_user_input for unknown session: %s", request.session_id)
+            return
+        if request.session_epoch != session.session_epoch:
+            logger.warning(
+                "Every Code request_user_input for stale session epoch: %s",
+                request.session_id,
+            )
+            return
+
+        await self.clear_pending_user_inputs(
+            session,
+            "Every Code is waiting on a newer prompt.",
+        )
+
+        channel = self.bot.get_channel(session.thread_id)
+        if not isinstance(channel, discord.Thread):
+            return
+
+        message = await channel.send(
+            self.format_request_user_input(request),
+            allowed_mentions=discord.AllowedMentions.none(),
+            view=self.request_user_input_view(session.session_id, request),
+        )
+        session.pending_user_inputs[request.turn_id] = PendingRemoteUserInput(
+            thread_id=session.thread_id,
+            message_id=message.id,
+            turn_id=request.turn_id,
+        )
+
+    async def handle_request_user_input_interaction(
+        self,
+        interaction: discord.Interaction[BlueBot],
+        session_id: str,
+        turn_id: str,
+        response: dict[str, object],
+    ) -> None:
+        if not self.is_operator(interaction.user):
+            await interaction.response.send_message(
+                "Only Every Code operators can answer prompts.",
+                ephemeral=True,
+            )
+            return
+
+        session = self.sessions.get(session_id)
+        if session is None or session.websocket.closed:
+            await interaction.response.send_message(
+                "Every Code session is offline; answer was not delivered.",
+                ephemeral=True,
+            )
+            return
+
+        pending = session.pending_user_inputs.get(turn_id)
+        if pending is None:
+            await interaction.response.send_message(
+                "This prompt is no longer active.",
+                ephemeral=True,
+            )
+            return
+
+        command_id = str(uuid.uuid4())
+        session.pending_commands[command_id] = PendingRemoteCommand(
+            thread_id=pending.thread_id,
+            message_id=pending.message_id,
+            notify_on_reject=False,
+        )
+        await session.websocket.send_json(
+            RemoteCommand(
+                command_id=command_id,
+                session_id=session.session_id,
+                session_epoch=session.session_epoch,
+                kind="request_user_input_response",
+                turn_id=turn_id,
+                response=response,
+                issued_by=str(interaction.user.id),
+            ).to_message()
+        )
+        await interaction.response.edit_message(
+            content=self.format_request_user_input_pending(interaction.user),
+            view=None,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     async def handle_approval_interaction(
@@ -773,9 +937,107 @@ class EveryCodeBridge:
         )
         await interaction.response.edit_message(
             content=self.format_approval_pending(decision, interaction.user),
-            view=self.disabled_approval_view(session_id, approval_id),
+            view=None,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+    async def handle_thread_reaction(
+        self,
+        thread: discord.Thread,
+        message_id: int,
+        emoji: str,
+        user: discord.User | discord.Member,
+    ) -> bool:
+        if not self.is_operator(user):
+            return False
+
+        session = self.sessions.get_by_thread(thread.id)
+        if session is None:
+            return False
+
+        if session.control_message_id == message_id:
+            return await self.handle_session_control_reaction(session, thread, message_id, emoji, user)
+
+        for approval_id, pending in session.pending_approvals.items():
+            if pending.message_id == message_id:
+                return await self.handle_approval_reaction(
+                    session,
+                    thread,
+                    approval_id,
+                    emoji,
+                    user,
+                )
+        return False
+
+    async def handle_session_control_reaction(
+        self,
+        session: EveryCodeSession,
+        thread: discord.Thread,
+        message_id: int,
+        emoji: str,
+        user: discord.User | discord.Member,
+    ) -> bool:
+        if emoji == REACTION_CONTROL_CONTINUE:
+            response = await self.send_continue_autonomously(thread, user)
+            await self.remove_message_reaction(thread, message_id, emoji, user)
+            if response == "Asked Every Code to go ahead until it needs you.":
+                await self.clear_session_controls(session)
+            else:
+                await self.post_thread_notice(thread.id, response)
+            return True
+        if emoji == REACTION_CONTROL_STATUS:
+            await self.remove_message_reaction(thread, message_id, emoji, user)
+            await self.post_thread_notice(
+                thread.id,
+                self.session_status_summary(thread, user),
+            )
+            return True
+        return False
+
+    async def handle_approval_reaction(
+        self,
+        session: EveryCodeSession,
+        thread: discord.Thread,
+        approval_id: str,
+        emoji: str,
+        user: discord.User | discord.Member,
+    ) -> bool:
+        if emoji not in {REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY}:
+            return False
+
+        pending = session.pending_approvals.get(approval_id)
+        if pending is None:
+            await self.post_thread_notice(thread.id, "This approval is no longer active.")
+            return True
+        if pending.decision is not None:
+            await self.remove_message_reaction(thread, pending.message_id, emoji, user)
+            return True
+        if session.websocket.closed:
+            await self.remove_message_reaction(thread, pending.message_id, emoji, user)
+            await self.post_thread_notice(thread.id, "Every Code session is offline; approval was not delivered.")
+            return True
+
+        decision: Literal["approved", "denied"]
+        if emoji == REACTION_APPROVAL_APPROVE:
+            decision = "approved"
+        else:
+            decision = "denied"
+
+        pending.decision = decision
+        pending.decided_by = user.id
+        await session.websocket.send_json(
+            RemoteApprovalDecision(
+                approval_id=approval_id,
+                session_id=session.session_id,
+                session_epoch=session.session_epoch,
+                decision=decision,
+            ).to_message()
+        )
+        await self.edit_approval_message(
+            pending,
+            self.format_approval_pending(decision, user),
+        )
+        return True
 
     async def handle_approval_decision_ack(self, payload: dict[str, object]) -> None:
         session_id = str(payload.get("session_id") or "")
@@ -814,6 +1076,7 @@ class EveryCodeBridge:
                 view=None,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+            await self.clear_message_reactions(message)
         except discord.DiscordException:
             logger.warning("Unable to edit Every Code approval message %s", pending.message_id)
 
@@ -835,12 +1098,20 @@ class EveryCodeBridge:
                 reaction = REACTION_COMPACTING
             else:
                 reaction = REACTION_IN_PROGRESS
-            await self.clear_session_controls(session, "Every Code is working.")
+            await self.clear_session_controls(session)
+            await self.clear_pending_user_inputs(
+                session,
+                "Every Code is no longer waiting on this prompt.",
+            )
             await self.update_active_command_reaction(session, reaction)
             return
 
         if message_type == "error":
-            await self.clear_session_controls(session, "Every Code hit an error.")
+            await self.clear_session_controls(session)
+            await self.clear_pending_user_inputs(
+                session,
+                "Every Code stopped waiting on this prompt.",
+            )
             await self.update_active_command_reaction(session, REACTION_REJECTED)
             return
 
@@ -848,6 +1119,10 @@ class EveryCodeBridge:
             await self.post_assistant_message(session.thread_id, status.assistant_message)
         if message_type == "turn_complete":
             await self.update_active_command_reaction(session, REACTION_FINISHED, clear=True)
+            await self.clear_pending_user_inputs(
+                session,
+                "Every Code is no longer waiting on this prompt.",
+            )
             await self.post_session_controls(session)
 
     async def handle_user_message(self, user_message: UserMessage) -> None:
@@ -908,32 +1183,48 @@ class EveryCodeBridge:
     async def post_session_controls(self, session: EveryCodeSession) -> None:
         if session.thread_id is None:
             return
-        await self.clear_session_controls(session, "Every Code is no longer waiting here.")
+        await self.clear_session_controls(session)
         channel = self.bot.get_channel(session.thread_id)
         if not isinstance(channel, discord.Thread):
             return
         message = await channel.send(
+            self.format_waiting_for_direction(session),
             allowed_mentions=discord.AllowedMentions.none(),
-            view=self.session_control_view(session),
+        )
+        await self.add_message_reactions(
+            message,
+            [REACTION_CONTROL_CONTINUE, REACTION_CONTROL_STATUS],
         )
         session.control_message_id = message.id
 
-    def session_control_view(self, session: EveryCodeSession) -> discord.ui.LayoutView:
-        view = discord.ui.LayoutView(timeout=None)
-        view.add_item(
-            discord.ui.Container(
-                discord.ui.TextDisplay(self.format_waiting_for_direction(session)),
-                discord.ui.Separator(),
-                discord.ui.ActionRow(
-                    SessionContinueButton(self),
-                    SessionStatusButton(self),
-                ),
-                accent_color=discord.Color.blurple(),
-            )
-        )
-        return view
+    async def clear_pending_user_inputs(
+        self,
+        session: EveryCodeSession,
+        content: str,
+    ) -> None:
+        if not session.pending_user_inputs:
+            return
 
-    async def clear_session_controls(self, session: EveryCodeSession, content: str) -> None:
+        pending_items = list(session.pending_user_inputs.values())
+        session.pending_user_inputs.clear()
+        for pending in pending_items:
+            channel = self.bot.get_channel(pending.thread_id)
+            if not isinstance(channel, discord.Thread):
+                continue
+            try:
+                message = await channel.fetch_message(pending.message_id)
+                await message.edit(
+                    content=content[:DISCORD_MESSAGE_LIMIT],
+                    view=None,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.DiscordException:
+                logger.warning(
+                    "Unable to clear Every Code request_user_input message %s",
+                    pending.message_id,
+                )
+
+    async def clear_session_controls(self, session: EveryCodeSession) -> None:
         if session.thread_id is None or session.control_message_id is None:
             return
         channel = self.bot.get_channel(session.thread_id)
@@ -941,17 +1232,15 @@ class EveryCodeBridge:
             return
         try:
             message = await channel.fetch_message(session.control_message_id)
-            await message.edit(
-                content=content[:DISCORD_MESSAGE_LIMIT],
-                view=None,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            await message.delete()
+        except discord.NotFound:
+            session.control_message_id = None
         except discord.DiscordException:
             logger.warning(
                 "Unable to clear Every Code control message %s",
                 session.control_message_id,
             )
-        finally:
+        else:
             session.control_message_id = None
 
     async def post_thread_notice(self, thread_id: int, text: str) -> None:
@@ -1058,18 +1347,50 @@ class EveryCodeBridge:
             return False
         return any(role.name == role_name for role in user.roles)
 
-    def disabled_approval_view(self, session_id: str, approval_id: str) -> ApprovalView:
-        view = ApprovalView(self, session_id, approval_id)
-        for child in view.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
+    def request_user_input_view(
+        self,
+        session_id: str,
+        request: RemoteRequestUserInput,
+    ) -> discord.ui.View:
+        view = discord.ui.View(timeout=3600)
+        if self.can_render_request_user_input_as_select(request):
+            view.add_item(
+                RequestUserInputSelect(
+                    self,
+                    session_id,
+                    request.turn_id,
+                    request.questions[0],
+                )
+            )
+            return view
+
+        view.add_item(
+            RequestUserInputModalSelect(
+                self,
+                session_id,
+                request.turn_id,
+                request.questions,
+            )
+        )
         return view
+
+    @staticmethod
+    def can_render_request_user_input_as_select(request: RemoteRequestUserInput) -> bool:
+        if len(request.questions) != 1:
+            return False
+        question = request.questions[0]
+        if question.is_other or question.is_secret:
+            return False
+        if not question.options:
+            return False
+        return len(question.options) <= 25
 
     @staticmethod
     def format_approval_request(approval: RemoteApprovalRequest) -> str:
         command = shlex.join(approval.command) if approval.command else ""
         parts = [
             "**Approval requested**",
+            "Quick review: `✅` approve · `✖️` deny",
             "",
             f"```sh\n{command[:1600]}\n```",
         ]
@@ -1094,16 +1415,35 @@ class EveryCodeBridge:
         return f"**{label}**{by}"
 
     @staticmethod
+    def format_request_user_input(request: RemoteRequestUserInput) -> str:
+        parts = ["**Need input**"]
+        for question in request.questions:
+            header = question.header or question.id or "Question"
+            parts.extend(["", f"**{header}**"])
+            if question.question:
+                parts.append(question.question)
+            if question.options:
+                for option in question.options:
+                    line = f"- {option.label}"
+                    if option.description:
+                        line = f"{line}: {option.description}"
+                    parts.append(line[:200])
+            elif question.is_secret:
+                parts.append("Respond privately through the attached form.")
+        return "\n".join(parts)[:DISCORD_MESSAGE_LIMIT]
+
+    @staticmethod
+    def format_request_user_input_pending(user: discord.User | discord.Member) -> str:
+        return (
+            "**Answer sent**\n"
+            "Waiting for local Every Code to accept the response.\n"
+            f"by: `{user}`"
+        )
+
+    @staticmethod
     def format_waiting_for_direction(session: EveryCodeSession) -> str:
-        repo = Path(session.hello.cwd).name or "session"
-        branch = f" · `{session.hello.branch}`" if session.hello.branch else ""
-        status = session.last_status_message or "Turn complete"
-        return "\n".join(
-            [
-                f"**{status}**",
-                f"`{repo}`{branch}",
-            ]
-        )[:DISCORD_MESSAGE_LIMIT]
+        del session
+        return "\u200b"
 
     def _authorized(self, request: web.Request) -> bool:
         token = self.bot.config.every_code.token
@@ -1111,6 +1451,34 @@ class EveryCodeBridge:
             return False
         expected = f"Bearer {token}"
         return request.headers.get("Authorization") == expected
+
+    async def add_message_reactions(
+        self,
+        message: discord.Message,
+        reactions: list[str],
+    ) -> None:
+        for reaction in reactions:
+            try:
+                await message.add_reaction(reaction)
+            except discord.DiscordException:
+                logger.warning("Unable to add Every Code reaction %s to %s", reaction, message.id)
+
+    async def clear_message_reactions(self, message: discord.Message) -> None:
+        with suppress(discord.DiscordException):
+            await message.clear_reactions()
+
+    async def remove_message_reaction(
+        self,
+        thread: discord.Thread,
+        message_id: int,
+        reaction: str,
+        user: discord.User | discord.Member,
+    ) -> None:
+        try:
+            message = await thread.fetch_message(message_id)
+            await message.remove_reaction(reaction, user)
+        except discord.DiscordException:
+            logger.warning("Unable to remove Every Code reaction %s from %s", reaction, message_id)
 
     @staticmethod
     def _split_discord_message(text: str, limit: int) -> list[str]:
