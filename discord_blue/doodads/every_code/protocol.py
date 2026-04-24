@@ -183,6 +183,7 @@ class RemoteCommand:
     kind: Literal[
         "reply",
         "continue_autonomously",
+        "end_session",
         "request_user_input_response",
         "status_request",
     ]

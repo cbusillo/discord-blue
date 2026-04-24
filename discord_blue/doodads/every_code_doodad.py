@@ -120,6 +120,21 @@ class EveryCodeDoodad(commands.Cog):
             ephemeral=True,
         )
 
+    @code_group.command(
+        name="end-session",
+        description="Ask this Every Code session to disconnect.",
+    )
+    async def end_session_command(self, interaction: discord.Interaction[BlueBot]) -> None:
+        if not self.bot.config.every_code.enabled:
+            await interaction.response.send_message("Every Code is not enabled.", ephemeral=True)
+            return
+
+        response = await self.bridge.send_end_session(
+            interaction.channel,
+            interaction.user,
+        )
+        await interaction.response.send_message(response, ephemeral=True)
+
     async def cog_unload(self) -> None:
         await self.bridge.stop()
 

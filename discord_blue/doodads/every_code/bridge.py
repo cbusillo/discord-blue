@@ -66,8 +66,15 @@ STATUS_REACTIONS = {
 }
 REACTION_CONTROL_CONTINUE = "▶️"
 REACTION_CONTROL_STATUS = "ℹ️"
+REACTION_CONTROL_END = "⏹️"
 REACTION_APPROVAL_APPROVE = "✅"
 REACTION_APPROVAL_DENY = "✖️"
+CONTROL_REACTIONS = {
+    REACTION_CONTROL_CONTINUE,
+    REACTION_CONTROL_STATUS,
+    REACTION_CONTROL_END,
+}
+TRANSIENT_REACTIONS = STATUS_REACTIONS | CONTROL_REACTIONS
 
 
 class RequestUserInputSelect(discord.ui.Select[discord.ui.View]):
@@ -661,11 +668,42 @@ class EveryCodeBridge:
         )
         session.pending_commands[command.command_id] = PendingRemoteCommand(
             thread_id=channel.id,
-            message_id=None,
-            notify_on_reject=True,
+            message_id=session.control_message_id,
+            reject_notice="Every Code could not go ahead",
         )
         await session.websocket.send_json(command.to_message())
         return "Asked Every Code to go ahead until it needs you."
+
+    async def send_end_session(
+        self,
+        channel: object,
+        user: discord.User | discord.Member,
+    ) -> str:
+        if not isinstance(channel, discord.Thread):
+            return "Use `/code end-session` inside an Every Code session thread."
+        if not self.is_operator(user):
+            return "Only Every Code operators can end a session."
+
+        session = self.sessions.get_by_thread(channel.id)
+        if session is None:
+            return "This thread is not attached to a live Every Code session."
+        if session.websocket.closed:
+            return "Every Code session is already offline."
+
+        command = RemoteCommand(
+            command_id=str(uuid.uuid4()),
+            session_id=session.session_id,
+            session_epoch=session.session_epoch,
+            kind="end_session",
+            issued_by=str(user.id),
+        )
+        session.pending_commands[command.command_id] = PendingRemoteCommand(
+            thread_id=channel.id,
+            message_id=session.control_message_id,
+            reject_notice="Every Code could not end the session",
+        )
+        await session.websocket.send_json(command.to_message())
+        return "Asked Every Code to end this session."
 
     async def handle_go_ahead_interaction(
         self,
@@ -780,9 +818,9 @@ class EveryCodeBridge:
         if command is not None:
             if command.message_id is not None:
                 await self.set_message_reaction(command.thread_id, command.message_id, REACTION_REJECTED)
-            elif command.notify_on_reject:
+            if command.reject_notice is not None:
                 reason = str(payload.get("reason") or "command was rejected")
-                await self.post_thread_notice(command.thread_id, f"Every Code could not go ahead: {reason}")
+                await self.post_thread_notice(command.thread_id, f"{command.reject_notice}: {reason}")
 
     async def handle_approval_request(self, approval: RemoteApprovalRequest) -> None:
         session = self.sessions.get(approval.session_id)
@@ -876,7 +914,6 @@ class EveryCodeBridge:
         session.pending_commands[command_id] = PendingRemoteCommand(
             thread_id=pending.thread_id,
             message_id=pending.message_id,
-            notify_on_reject=False,
         )
         await session.websocket.send_json(
             RemoteCommand(
@@ -979,10 +1016,15 @@ class EveryCodeBridge:
     ) -> bool:
         if emoji == REACTION_CONTROL_CONTINUE:
             response = await self.send_continue_autonomously(thread, user)
-            await self.remove_message_reaction(thread, message_id, emoji, user)
             if response == "Asked Every Code to go ahead until it needs you.":
-                await self.clear_session_controls(session)
+                await self.replace_message_reactions(
+                    thread,
+                    message_id,
+                    [REACTION_QUEUED],
+                    remove_user_reaction=(emoji, user),
+                )
             else:
+                await self.remove_message_reaction(thread, message_id, emoji, user)
                 await self.post_thread_notice(thread.id, response)
             return True
         if emoji == REACTION_CONTROL_STATUS:
@@ -991,6 +1033,19 @@ class EveryCodeBridge:
                 thread.id,
                 self.session_status_summary(thread, user),
             )
+            return True
+        if emoji == REACTION_CONTROL_END:
+            response = await self.send_end_session(thread, user)
+            if response == "Asked Every Code to end this session.":
+                await self.replace_message_reactions(
+                    thread,
+                    message_id,
+                    [REACTION_QUEUED],
+                    remove_user_reaction=(emoji, user),
+                )
+            else:
+                await self.remove_message_reaction(thread, message_id, emoji, user)
+                await self.post_thread_notice(thread.id, response)
             return True
         return False
 
@@ -1098,7 +1153,8 @@ class EveryCodeBridge:
                 reaction = REACTION_COMPACTING
             else:
                 reaction = REACTION_IN_PROGRESS
-            await self.clear_session_controls(session)
+            if not self.active_command_uses_control_message(session):
+                await self.clear_session_controls(session)
             await self.clear_pending_user_inputs(
                 session,
                 "Every Code is no longer waiting on this prompt.",
@@ -1107,7 +1163,8 @@ class EveryCodeBridge:
             return
 
         if message_type == "error":
-            await self.clear_session_controls(session)
+            if not self.active_command_uses_control_message(session):
+                await self.clear_session_controls(session)
             await self.clear_pending_user_inputs(
                 session,
                 "Every Code stopped waiting on this prompt.",
@@ -1135,7 +1192,18 @@ class EveryCodeBridge:
             return
         if not user_message.message.strip():
             return
-        await self.post_thread_notice(session.thread_id, f"**You**\n{user_message.message}")
+        await self.post_thread_notice(
+            session.thread_id,
+            self.format_user_message_notice(user_message.message),
+        )
+
+    def active_command_uses_control_message(self, session: EveryCodeSession) -> bool:
+        if session.control_message_id is None or session.active_command_id is None:
+            return False
+        command = session.pending_commands.get(session.active_command_id)
+        if command is None:
+            return False
+        return command.message_id == session.control_message_id
 
     async def update_active_command_reaction(
         self,
@@ -1170,7 +1238,7 @@ class EveryCodeBridge:
         try:
             await message.add_reaction(reaction)
             if bot_user is not None:
-                for existing in STATUS_REACTIONS - {reaction}:
+                for existing in TRANSIENT_REACTIONS - {reaction}:
                     with suppress(discord.DiscordException):
                         await message.remove_reaction(existing, bot_user)
         except discord.DiscordException:
@@ -1183,17 +1251,26 @@ class EveryCodeBridge:
     async def post_session_controls(self, session: EveryCodeSession) -> None:
         if session.thread_id is None:
             return
-        await self.clear_session_controls(session)
         channel = self.bot.get_channel(session.thread_id)
         if not isinstance(channel, discord.Thread):
             return
+        if session.control_message_id is not None:
+            replaced = await self.replace_message_reactions(
+                channel,
+                session.control_message_id,
+                [REACTION_CONTROL_CONTINUE, REACTION_CONTROL_STATUS, REACTION_CONTROL_END],
+            )
+            if replaced:
+                return
+            session.control_message_id = None
+
         message = await channel.send(
             self.format_waiting_for_direction(session),
             allowed_mentions=discord.AllowedMentions.none(),
         )
         await self.add_message_reactions(
             message,
-            [REACTION_CONTROL_CONTINUE, REACTION_CONTROL_STATUS],
+            [REACTION_CONTROL_CONTINUE, REACTION_CONTROL_STATUS, REACTION_CONTROL_END],
         )
         session.control_message_id = message.id
 
@@ -1441,6 +1518,10 @@ class EveryCodeBridge:
         )
 
     @staticmethod
+    def format_user_message_notice(message: str) -> str:
+        return f"**You**\n>>> {message.strip()}"
+
+    @staticmethod
     def format_waiting_for_direction(session: EveryCodeSession) -> str:
         del session
         return "\u200b"
@@ -1479,6 +1560,27 @@ class EveryCodeBridge:
             await message.remove_reaction(reaction, user)
         except discord.DiscordException:
             logger.warning("Unable to remove Every Code reaction %s from %s", reaction, message_id)
+
+    async def replace_message_reactions(
+        self,
+        thread: discord.Thread,
+        message_id: int,
+        reactions: list[str],
+        *,
+        remove_user_reaction: tuple[str, discord.User | discord.Member] | None = None,
+    ) -> bool:
+        try:
+            message = await thread.fetch_message(message_id)
+            if remove_user_reaction is not None:
+                reaction, user = remove_user_reaction
+                with suppress(discord.DiscordException):
+                    await message.remove_reaction(reaction, user)
+            await self.clear_message_reactions(message)
+            await self.add_message_reactions(message, reactions)
+            return True
+        except discord.DiscordException:
+            logger.warning("Unable to replace Every Code reactions on %s", message_id)
+            return False
 
     @staticmethod
     def _split_discord_message(text: str, limit: int) -> list[str]:
