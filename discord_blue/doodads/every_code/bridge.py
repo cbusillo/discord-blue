@@ -65,7 +65,7 @@ STATUS_REACTIONS = {
     REACTION_REJECTED,
 }
 REACTION_CONTROL_CONTINUE = "▶️"
-REACTION_CONTROL_STATUS = "ℹ️"
+REACTION_CONTROL_STATUS = "\N{INFORMATION SOURCE}\N{VARIATION SELECTOR-16}"
 REACTION_CONTROL_PAUSE = "⏸️"
 REACTION_CONTROL_END = "⏹️"
 REACTION_APPROVAL_APPROVE = "✅"
@@ -82,119 +82,177 @@ TRANSIENT_REACTIONS = STATUS_REACTIONS | CONTROL_REACTIONS
 class RequestUserInputSelect(discord.ui.Select[discord.ui.View]):
     def __init__(
         self,
-        bridge: EveryCodeBridge,
-        session_id: str,
-        turn_id: str,
+        parent_view: RequestUserInputView,
         question: RequestUserInputQuestion,
     ) -> None:
         options = [
             discord.SelectOption(
                 label=option.label[:100],
+                value=option.label[:100],
                 description=(option.description[:100] or None),
             )
             for option in question.options[:25]
         ]
+        if question.is_other and len(options) < 25:
+            options.append(
+                discord.SelectOption(
+                    label="Other...",
+                    value="__other__",
+                    description="Provide a custom answer",
+                )
+            )
         placeholder = (question.header or question.question or "Choose an answer")[:150]
         super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
-        self.bridge = bridge
-        self.session_id = session_id
-        self.turn_id = turn_id
+        self.parent_view = parent_view
         self.question = question
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        answer = self.values[0] if self.values else ""
-        await self.bridge.handle_request_user_input_interaction(
-            cast(discord.Interaction[BlueBot], interaction),
-            self.session_id,
-            self.turn_id,
-            {"answers": {self.question.id: {"answers": [answer]}}},
+        if not self.values:
+            return
+        value = self.values[0]
+        if value == "__other__":
+            await interaction.response.send_modal(
+                RequestUserInputAnswerModal(self.parent_view, self.question)
+            )
+            return
+        self.parent_view.set_answer(self.question.id, value)
+        await interaction.response.edit_message(
+            content=self.parent_view.format_prompt(),
+            view=self.parent_view,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
 
-class RequestUserInputModal(discord.ui.Modal):
+class RequestUserInputAnswerModal(discord.ui.Modal):
     def __init__(
         self,
-        bridge: EveryCodeBridge,
-        session_id: str,
-        turn_id: str,
-        questions: list[RequestUserInputQuestion],
+        parent_view: RequestUserInputView,
+        question: RequestUserInputQuestion,
     ) -> None:
-        super().__init__(title="Every Code input")
-        self.bridge = bridge
-        self.session_id = session_id
-        self.turn_id = turn_id
-        self.questions = questions[:5]
-        self.inputs: list[discord.ui.TextInput[RequestUserInputModal]] = []
-        for index, question in enumerate(self.questions, start=1):
-            label_source = question.header or question.question or f"Question {index}"
-            label = label_source[:45]
-            details = []
-            if question.options:
-                details.append(
-                    "Options: " + ", ".join(option.label for option in question.options[:5])
-                )
-            if question.is_other:
-                details.append("Custom answers allowed")
-            placeholder = " | ".join(details)[:100] if details else None
-            field = discord.ui.TextInput(
-                label=label,
-                placeholder=placeholder,
-                default=None,
-                required=not question.is_other,
-                style=discord.TextStyle.short,
-            )
-            self.inputs.append(field)
-            self.add_item(field)
+        title = (question.header or question.question or "Every Code input")[:45]
+        super().__init__(title=title)
+        self.parent_view = parent_view
+        self.question = question
+        self.answer: discord.ui.TextInput[RequestUserInputAnswerModal] = discord.ui.TextInput(
+            label=(question.header or question.question or "Answer")[:45],
+            placeholder=(question.question or None),
+            required=True,
+            style=discord.TextStyle.paragraph if not question.options else discord.TextStyle.short,
+            max_length=1500,
+        )
+        self.add_item(self.answer)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        answers = {
-            question.id: {"answers": [field.value.strip()]}
-            for question, field in zip(self.questions, self.inputs, strict=False)
-        }
-        await self.bridge.handle_request_user_input_interaction(
-            cast(discord.Interaction[BlueBot], interaction),
-            self.session_id,
-            self.turn_id,
-            {"answers": answers},
+        self.parent_view.set_answer(self.question.id, self.answer.value.strip())
+        await interaction.response.edit_message(
+            content=self.parent_view.format_prompt(),
+            view=self.parent_view,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
 
-class RequestUserInputModalSelect(discord.ui.Select[discord.ui.View]):
+class RequestUserInputAnswerButton(discord.ui.Button[discord.ui.View]):
+    def __init__(
+        self,
+        parent_view: RequestUserInputView,
+        question: RequestUserInputQuestion,
+    ) -> None:
+        label = (question.header or question.question or "Answer")[:80]
+        super().__init__(
+            label=label,
+            style=discord.ButtonStyle.secondary,
+            emoji="✏️",
+        )
+        self.parent_view = parent_view
+        self.question = question
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(
+            RequestUserInputAnswerModal(self.parent_view, self.question)
+        )
+
+
+class RequestUserInputSubmitButton(discord.ui.Button[discord.ui.View]):
+    def __init__(self, parent_view: RequestUserInputView) -> None:
+        super().__init__(label="Submit", style=discord.ButtonStyle.primary, emoji="✅")
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.parent_view.submit(cast(discord.Interaction[BlueBot], interaction))
+
+
+class RequestUserInputCancelButton(discord.ui.Button[discord.ui.View]):
+    def __init__(self, parent_view: RequestUserInputView) -> None:
+        super().__init__(label="Cancel", style=discord.ButtonStyle.danger, emoji="✖️")
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.parent_view.cancel(cast(discord.Interaction[BlueBot], interaction))
+
+
+class RequestUserInputView(discord.ui.View):
     def __init__(
         self,
         bridge: EveryCodeBridge,
         session_id: str,
-        turn_id: str,
-        questions: list[RequestUserInputQuestion],
+        request: RemoteRequestUserInput,
     ) -> None:
-        placeholder = (questions[0].header or questions[0].question or "Open answer form")[:150]
-        super().__init__(
-            placeholder=placeholder,
-            min_values=1,
-            max_values=1,
-            options=[
-                discord.SelectOption(
-                    label="Open answer form",
-                    value="open_modal",
-                    description="Respond in a modal dialog",
-                )
-            ],
-        )
+        super().__init__(timeout=3600)
         self.bridge = bridge
         self.session_id = session_id
-        self.turn_id = turn_id
-        self.questions = questions
+        self.request = request
+        self.answers: dict[str, str] = {}
 
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if not self.values or self.values[0] != "open_modal":
-            return
-        await interaction.response.send_modal(
-            RequestUserInputModal(
-                self.bridge,
-                self.session_id,
-                self.turn_id,
-                self.questions,
+        for question in request.questions[:4]:
+            if question.options:
+                self.add_item(RequestUserInputSelect(self, question))
+            else:
+                self.add_item(RequestUserInputAnswerButton(self, question))
+        self.add_item(RequestUserInputSubmitButton(self))
+        self.add_item(RequestUserInputCancelButton(self))
+
+    def set_answer(self, question_id: str, answer: str) -> None:
+        self.answers[question_id] = answer
+
+    def response_payload(self) -> dict[str, object]:
+        return {
+            "answers": {
+                question.id: {"answers": [self.answers.get(question.id, "")]}
+                for question in self.request.questions
+            }
+        }
+
+    def format_prompt(self) -> str:
+        return self.bridge.format_request_user_input(self.request, self.answers)
+
+    async def submit(self, interaction: discord.Interaction[BlueBot]) -> None:
+        missing = [
+            question.header or question.id or "Question"
+            for question in self.request.questions
+            if not self.answers.get(question.id, "").strip()
+        ]
+        if missing:
+            await interaction.response.send_message(
+                "Please answer before submitting: " + ", ".join(missing[:4]),
+                ephemeral=True,
             )
+            return
+        await self.bridge.handle_request_user_input_interaction(
+            interaction,
+            self.session_id,
+            self.request.call_id,
+            self.request.turn_id,
+            self.response_payload(),
+        )
+
+    async def cancel(self, interaction: discord.Interaction[BlueBot]) -> None:
+        await self.bridge.handle_request_user_input_interaction(
+            interaction,
+            self.session_id,
+            self.request.call_id,
+            self.request.turn_id,
+            {"answers": {}},
+            cancelled=True,
         )
 
 
@@ -919,7 +977,7 @@ class EveryCodeBridge:
             return
 
         message = await channel.send(
-            self.format_request_user_input(request),
+            self.format_request_user_input(request, {}),
             allowed_mentions=discord.AllowedMentions.none(),
             view=self.request_user_input_view(session.session_id, request),
         )
@@ -933,8 +991,11 @@ class EveryCodeBridge:
         self,
         interaction: discord.Interaction[BlueBot],
         session_id: str,
+        call_id: str,
         turn_id: str,
         response: dict[str, object],
+        *,
+        cancelled: bool = False,
     ) -> None:
         if not self.is_operator(interaction.user):
             await interaction.response.send_message(
@@ -971,13 +1032,14 @@ class EveryCodeBridge:
                 session_id=session.session_id,
                 session_epoch=session.session_epoch,
                 kind="request_user_input_response",
+                call_id=call_id,
                 turn_id=turn_id,
                 response=response,
                 issued_by=str(interaction.user.id),
             ).to_message()
         )
         await interaction.response.edit_message(
-            content=self.format_request_user_input_pending(interaction.user),
+            content=self.format_request_user_input_pending(interaction.user, cancelled=cancelled),
             view=None,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -1571,38 +1633,15 @@ class EveryCodeBridge:
         session_id: str,
         request: RemoteRequestUserInput,
     ) -> discord.ui.View:
-        view = discord.ui.View(timeout=3600)
-        if self.can_render_request_user_input_as_select(request):
-            view.add_item(
-                RequestUserInputSelect(
-                    self,
-                    session_id,
-                    request.turn_id,
-                    request.questions[0],
-                )
-            )
-            return view
-
-        view.add_item(
-            RequestUserInputModalSelect(
-                self,
-                session_id,
-                request.turn_id,
-                request.questions,
-            )
-        )
-        return view
+        return RequestUserInputView(self, session_id, request)
 
     @staticmethod
     def can_render_request_user_input_as_select(request: RemoteRequestUserInput) -> bool:
-        if len(request.questions) != 1:
-            return False
-        question = request.questions[0]
-        if question.is_other or question.is_secret:
-            return False
-        if not question.options:
-            return False
-        return len(question.options) <= 25
+        return (
+            len(request.questions) == 1
+            and bool(request.questions[0].options)
+            and len(request.questions[0].options) <= 25
+        )
 
     @staticmethod
     def format_approval_request(approval: RemoteApprovalRequest) -> str:
@@ -1634,13 +1673,22 @@ class EveryCodeBridge:
         return f"**{label}**{by}"
 
     @staticmethod
-    def format_request_user_input(request: RemoteRequestUserInput) -> str:
-        parts = ["**Need input**"]
+    def format_request_user_input(
+        request: RemoteRequestUserInput,
+        answers: dict[str, str] | None = None,
+    ) -> str:
+        answers = answers or {}
+        parts = ["**Need input**", "Use the controls below, then press **Submit**."]
         for question in request.questions:
             header = question.header or question.id or "Question"
-            parts.extend(["", f"**{header}**"])
+            answer = answers.get(question.id, "").strip()
+            status = "✅" if answer else "⬜"
+            parts.extend(["", f"{status} **{header}**"])
             if question.question:
                 parts.append(question.question)
+            if answer:
+                value = "[hidden]" if question.is_secret else answer
+                parts.append(f"Selected: `{value[:200]}`")
             if question.options:
                 for option in question.options:
                     line = f"- {option.label}"
@@ -1652,9 +1700,14 @@ class EveryCodeBridge:
         return "\n".join(parts)[:DISCORD_MESSAGE_LIMIT]
 
     @staticmethod
-    def format_request_user_input_pending(user: discord.User | discord.Member) -> str:
+    def format_request_user_input_pending(
+        user: discord.User | discord.Member,
+        *,
+        cancelled: bool = False,
+    ) -> str:
+        label = "Answer cancelled" if cancelled else "Answer sent"
         return (
-            "**Answer sent**\n"
+            f"**{label}**\n"
             "Waiting for local Every Code to accept the response.\n"
             f"by: `{user}`"
         )

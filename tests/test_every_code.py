@@ -380,6 +380,7 @@ class ProtocolTests(unittest.TestCase):
             session_id="session-1",
             session_epoch="epoch-1",
             kind="request_user_input_response",
+            call_id="call-1",
             turn_id="turn-1",
             response={"answers": {"mode": {"answers": ["Safe"]}}},
             issued_by="123",
@@ -394,6 +395,7 @@ class ProtocolTests(unittest.TestCase):
                 "session_epoch": "epoch-1",
                 "kind": "request_user_input_response",
                 "text": None,
+                "call_id": "call-1",
                 "turn_id": "turn-1",
                 "response": {"answers": {"mode": {"answers": ["Safe"]}}},
                 "issued_by": "123",
@@ -641,7 +643,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(thread.sent_views[0])
         self.assertIsNone(thread.sent_views[1])
         control_message = await thread.fetch_message(902)
-        self.assertEqual(control_message.reactions, ["▶️", "ℹ️", "⏹️"])
+        self.assertEqual(control_message.reactions, ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"])
         self.assertEqual(session.control_message_id, 902)
 
     async def test_approval_request_posts_compact_reactions(self) -> None:
@@ -741,7 +743,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        self.assertEqual(control_message.reactions, ["▶️", "ℹ️", "⏹️"])
+        self.assertEqual(control_message.reactions, ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"])
         self.assertEqual(session.control_message_id, 901)
         self.assertEqual(thread.sent_messages, [])
 
@@ -898,7 +900,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         control_message = await thread.fetch_message(901)
-        self.assertEqual(control_message.reactions, ["▶️", "ℹ️", "⏹️"])
+        self.assertEqual(control_message.reactions, ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"])
         self.assertEqual(websocket.sent_json, [])
 
     async def test_approval_reaction_edits_message_pending_state(self) -> None:
@@ -983,11 +985,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(thread.sent_views[0])
         children = list(cast(Any, thread.sent_views[0]).children)
         selects = [child for child in children if isinstance(child, bridge_module.discord.ui.Select)]
+        buttons = [child for child in children if isinstance(child, bridge_module.discord.ui.Button)]
         self.assertEqual(len(selects), 1)
         self.assertEqual([option.label for option in selects[0].options], ["Fast", "Safe"])
+        self.assertEqual([button.label for button in buttons], ["Submit", "Cancel"])
         self.assertIn("turn-1", session.pending_user_inputs)
 
-    async def test_request_user_input_modal_prompt_uses_open_form_select(self) -> None:
+    async def test_request_user_input_modal_prompt_uses_buttons(self) -> None:
         config = Config()
         thread = FakeThread(555)
         bridge = EveryCodeBridge(FakeBot(config, thread))
@@ -1027,11 +1031,59 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         children = list(cast(Any, thread.sent_views[0]).children)
-        self.assertEqual(len(children), 1)
-        select = children[0]
-        self.assertIsInstance(select, bridge_module.discord.ui.Select)
-        self.assertEqual(select.placeholder, "Summary")
-        self.assertEqual([option.label for option in select.options], ["Open answer form"])
+        self.assertEqual(len(children), 4)
+        buttons = [child for child in children if isinstance(child, bridge_module.discord.ui.Button)]
+        self.assertEqual([button.label for button in buttons], ["Summary", "Token", "Submit", "Cancel"])
+        self.assertIn("Use the controls below", thread.sent_messages[0])
+
+    async def test_request_user_input_submit_sends_call_id(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        websocket = FakeWebSocket()
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=websocket,
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+        request = RemoteRequestUserInput(
+            call_id="call-1",
+            turn_id="turn-1",
+            session_id="session-1",
+            session_epoch="epoch-1",
+            questions=[
+                RequestUserInputQuestion(
+                    id="mode",
+                    header="Build mode",
+                    question="Choose a mode",
+                    is_other=False,
+                    is_secret=False,
+                    options=[
+                        RequestUserInputQuestionOption(
+                            label="Safe",
+                            description="Run the full path",
+                        ),
+                    ],
+                )
+            ],
+        )
+        await bridge.handle_request_user_input(request)
+
+        view = cast(Any, thread.sent_views[0])
+        view.set_answer("mode", "Safe")
+        interaction = FakeInteraction(thread)
+        await view.submit(interaction)
+
+        self.assertEqual(websocket.sent_json[0]["call_id"], "call-1")
+        self.assertEqual(websocket.sent_json[0]["turn_id"], "turn-1")
+        self.assertEqual(
+            websocket.sent_json[0]["response"],
+            {"answers": {"mode": {"answers": ["Safe"]}}},
+        )
+        self.assertIn("Answer sent", interaction.response.edits[0][0])
 
     async def test_status_changed_clears_contextual_controls_for_active_reply_command(self) -> None:
         config = Config()
@@ -1075,7 +1127,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = EveryCodeBridge(FakeBot(config, thread))
         control_message = FakeReplyMessage(901, thread, "Waiting")
-        control_message.reactions = ["▶️", "ℹ️", "⏹️"]
+        control_message.reactions = ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"]
         thread.add_message(control_message)
         session = EveryCodeSession(
             hello=make_hello(),

@@ -189,12 +189,13 @@ class RemoteCommand:
         "status_request",
     ]
     text: str | None = None
+    call_id: str | None = None
     turn_id: str | None = None
     response: dict[str, Any] | None = None
     issued_by: str | None = None
 
     def to_message(self) -> dict[str, Any]:
-        message = {
+        message: dict[str, Any] = {
             "type": "command",
             "command_id": self.command_id,
             "session_id": self.session_id,
@@ -203,6 +204,8 @@ class RemoteCommand:
             "text": self.text,
             "issued_by": self.issued_by,
         }
+        if self.call_id is not None:
+            message["call_id"] = self.call_id
         if self.turn_id is not None:
             message["turn_id"] = self.turn_id
         if self.response is not None:
