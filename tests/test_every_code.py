@@ -7,14 +7,16 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, AsyncIterator, TypeAlias, cast
+from typing import Any, cast
 
-if TYPE_CHECKING:
-    from discord_blue.config import Config as ConfigType
-    from discord_blue.doodads.every_code.protocol import SessionHello as SessionHelloType
-else:
-    ConfigType: TypeAlias = object
-    SessionHelloType: TypeAlias = object
+from tests.fakes_every_code import FakeBot
+from tests.fakes_every_code import FakeInteraction
+from tests.fakes_every_code import FakeReplyMessage
+from tests.fakes_every_code import FakeTextChannel
+from tests.fakes_every_code import FakeThread
+from tests.fakes_every_code import FakeWebSocket
+from tests.fakes_every_code import add_bot_message
+from tests.fakes_every_code import make_hello
 
 _TEST_HOME = tempfile.TemporaryDirectory()
 os.environ["HOME"] = _TEST_HOME.name
@@ -62,169 +64,6 @@ threads_module = importlib.import_module("discord_blue.doodads.every_code.thread
 session_notification_message = threads_module.session_notification_message
 session_start_message = threads_module.session_start_message
 session_thread_name = threads_module.session_thread_name
-
-
-class FakeWebSocket:
-    def __init__(self, *, closed: bool = False) -> None:
-        self.closed = closed
-        self.sent_json: list[dict[str, object]] = []
-
-    async def send_json(self, payload: dict[str, object]) -> None:
-        self.sent_json.append(payload)
-
-
-class FakeReplyMessage:
-    def __init__(self, message_id: int, channel: FakeThread, content: str = "") -> None:
-        self.id = message_id
-        self.channel = channel
-        self.content = content
-        self.author = SimpleNamespace(id=123)
-        self.reactions: list[str] = []
-        self.replies: list[str] = []
-        self.edits: list[tuple[str, bool]] = []
-        self.deleted = False
-
-    async def add_reaction(self, reaction: str) -> None:
-        self.reactions.append(reaction)
-
-    async def remove_reaction(self, reaction: str, _user: object) -> None:
-        if reaction in self.reactions:
-            self.reactions.remove(reaction)
-
-    async def clear_reactions(self) -> None:
-        self.reactions.clear()
-
-    async def reply(self, content: str, *, mention_author: bool) -> None:
-        del mention_author
-        self.replies.append(content)
-
-    async def edit(self, content: str, **kwargs: object) -> None:
-        self.content = content
-        self.edits.append((content, kwargs.get("view") is None))
-
-    async def delete(self) -> None:
-        self.deleted = True
-
-
-class FakeThread:
-    def __init__(self, thread_id: int, *, archived: bool = False, locked: bool = False) -> None:
-        self.id = thread_id
-        self.archived = archived
-        self.locked = locked
-        self._messages: dict[int, FakeReplyMessage] = {}
-        self._history: list[FakeReplyMessage] = []
-        self.sent_messages: list[str] = []
-        self.sent_views: list[object] = []
-        self.edits: list[dict[str, object]] = []
-
-    def add_message(self, message: FakeReplyMessage) -> None:
-        self._messages[message.id] = message
-        self._history.append(message)
-
-    async def fetch_message(self, message_id: int) -> FakeReplyMessage:
-        return self._messages[message_id]
-
-    async def history(
-        self,
-        limit: int,
-        oldest_first: bool = False,
-    ) -> AsyncIterator[FakeReplyMessage]:
-        messages = self._history[:limit] if oldest_first else list(reversed(self._history))[:limit]
-        for message in messages:
-            yield message
-
-    async def send(self, content: str | None = None, **kwargs: object) -> FakeReplyMessage:
-        stored_content = content or ""
-        self.sent_messages.append(stored_content)
-        self.sent_views.append(kwargs.get("view"))
-        message = FakeReplyMessage(900 + len(self.sent_messages), self, stored_content)
-        self.add_message(message)
-        return message
-
-    async def edit(self, **kwargs: object) -> None:
-        if "archived" in kwargs:
-            self.archived = bool(kwargs["archived"])
-        if "locked" in kwargs:
-            self.locked = bool(kwargs["locked"])
-        self.edits.append(kwargs)
-
-
-class FakeTextChannel:
-    def __init__(self, channel_id: int, threads: list[FakeThread]) -> None:
-        self.id = channel_id
-        self.threads = [thread for thread in threads if not thread.archived]
-        self._archived_threads = [thread for thread in threads if thread.archived]
-
-    async def archived_threads(self, **_: object) -> AsyncIterator[FakeThread]:
-        for thread in self._archived_threads:
-            yield thread
-
-
-class FakeInteractionResponse:
-    def __init__(self) -> None:
-        self.messages: list[tuple[str, bool]] = []
-        self.edits: list[tuple[str, bool]] = []
-        self.modals: list[object] = []
-
-    async def send_message(self, content: str, *, ephemeral: bool) -> None:
-        self.messages.append((content, ephemeral))
-
-    async def edit_message(self, content: str, **kwargs: object) -> None:
-        self.edits.append((content, kwargs.get("view") is None))
-
-    async def send_modal(self, modal: object) -> None:
-        self.modals.append(modal)
-
-
-class FakeInteraction:
-    def __init__(
-        self,
-        channel: FakeThread,
-        user_id: int = 123,
-        message: FakeReplyMessage | None = None,
-    ) -> None:
-        self.channel = channel
-        self.user = SimpleNamespace(id=user_id)
-        self.message = message
-        self.response = FakeInteractionResponse()
-
-
-class FakeBot:
-    def __init__(
-        self,
-        config: ConfigType,
-        thread: FakeThread | None = None,
-        channel: FakeTextChannel | None = None,
-    ) -> None:
-        self.config = config
-        self.user = SimpleNamespace(id=999)
-        self._thread = thread
-        self._channel = channel
-
-    def get_channel(self, channel_id: int) -> FakeThread | FakeTextChannel | None:
-        if self._thread is not None and self._thread.id == channel_id:
-            return self._thread
-        if self._channel is not None and self._channel.id == channel_id:
-            return self._channel
-        return None
-
-
-def make_hello() -> SessionHelloType:
-    return SessionHello(
-        session_id="session-1",
-        session_epoch="epoch-1",
-        host_label="Mac Studio",
-        cwd="/tmp/project",
-        branch="main",
-        pid=42,
-    )
-
-
-def add_bot_message(thread: FakeThread, message_id: int, content: str) -> FakeReplyMessage:
-    message = FakeReplyMessage(message_id, thread, content)
-    message.author = SimpleNamespace(id=999)
-    thread.add_message(message)
-    return message
 
 
 class ConfigTests(unittest.TestCase):
@@ -444,6 +283,30 @@ class ThreadFormattingTests(unittest.TestCase):
             "Every Code session connected for `session`: <#555>",
         )
         self.assertIn("branch: `unknown`", session_start_message(hello))
+
+
+class FakeThreadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_send_creates_bot_authored_history_message(self) -> None:
+        thread = FakeThread(555)
+
+        message = await thread.send("Every Code session connected")
+
+        self.assertEqual(message.author.id, 999)
+        self.assertEqual((await thread.fetch_message(message.id)).author.id, 999)
+        history = [entry async for entry in thread.history(limit=10, oldest_first=True)]
+        self.assertEqual([entry.id for entry in history], [message.id])
+
+    async def test_delete_removes_message_from_fetch_and_history(self) -> None:
+        thread = FakeThread(555)
+
+        message = await thread.send("Every Code session connected")
+        await message.delete()
+
+        self.assertTrue(message.deleted)
+        with self.assertRaises(bridge_module.discord.NotFound):
+            await thread.fetch_message(message.id)
+        history = [entry async for entry in thread.history(limit=10, oldest_first=True)]
+        self.assertEqual(history, [])
 
 
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
@@ -935,6 +798,67 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(approval_message.reactions, [])
         self.assertEqual(websocket.sent_json[0]["decision"], "approved")
 
+    async def test_approval_decision_ack_marks_message_finished(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        approval_message = FakeReplyMessage(901, thread, "**Approval sent**")
+        thread.add_message(approval_message)
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        session.pending_approvals["approval-1"] = sessions_module.PendingRemoteApproval(
+            thread_id=555,
+            message_id=901,
+            decision="approved",
+            decided_by=123,
+        )
+        bridge.sessions.register(session)
+
+        await bridge.handle_approval_decision_ack(
+            {
+                "session_id": "session-1",
+                "approval_id": "approval-1",
+            }
+        )
+
+        self.assertEqual(approval_message.content, "**Approved**\nby: `123`")
+        self.assertEqual(approval_message.reactions, [])
+        self.assertEqual(session.pending_approvals, {})
+
+    async def test_approval_decision_reject_marks_message_expired(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        approval_message = FakeReplyMessage(901, thread, "**Approval sent**")
+        thread.add_message(approval_message)
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        session.pending_approvals["approval-1"] = sessions_module.PendingRemoteApproval(
+            thread_id=555,
+            message_id=901,
+            decision="approved",
+            decided_by=123,
+        )
+        bridge.sessions.register(session)
+
+        await bridge.handle_approval_decision_reject(
+            {
+                "session_id": "session-1",
+                "approval_id": "approval-1",
+                "reason": "approval timed out",
+            }
+        )
+
+        self.assertEqual(approval_message.content, "**Approval expired**\napproval timed out")
+        self.assertEqual(approval_message.reactions, [])
+        self.assertEqual(session.pending_approvals, {})
+
     async def test_request_user_input_posts_select_prompt(self) -> None:
         config = Config()
         thread = FakeThread(555)
@@ -1080,6 +1004,52 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             {"answers": {"mode": {"answers": ["Safe"]}}},
         )
         self.assertIn("Answer sent", interaction.response.edits[0][0])
+
+    async def test_request_user_input_cancel_sends_empty_response(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        websocket = FakeWebSocket()
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=websocket,
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+        request = RemoteRequestUserInput(
+            call_id="call-1",
+            turn_id="turn-1",
+            session_id="session-1",
+            session_epoch="epoch-1",
+            questions=[
+                RequestUserInputQuestion(
+                    id="mode",
+                    header="Build mode",
+                    question="Choose a mode",
+                    is_other=False,
+                    is_secret=False,
+                    options=[
+                        RequestUserInputQuestionOption(
+                            label="Safe",
+                            description="Run the full path",
+                        ),
+                    ],
+                )
+            ],
+        )
+        await bridge.handle_request_user_input(request)
+
+        view = cast(Any, thread.sent_views[0])
+        interaction = FakeInteraction(thread)
+        await view.cancel(interaction)
+
+        self.assertEqual(websocket.sent_json[0]["kind"], "request_user_input_response")
+        self.assertEqual(websocket.sent_json[0]["call_id"], "call-1")
+        self.assertEqual(websocket.sent_json[0]["turn_id"], "turn-1")
+        self.assertEqual(websocket.sent_json[0]["response"], {"answers": {}})
+        self.assertIn("Answer cancelled", interaction.response.edits[0][0])
 
     async def test_status_changed_clears_contextual_controls_for_active_reply_command(self) -> None:
         config = Config()
