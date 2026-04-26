@@ -1,12 +1,12 @@
 [Unit]
-Description=Discord Blue (nextcord)
+Description=Discord Blue
 After=multi-user.target
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 # Use the same Python version installed with uv venv
-ExecStart=uv run discord_blue
+ExecStart=uv run discord-blue
 User=root
 Group=root
 Type=idle

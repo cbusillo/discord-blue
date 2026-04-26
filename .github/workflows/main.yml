@@ -1,13 +1,40 @@
+---
 name: Deploy to Production
-on:
+"on":
   workflow_dispatch:
+  pull_request:
   push:
     branches:
       - main
 permissions:
   contents: read
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        shell: bash
+      - name: Install Python
+        run: uv python install 3.13
+      - name: Install dependencies
+        run: uv sync --all-groups --python 3.13
+      - name: Check formatting
+        run: uv run ruff format --check .
+      - name: Lint
+        run: uv run ruff check .
+      - name: Type check
+        run: uv run mypy .
+      - name: Test
+        run: uv run python -m unittest discover -s tests -q
+
   deploy:
+    needs: validate
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Setup Tailscale VPN
@@ -26,9 +53,11 @@ jobs:
         shell: bash
       - name: Clone & Install
         run: |
-          ssh ${{ vars.PRODUCTION_USER }}@${{ vars.PRODUCTION_SERVER }} "cd /opt/discord-blue; \
+          ssh \
+            ${{ vars.PRODUCTION_USER }}@${{ vars.PRODUCTION_SERVER }} \
+            "cd /opt/discord-blue; \
           export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring; \
           git pull; \
-          uv venv --upgrade --dev; \
+          uv sync --all-groups; \
           systemctl restart discord-blue"
         shell: bash

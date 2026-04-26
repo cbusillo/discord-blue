@@ -463,12 +463,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge = EveryCodeBridge(FakeBot(config))
 
         self.assertFalse(bridge._authorized(SimpleNamespace(headers={})))
-        self.assertFalse(
-            bridge._authorized(SimpleNamespace(headers={"Authorization": "Bearer wrong"}))
-        )
-        self.assertTrue(
-            bridge._authorized(SimpleNamespace(headers={"Authorization": "Bearer shared-secret"}))
-        )
+        self.assertFalse(bridge._authorized(SimpleNamespace(headers={"Authorization": "Bearer wrong"})))
+        self.assertTrue(bridge._authorized(SimpleNamespace(headers={"Authorization": "Bearer shared-secret"})))
 
     async def test_thread_reply_routes_to_registered_session_websocket(self) -> None:
         config = Config()

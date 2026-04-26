@@ -1,44 +1,48 @@
 # Discord Blue LXC Installation Guide
 
-Discord Blue is a basic Discord bot plugin system built with the **discord.py** library. This guide provides
-step-by-step
-instructions for setting it up on
+Discord Blue is a basic Discord bot plugin system built with the **discord.py**
+library. This guide provides step-by-step instructions for setting it up on a
 Debian-based LXC.
 
 ## Installation Steps
 
 1. Update System Packages:
-   ```
+
+   ```bash
    apt update && apt upgrade
    apt install git curl libcairo2
    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
 2. Clone the Discord Blue Repository:
-   ```
+
+   ```bash
    cd /opt
    git clone https://github.com/cbusillo/discord-blue
    cd discord-blue
    ```
 
 3. Install Dependencies with uv:
-   ```
-   uv venv
+
+   ```bash
+   uv sync --all-groups
    ```
 
 4. Set up and Start the Systemd Service:
-   ```
+
+   ```bash
    cp discord-blue.service /etc/systemd/system/
-   system daemon-reload
-   system enable discord-blue
-   system start discord-blue
+   systemctl daemon-reload
+   systemctl enable discord-blue
+   systemctl start discord-blue
    ```
 
-**Note**: Make sure to run once to create the config file and input the discord token along with the server and the bot
-channel. Slash commands sync directly to the first guild the bot joins, so they appear immediately.
+**Note**: Make sure to run once to create the config file and input the Discord
+token along with the server and the bot channel. Slash commands sync directly to
+the first guild the bot joins, so they appear immediately.
 
-```
-uv run discord_blue
+```bash
+uv run discord-blue
 ```
 
 ## Docker

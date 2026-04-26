@@ -111,9 +111,7 @@ class RequestUserInputSelect(discord.ui.Select[discord.ui.View]):
             return
         value = self.values[0]
         if value == "__other__":
-            await interaction.response.send_modal(
-                RequestUserInputAnswerModal(self.parent_view, self.question)
-            )
+            await interaction.response.send_modal(RequestUserInputAnswerModal(self.parent_view, self.question))
             return
         self.parent_view.set_answer(self.question.id, value)
         await interaction.response.edit_message(
@@ -133,12 +131,15 @@ class RequestUserInputAnswerModal(discord.ui.Modal):
         super().__init__(title=title)
         self.parent_view = parent_view
         self.question = question
-        self.answer: discord.ui.TextInput[RequestUserInputAnswerModal] = discord.ui.TextInput(
-            label=(question.header or question.question or "Answer")[:45],
-            placeholder=(question.question or None),
-            required=True,
-            style=discord.TextStyle.paragraph if not question.options else discord.TextStyle.short,
-            max_length=1500,
+        self.answer = cast(
+            discord.ui.TextInput[RequestUserInputAnswerModal],
+            discord.ui.TextInput(
+                label=(question.header or question.question or "Answer")[:45],
+                placeholder=(question.question or None),
+                required=True,
+                style=discord.TextStyle.paragraph if not question.options else discord.TextStyle.short,
+                max_length=1500,
+            ),
         )
         self.add_item(self.answer)
 
@@ -167,9 +168,7 @@ class RequestUserInputAnswerButton(discord.ui.Button[discord.ui.View]):
         self.question = question
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_modal(
-            RequestUserInputAnswerModal(self.parent_view, self.question)
-        )
+        await interaction.response.send_modal(RequestUserInputAnswerModal(self.parent_view, self.question))
 
 
 class RequestUserInputSubmitButton(discord.ui.Button[discord.ui.View]):
@@ -215,12 +214,7 @@ class RequestUserInputView(discord.ui.View):
         self.answers[question_id] = answer
 
     def response_payload(self) -> dict[str, object]:
-        return {
-            "answers": {
-                question.id: {"answers": [self.answers.get(question.id, "")]}
-                for question in self.request.questions
-            }
-        }
+        return {"answers": {question.id: {"answers": [self.answers.get(question.id, "")]} for question in self.request.questions}}
 
     def format_prompt(self) -> str:
         return self.bridge.format_request_user_input(self.request, self.answers)
@@ -445,9 +439,7 @@ class EveryCodeBridge:
                     session_thread.thread,
                     hello,
                 )
-                await websocket.send_json(
-                    {"type": "hello_ack", "thread_id": session_thread.thread.id}
-                )
+                await websocket.send_json({"type": "hello_ack", "thread_id": session_thread.thread.id})
             elif message_type == "heartbeat" and session is not None:
                 session.touch()
             elif message_type == "user_message":
@@ -570,7 +562,7 @@ class EveryCodeBridge:
                     assistant_messages += 1
         except discord.DiscordException:
             logger.warning("Unable to score Every Code thread %s", thread.id)
-        return (assistant_messages, messages, thread.id)
+        return assistant_messages, messages, thread.id
 
     async def backfill_latest_assistant_message(
         self,
@@ -853,9 +845,7 @@ class EveryCodeBridge:
             branch = f" on `{session.hello.branch}`" if session.hello.branch else ""
             thread = f" <#{session.thread_id}>" if session.thread_id is not None else ""
             state = "offline" if session.websocket.closed else "online"
-            lines.append(
-                f"- `{repo}`{branch} ({state}, {session.hello.host_label}){thread}"
-            )
+            lines.append(f"- `{repo}`{branch} ({state}, {session.hello.host_label}){thread}")
         return "\n".join(lines)
 
     def session_status_summary(
@@ -1618,10 +1608,7 @@ class EveryCodeBridge:
                 )
 
     def is_operator(self, user: discord.User | discord.Member) -> bool:
-        role_name = (
-            self.bot.config.every_code.operator_role_name
-            or self.bot.config.discord.employee_role_name
-        )
+        role_name = self.bot.config.every_code.operator_role_name or self.bot.config.discord.employee_role_name
         if not role_name:
             return True
         if not isinstance(user, discord.Member):
@@ -1637,11 +1624,7 @@ class EveryCodeBridge:
 
     @staticmethod
     def can_render_request_user_input_as_select(request: RemoteRequestUserInput) -> bool:
-        return (
-            len(request.questions) == 1
-            and bool(request.questions[0].options)
-            and len(request.questions[0].options) <= 25
-        )
+        return len(request.questions) == 1 and bool(request.questions[0].options) and len(request.questions[0].options) <= 25
 
     @staticmethod
     def format_approval_request(approval: RemoteApprovalRequest) -> str:
@@ -1706,19 +1689,14 @@ class EveryCodeBridge:
         cancelled: bool = False,
     ) -> str:
         label = "Answer cancelled" if cancelled else "Answer sent"
-        return (
-            f"**{label}**\n"
-            "Waiting for local Every Code to accept the response.\n"
-            f"by: `{user}`"
-        )
+        return f"**{label}**\nWaiting for local Every Code to accept the response.\nby: `{user}`"
 
     @staticmethod
     def format_user_message_notice(message: str) -> str:
         return f"**You**\n>>> {message.strip()}"
 
     @staticmethod
-    def format_waiting_for_direction(session: EveryCodeSession) -> str:
-        del session
+    def format_waiting_for_direction(_session: EveryCodeSession) -> str:
         return "\u200b"
 
     @staticmethod
@@ -1727,9 +1705,7 @@ class EveryCodeBridge:
             return [REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY]
         if session.control_status_reaction is not None:
             active_command = (
-                session.pending_commands.get(session.active_command_id)
-                if session.active_command_id is not None
-                else None
+                session.pending_commands.get(session.active_command_id) if session.active_command_id is not None else None
             )
             if active_command is not None and active_command.kind == "continue_autonomously":
                 return [

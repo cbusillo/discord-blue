@@ -1,6 +1,6 @@
 import logging
 import textwrap
-from typing import Callable, TypeVar, Type, NoReturn
+from typing import Callable, NoReturn, TypeVar
 
 import discord
 from discord.ext import commands
@@ -49,7 +49,7 @@ class BlueBot(commands.Bot):
             return await self.select_object(list(self.guilds), "guild", self.save_config_guild)
         if guild := self.get_guild(config.discord.guild_id):
             return guild
-        await self.message_and_raise_error(f"Could not find guild with ID {config.discord.guild_id}")
+        self.message_and_raise_error(f"Could not find guild with ID {config.discord.guild_id}")
 
     async def blue_bot_channel(self, guild: discord.Guild) -> discord.TextChannel:
         if not config.discord.bot_channel_id:
@@ -58,10 +58,10 @@ class BlueBot(commands.Bot):
             if isinstance(channel, discord.TextChannel):
                 return channel
 
-        await self.message_and_raise_error(f"Could not find channel with ID {config.discord.bot_channel_id}")
+        self.message_and_raise_error(f"Could not find channel with ID {config.discord.bot_channel_id}")
 
     @staticmethod
-    async def message_and_raise_error(message: str, error_type: Type[BaseException] = ValueError) -> NoReturn:
+    def message_and_raise_error(message: str, error_type: type[BaseException] = ValueError) -> NoReturn:
         logging.error(message)
         raise error_type(message)
 

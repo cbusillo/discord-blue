@@ -138,5 +138,6 @@ class EveryCodeDoodad(commands.Cog):
     async def cog_unload(self) -> None:
         await self.bridge.stop()
 
+
 async def setup(bot: BlueBot) -> None:
     await bot.add_cog(EveryCodeDoodad(bot))

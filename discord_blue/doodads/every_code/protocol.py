@@ -38,11 +38,7 @@ class SessionStatus:
             session_id=str(payload["session_id"]),
             session_epoch=str(payload["session_epoch"]),
             message=str(payload["message"]) if payload.get("message") is not None else None,
-            assistant_message=(
-                str(payload["assistant_message"])
-                if payload.get("assistant_message") is not None
-                else None
-            ),
+            assistant_message=(str(payload["assistant_message"]) if payload.get("assistant_message") is not None else None),
         )
 
 
@@ -88,11 +84,7 @@ class RequestUserInputQuestion:
         options_payload = payload.get("options")
         options = []
         if isinstance(options_payload, list):
-            options = [
-                RequestUserInputQuestionOption.from_payload(option)
-                for option in options_payload
-                if isinstance(option, dict)
-            ]
+            options = [RequestUserInputQuestionOption.from_payload(option) for option in options_payload if isinstance(option, dict)]
         return cls(
             id=str(payload.get("id") or ""),
             header=str(payload.get("header") or ""),
@@ -117,9 +109,7 @@ class RemoteRequestUserInput:
         questions = []
         if isinstance(questions_payload, list):
             questions = [
-                RequestUserInputQuestion.from_payload(question)
-                for question in questions_payload
-                if isinstance(question, dict)
+                RequestUserInputQuestion.from_payload(question) for question in questions_payload if isinstance(question, dict)
             ]
         return cls(
             call_id=str(payload.get("call_id") or ""),
