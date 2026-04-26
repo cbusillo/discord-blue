@@ -66,6 +66,10 @@ session_start_message = threads_module.session_start_message
 session_thread_name = threads_module.session_thread_name
 
 
+def stub_recovered_assistant_message(bridge: object, recovered_message: str | None) -> None:
+    cast(Any, bridge).recover_latest_assistant_message = lambda _hello: recovered_message
+
+
 class ConfigTests(unittest.TestCase):
     def test_every_code_config_loads_and_saves(self) -> None:
         _CONFIG_PATH.write_text(
@@ -309,6 +313,7 @@ class FakeThreadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history, [])
 
 
+# noinspection DuplicatedCode
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.original_thread_type = bridge_module.discord.Thread
@@ -1279,7 +1284,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         thread = FakeThread(555)
         bridge = EveryCodeBridge(FakeBot(config, thread))
-        bridge.recover_latest_assistant_message = lambda _hello: "Recovered answer"  # type: ignore[method-assign]
+        stub_recovered_assistant_message(bridge, "Recovered answer")
 
         await bridge.backfill_latest_assistant_message(thread, make_hello())
 
@@ -1290,7 +1295,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         add_bot_message(thread, 1, "**Assistant**\nAlready present")
         bridge = EveryCodeBridge(FakeBot(config, thread))
-        bridge.recover_latest_assistant_message = lambda _hello: "Recovered answer"  # type: ignore[method-assign]
+        stub_recovered_assistant_message(bridge, "Recovered answer")
 
         await bridge.backfill_latest_assistant_message(thread, make_hello())
 

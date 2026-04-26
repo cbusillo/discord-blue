@@ -36,6 +36,7 @@ class FakeReplyMessage:
         self.author = SimpleNamespace(id=author_id)
         self.reactions: list[str] = []
         self.replies: list[str] = []
+        self.reply_mentions: list[bool] = []
         self.edits: list[tuple[str, bool]] = []
         self.deleted = False
 
@@ -50,8 +51,8 @@ class FakeReplyMessage:
         self.reactions.clear()
 
     async def reply(self, content: str, *, mention_author: bool) -> None:
-        _ = mention_author
         self.replies.append(content)
+        self.reply_mentions.append(mention_author)
 
     async def edit(self, content: str, **kwargs: object) -> None:
         self.content = content

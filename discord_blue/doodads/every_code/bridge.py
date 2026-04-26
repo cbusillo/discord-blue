@@ -102,7 +102,7 @@ class RequestUserInputSelect(discord.ui.Select[discord.ui.View]):
                 )
             )
         placeholder = (question.header or question.question or "Choose an answer")[:150]
-        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
+        super().__init__(placeholder=placeholder, options=options)
         self.parent_view = parent_view
         self.question = question
 
@@ -136,7 +136,6 @@ class RequestUserInputAnswerModal(discord.ui.Modal):
             discord.ui.TextInput(
                 label=(question.header or question.question or "Answer")[:45],
                 placeholder=(question.question or None),
-                required=True,
                 style=discord.TextStyle.paragraph if not question.options else discord.TextStyle.short,
                 max_length=1500,
             ),
@@ -161,7 +160,6 @@ class RequestUserInputAnswerButton(discord.ui.Button[discord.ui.View]):
         label = (question.header or question.question or "Answer")[:80]
         super().__init__(
             label=label,
-            style=discord.ButtonStyle.secondary,
             emoji="✏️",
         )
         self.parent_view = parent_view
@@ -346,7 +344,7 @@ class EveryCodeBridge:
 
         deleted = 0
         try:
-            async for message in channel.history(limit=100):
+            async for message in channel.history():
                 if message.author.id != bot_user.id:
                     continue
                 if not message.content.startswith(SESSION_NOTIFICATION_PREFIX):
@@ -517,8 +515,8 @@ class EveryCodeBridge:
                 best_score = score
         return best_thread
 
+    @staticmethod
     async def session_thread_candidates(
-        self,
         channel: discord.TextChannel,
     ) -> list[discord.Thread]:
         candidates = list(channel.threads)
@@ -552,7 +550,8 @@ class EveryCodeBridge:
             logger.warning("Unable to inspect Every Code thread %s", thread.id)
         return False
 
-    async def score_session_thread(self, thread: discord.Thread) -> tuple[int, int, int]:
+    @staticmethod
+    async def score_session_thread(thread: discord.Thread) -> tuple[int, int, int]:
         assistant_messages = 0
         messages = 0
         try:
@@ -582,7 +581,8 @@ class EveryCodeBridge:
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    async def thread_has_assistant_message(self, thread: discord.Thread) -> bool:
+    @staticmethod
+    async def thread_has_assistant_message(thread: discord.Thread) -> bool:
         try:
             async for message in thread.history(limit=50):
                 if message.content.startswith("**Assistant**"):
@@ -607,7 +607,6 @@ class EveryCodeBridge:
         try:
             result = subprocess.run(
                 ["ps", "-p", str(pid), "-o", "command="],
-                check=False,
                 capture_output=True,
                 text=True,
                 timeout=2,
@@ -876,48 +875,54 @@ class EveryCodeBridge:
         )
 
     async def handle_command_ack(self, payload: dict[str, object]) -> None:
-        command_id = str(payload.get("command_id") or "")
-        session_id = str(payload.get("session_id") or "")
-        if not command_id or not session_id:
+        command_context = self.command_context(payload)
+        if command_context is None:
             return
-        session = self.sessions.get(session_id)
-        if session is None:
-            return
+        command_id, session = command_context
         command = session.pending_commands.get(command_id)
         if command is not None:
             session.active_command_id = command_id
-            if command.message_id is not None:
-                if command.message_id == session.control_message_id:
-                    session.control_status_reaction = REACTION_DELIVERED
-                    channel = self.bot.get_channel(command.thread_id)
-                    if isinstance(channel, discord.Thread):
-                        await self.refresh_session_controls(session, channel)
-                else:
-                    await self.set_message_reaction(command.thread_id, command.message_id, REACTION_DELIVERED)
+            await self.update_command_message_reaction(session, command, REACTION_DELIVERED)
 
     async def handle_command_reject(self, payload: dict[str, object]) -> None:
-        command_id = str(payload.get("command_id") or "")
-        session_id = str(payload.get("session_id") or "")
-        if not command_id or not session_id:
+        command_context = self.command_context(payload)
+        if command_context is None:
             return
-        session = self.sessions.get(session_id)
-        if session is None:
-            return
+        command_id, session = command_context
         command = session.pending_commands.pop(command_id, None)
         if session.active_command_id == command_id:
             session.active_command_id = None
         if command is not None:
-            if command.message_id is not None:
-                if command.message_id == session.control_message_id:
-                    session.control_status_reaction = None
-                    channel = self.bot.get_channel(command.thread_id)
-                    if isinstance(channel, discord.Thread):
-                        await self.refresh_session_controls(session, channel)
-                else:
-                    await self.set_message_reaction(command.thread_id, command.message_id, REACTION_REJECTED)
+            await self.update_command_message_reaction(session, command, REACTION_REJECTED)
             if command.reject_notice is not None:
                 reason = str(payload.get("reason") or "command was rejected")
                 await self.post_thread_notice(command.thread_id, f"{command.reject_notice}: {reason}")
+
+    def command_context(self, payload: dict[str, object]) -> tuple[str, EveryCodeSession] | None:
+        command_id = str(payload.get("command_id") or "")
+        session_id = str(payload.get("session_id") or "")
+        if not command_id or not session_id:
+            return None
+        session = self.sessions.get(session_id)
+        if session is None:
+            return None
+        return command_id, session
+
+    async def update_command_message_reaction(
+        self,
+        session: EveryCodeSession,
+        command: PendingRemoteCommand,
+        reaction: str,
+    ) -> None:
+        if command.message_id is None:
+            return
+        if command.message_id == session.control_message_id:
+            session.control_status_reaction = None if reaction == REACTION_REJECTED else reaction
+            channel = self.bot.get_channel(command.thread_id)
+            if isinstance(channel, discord.Thread):
+                await self.refresh_session_controls(session, channel)
+            return
+        await self.set_message_reaction(command.thread_id, command.message_id, reaction)
 
     async def handle_approval_request(self, approval: RemoteApprovalRequest) -> None:
         session = self.sessions.get(approval.session_id)
@@ -1363,7 +1368,8 @@ class EveryCodeBridge:
             self.format_user_message_notice(user_message.message),
         )
 
-    def active_command_uses_control_message(self, session: EveryCodeSession) -> bool:
+    @staticmethod
+    def active_command_uses_control_message(session: EveryCodeSession) -> bool:
         if session.control_message_id is None or session.active_command_id is None:
             return False
         command = session.pending_commands.get(session.active_command_id)
@@ -1384,14 +1390,7 @@ class EveryCodeBridge:
         command = session.pending_commands.get(command_id)
         if command is None:
             return
-        if command.message_id is not None:
-            if command.message_id == session.control_message_id:
-                session.control_status_reaction = reaction
-                channel = self.bot.get_channel(command.thread_id)
-                if isinstance(channel, discord.Thread):
-                    await self.refresh_session_controls(session, channel)
-            else:
-                await self.set_message_reaction(command.thread_id, command.message_id, reaction)
+        await self.update_command_message_reaction(session, command, reaction)
         if clear:
             session.pending_commands.pop(command_id, None)
             session.active_command_id = None
@@ -1752,8 +1751,8 @@ class EveryCodeBridge:
         expected = f"Bearer {token}"
         return request.headers.get("Authorization") == expected
 
+    @staticmethod
     async def add_message_reactions(
-        self,
         message: discord.Message,
         reactions: list[str],
     ) -> None:
@@ -1763,12 +1762,13 @@ class EveryCodeBridge:
             except discord.DiscordException:
                 logger.warning("Unable to add Every Code reaction %s to %s", reaction, message.id)
 
-    async def clear_message_reactions(self, message: discord.Message) -> None:
+    @staticmethod
+    async def clear_message_reactions(message: discord.Message) -> None:
         with suppress(discord.DiscordException):
             await message.clear_reactions()
 
+    @staticmethod
     async def remove_message_reaction(
-        self,
         thread: discord.Thread,
         message_id: int,
         reaction: str,

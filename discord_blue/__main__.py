@@ -36,7 +36,6 @@ def setup_logging(log_level: str) -> None:
     logging.basicConfig(level=numeric_log_level)
 
 
-# noinspection Annotator
 def parse_args() -> Namespace:
     parser = argparse.ArgumentParser(description="Discord bot")
     parser.add_argument(
