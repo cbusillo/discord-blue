@@ -1,6 +1,6 @@
 {
   "defaultBranch": "main",
-  "importantWorkflows": ["Deploy to Production", "CodeQL"],
+  "importantWorkflows": ["Deploy to Production"],
   "qaLabels": [],
   "deployLabels": [],
   "healthUrls": [],
