@@ -1144,7 +1144,70 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(thread.sent_messages, ["**You**\n>>> Run the quick path"])
+        self.assertEqual(
+            thread.sent_messages,
+            [
+                "**You**\n>>> Run the quick path",
+                "\u200b",
+            ],
+        )
+        control_message = await thread.fetch_message(902)
+        self.assertEqual(
+            control_message.reactions,
+            [
+                bridge_module.REACTION_IN_PROGRESS,
+                bridge_module.REACTION_CONTROL_PAUSE,
+                bridge_module.REACTION_CONTROL_END,
+            ],
+        )
+        self.assertEqual(session.control_message_id, 902)
+        self.assertTrue(session.control_interruptions_enabled)
+
+    async def test_tui_user_message_turn_complete_moves_controls_after_assistant(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        await bridge.handle_user_message(
+            protocol_module.UserMessage(
+                session_id="session-1",
+                session_epoch="epoch-1",
+                message="Run the quick path",
+            )
+        )
+        old_control_message = await thread.fetch_message(902)
+
+        await bridge.handle_session_status(
+            "turn_complete",
+            SessionStatus(
+                session_id="session-1",
+                session_epoch="epoch-1",
+                message="Waiting for direction",
+                assistant_message="Done.",
+            ),
+        )
+
+        self.assertTrue(old_control_message.deleted)
+        self.assertEqual(
+            thread.sent_messages,
+            [
+                "**You**\n>>> Run the quick path",
+                "\u200b",
+                "**Assistant**\nDone.",
+                "\u200b",
+            ],
+        )
+        control_message = await thread.fetch_message(904)
+        self.assertEqual(control_message.reactions, ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"])
+        self.assertEqual(session.control_message_id, 904)
+        self.assertFalse(session.control_interruptions_enabled)
 
     async def test_active_sessions_summary_lists_live_sessions(self) -> None:
         config = Config()
