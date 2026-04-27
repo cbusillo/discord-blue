@@ -1351,6 +1351,8 @@ class EveryCodeBridge:
                 session,
                 "Every Code is no longer waiting on this prompt.",
             )
+            if status.assistant_message and session.control_interruptions_enabled:
+                await self.clear_session_controls(session)
             await self.post_session_controls(session)
 
     async def handle_user_message(self, user_message: UserMessage) -> None:
@@ -1363,10 +1365,23 @@ class EveryCodeBridge:
             return
         if not user_message.message.strip():
             return
-        await self.post_thread_notice(
-            session.thread_id,
-            self.format_user_message_notice(user_message.message),
+        channel = self.bot.get_channel(session.thread_id)
+        if not isinstance(channel, discord.Thread):
+            return
+
+        await self.clear_session_controls(session)
+        await channel.send(
+            self.format_user_message_notice(user_message.message)[:DISCORD_MESSAGE_LIMIT],
+            allowed_mentions=discord.AllowedMentions.none(),
         )
+        session.control_status_reaction = REACTION_IN_PROGRESS
+        session.control_interruptions_enabled = True
+        message = await channel.send(
+            self.format_waiting_for_direction(session),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        await self.add_message_reactions(message, self.session_control_reactions(session))
+        session.control_message_id = message.id
 
     @staticmethod
     def active_command_uses_control_message(session: EveryCodeSession) -> bool:
@@ -1445,6 +1460,7 @@ class EveryCodeBridge:
             return
         session.pending_control_confirmation = None
         session.control_status_reaction = None
+        session.control_interruptions_enabled = False
         if session.control_message_id is not None:
             replaced = await self.replace_message_reactions(
                 channel,
@@ -1512,6 +1528,7 @@ class EveryCodeBridge:
             session.control_message_id = None
         session.pending_control_confirmation = None
         session.control_status_reaction = None
+        session.control_interruptions_enabled = False
 
     async def post_thread_notice(self, thread_id: int, text: str) -> None:
         channel = self.bot.get_channel(thread_id)
@@ -1706,7 +1723,14 @@ class EveryCodeBridge:
             active_command = (
                 session.pending_commands.get(session.active_command_id) if session.active_command_id is not None else None
             )
-            if active_command is not None and active_command.kind == "continue_autonomously":
+            command_can_be_interrupted = active_command is not None and active_command.kind == "continue_autonomously"
+            status_can_be_interrupted = session.control_status_reaction in {
+                REACTION_QUEUED,
+                REACTION_DELIVERED,
+                REACTION_IN_PROGRESS,
+                REACTION_COMPACTING,
+            }
+            if status_can_be_interrupted and (session.control_interruptions_enabled or command_can_be_interrupted):
                 return [
                     session.control_status_reaction,
                     REACTION_CONTROL_PAUSE,

@@ -46,6 +46,7 @@ class EveryCodeSession:
     active_command_id: str | None = None
     last_status_message: str | None = None
     control_status_reaction: str | None = None
+    control_interruptions_enabled: bool = False
     pending_control_confirmation: Literal["end_session"] | None = None
 
     @property
