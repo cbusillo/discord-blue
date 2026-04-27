@@ -692,6 +692,7 @@ class EveryCodeBridge:
             kind="reply",
         )
         await self.set_message_reaction(message.channel.id, message.id, REACTION_QUEUED)
+        await self.show_active_session_controls(session, message.channel, REACTION_QUEUED)
         await session.websocket.send_json(command.to_message())
         return True
 
@@ -800,8 +801,19 @@ class EveryCodeBridge:
             interaction.user,
         )
         await interaction.response.send_message(response, ephemeral=True)
-        if response == "Asked Every Code to go ahead until it needs you.":
-            await self.clear_interaction_controls(interaction)
+        if response != "Asked Every Code to go ahead until it needs you.":
+            return
+        message = interaction.message
+        if message is None or not isinstance(interaction.channel, discord.Thread):
+            return
+        session = self.sessions.get_by_thread(interaction.channel.id)
+        if session is None or session.control_message_id != message.id:
+            return
+        await self.replace_message_reactions(
+            interaction.channel,
+            message.id,
+            [REACTION_QUEUED],
+        )
 
     async def handle_status_interaction(
         self,
@@ -811,27 +823,6 @@ class EveryCodeBridge:
             self.session_status_summary(interaction.channel, interaction.user),
             ephemeral=True,
         )
-
-    async def clear_interaction_controls(
-        self,
-        interaction: discord.Interaction[BlueBot],
-    ) -> None:
-        message = interaction.message
-        if message is None:
-            return
-        session: EveryCodeSession | None = None
-        if isinstance(interaction.channel, discord.Thread):
-            session = self.sessions.get_by_thread(interaction.channel.id)
-        try:
-            await message.delete()
-        except discord.NotFound:
-            if session is not None and session.control_message_id == message.id:
-                session.control_message_id = None
-        except discord.DiscordException:
-            logger.warning("Unable to clear Every Code control message %s", message.id)
-        else:
-            if session is not None and session.control_message_id == message.id:
-                session.control_message_id = None
 
     def active_sessions_summary(self) -> str:
         sessions = list(self.sessions.by_session.values())
@@ -1324,8 +1315,6 @@ class EveryCodeBridge:
                 reaction = REACTION_COMPACTING
             else:
                 reaction = REACTION_IN_PROGRESS
-            if session.active_command_id is not None and not self.active_command_uses_control_message(session):
-                await self.clear_session_controls(session)
             await self.clear_pending_user_inputs(
                 session,
                 "Every Code is no longer waiting on this prompt.",
@@ -1334,8 +1323,6 @@ class EveryCodeBridge:
             return
 
         if message_type == "error":
-            if session.active_command_id is not None and not self.active_command_uses_control_message(session):
-                await self.clear_session_controls(session)
             await self.clear_pending_user_inputs(
                 session,
                 "Every Code stopped waiting on this prompt.",
@@ -1352,7 +1339,13 @@ class EveryCodeBridge:
                 "Every Code is no longer waiting on this prompt.",
             )
             if status.assistant_message and session.control_interruptions_enabled:
-                await self.clear_session_controls(session)
+                replaced = await self.spawn_session_controls(
+                    session,
+                    reaction=None,
+                    interruptions_enabled=False,
+                )
+                if replaced:
+                    return
             await self.post_session_controls(session)
 
     async def handle_user_message(self, user_message: UserMessage) -> None:
@@ -1369,28 +1362,15 @@ class EveryCodeBridge:
         if not isinstance(channel, discord.Thread):
             return
 
-        await self.clear_session_controls(session)
         await channel.send(
             self.format_user_message_notice(user_message.message)[:DISCORD_MESSAGE_LIMIT],
             allowed_mentions=discord.AllowedMentions.none(),
         )
-        session.control_status_reaction = REACTION_IN_PROGRESS
-        session.control_interruptions_enabled = True
-        message = await channel.send(
-            self.format_waiting_for_direction(session),
-            allowed_mentions=discord.AllowedMentions.none(),
+        await self.spawn_session_controls(
+            session,
+            reaction=REACTION_IN_PROGRESS,
+            interruptions_enabled=True,
         )
-        await self.add_message_reactions(message, self.session_control_reactions(session))
-        session.control_message_id = message.id
-
-    @staticmethod
-    def active_command_uses_control_message(session: EveryCodeSession) -> bool:
-        if session.control_message_id is None or session.active_command_id is None:
-            return False
-        command = session.pending_commands.get(session.active_command_id)
-        if command is None:
-            return False
-        return command.message_id == session.control_message_id
 
     async def update_active_command_reaction(
         self,
@@ -1406,6 +1386,8 @@ class EveryCodeBridge:
         if command is None:
             return
         await self.update_command_message_reaction(session, command, reaction)
+        if command.message_id != session.control_message_id:
+            await self.update_control_anchor_status(session, command.thread_id, reaction)
         if clear:
             session.pending_commands.pop(command_id, None)
             session.active_command_id = None
@@ -1420,13 +1402,47 @@ class EveryCodeBridge:
         if session.active_command_id is not None:
             await self.update_active_command_reaction(session, reaction)
             return
-        if session.thread_id is None or session.control_message_id is None:
+        if session.thread_id is None:
             return
-        channel = self.bot.get_channel(session.thread_id)
+        await self.update_control_anchor_status(session, session.thread_id, reaction)
+
+    async def update_control_anchor_status(
+        self,
+        session: EveryCodeSession,
+        thread_id: int,
+        reaction: str,
+    ) -> None:
+        channel = self.bot.get_channel(thread_id)
         if not isinstance(channel, discord.Thread):
             return
         session.control_status_reaction = reaction
-        await self.refresh_session_controls(session, channel)
+        await self.show_or_refresh_session_controls(session, channel)
+
+    async def show_active_session_controls(
+        self,
+        session: EveryCodeSession,
+        thread: discord.Thread,
+        reaction: str,
+    ) -> None:
+        session.control_status_reaction = reaction
+        session.control_interruptions_enabled = True
+        await self.show_or_refresh_session_controls(session, thread)
+
+    async def show_or_refresh_session_controls(
+        self,
+        session: EveryCodeSession,
+        thread: discord.Thread,
+    ) -> None:
+        if session.control_message_id is not None:
+            await self.refresh_session_controls(session, thread)
+            if session.control_message_id is not None:
+                return
+        message = await thread.send(
+            self.format_waiting_for_direction(session),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        await self.add_message_reactions(message, self.session_control_reactions(session))
+        session.control_message_id = message.id
 
     async def set_message_reaction(self, thread_id: int, message_id: int, reaction: str) -> None:
         channel = self.bot.get_channel(thread_id)
@@ -1529,6 +1545,68 @@ class EveryCodeBridge:
         session.pending_control_confirmation = None
         session.control_status_reaction = None
         session.control_interruptions_enabled = False
+
+    async def delete_session_message(self, thread_id: int, message_id: int) -> None:
+        channel = self.bot.get_channel(thread_id)
+        if not isinstance(channel, discord.Thread):
+            return
+        try:
+            message = await channel.fetch_message(message_id)
+            await message.delete()
+        except discord.NotFound:
+            return
+        except discord.DiscordException:
+            logger.warning("Unable to clear Every Code control message %s", message_id)
+
+    async def spawn_session_controls(
+        self,
+        session: EveryCodeSession,
+        *,
+        reaction: str | None,
+        interruptions_enabled: bool,
+    ) -> bool:
+        if session.thread_id is None:
+            return False
+        channel = self.bot.get_channel(session.thread_id)
+        if not isinstance(channel, discord.Thread):
+            return False
+
+        old_control_message_id = session.control_message_id
+        old_pending_control_confirmation = session.pending_control_confirmation
+        old_control_status_reaction = session.control_status_reaction
+        old_control_interruptions_enabled = session.control_interruptions_enabled
+
+        session.pending_control_confirmation = None
+        session.control_status_reaction = reaction
+        session.control_interruptions_enabled = interruptions_enabled
+
+        try:
+            message = await channel.send(
+                self.format_waiting_for_direction(session),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            await self.add_message_reactions(message, self.session_control_reactions(session))
+        except discord.DiscordException:
+            session.pending_control_confirmation = old_pending_control_confirmation
+            session.control_status_reaction = old_control_status_reaction
+            session.control_interruptions_enabled = old_control_interruptions_enabled
+            return False
+
+        session.control_message_id = message.id
+        if old_control_message_id is not None and old_control_message_id != message.id:
+            self.rebind_session_control_commands(session, old_control_message_id, message.id)
+            await self.delete_session_message(session.thread_id, old_control_message_id)
+        return True
+
+    @staticmethod
+    def rebind_session_control_commands(
+        session: EveryCodeSession,
+        old_message_id: int,
+        new_message_id: int,
+    ) -> None:
+        for command in session.pending_commands.values():
+            if command.message_id == old_message_id:
+                command.message_id = new_message_id
 
     async def post_thread_notice(self, thread_id: int, text: str) -> None:
         channel = self.bot.get_channel(thread_id)
@@ -1723,7 +1801,10 @@ class EveryCodeBridge:
             active_command = (
                 session.pending_commands.get(session.active_command_id) if session.active_command_id is not None else None
             )
-            command_can_be_interrupted = active_command is not None and active_command.kind == "continue_autonomously"
+            command_can_be_interrupted = active_command is not None and active_command.kind in {
+                "continue_autonomously",
+                "reply",
+            }
             status_can_be_interrupted = session.control_status_reaction in {
                 REACTION_QUEUED,
                 REACTION_DELIVERED,
