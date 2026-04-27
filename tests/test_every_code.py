@@ -456,13 +456,18 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(websocket.sent_json[0]["kind"], "continue_autonomously")
 
-    async def test_go_ahead_interaction_clears_contextual_controls(self) -> None:
+    async def test_go_ahead_interaction_preserves_the_control_anchor(self) -> None:
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = EveryCodeBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=websocket,
+            thread_id=555,
+            control_message_id=901,
+        )
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
         control_message = FakeReplyMessage(901, thread, "Every Code `project` on `main`")
@@ -471,9 +476,50 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         await bridge.handle_go_ahead_interaction(interaction)
 
-        self.assertTrue(control_message.deleted)
-        self.assertIsNone(session.control_message_id)
+        self.assertFalse(control_message.deleted)
+        self.assertEqual(session.control_message_id, 901)
+        self.assertEqual(control_message.reactions, [bridge_module.REACTION_QUEUED])
         self.assertEqual(websocket.sent_json[0]["kind"], "continue_autonomously")
+
+    async def test_tui_user_message_rebinds_pending_control_command_to_new_anchor(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+            control_message_id=910,
+        )
+        session.pending_commands["cmd-1"] = sessions_module.PendingRemoteCommand(
+            thread_id=555,
+            message_id=910,
+            kind="continue_autonomously",
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+        control_message = FakeReplyMessage(910, thread, "\u200b")
+        thread.add_message(control_message)
+
+        await bridge.handle_user_message(
+            protocol_module.UserMessage(
+                session_id="session-1",
+                session_epoch="epoch-1",
+                message="Run the quick path",
+            )
+        )
+
+        self.assertTrue(control_message.deleted)
+        self.assertEqual(
+            thread.sent_messages,
+            [
+                "**You**\n>>> Run the quick path",
+                "\u200b",
+            ],
+        )
+        self.assertEqual(session.control_message_id, 902)
+        self.assertEqual(session.pending_commands["cmd-1"].message_id, 902)
+        self.assertTrue(session.control_interruptions_enabled)
 
     async def test_turn_complete_posts_contextual_controls(self) -> None:
         config = Config()
@@ -574,6 +620,88 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(control_message.reactions, [bridge_module.REACTION_QUEUED])
         self.assertEqual(session.control_message_id, 901)
         self.assertEqual(websocket.sent_json[0]["kind"], "continue_autonomously")
+
+    async def test_thread_reply_shows_active_control_anchor(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        websocket = FakeWebSocket()
+        control_message = add_bot_message(thread, 801, "\u200b")
+        control_message.reactions = ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"]
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=websocket,
+            thread_id=555,
+            control_message_id=801,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+        reply_message = FakeReplyMessage(802, thread, "Run the quick path")
+        thread.add_message(reply_message)
+
+        delivered = await bridge.send_thread_reply(cast(Any, reply_message))
+
+        self.assertTrue(delivered)
+        self.assertEqual(reply_message.reactions, [bridge_module.REACTION_QUEUED])
+        self.assertEqual(
+            control_message.reactions,
+            [
+                bridge_module.REACTION_QUEUED,
+                bridge_module.REACTION_CONTROL_PAUSE,
+                bridge_module.REACTION_CONTROL_END,
+            ],
+        )
+        self.assertEqual(session.control_message_id, 801)
+        self.assertTrue(session.control_interruptions_enabled)
+        self.assertEqual(websocket.sent_json[0]["kind"], "reply")
+
+    async def test_thread_reply_turn_complete_moves_controls_after_assistant(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        websocket = FakeWebSocket()
+        control_message = add_bot_message(thread, 801, "\u200b")
+        control_message.reactions = ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"]
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=websocket,
+            thread_id=555,
+            control_message_id=801,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+        reply_message = FakeReplyMessage(802, thread, "Run the quick path")
+        thread.add_message(reply_message)
+
+        await bridge.send_thread_reply(cast(Any, reply_message))
+        command_id = next(iter(session.pending_commands))
+        session.active_command_id = command_id
+
+        await bridge.handle_session_status(
+            "turn_complete",
+            SessionStatus(
+                session_id="session-1",
+                session_epoch="epoch-1",
+                message="Waiting for direction",
+                assistant_message="Done.",
+            ),
+        )
+
+        self.assertTrue(control_message.deleted)
+        self.assertEqual(reply_message.reactions, [bridge_module.REACTION_FINISHED])
+        self.assertEqual(
+            thread.sent_messages,
+            [
+                "**Assistant**\nDone.",
+                "\u200b",
+            ],
+        )
+        new_control_message = await thread.fetch_message(902)
+        self.assertEqual(new_control_message.reactions, ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"])
+        self.assertEqual(session.control_message_id, 902)
+        self.assertFalse(session.control_interruptions_enabled)
 
     async def test_turn_complete_restores_reaction_controls_on_existing_anchor(self) -> None:
         config = Config()
@@ -1056,7 +1184,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(websocket.sent_json[0]["response"], {"answers": {}})
         self.assertIn("Answer cancelled", interaction.response.edits[0][0])
 
-    async def test_status_changed_clears_contextual_controls_for_active_reply_command(self) -> None:
+    async def test_status_changed_preserves_contextual_controls_for_active_reply_command(self) -> None:
         config = Config()
         thread = FakeThread(555)
         bridge = EveryCodeBridge(FakeBot(config, thread))
@@ -1089,9 +1217,17 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        self.assertTrue(control_message.deleted)
-        self.assertIsNone(session.control_message_id)
+        self.assertFalse(control_message.deleted)
+        self.assertEqual(session.control_message_id, 901)
         self.assertEqual(reply_message.reactions, [bridge_module.REACTION_IN_PROGRESS])
+        self.assertEqual(
+            control_message.reactions,
+            [
+                bridge_module.REACTION_IN_PROGRESS,
+                bridge_module.REACTION_CONTROL_PAUSE,
+                bridge_module.REACTION_CONTROL_END,
+            ],
+        )
 
     async def test_status_changed_uses_existing_control_anchor_without_active_command(self) -> None:
         config = Config()
