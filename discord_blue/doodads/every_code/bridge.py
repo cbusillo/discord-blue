@@ -43,9 +43,11 @@ logger = logging.getLogger(__name__)
 
 DISCORD_MESSAGE_LIMIT = 2000
 DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
+DISCORD_CODE_FENCE_WRAP_RESERVE = 80
 STARTUP_RECONNECT_GRACE_SECONDS = 20
 SESSION_START_PREFIX = "Every Code session connected"
 SESSION_NOTIFICATION_PREFIX = "Every Code session connected for "
+MARKDOWN_CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})(?P<info>[^`~\n]*)$")
 RESUME_SESSION_RE = re.compile(
     r"\bresume\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b",
     re.IGNORECASE,
@@ -576,10 +578,11 @@ class EveryCodeBridge:
         )
         if assistant_message is None:
             return
-        await thread.send(
-            f"**Assistant**\n{assistant_message}"[:DISCORD_MESSAGE_LIMIT],
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        for message in self.format_assistant_messages(assistant_message):
+            await thread.send(
+                message[:DISCORD_MESSAGE_LIMIT],
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     @staticmethod
     async def thread_has_assistant_message(thread: discord.Thread) -> bool:
@@ -1465,8 +1468,12 @@ class EveryCodeBridge:
             logger.warning("Unable to update Every Code reply reaction %s", message_id)
 
     async def post_assistant_message(self, thread_id: int, text: str) -> None:
-        for chunk in self._split_discord_message(text, DISCORD_ASSISTANT_CHUNK_LIMIT):
-            await self.post_thread_notice(thread_id, f"**Assistant**\n{chunk}")
+        for message in self.format_assistant_messages(text):
+            await self.post_thread_notice(thread_id, message)
+
+    @classmethod
+    def format_assistant_messages(cls, text: str) -> list[str]:
+        return [f"**Assistant**\n{chunk}" for chunk in cls._split_discord_message(text, DISCORD_ASSISTANT_CHUNK_LIMIT)]
 
     async def post_session_controls(self, session: EveryCodeSession) -> None:
         if session.thread_id is None:
@@ -1912,8 +1919,14 @@ class EveryCodeBridge:
         if not normalized:
             return []
 
+        plain_limit = max(1, limit - DISCORD_CODE_FENCE_WRAP_RESERVE)
+        chunks = EveryCodeBridge._split_discord_message_plain(normalized, plain_limit)
+        return EveryCodeBridge._wrap_split_code_fences(chunks)
+
+    @staticmethod
+    def _split_discord_message_plain(text: str, limit: int) -> list[str]:
         chunks: list[str] = []
-        remaining = normalized
+        remaining = text
         while len(remaining) > limit:
             split_at = remaining.rfind("\n", 0, limit)
             if split_at < limit // 2:
@@ -1925,3 +1938,45 @@ class EveryCodeBridge:
         if remaining:
             chunks.append(remaining)
         return chunks
+
+    @staticmethod
+    def _wrap_split_code_fences(chunks: list[str]) -> list[str]:
+        wrapped: list[str] = []
+        fence_state: tuple[str, int, str] | None = None
+        for chunk in chunks:
+            prefix = EveryCodeBridge._opening_code_fence(fence_state)
+            next_fence_state = EveryCodeBridge._scan_code_fence_state(chunk, fence_state)
+            suffix = EveryCodeBridge._closing_code_fence(next_fence_state)
+            wrapped.append(f"{prefix}{chunk}{suffix}")
+            fence_state = next_fence_state
+        return wrapped
+
+    @staticmethod
+    def _scan_code_fence_state(text: str, state: tuple[str, int, str] | None) -> tuple[str, int, str] | None:
+        for line in text.splitlines():
+            match = MARKDOWN_CODE_FENCE_RE.match(line.rstrip())
+            if match is None:
+                continue
+            fence = match.group("fence")
+            fence_char = fence[0]
+            fence_length = len(fence)
+            if state is None:
+                info = match.group("info").strip()
+                state = (fence_char, fence_length, info)
+            elif fence_char == state[0] and fence_length >= state[1]:
+                state = None
+        return state
+
+    @staticmethod
+    def _opening_code_fence(state: tuple[str, int, str] | None) -> str:
+        if state is None:
+            return ""
+        fence_char, fence_length, info = state
+        return f"{fence_char * fence_length}{info}\n"
+
+    @staticmethod
+    def _closing_code_fence(state: tuple[str, int, str] | None) -> str:
+        if state is None:
+            return ""
+        fence_char, fence_length, _info = state
+        return f"\n{fence_char * fence_length}"

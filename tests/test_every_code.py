@@ -556,6 +556,36 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(control_message.reactions, ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"])
         self.assertEqual(session.control_message_id, 902)
 
+    async def test_turn_complete_keeps_split_code_fences_balanced(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+        assistant_message = "```python\n" + "print('hello')\n" * 180 + "```"
+
+        await bridge.handle_session_status(
+            "turn_complete",
+            SessionStatus(
+                session_id="session-1",
+                session_epoch="epoch-1",
+                message="Waiting for direction",
+                assistant_message=assistant_message,
+            ),
+        )
+
+        assistant_messages = [message for message in thread.sent_messages if message.startswith("**Assistant**\n")]
+        self.assertGreater(len(assistant_messages), 1)
+        for message in assistant_messages:
+            body = message.removeprefix("**Assistant**\n")
+            self.assertTrue(body.startswith("```python\n"))
+            self.assertTrue(body.endswith("```"))
+
     async def test_approval_request_posts_compact_reactions(self) -> None:
         config = Config()
         thread = FakeThread(555)
