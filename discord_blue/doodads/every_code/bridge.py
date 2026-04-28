@@ -763,6 +763,38 @@ class EveryCodeBridge:
         await session.websocket.send_json(command.to_message())
         return "Asked Every Code to pause what it is doing now."
 
+    async def send_new_session(
+        self,
+        channel: object,
+        user: discord.User | discord.Member,
+    ) -> str:
+        if not isinstance(channel, discord.Thread):
+            return "Use `/code new` inside an Every Code session thread."
+        if not self.is_operator(user):
+            return "Only Every Code operators can start a new session."
+
+        session = self.sessions.get_by_thread(channel.id)
+        if session is None:
+            return "This thread is not attached to a live Every Code session."
+        if session.websocket.closed:
+            return "Every Code session is offline; new session was not started."
+
+        command = RemoteCommand(
+            command_id=str(uuid.uuid4()),
+            session_id=session.session_id,
+            session_epoch=session.session_epoch,
+            kind="new_session",
+            issued_by=str(user.id),
+        )
+        session.pending_commands[command.command_id] = PendingRemoteCommand(
+            thread_id=channel.id,
+            message_id=session.control_message_id,
+            kind="new_session",
+            reject_notice="Every Code could not start a new session",
+        )
+        await session.websocket.send_json(command.to_message())
+        return "Asked Every Code to start a new session in this folder."
+
     async def send_end_session(
         self,
         channel: object,
