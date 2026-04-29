@@ -437,6 +437,33 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn(command_id, session.pending_commands)
 
+    async def test_new_session_routes_to_registered_session_websocket(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        websocket = FakeWebSocket()
+        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        response = await bridge.send_new_session(thread, SimpleNamespace(id=123))
+
+        self.assertEqual(response, "Asked Every Code to start a new session in this folder.")
+        self.assertEqual(len(websocket.sent_json), 1)
+        sent = websocket.sent_json[0]
+        self.assertEqual(sent["type"], "command")
+        self.assertEqual(sent["session_id"], "session-1")
+        self.assertEqual(sent["session_epoch"], "epoch-1")
+        self.assertEqual(sent["kind"], "new_session")
+        self.assertIsNone(sent["text"])
+        self.assertEqual(sent["issued_by"], "123")
+        pending = session.pending_commands[str(sent["command_id"])]
+        self.assertEqual(pending.thread_id, 555)
+        self.assertIsNone(pending.message_id)
+        self.assertEqual(pending.kind, "new_session")
+        self.assertEqual(pending.reject_notice, "Every Code could not start a new session")
+
     async def test_go_ahead_interaction_replies_ephemerally(self) -> None:
         config = Config()
         config.discord.employee_role_name = ""

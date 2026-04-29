@@ -121,6 +121,21 @@ class EveryCodeDoodad(commands.Cog):
         )
 
     @code_group.command(
+        name="new",
+        description="Ask this Every Code session to start a fresh chat in the same folder.",
+    )
+    async def new_session_command(self, interaction: discord.Interaction[BlueBot]) -> None:
+        if not self.bot.config.every_code.enabled:
+            await interaction.response.send_message("Every Code is not enabled.", ephemeral=True)
+            return
+
+        response = await self.bridge.send_new_session(
+            interaction.channel,
+            interaction.user,
+        )
+        await interaction.response.send_message(response, ephemeral=True)
+
+    @code_group.command(
         name="end-session",
         description="Ask this Every Code session to disconnect.",
     )

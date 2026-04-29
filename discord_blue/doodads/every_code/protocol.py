@@ -174,6 +174,7 @@ class RemoteCommand:
         "reply",
         "continue_autonomously",
         "pause_current_turn",
+        "new_session",
         "end_session",
         "request_user_input_response",
         "status_request",
