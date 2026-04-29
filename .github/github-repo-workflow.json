@@ -1,13 +1,90 @@
 {
   "defaultBranch": "main",
+  "projectType": "python-service",
+  "docs": {
+    "overview": "README.md",
+    "packageManifest": "pyproject.toml",
+    "lockfile": "uv.lock",
+    "dockerfile": "Dockerfile",
+    "compose": "docker-compose.yml",
+    "systemdService": "discord-blue.service"
+  },
+  "qualityGate": {
+    "setup": {
+      "default": "uv sync --all-groups --python 3.13"
+    },
+    "format": {
+      "check": "uv run ruff format --check .",
+      "fix": "uv run ruff format ."
+    },
+    "lint": {
+      "default": "uv run ruff check ."
+    },
+    "typecheck": {
+      "default": "uv run mypy ."
+    },
+    "test": {
+      "default": "uv run python -m unittest discover -s tests -q"
+    },
+    "build": {
+      "docker": "docker build ."
+    },
+    "inspection": {
+      "tool": "jetbrains",
+      "ide": "PyCharm",
+      "scopePreference": ["changed_files", "directory", "whole_project"]
+    },
+    "docsRequiredWhen": [
+      "behavior changes",
+      "api changes",
+      "config changes",
+      "Discord command surface changes",
+      "Every Code bridge behavior changes",
+      "deployment workflow changes",
+      "runtime dependency changes",
+      "systemd or container wiring changes"
+    ]
+  },
   "importantWorkflows": ["Deploy to Production"],
   "qaLabels": [],
   "deployLabels": [],
   "healthUrls": [],
   "relatedRepos": [],
-  "validatedThrough": [],
+  "validatedThrough": ["Deploy to Production"],
+  "githubSignals": {
+    "postMerge": {
+      "waitForActions": true,
+      "checkSecurityAndQuality": true
+    },
+    "capabilities": {
+      "codeScanning": "available",
+      "secretScanning": "not_enabled",
+      "dependabotAlerts": "available",
+      "securityAdvisories": "available"
+    },
+    "refreshWhen": [
+      "repo visibility changes",
+      "GitHub plan changes",
+      "security settings change",
+      "token permissions change"
+    ]
+  },
   "cleanup": {
     "deleteMergedLocalBranches": true,
     "removeMergedCleanWorktrees": true
+  },
+  "metadataFreshness": {
+    "updateWhen": [
+      "docs routing changes",
+      "validation gates change",
+      "primary commands change",
+      "important workflows change",
+      "repo relationship changes",
+      "cleanup policy changes",
+      "deployment workflow changes",
+      "Discord command surface changes",
+      "Every Code bridge behavior changes",
+      "runtime or service wiring changes"
+    ]
   }
 }
