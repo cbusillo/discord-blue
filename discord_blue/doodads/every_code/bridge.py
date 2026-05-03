@@ -307,17 +307,24 @@ class EveryCodeBridge:
             self._site = None
 
     async def disconnect_active_sessions(self) -> None:
+        close_tasks: list[asyncio.Task[None]] = []
         for session_id in list(self.sessions.by_session):
             session = self.sessions.remove(session_id)
             if session is None or session.websocket.closed:
                 continue
-            try:
-                await asyncio.wait_for(
-                    session.websocket.close(message=b"bridge shutdown", drain=False),
-                    timeout=SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS,
-                )
-            except Exception:
-                logger.warning("Unable to close Every Code websocket %s during shutdown", session_id, exc_info=True)
+            close_tasks.append(asyncio.create_task(self.close_session_websocket(session_id, session)))
+
+        if close_tasks:
+            await asyncio.gather(*close_tasks)
+
+    async def close_session_websocket(self, session_id: str, session: EveryCodeSession) -> None:
+        try:
+            await asyncio.wait_for(
+                session.websocket.close(message=b"bridge shutdown", drain=False),
+                timeout=SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.warning("Unable to close Every Code websocket %s during shutdown", session_id, exc_info=True)
 
     async def close_active_sessions(self) -> None:
         for session_id in list(self.sessions.by_session):
