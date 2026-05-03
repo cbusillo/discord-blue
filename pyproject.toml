@@ -12,14 +12,13 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "aiohttp",
-    "toml",
+    "tomli-w",
     "discord.py",
     "PyNaCl",
 ]
 
 [dependency-groups]
 dev = [
-    "types-toml",
     "mypy",
     "hatchling",
     "ruff",

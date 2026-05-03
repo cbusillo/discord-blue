@@ -8,7 +8,7 @@ from time import sleep
 
 from discord.errors import PrivilegedIntentsRequired
 
-from discord_blue.config import config
+from discord_blue.config import get_config
 from discord_blue.plugs.discord_plug import BlueBot
 
 DISCORD_TOKEN_TIMEOUT = 120
@@ -48,12 +48,13 @@ def parse_args() -> Namespace:
 
 
 def start_bot() -> None:
+    config = get_config()
     login_success = False
     for _count in range(DISCORD_TOKEN_TIMEOUT):
         if login_success:
             break
         try:
-            bot = BlueBot()
+            bot = BlueBot(config)
             loop = asyncio.get_event_loop()
             handler = create_signal_handler(bot)
             for signal_to_add in (signal.SIGINT, signal.SIGTERM):
