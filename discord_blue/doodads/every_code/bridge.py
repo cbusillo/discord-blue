@@ -31,6 +31,7 @@ from discord_blue.doodads.every_code.sessions import (
     PendingRemoteApproval,
     PendingRemoteCommand,
     PendingRemoteUserInput,
+    RejectedCommandMessage,
 )
 from discord_blue.doodads.every_code.threads import SessionThread
 from discord_blue.doodads.every_code.threads import auto_join_configured_users
@@ -920,6 +921,13 @@ class EveryCodeBridge:
             session.active_command_id = None
         if command is not None:
             await self.update_command_message_reaction(session, command, REACTION_REJECTED)
+            if command.message_id is not None:
+                session.rejected_command_messages.append(
+                    RejectedCommandMessage(
+                        thread_id=command.thread_id,
+                        message_id=command.message_id,
+                    )
+                )
             if command.reject_notice is not None:
                 reason = str(payload.get("reason") or "command was rejected")
                 await self.post_thread_notice(command.thread_id, f"{command.reject_notice}: {reason}")
@@ -1371,6 +1379,7 @@ class EveryCodeBridge:
         if message_type == "turn_complete" and status.assistant_message:
             await self.post_assistant_message(session.thread_id, status.assistant_message)
         if message_type == "turn_complete":
+            await self.clear_rejected_command_reactions(session)
             await self.update_active_command_reaction(session, REACTION_FINISHED, clear=True)
             await self.clear_pending_user_inputs(
                 session,
@@ -1431,6 +1440,12 @@ class EveryCodeBridge:
             session.active_command_id = None
             if command.message_id == session.control_message_id:
                 session.control_status_reaction = None
+
+    async def clear_rejected_command_reactions(self, session: EveryCodeSession) -> None:
+        rejected_messages = session.rejected_command_messages
+        session.rejected_command_messages = []
+        for rejected_message in rejected_messages:
+            await self.clear_message_transient_reactions(rejected_message.thread_id, rejected_message.message_id)
 
     async def update_session_status_reaction(
         self,
@@ -1611,6 +1626,7 @@ class EveryCodeBridge:
             return
         try:
             message = await channel.fetch_message(message_id)
+            await self.clear_message_reactions(message)
             await message.delete()
         except discord.NotFound:
             return

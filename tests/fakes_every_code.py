@@ -39,6 +39,7 @@ class FakeReplyMessage:
         self.reply_mentions: list[bool] = []
         self.edits: list[tuple[str, bool]] = []
         self.deleted = False
+        self.delete_raises = False
 
     async def add_reaction(self, reaction: str) -> None:
         self.reactions.append(reaction)
@@ -59,6 +60,11 @@ class FakeReplyMessage:
         self.edits.append((content, kwargs.get("view") is None))
 
     async def delete(self) -> None:
+        if self.delete_raises:
+            raise discord.Forbidden(
+                response=SimpleNamespace(status=403, reason="Forbidden"),
+                message=f"Cannot delete {self.id}",
+            )
         self.deleted = True
         self.channel.delete_message(self.id)
 
