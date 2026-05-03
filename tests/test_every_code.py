@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import importlib
@@ -351,6 +352,74 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(bridge._authorized(SimpleNamespace(headers={})))
         self.assertFalse(bridge._authorized(SimpleNamespace(headers={"Authorization": "Bearer wrong"})))
         self.assertTrue(bridge._authorized(SimpleNamespace(headers={"Authorization": "Bearer shared-secret"})))
+
+    async def test_stop_disconnects_sessions_before_runner_cleanup(self) -> None:
+        config = Config()
+        bridge = EveryCodeBridge(FakeBot(config))
+        websocket = FakeWebSocket()
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=websocket,
+            thread_id=555,
+            notification_message_id=777,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555, notification_message_id=777)
+        test_case = self
+
+        class FakeRunner:
+            def __init__(self) -> None:
+                self.cleaned = False
+
+            async def cleanup(self) -> None:
+                self.cleaned = True
+                test_case.assertTrue(websocket.closed)
+                test_case.assertIsNone(bridge.sessions.get("session-1"))
+
+        runner = FakeRunner()
+        cast(Any, bridge)._runner = runner
+
+        await bridge.stop()
+
+        self.assertTrue(runner.cleaned)
+        self.assertTrue(websocket.closed)
+        self.assertEqual(websocket.close_messages, [b"bridge shutdown"])
+        self.assertIsNone(bridge.sessions.get("session-1"))
+        self.assertIsNone(bridge.sessions.get_by_thread(555))
+        self.assertIsNone(cast(Any, bridge)._runner)
+
+    async def test_stop_bounds_slow_runner_cleanup(self) -> None:
+        config = Config()
+        bridge = EveryCodeBridge(FakeBot(config))
+
+        class SlowRunner:
+            def __init__(self) -> None:
+                self.cleanup_started = False
+                self.cleanup_cancelled = False
+
+            async def cleanup(self) -> None:
+                self.cleanup_started = True
+                try:
+                    await asyncio.sleep(60)
+                except asyncio.CancelledError:
+                    self.cleanup_cancelled = True
+                    raise
+
+        runner = SlowRunner()
+        bridge_module_any = cast(Any, bridge_module)
+        original_timeout = bridge_module_any.SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS
+        bridge_module_any.SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = 0.01
+        cast(Any, bridge)._runner = runner
+        try:
+            with self.assertLogs(cast(Any, bridge_module).logger, level="WARNING") as logs:
+                await bridge.stop()
+        finally:
+            bridge_module_any.SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = original_timeout
+
+        self.assertIn("Every Code bridge runner cleanup timed out during shutdown", "\n".join(logs.output))
+        self.assertTrue(runner.cleanup_started)
+        self.assertTrue(runner.cleanup_cancelled)
+        self.assertIsNone(cast(Any, bridge)._runner)
 
     async def test_thread_reply_routes_to_registered_session_websocket(self) -> None:
         config = Config()
