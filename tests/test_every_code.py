@@ -398,6 +398,60 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(bridge.sessions.get_by_thread(555))
         self.assertIsNone(cast(Any, bridge)._runner)
 
+    async def test_stop_disconnects_sessions_concurrently(self) -> None:
+        config = Config()
+        bridge = EveryCodeBridge(FakeBot(config))
+        all_closes_started = asyncio.Event()
+        started_closes = 0
+        session_count = 3
+
+        class CoordinatedWebSocket(FakeWebSocket):
+            async def close(self, *, message: bytes = b"", drain: bool = True) -> bool:
+                nonlocal started_closes
+                started_closes += 1
+                if started_closes == session_count:
+                    all_closes_started.set()
+                await all_closes_started.wait()
+                return await super().close(message=message, drain=drain)
+
+        websockets: list[CoordinatedWebSocket] = []
+        for index in range(session_count):
+            websocket = CoordinatedWebSocket()
+            websockets.append(websocket)
+            session_id = f"session-{index}"
+            session = EveryCodeSession(
+                hello=SessionHello(
+                    session_id=session_id,
+                    session_epoch="epoch-1",
+                    host_label="Mac Studio",
+                    cwd="/tmp/project",
+                    branch="main",
+                    pid=42,
+                ),
+                websocket=websocket,
+                thread_id=555 + index,
+            )
+            bridge.sessions.register(session)
+            bridge.sessions.bind_thread(session_id, 555 + index)
+
+        class FakeRunner:
+            async def cleanup(self) -> None:
+                pass
+
+        bridge_module_any = cast(Any, bridge_module)
+        original_timeout = bridge_module_any.SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
+        bridge_module_any.SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 0.25
+        cast(Any, bridge)._runner = FakeRunner()
+        try:
+            await bridge.stop()
+        finally:
+            bridge_module_any.SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = original_timeout
+
+        self.assertEqual(started_closes, session_count)
+        for websocket in websockets:
+            self.assertEqual(websocket.close_messages, [b"bridge shutdown"])
+            self.assertTrue(websocket.closed)
+
     async def test_stop_bounds_slow_runner_cleanup(self) -> None:
         config = Config()
         bridge = EveryCodeBridge(FakeBot(config))
