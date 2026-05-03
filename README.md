@@ -14,7 +14,16 @@ to a local Every Code remote inbox.
    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
-2. Clone the Discord Blue Repository:
+2. Create the service user:
+
+   ```bash
+   groupadd --system discord-blue
+   useradd --system --home-dir /var/lib/discord-blue --create-home \
+     --gid discord-blue --shell /usr/sbin/nologin discord-blue
+   install -d -m 700 -o discord-blue -g discord-blue /var/lib/discord-blue/.config/discord-blue
+   ```
+
+3. Clone the Discord Blue Repository:
 
    ```bash
    cd /opt
@@ -22,13 +31,39 @@ to a local Every Code remote inbox.
    cd discord-blue
    ```
 
-3. Install Dependencies with uv:
+4. Install Dependencies with uv:
 
    ```bash
+   export UV_PYTHON_INSTALL_DIR=/opt/discord-blue/.uv-python
+   uv python install 3.13
+   rm -rf .venv
    uv sync --all-groups --python 3.13
+   chmod -R a+rX .uv-python .venv
    ```
 
-4. Set up and Start the Systemd Service:
+5. Create or migrate the config.
+
+   For a new install, run the bot once as the service user and complete the
+   prompts:
+
+   ```bash
+   sudo -u discord-blue HOME=/var/lib/discord-blue \
+     /opt/discord-blue/.venv/bin/discord-blue
+   ```
+
+   For the existing root-based install, migrate the generated config instead:
+
+   ```bash
+   install -D -m 600 -o discord-blue -g discord-blue \
+     /root/.config/discord-blue/config.toml \
+     /var/lib/discord-blue/.config/discord-blue/config.toml
+   if [ ! -e /var/lib/discord-blue/.code ] && [ -e /root/.code ]; then
+     cp -a /root/.code /var/lib/discord-blue/.code
+     chown -R discord-blue:discord-blue /var/lib/discord-blue/.code
+   fi
+   ```
+
+6. Set up and Start the Systemd Service:
 
    ```bash
    cp discord-blue.service /etc/systemd/system/
@@ -37,13 +72,9 @@ to a local Every Code remote inbox.
    systemctl start discord-blue
    ```
 
-**Note**: Make sure to run once to create the config file and input the Discord
-token along with the server and the bot channel. Slash commands sync directly to
-the first guild the bot joins, so they appear immediately.
-
-```bash
-uv run discord-blue
-```
+**Note**: The systemd service runs as the `discord-blue` user and reads config
+from `/var/lib/discord-blue/.config/discord-blue/config.toml`. Slash commands
+sync directly to the first guild the bot joins, so they appear immediately.
 
 To enable Every Code, set the doodad extension name in the generated config:
 

@@ -5,6 +5,9 @@
 .mypy_cache/
 .ruff_cache/
 .venv/
+.venv-next/
+.venv-prev/
+.uv-python/
 __pycache__/
 *.py[cod]
 .DS_Store
