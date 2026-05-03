@@ -18,6 +18,12 @@ class PendingRemoteCommand:
 
 
 @dataclass(slots=True)
+class RejectedCommandMessage:
+    thread_id: int
+    message_id: int
+
+
+@dataclass(slots=True)
 class PendingRemoteApproval:
     thread_id: int
     message_id: int
@@ -43,6 +49,7 @@ class EveryCodeSession:
     pending_commands: dict[str, PendingRemoteCommand] = field(default_factory=dict)
     pending_approvals: dict[str, PendingRemoteApproval] = field(default_factory=dict)
     pending_user_inputs: dict[str, PendingRemoteUserInput] = field(default_factory=dict)
+    rejected_command_messages: list[RejectedCommandMessage] = field(default_factory=list)
     active_command_id: str | None = None
     last_status_message: str | None = None
     control_status_reaction: str | None = None
