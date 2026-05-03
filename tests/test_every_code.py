@@ -25,29 +25,35 @@ _TEST_HOME = tempfile.TemporaryDirectory()
 os.environ["HOME"] = _TEST_HOME.name
 _CONFIG_PATH = Path(_TEST_HOME.name) / ".config" / "discord-blue" / "config.toml"
 _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-_CONFIG_PATH.write_text(
-    "\n".join(
-        [
-            "[discord]",
-            'token = "from-test"',
-            "guild_id = 1",
-            "bot_channel_id = 2",
-            'employee_role_name = "employee"',
-            "loaded_doodads = []",
-            "",
-            "[every_code]",
-            "enabled = false",
-            'listen_host = "0.0.0.0"',
-            "listen_port = 8787",
-            'token = ""',
-            "channel_id = 0",
-            'operator_role_name = ""',
-            "auto_join_user_ids = []",
-            "heartbeat_timeout_seconds = 120",
-            "heartbeat_check_interval_seconds = 30",
-        ]
+
+
+def write_default_config() -> None:
+    _CONFIG_PATH.write_text(
+        "\n".join(
+            [
+                "[discord]",
+                'token = "from-test"',
+                "guild_id = 1",
+                "bot_channel_id = 2",
+                'employee_role_name = "employee"',
+                "loaded_doodads = []",
+                "",
+                "[every_code]",
+                "enabled = false",
+                'listen_host = "0.0.0.0"',
+                "listen_port = 8787",
+                'token = ""',
+                "channel_id = 0",
+                'operator_role_name = ""',
+                "auto_join_user_ids = []",
+                "heartbeat_timeout_seconds = 120",
+                "heartbeat_check_interval_seconds = 30",
+            ]
+        )
     )
-)
+
+
+write_default_config()
 
 Config = importlib.import_module("discord_blue.config").Config
 bridge_module = importlib.import_module("discord_blue.doodads.every_code.bridge")
@@ -74,6 +80,9 @@ def stub_recovered_assistant_message(bridge: object, recovered_message: str | No
 
 
 class ConfigTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        write_default_config()
+
     def test_config_module_import_has_no_filesystem_side_effects(self) -> None:
         with tempfile.TemporaryDirectory() as home:
             env = os.environ.copy()
@@ -335,6 +344,7 @@ class FakeThreadTests(unittest.IsolatedAsyncioTestCase):
 # noinspection DuplicatedCode
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        write_default_config()
         self.original_thread_type = bridge_module.discord.Thread
         self.original_text_channel_type = bridge_module.discord.TextChannel
         bridge_module.discord.Thread = FakeThread
