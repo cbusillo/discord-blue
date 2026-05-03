@@ -5,17 +5,22 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-# Use the same Python version installed with uv venv
-ExecStart=uv run discord-blue
-User=root
-Group=root
-Type=idle
-Restart=on-abnormal
-RestartSec=15
-RestartForceExitStatus=1
-RestartForceExitStatus=26
-TimeoutStopSec=10
+Type=simple
+User=discord-blue
+Group=discord-blue
 WorkingDirectory=/opt/discord-blue
+Environment=HOME=/var/lib/discord-blue
+ExecStart=/opt/discord-blue/.venv/bin/discord-blue
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=10
+StateDirectory=discord-blue
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
 
 [Install]
 WantedBy=multi-user.target

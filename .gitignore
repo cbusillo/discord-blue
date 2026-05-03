@@ -11,6 +11,9 @@ htmlcov/
 # Local environments and secrets
 .env
 .venv/
+.venv-next/
+.venv-prev/
+.uv-python/
 env/
 venv/
 *.override.*
