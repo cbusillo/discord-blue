@@ -17,8 +17,9 @@ to a local Every Code remote inbox.
 2. Create the service user:
 
    ```bash
+   groupadd --system discord-blue
    useradd --system --home-dir /var/lib/discord-blue --create-home \
-     --shell /usr/sbin/nologin discord-blue
+     --gid discord-blue --shell /usr/sbin/nologin discord-blue
    install -d -m 700 -o discord-blue -g discord-blue /var/lib/discord-blue/.config/discord-blue
    ```
 
@@ -56,6 +57,10 @@ to a local Every Code remote inbox.
    install -D -m 600 -o discord-blue -g discord-blue \
      /root/.config/discord-blue/config.toml \
      /var/lib/discord-blue/.config/discord-blue/config.toml
+   if [ ! -e /var/lib/discord-blue/.code ] && [ -e /root/.code ]; then
+     cp -a /root/.code /var/lib/discord-blue/.code
+     chown -R discord-blue:discord-blue /var/lib/discord-blue/.code
+   fi
    ```
 
 6. Set up and Start the Systemd Service:

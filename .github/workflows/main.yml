@@ -61,15 +61,25 @@ jobs:
           service_home=/var/lib/discord-blue
           config_path=$service_home/.config/discord-blue/config.toml
           root_config=/root/.config/discord-blue/config.toml
+          if ! getent group "$service_user" >/dev/null; then
+            groupadd --system "$service_user"
+          fi
           if ! id -u "$service_user" >/dev/null 2>&1; then
             useradd --system --home-dir "$service_home" --create-home \
-              --shell /usr/sbin/nologin "$service_user"
+              --gid "$service_user" --shell /usr/sbin/nologin \
+              "$service_user"
           fi
+          install -d -m 700 -o "$service_user" -g "$service_user" \
+            "$service_home"
           install -d -m 700 -o "$service_user" -g "$service_user" \
             "$(dirname "$config_path")"
           if [ ! -f "$config_path" ] && [ -f "$root_config" ]; then
             install -D -m 600 -o "$service_user" -g "$service_user" \
               "$root_config" "$config_path"
+          fi
+          if [ ! -e "$service_home/.code" ] && [ -e /root/.code ]; then
+            cp -a /root/.code "$service_home/.code"
+            chown -R "$service_user:$service_user" "$service_home/.code"
           fi
           cd /opt/discord-blue
           export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring
