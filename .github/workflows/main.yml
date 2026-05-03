@@ -58,6 +58,6 @@ jobs:
             "cd /opt/discord-blue; \
           export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring; \
           git pull; \
-          uv sync --all-groups; \
+          uv sync --all-groups --python 3.13; \
           systemctl restart discord-blue"
         shell: bash

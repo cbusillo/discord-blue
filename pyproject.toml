@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "discord-blue"
 version = "0.2.0"
-description = ""
+description = "Discord bot plugin system with Every Code remote inbox integration"
 authors = [{ name = "Chris Busillo", email = "info@shinycomputers.com" }]
 readme = "README.md"
 
@@ -36,4 +36,3 @@ line-length = 133
 
 [tool.ruff.lint]
 select = ["ANN", "B", "E", "F", "RUF"]
-#ignore = ["ANN401"]

@@ -1,16 +1,16 @@
-# Discord Blue LXC Installation Guide
+# Discord Blue
 
 Discord Blue is a basic Discord bot plugin system built with the **discord.py**
-library. This guide provides step-by-step instructions for setting it up on a
-Debian-based LXC.
+library. It includes an Every Code doodad that bridges Discord session threads
+to a local Every Code remote inbox.
 
-## Installation Steps
+## LXC Installation
 
 1. Update System Packages:
 
    ```bash
    apt update && apt upgrade
-   apt install git curl libcairo2
+   apt install git curl
    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
@@ -25,7 +25,7 @@ Debian-based LXC.
 3. Install Dependencies with uv:
 
    ```bash
-   uv sync --all-groups
+   uv sync --all-groups --python 3.13
    ```
 
 4. Set up and Start the Systemd Service:
@@ -45,6 +45,33 @@ the first guild the bot joins, so they appear immediately.
 uv run discord-blue
 ```
 
+To enable Every Code, set the doodad extension name in the generated config:
+
+```toml
+[discord]
+loaded_doodads = ["every_code_doodad"]
+
+[every_code]
+enabled = true
+```
+
+## Development
+
+Install the managed Python environment:
+
+```bash
+uv sync --all-groups --python 3.13
+```
+
+Run the local validation gates:
+
+```bash
+uv run ruff format --check .
+uv run ruff check .
+uv run mypy .
+uv run python -m unittest discover -s tests -q
+```
+
 ## Docker
 
 A `Dockerfile` is provided to build a containerized version of the bot. It
@@ -61,4 +88,11 @@ Run the bot:
 
 ```bash
 docker run --rm discord-blue
+```
+
+Or use Docker Compose, which mounts `${HOME}/.config/discord-blue` into the
+container for the generated config:
+
+```bash
+docker compose up -d
 ```

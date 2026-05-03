@@ -80,7 +80,7 @@ class ConfigTests(unittest.TestCase):
                     "guild_id = 1",
                     "bot_channel_id = 2",
                     'employee_role_name = "employee"',
-                    'loaded_doodads = ["every_code"]',
+                    'loaded_doodads = ["every_code_doodad"]',
                     "",
                     "[every_code]",
                     "enabled = true",
