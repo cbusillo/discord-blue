@@ -713,6 +713,41 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session.control_interruptions_enabled)
         self.assertEqual(websocket.sent_json[0]["kind"], "reply")
 
+    async def test_thread_reply_ack_clears_delivery_receipt(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        websocket = FakeWebSocket()
+        control_message = add_bot_message(thread, 801, "\u200b")
+        control_message.reactions = ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"]
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=websocket,
+            thread_id=555,
+            control_message_id=801,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+        reply_message = FakeReplyMessage(802, thread, "Run the quick path")
+        thread.add_message(reply_message)
+
+        await bridge.send_thread_reply(cast(Any, reply_message))
+        command_id = next(iter(session.pending_commands))
+
+        await bridge.handle_command_ack({"session_id": "session-1", "command_id": command_id})
+
+        self.assertEqual(reply_message.reactions, [])
+        self.assertEqual(session.active_command_id, command_id)
+        self.assertEqual(
+            control_message.reactions,
+            [
+                bridge_module.REACTION_QUEUED,
+                bridge_module.REACTION_CONTROL_PAUSE,
+                bridge_module.REACTION_CONTROL_END,
+            ],
+        )
+
     async def test_thread_reply_turn_complete_moves_controls_after_assistant(self) -> None:
         config = Config()
         config.discord.employee_role_name = ""
@@ -747,7 +782,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(control_message.deleted)
-        self.assertEqual(reply_message.reactions, [bridge_module.REACTION_FINISHED])
+        self.assertEqual(reply_message.reactions, [])
         self.assertEqual(
             thread.sent_messages,
             [
@@ -1276,7 +1311,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(control_message.deleted)
         self.assertEqual(session.control_message_id, 901)
-        self.assertEqual(reply_message.reactions, [bridge_module.REACTION_IN_PROGRESS])
+        self.assertEqual(reply_message.reactions, [])
         self.assertEqual(
             control_message.reactions,
             [

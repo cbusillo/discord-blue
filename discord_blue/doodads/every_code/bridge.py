@@ -948,6 +948,9 @@ class EveryCodeBridge:
             if isinstance(channel, discord.Thread):
                 await self.refresh_session_controls(session, channel)
             return
+        if command.kind == "reply" and reaction != REACTION_REJECTED:
+            await self.clear_message_transient_reactions(command.thread_id, command.message_id)
+            return
         await self.set_message_reaction(command.thread_id, command.message_id, reaction)
 
     async def handle_approval_request(self, approval: RemoteApprovalRequest) -> None:
@@ -1498,6 +1501,23 @@ class EveryCodeBridge:
                         await message.remove_reaction(existing, bot_user)
         except discord.DiscordException:
             logger.warning("Unable to update Every Code reply reaction %s", message_id)
+
+    async def clear_message_transient_reactions(self, thread_id: int, message_id: int) -> None:
+        channel = self.bot.get_channel(thread_id)
+        if not isinstance(channel, discord.Thread):
+            return
+        bot_user = self.bot.user
+        if bot_user is None:
+            return
+        try:
+            message = await channel.fetch_message(message_id)
+        except discord.DiscordException:
+            logger.warning("Unable to fetch Every Code reply message %s", message_id)
+            return
+
+        for existing in TRANSIENT_REACTIONS:
+            with suppress(discord.DiscordException):
+                await message.remove_reaction(existing, bot_user)
 
     async def post_assistant_message(self, thread_id: int, text: str) -> None:
         for message in self.format_assistant_messages(text):
