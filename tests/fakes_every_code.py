@@ -16,9 +16,15 @@ class FakeWebSocket:
     def __init__(self, *, closed: bool = False) -> None:
         self.closed = closed
         self.sent_json: list[dict[str, object]] = []
+        self.close_messages: list[bytes] = []
 
     async def send_json(self, payload: dict[str, object]) -> None:
         self.sent_json.append(payload)
+
+    async def close(self, *, message: bytes = b"", drain: bool = True) -> bool:
+        self.close_messages.append(message)
+        self.closed = True
+        return True
 
 
 class FakeReplyMessage:

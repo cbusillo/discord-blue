@@ -46,6 +46,8 @@ DISCORD_MESSAGE_LIMIT = 2000
 DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
 DISCORD_CODE_FENCE_WRAP_RESERVE = 80
 STARTUP_RECONNECT_GRACE_SECONDS = 20
+SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 2
+SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = 5
 SESSION_START_PREFIX = "Every Code session connected"
 SESSION_NOTIFICATION_PREFIX = "Every Code session connected for "
 MARKDOWN_CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})(?P<info>[^`~\n]*)$")
@@ -266,7 +268,7 @@ class EveryCodeBridge:
 
         app = web.Application()
         app.router.add_get("/every-code/connect", self.handle_connect)
-        self._runner = web.AppRunner(app)
+        self._runner = web.AppRunner(app, shutdown_timeout=SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS)
         await self._runner.setup()
         self._site = web.TCPSite(
             self._runner,
@@ -295,9 +297,27 @@ class EveryCodeBridge:
             with suppress(asyncio.CancelledError):
                 await self._heartbeat_task
             self._heartbeat_task = None
-        await self._runner.cleanup()
-        self._runner = None
-        self._site = None
+        await self.disconnect_active_sessions()
+        try:
+            await asyncio.wait_for(self._runner.cleanup(), timeout=SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.warning("Every Code bridge runner cleanup timed out during shutdown")
+        finally:
+            self._runner = None
+            self._site = None
+
+    async def disconnect_active_sessions(self) -> None:
+        for session_id in list(self.sessions.by_session):
+            session = self.sessions.remove(session_id)
+            if session is None or session.websocket.closed:
+                continue
+            try:
+                await asyncio.wait_for(
+                    session.websocket.close(message=b"bridge shutdown", drain=False),
+                    timeout=SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                logger.warning("Unable to close Every Code websocket %s during shutdown", session_id, exc_info=True)
 
     async def close_active_sessions(self) -> None:
         for session_id in list(self.sessions.by_session):
