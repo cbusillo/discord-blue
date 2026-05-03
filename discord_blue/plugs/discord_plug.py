@@ -6,7 +6,7 @@ import discord
 from discord.ext import commands
 from discord.ext.commands import Bot
 
-from discord_blue.config import config
+from discord_blue.config import Config
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=discord.Guild | discord.TextChannel)
@@ -16,7 +16,7 @@ class BlueBot(commands.Bot):
     destination_guild: discord.Guild
     bot_channel: discord.TextChannel
 
-    def __init__(self) -> None:
+    def __init__(self, config: Config) -> None:
         self.config = config
         intents = discord.Intents.all()
 
@@ -45,20 +45,20 @@ class BlueBot(commands.Bot):
         await self.close()
 
     async def blue_guild(self) -> discord.Guild:
-        if not config.discord.guild_id:
+        if not self.config.discord.guild_id:
             return await self.select_object(list(self.guilds), "guild", self.save_config_guild)
-        if guild := self.get_guild(config.discord.guild_id):
+        if guild := self.get_guild(self.config.discord.guild_id):
             return guild
-        self.message_and_raise_error(f"Could not find guild with ID {config.discord.guild_id}")
+        self.message_and_raise_error(f"Could not find guild with ID {self.config.discord.guild_id}")
 
     async def blue_bot_channel(self, guild: discord.Guild) -> discord.TextChannel:
-        if not config.discord.bot_channel_id:
+        if not self.config.discord.bot_channel_id:
             return await self.select_object(list(guild.text_channels), "channel", self.save_config_bot_channel)
-        if channel := self.get_channel(config.discord.bot_channel_id):
+        if channel := self.get_channel(self.config.discord.bot_channel_id):
             if isinstance(channel, discord.TextChannel):
                 return channel
 
-        self.message_and_raise_error(f"Could not find channel with ID {config.discord.bot_channel_id}")
+        self.message_and_raise_error(f"Could not find channel with ID {self.config.discord.bot_channel_id}")
 
     @staticmethod
     def message_and_raise_error(message: str, error_type: type[BaseException] = ValueError) -> NoReturn:
@@ -81,15 +81,13 @@ class BlueBot(commands.Bot):
             except ValueError:
                 print("Invalid input. Please use the index number.")
 
-    @staticmethod
-    def save_config_guild(guild: discord.Guild) -> None:
-        config.discord.guild_id = guild.id
-        config.save()
+    def save_config_guild(self, guild: discord.Guild) -> None:
+        self.config.discord.guild_id = guild.id
+        self.config.save()
 
-    @staticmethod
-    def save_config_bot_channel(channel: discord.TextChannel) -> None:
-        config.discord.bot_channel_id = channel.id
-        config.save()
+    def save_config_bot_channel(self, channel: discord.TextChannel) -> None:
+        self.config.discord.bot_channel_id = channel.id
+        self.config.save()
 
     @staticmethod
     async def wrap_reply_lines(lines: str, message: discord.Message | discord.Interaction[Bot]) -> None:

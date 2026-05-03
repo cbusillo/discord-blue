@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import importlib
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -71,6 +73,22 @@ def stub_recovered_assistant_message(bridge: object, recovered_message: str | No
 
 
 class ConfigTests(unittest.TestCase):
+    def test_config_module_import_has_no_filesystem_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            env = os.environ.copy()
+            env["HOME"] = home
+            result = subprocess.run(
+                [sys.executable, "-c", "import discord_blue.config"],
+                cwd=Path(__file__).parents[1],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((Path(home) / ".config" / "discord-blue" / "config.toml").exists())
+
     def test_every_code_config_loads_and_saves(self) -> None:
         _CONFIG_PATH.write_text(
             "\n".join(

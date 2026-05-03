@@ -1,9 +1,9 @@
 import logging
+import tomllib
 from pathlib import Path
 from typing import Any
 
-# noinspection PyPackageRequirements
-import toml
+import tomli_w
 
 logger = logging.getLogger(__name__)
 
@@ -103,8 +103,8 @@ class Config(Serializable):
 
     def load(self) -> None:
         try:
-            with self.filepath.open() as file:
-                data = toml.load(file)
+            with self.filepath.open("rb") as file:
+                data = tomllib.load(file)
                 for key, value in data.items():
                     if key.startswith("_"):
                         continue
@@ -116,7 +116,7 @@ class Config(Serializable):
                         attr.from_dict(value)
                     else:
                         setattr(self, key, value)
-        except (FileNotFoundError, OSError, toml.TomlDecodeError):
+        except (FileNotFoundError, OSError, tomllib.TOMLDecodeError):
             logger.exception("Error loading configuration")
             exit(1)
         self.save()
@@ -125,7 +125,7 @@ class Config(Serializable):
         self.gather_missing_data(self)
         data = self.to_dict()
         try:
-            toml_data = toml.dumps(data)
+            toml_data = tomli_w.dumps(data)
             self.filepath.write_text(toml_data)
         except KeyError as key_error:
             logger.error(f"KeyError when saving configuration: {key_error}")
@@ -163,8 +163,10 @@ class Config(Serializable):
                     Config.gather_missing_data(value, full_key_name)
 
 
-config = Config()
+def get_config() -> Config:
+    return Config.get_instance()
+
 
 if __name__ == "__main__":
-    config = Config.get_instance()
-    print(config.discord.token)
+    loaded_config = get_config()
+    print(loaded_config.discord.token)
