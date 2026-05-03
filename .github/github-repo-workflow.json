@@ -6,6 +6,7 @@
     "packageManifest": "pyproject.toml",
     "lockfile": "uv.lock",
     "dockerfile": "Dockerfile",
+    "dockerignore": ".dockerignore",
     "compose": "docker-compose.yml",
     "systemdService": "discord-blue.service"
   },
