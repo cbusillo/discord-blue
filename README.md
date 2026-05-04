@@ -159,8 +159,13 @@ unit, and restarts the service. The container migration target is narrower:
 Until Launchplane owns the deploy driver, the existing SSH/systemd workflow
 remains the production deployment path.
 
-GitHub Actions expects a repository variable named `DISCORD_BLUE_RUNNER_LABEL`
-that points at the self-hosted runner label authorized for this repo. Other
-operational repos use repo-specific labels such as `chris-testing-launchplane`,
-`chris-testing-verireel`, or `chris-testing-sellyouroutboard`; Discord Blue
-should follow that pattern before the container workflow is treated as mergeable.
+GitHub Actions expects repo-scoped self-hosted runners with these labels:
+
+- `self-hosted`
+- `chris-testing`
+- `chris-testing-discord-blue`
+
+This follows the product-repo pattern used by repos such as Sell Your Outboard
+and VeriReel. Individual runners may also carry per-runner labels such as
+`chris-testing-discord-blue-1` and `chris-testing-discord-blue-2` for targeted
+maintenance.

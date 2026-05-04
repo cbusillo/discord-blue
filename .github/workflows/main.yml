@@ -13,7 +13,8 @@ jobs:
   validate:
     runs-on:
       - self-hosted
-      - ${{ vars.DISCORD_BLUE_RUNNER_LABEL }}
+      - chris-testing
+      - chris-testing-discord-blue
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -39,7 +40,8 @@ jobs:
     needs: validate
     runs-on:
       - self-hosted
-      - ${{ vars.DISCORD_BLUE_RUNNER_LABEL }}
+      - chris-testing
+      - chris-testing-discord-blue
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -77,7 +79,8 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on:
       - self-hosted
-      - ${{ vars.DISCORD_BLUE_RUNNER_LABEL }}
+      - chris-testing
+      - chris-testing-discord-blue
     steps:
       - name: Setup Tailscale VPN
         uses: tailscale/github-action@v4
