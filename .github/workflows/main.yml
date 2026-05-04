@@ -155,6 +155,12 @@ jobs:
             echo "Launchplane deploy request failed with HTTP ${status_code}." >&2
             exit 1
           fi
+          deploy_status="$(jq -r '.result.deploy_status // empty' "$response_file")"
+          if [ "$deploy_status" != "pass" ]; then
+            error_message="$(jq -r '.result.error_message // "Launchplane deploy did not pass."' "$response_file")"
+            echo "$error_message" >&2
+            exit 1
+          fi
 
   deploy:
     needs: image
