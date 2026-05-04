@@ -3,6 +3,12 @@ services:
     build:
       context: .
     container_name: discord-blue
+    image: discord-blue:local
     volumes:
-      - "${HOME}/.config/discord-blue:/root/.config/discord-blue"
+      - "discord-blue-state:/var/lib/discord-blue"
+    ports:
+      - "127.0.0.1:8787:8787"
     restart: unless-stopped
+
+volumes:
+  discord-blue-state:
