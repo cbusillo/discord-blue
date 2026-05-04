@@ -107,7 +107,11 @@ uv run python -m unittest discover -s tests -q
 
 A `Dockerfile` is provided to build a containerized version of the bot. It
 uses the [`ghcr.io/astral-sh/uv:debian`](https://github.com/astral-sh/uv) base
-image so `uv` is already available for dependency installation.
+image so `uv` is already available for dependency installation. The container
+starts through a small entrypoint that aligns the non-root `discord-blue` user
+with the mounted `/var/lib/discord-blue` owner, then runs the bot from that home
+directory. That keeps the container compatible with the existing LXC/systemd
+state directory during migration.
 
 Build the image:
 
@@ -115,15 +119,42 @@ Build the image:
 docker build -t discord-blue .
 ```
 
-Run the bot:
+Run the bot with the existing service state mounted:
 
 ```bash
-docker run --rm discord-blue
+docker run --rm \
+  --volume /var/lib/discord-blue:/var/lib/discord-blue \
+  --publish 127.0.0.1:8787:8787 \
+  discord-blue
 ```
 
-Or use Docker Compose, which mounts `${HOME}/.config/discord-blue` into the
-container for the generated config:
+Or use Docker Compose for a local smoke run:
 
 ```bash
 docker compose up -d
 ```
+
+Compose creates a `discord-blue-state` volume mounted at
+`/var/lib/discord-blue`. For the production LXC, Dokploy/Launchplane should bind
+the real `/var/lib/discord-blue` directory instead so
+`.config/discord-blue/config.toml` and `.code` Every Code state survive image
+replacement.
+
+The Every Code bridge listens on the configured `[every_code]` host and port.
+The image exposes port `8787`, and the local Compose file binds it to
+`127.0.0.1:8787`.
+
+## Launchplane/Dokploy migration target
+
+The current production workflow still SSHes into the LXC, runs `git pull`,
+rebuilds the uv environment under `/opt/discord-blue`, installs the systemd
+unit, and restarts the service. The container migration target is narrower:
+
+- CI proves the Docker image builds for every PR and push.
+- The production LXC keeps `/var/lib/discord-blue` as the durable state mount.
+- Dokploy pulls a versioned image and replaces the container.
+- Launchplane owns the deploy record, Dokploy mutation, and rollback decision.
+- This repo keeps source, image build inputs, tests, and smoke-check guidance.
+
+Until Launchplane owns the deploy driver, the existing SSH/systemd workflow
+remains the production deployment path.
