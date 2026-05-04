@@ -146,23 +146,15 @@ The image exposes port `8787`, and the local Compose file binds it to
 
 ## Launchplane/Dokploy migration target
 
-The current production workflow still SSHes into the LXC, runs `git pull`,
-rebuilds the uv environment under `/opt/discord-blue`, installs the systemd
-unit, and restarts the service. The container migration target is narrower:
+Production deploys run through Launchplane and Dokploy. The product workflow
+validates the repo, publishes an immutable GHCR image, and asks Launchplane to
+deploy that image to the registered Dokploy application on the Discord Blue LXC.
 
 - CI proves the Docker image builds for every PR and push.
 - The production LXC keeps `/var/lib/discord-blue` as the durable state mount.
 - Dokploy pulls a versioned image and replaces the container.
 - Launchplane owns the deploy record, Dokploy mutation, and rollback decision.
 - This repo keeps source, image build inputs, tests, and smoke-check guidance.
-
-Until Launchplane owns the deploy driver, the existing SSH/systemd workflow
-remains the production deployment path.
-
-The legacy SSH/systemd deploy job is guarded by the repository variable
-`DISCORD_BLUE_LEGACY_DEPLOY_ENABLED`. Set it to `true` only when intentionally
-running that old path. Otherwise `main` pushes validate and publish the image
-without mutating the LXC.
 
 GitHub Actions expects repo-scoped self-hosted runners with these labels:
 
