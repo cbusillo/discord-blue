@@ -76,7 +76,10 @@ jobs:
 
   deploy:
     needs: image
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      vars.DISCORD_BLUE_LEGACY_DEPLOY_ENABLED == 'true'
     runs-on:
       - self-hosted
       - chris-testing
