@@ -159,6 +159,11 @@ unit, and restarts the service. The container migration target is narrower:
 Until Launchplane owns the deploy driver, the existing SSH/systemd workflow
 remains the production deployment path.
 
+The legacy SSH/systemd deploy job is guarded by the repository variable
+`DISCORD_BLUE_LEGACY_DEPLOY_ENABLED`. Set it to `true` only when intentionally
+running that old path. Otherwise `main` pushes validate and publish the image
+without mutating the LXC.
+
 GitHub Actions expects repo-scoped self-hosted runners with these labels:
 
 - `self-hosted`
