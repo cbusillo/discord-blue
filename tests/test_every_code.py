@@ -360,7 +360,7 @@ class ThreadFormattingTests(unittest.TestCase):
 
         self.assertEqual(
             session_thread_name(hello),
-            "EC sellyouroutboard#67 · every-code/cbusillo-syo-67",
+            "EC sellyouroutboard#67",
         )
         self.assertEqual(
             session_notification_message(hello, thread),
@@ -371,6 +371,21 @@ class ThreadFormattingTests(unittest.TestCase):
         self.assertIn("source: `cbusillo/sellyouroutboard#67`", start_message)
         self.assertIn("issue: https://github.com/cbusillo/sellyouroutboard/issues/67", start_message)
         self.assertIn("request: `every-code-cbusillo-syo-67`", start_message)
+
+    def test_session_thread_name_caps_human_branch_length(self) -> None:
+        hello = SessionHello(
+            session_id="session-1",
+            session_epoch="epoch-1",
+            host_label="Mac Studio",
+            cwd="/tmp/project",
+            branch="feature/" + "x" * 160,
+            pid=42,
+        )
+
+        thread_name = session_thread_name(hello)
+
+        self.assertLessEqual(len(thread_name), 100)
+        self.assertTrue(thread_name.endswith("…"))
 
 
 class FakeThreadTests(unittest.IsolatedAsyncioTestCase):

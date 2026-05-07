@@ -10,6 +10,7 @@ from discord_blue.doodads.every_code.protocol import SessionHello
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
+DISCORD_THREAD_NAME_LIMIT = 100
 
 
 @dataclass(slots=True)
@@ -20,8 +21,10 @@ class SessionThread:
 
 def session_thread_name(hello: SessionHello) -> str:
     repo = session_display_name(hello)
+    if hello.origin and hello.origin.kind == "every_code":
+        return _truncate_thread_name(repo)
     branch = f" · {hello.branch}" if hello.branch else ""
-    return f"{repo}{branch}"
+    return _truncate_thread_name(f"{repo}{branch}")
 
 
 def session_display_name(hello: SessionHello) -> str:
@@ -31,6 +34,12 @@ def session_display_name(hello: SessionHello) -> str:
         issue = f"#{hello.origin.issue_number}" if hello.origin.issue_number is not None else ""
         return f"EC {repo}{issue}"
     return repo
+
+
+def _truncate_thread_name(name: str) -> str:
+    if len(name) <= DISCORD_THREAD_NAME_LIMIT:
+        return name
+    return name[: DISCORD_THREAD_NAME_LIMIT - 1].rstrip() + "…"
 
 
 def session_origin_lines(hello: SessionHello) -> list[str]:
