@@ -70,6 +70,7 @@ SessionStatus = protocol_module.SessionStatus
 sessions_module = importlib.import_module("discord_blue.doodads.every_code.sessions")
 EveryCodeSession = sessions_module.EveryCodeSession
 EveryCodeSessionRegistry = sessions_module.EveryCodeSessionRegistry
+PendingRemoteApproval = sessions_module.PendingRemoteApproval
 threads_module = importlib.import_module("discord_blue.doodads.every_code.threads")
 create_session_thread = threads_module.create_session_thread
 session_notification_message = threads_module.session_notification_message
@@ -1339,6 +1340,29 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("suppress", approval_message.edit_kwargs[-1])
         self.assertEqual(websocket.sent_json[0]["decision"], "approved")
 
+    async def test_approval_interaction_does_not_suppress_embeds_on_edit(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        websocket = FakeWebSocket()
+        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+        session.pending_approvals["approval-1"] = PendingRemoteApproval(thread_id=555, message_id=901)
+        interaction = FakeInteraction(thread)
+
+        await bridge.handle_approval_interaction(
+            cast(Any, interaction),
+            "session-1",
+            "approval-1",
+            "approved",
+        )
+
+        self.assertIn("Approval sent", interaction.response.edits[0][0])
+        self.assertNotIn("suppress_embeds", interaction.response.edit_kwargs[0])
+        self.assertEqual(websocket.sent_json[0]["decision"], "approved")
+
     async def test_approval_decision_ack_marks_message_finished(self) -> None:
         config = Config()
         thread = FakeThread(555)
@@ -1545,6 +1569,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             {"answers": {"mode": {"answers": ["Safe"]}}},
         )
         self.assertIn("Answer sent", interaction.response.edits[0][0])
+        self.assertNotIn("suppress_embeds", interaction.response.edit_kwargs[0])
 
     async def test_request_user_input_cancel_sends_empty_response(self) -> None:
         config = Config()
@@ -1591,6 +1616,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(websocket.sent_json[0]["turn_id"], "turn-1")
         self.assertEqual(websocket.sent_json[0]["response"], {"answers": {}})
         self.assertIn("Answer cancelled", interaction.response.edits[0][0])
+        self.assertNotIn("suppress_embeds", interaction.response.edit_kwargs[0])
 
     async def test_status_changed_preserves_contextual_controls_for_active_reply_command(self) -> None:
         config = Config()

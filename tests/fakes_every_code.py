@@ -168,6 +168,7 @@ class FakeInteractionResponse:
     def __init__(self) -> None:
         self.messages: list[tuple[str, bool]] = []
         self.edits: list[tuple[str, bool]] = []
+        self.edit_kwargs: list[dict[str, object]] = []
         self.modals: list[object] = []
 
     async def send_message(self, content: str, *, ephemeral: bool) -> None:
@@ -175,6 +176,7 @@ class FakeInteractionResponse:
 
     async def edit_message(self, content: str, **kwargs: object) -> None:
         self.edits.append((content, kwargs.get("view") is None))
+        self.edit_kwargs.append(kwargs)
 
     async def send_modal(self, modal: object) -> None:
         self.modals.append(modal)

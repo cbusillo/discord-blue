@@ -127,7 +127,6 @@ class RequestUserInputSelect(discord.ui.Select[discord.ui.View]):
             content=self.parent_view.format_prompt(),
             view=self.parent_view,
             allowed_mentions=every_code_allowed_mentions(),
-            suppress_embeds=True,
         )
 
 
@@ -158,7 +157,6 @@ class RequestUserInputAnswerModal(discord.ui.Modal):
             content=self.parent_view.format_prompt(),
             view=self.parent_view,
             allowed_mentions=every_code_allowed_mentions(),
-            suppress_embeds=True,
         )
 
 
@@ -1107,7 +1105,6 @@ class EveryCodeBridge:
             content=self.format_request_user_input_pending(interaction.user, cancelled=cancelled),
             view=None,
             allowed_mentions=every_code_allowed_mentions(),
-            suppress_embeds=True,
         )
 
     async def handle_approval_interaction(
@@ -1154,7 +1151,6 @@ class EveryCodeBridge:
             content=self.format_approval_pending(decision, interaction.user),
             view=None,
             allowed_mentions=every_code_allowed_mentions(),
-            suppress_embeds=True,
         )
 
     async def handle_thread_reaction(
