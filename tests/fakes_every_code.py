@@ -78,10 +78,19 @@ class FakeReplyMessage:
 
 
 class FakeThread:
-    def __init__(self, thread_id: int, *, archived: bool = False, locked: bool = False) -> None:
+    def __init__(
+        self,
+        thread_id: int,
+        *,
+        archived: bool = False,
+        locked: bool = False,
+        manage_messages: bool = True,
+    ) -> None:
         self.id = thread_id
         self.archived = archived
         self.locked = locked
+        self.guild = SimpleNamespace(me=SimpleNamespace(id=999))
+        self._manage_messages = manage_messages
         self._messages: dict[int, FakeReplyMessage] = {}
         self._history: list[FakeReplyMessage] = []
         self.sent_messages: list[str] = []
@@ -92,6 +101,9 @@ class FakeThread:
     def add_message(self, message: FakeReplyMessage) -> None:
         self._messages[message.id] = message
         self._history.append(message)
+
+    def permissions_for(self, _member: object) -> object:
+        return SimpleNamespace(manage_messages=self._manage_messages)
 
     def delete_message(self, message_id: int) -> None:
         message = self._messages.pop(message_id, None)
@@ -141,8 +153,10 @@ class FakeThread:
 
 
 class FakeTextChannel:
-    def __init__(self, channel_id: int, threads: list[FakeThread]) -> None:
+    def __init__(self, channel_id: int, threads: list[FakeThread], *, manage_messages: bool = True) -> None:
         self.id = channel_id
+        self.guild = SimpleNamespace(me=SimpleNamespace(id=999))
+        self._manage_messages = manage_messages
         self.threads = [thread for thread in threads if not thread.archived]
         self._archived_threads = [thread for thread in threads if thread.archived]
         self.sent_messages: list[str] = []
@@ -152,8 +166,11 @@ class FakeTextChannel:
         for thread in self._archived_threads:
             yield thread
 
+    def permissions_for(self, _member: object) -> object:
+        return SimpleNamespace(manage_messages=self._manage_messages)
+
     async def create_thread(self, **kwargs: object) -> FakeThread:
-        thread = FakeThread(9000 + len(self.threads))
+        thread = FakeThread(9000 + len(self.threads), manage_messages=self._manage_messages)
         self.threads.append(thread)
         return thread
 
