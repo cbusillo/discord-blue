@@ -29,4 +29,4 @@ async def send_every_code_message(
 
 
 async def edit_every_code_message(message: discord.Message, *, content: str) -> discord.Message:
-    return await message.edit(content=content, allowed_mentions=every_code_allowed_mentions(), suppress=True, view=None)
+    return await message.edit(content=content, allowed_mentions=every_code_allowed_mentions(), view=None)

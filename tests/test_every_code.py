@@ -1336,7 +1336,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         approval_message = await thread.fetch_message(901)
         self.assertIn("Approval sent", approval_message.content)
         self.assertEqual(approval_message.reactions, [])
-        self.assertTrue(approval_message.edit_kwargs[-1]["suppress"])
+        self.assertNotIn("suppress", approval_message.edit_kwargs[-1])
         self.assertEqual(websocket.sent_json[0]["decision"], "approved")
 
     async def test_approval_decision_ack_marks_message_finished(self) -> None:
