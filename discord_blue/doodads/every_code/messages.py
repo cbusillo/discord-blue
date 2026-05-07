@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import discord
 
 logger = logging.getLogger(__name__)
 MISSING_MANAGE_MESSAGES_DESTINATIONS: set[int] = set()
+MISSING_MANAGE_MESSAGES_NOTICE_LOCK = asyncio.Lock()
 
 
 def every_code_allowed_mentions() -> discord.AllowedMentions:
@@ -64,16 +66,18 @@ async def send_every_code_message(
 
 async def notify_missing_manage_messages(destination: discord.abc.Messageable) -> None:
     destination_id = getattr(destination, "id", id(destination))
-    if destination_id in MISSING_MANAGE_MESSAGES_DESTINATIONS:
-        return
-    MISSING_MANAGE_MESSAGES_DESTINATIONS.add(destination_id)
-    try:
-        await destination.send(
-            "Every Code could not suppress link previews because I am missing the `Manage Messages` permission here.",
-            allowed_mentions=every_code_allowed_mentions(),
-        )
-    except discord.DiscordException:
-        logger.warning("Unable to post Every Code missing Manage Messages notice in %s", destination_id)
+    async with MISSING_MANAGE_MESSAGES_NOTICE_LOCK:
+        if destination_id in MISSING_MANAGE_MESSAGES_DESTINATIONS:
+            return
+        try:
+            await destination.send(
+                "Every Code could not suppress link previews because I am missing the `Manage Messages` permission here.",
+                allowed_mentions=every_code_allowed_mentions(),
+            )
+        except discord.DiscordException:
+            logger.warning("Unable to post Every Code missing Manage Messages notice in %s", destination_id)
+            return
+        MISSING_MANAGE_MESSAGES_DESTINATIONS.add(destination_id)
 
 
 async def edit_every_code_message(message: discord.Message, *, content: str) -> discord.Message:

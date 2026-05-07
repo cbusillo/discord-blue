@@ -344,6 +344,27 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         notices = [message for message in channel.sent_messages if "missing the `Manage Messages` permission" in message]
         self.assertEqual(len(notices), 1)
 
+    async def test_missing_manage_messages_notice_retries_after_send_failure(self) -> None:
+        thread = FakeThread(555, manage_messages=False)
+        thread.send_failures_remaining = 1
+
+        await messages_module.notify_missing_manage_messages(thread)
+        await messages_module.send_every_code_message(thread, "Second message")
+
+        notices = [message for message in thread.sent_messages if "missing the `Manage Messages` permission" in message]
+        self.assertEqual(len(notices), 1)
+
+    async def test_missing_manage_messages_notice_is_atomic_per_destination(self) -> None:
+        thread = FakeThread(555, manage_messages=False)
+
+        await asyncio.gather(
+            messages_module.send_every_code_message(thread, "First message"),
+            messages_module.send_every_code_message(thread, "Second message"),
+        )
+
+        notices = [message for message in thread.sent_messages if "missing the `Manage Messages` permission" in message]
+        self.assertEqual(len(notices), 1)
+
     def test_session_thread_text_uses_repo_branch_and_no_mentions(self) -> None:
         hello = make_hello()
         thread = SimpleNamespace(id=555)

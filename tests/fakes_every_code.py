@@ -96,6 +96,8 @@ class FakeThread:
         self.sent_messages: list[str] = []
         self.sent_views: list[object] = []
         self.sent_kwargs: list[dict[str, object]] = []
+        self.send_raises = False
+        self.send_failures_remaining = 0
         self.edits: list[dict[str, object]] = []
 
     def add_message(self, message: FakeReplyMessage) -> None:
@@ -131,6 +133,13 @@ class FakeThread:
             yield message
 
     async def send(self, content: str | None = None, **kwargs: object) -> FakeReplyMessage:
+        if self.send_raises or self.send_failures_remaining > 0:
+            if self.send_failures_remaining > 0:
+                self.send_failures_remaining -= 1
+            raise discord.Forbidden(
+                response=SimpleNamespace(status=403, reason="Forbidden"),
+                message=f"Cannot send to {self.id}",
+            )
         stored_content = content or ""
         self.sent_messages.append(stored_content)
         self.sent_views.append(kwargs.get("view"))
