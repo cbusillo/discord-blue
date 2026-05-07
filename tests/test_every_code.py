@@ -71,6 +71,7 @@ sessions_module = importlib.import_module("discord_blue.doodads.every_code.sessi
 EveryCodeSession = sessions_module.EveryCodeSession
 EveryCodeSessionRegistry = sessions_module.EveryCodeSessionRegistry
 threads_module = importlib.import_module("discord_blue.doodads.every_code.threads")
+create_session_thread = threads_module.create_session_thread
 session_notification_message = threads_module.session_notification_message
 session_start_message = threads_module.session_start_message
 session_thread_name = threads_module.session_thread_name
@@ -298,7 +299,24 @@ class ProtocolTests(unittest.TestCase):
         )
 
 
-class ThreadFormattingTests(unittest.TestCase):
+class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.original_text_channel_type = threads_module.discord.TextChannel
+        threads_module.discord.TextChannel = FakeTextChannel
+
+    async def asyncTearDown(self) -> None:
+        threads_module.discord.TextChannel = self.original_text_channel_type
+
+    async def test_create_session_thread_suppresses_embeds_on_start_messages(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        channel = FakeTextChannel(321, [])
+
+        session_thread = await create_session_thread(FakeBot(config, channel=channel), make_hello())
+
+        self.assertTrue(channel.sent_kwargs[0]["suppress_embeds"])
+        self.assertTrue(session_thread.thread.sent_kwargs[0]["suppress_embeds"])
+
     def test_session_thread_text_uses_repo_branch_and_no_mentions(self) -> None:
         hello = make_hello()
         thread = SimpleNamespace(id=555)
@@ -863,6 +881,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(thread.sent_messages), 1)
         self.assertIn("Need approval", thread.sent_messages[0])
         self.assertIn("Quick review", thread.sent_messages[0])
+        self.assertTrue(thread.sent_kwargs[0]["suppress_embeds"])
         self.assertIsNone(thread.sent_views[0])
         approval_message = await thread.fetch_message(901)
         self.assertEqual(approval_message.reactions, ["✅", "✖️"])
@@ -1317,6 +1336,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         approval_message = await thread.fetch_message(901)
         self.assertIn("Approval sent", approval_message.content)
         self.assertEqual(approval_message.reactions, [])
+        self.assertTrue(approval_message.edit_kwargs[-1]["suppress"])
         self.assertEqual(websocket.sent_json[0]["decision"], "approved")
 
     async def test_approval_decision_ack_marks_message_finished(self) -> None:
@@ -1952,6 +1972,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await bridge.backfill_latest_assistant_message(thread, make_hello())
 
         self.assertEqual(thread.sent_messages, ["**Assistant**\nRecovered answer"])
+        self.assertTrue(thread.sent_kwargs[0]["suppress_embeds"])
 
     async def test_backfill_skips_thread_with_existing_assistant(self) -> None:
         config = Config()

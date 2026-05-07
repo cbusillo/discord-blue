@@ -15,6 +15,9 @@ from typing import Literal, cast
 import discord
 from aiohttp import WSMsgType, web
 
+from discord_blue.doodads.every_code.messages import edit_every_code_message
+from discord_blue.doodads.every_code.messages import every_code_allowed_mentions
+from discord_blue.doodads.every_code.messages import send_every_code_message
 from discord_blue.doodads.every_code.protocol import (
     RequestUserInputQuestion,
     RemoteApprovalDecision,
@@ -123,7 +126,8 @@ class RequestUserInputSelect(discord.ui.Select[discord.ui.View]):
         await interaction.response.edit_message(
             content=self.parent_view.format_prompt(),
             view=self.parent_view,
-            allowed_mentions=discord.AllowedMentions.none(),
+            allowed_mentions=every_code_allowed_mentions(),
+            suppress_embeds=True,
         )
 
 
@@ -153,7 +157,8 @@ class RequestUserInputAnswerModal(discord.ui.Modal):
         await interaction.response.edit_message(
             content=self.parent_view.format_prompt(),
             view=self.parent_view,
-            allowed_mentions=discord.AllowedMentions.none(),
+            allowed_mentions=every_code_allowed_mentions(),
+            suppress_embeds=True,
         )
 
 
@@ -608,9 +613,9 @@ class EveryCodeBridge:
         if assistant_message is None:
             return
         for message in self.format_assistant_messages(assistant_message):
-            await thread.send(
+            await send_every_code_message(
+                thread,
                 message[:DISCORD_MESSAGE_LIMIT],
-                allowed_mentions=discord.AllowedMentions.none(),
             )
 
     @staticmethod
@@ -1002,9 +1007,9 @@ class EveryCodeBridge:
         if not isinstance(channel, discord.Thread):
             return
 
-        message = await channel.send(
+        message = await send_every_code_message(
+            channel,
             self.format_approval_request(approval),
-            allowed_mentions=discord.AllowedMentions.none(),
         )
         await self.add_message_reactions(
             message,
@@ -1036,9 +1041,9 @@ class EveryCodeBridge:
         if not isinstance(channel, discord.Thread):
             return
 
-        message = await channel.send(
+        message = await send_every_code_message(
+            channel,
             self.format_request_user_input(request, {}),
-            allowed_mentions=discord.AllowedMentions.none(),
             view=self.request_user_input_view(session.session_id, request),
         )
         session.pending_user_inputs[request.turn_id] = PendingRemoteUserInput(
@@ -1101,7 +1106,8 @@ class EveryCodeBridge:
         await interaction.response.edit_message(
             content=self.format_request_user_input_pending(interaction.user, cancelled=cancelled),
             view=None,
-            allowed_mentions=discord.AllowedMentions.none(),
+            allowed_mentions=every_code_allowed_mentions(),
+            suppress_embeds=True,
         )
 
     async def handle_approval_interaction(
@@ -1147,7 +1153,8 @@ class EveryCodeBridge:
         await interaction.response.edit_message(
             content=self.format_approval_pending(decision, interaction.user),
             view=None,
-            allowed_mentions=discord.AllowedMentions.none(),
+            allowed_mentions=every_code_allowed_mentions(),
+            suppress_embeds=True,
         )
 
     async def handle_thread_reaction(
@@ -1362,10 +1369,9 @@ class EveryCodeBridge:
             return
         try:
             message = await channel.fetch_message(pending.message_id)
-            await message.edit(
+            await edit_every_code_message(
+                message,
                 content=content[:DISCORD_MESSAGE_LIMIT],
-                view=None,
-                allowed_mentions=discord.AllowedMentions.none(),
             )
             await self.clear_message_reactions(message)
         except discord.DiscordException:
@@ -1437,9 +1443,9 @@ class EveryCodeBridge:
         if not isinstance(channel, discord.Thread):
             return
 
-        await channel.send(
+        await send_every_code_message(
+            channel,
             self.format_user_message_notice(user_message.message)[:DISCORD_MESSAGE_LIMIT],
-            allowed_mentions=discord.AllowedMentions.none(),
         )
         await self.spawn_session_controls(
             session,
@@ -1518,9 +1524,9 @@ class EveryCodeBridge:
             await self.refresh_session_controls(session, thread)
             if session.control_message_id is not None:
                 return
-        message = await thread.send(
+        message = await send_every_code_message(
+            thread,
             self.format_waiting_for_direction(session),
-            allowed_mentions=discord.AllowedMentions.none(),
         )
         await self.add_message_reactions(message, self.session_control_reactions(session))
         session.control_message_id = message.id
@@ -1589,9 +1595,9 @@ class EveryCodeBridge:
                 return
             session.control_message_id = None
 
-        message = await channel.send(
+        message = await send_every_code_message(
+            channel,
             self.format_waiting_for_direction(session),
-            allowed_mentions=discord.AllowedMentions.none(),
         )
         await self.add_message_reactions(
             message,
@@ -1615,10 +1621,9 @@ class EveryCodeBridge:
                 continue
             try:
                 message = await channel.fetch_message(pending.message_id)
-                await message.edit(
+                await edit_every_code_message(
+                    message,
                     content=content[:DISCORD_MESSAGE_LIMIT],
-                    view=None,
-                    allowed_mentions=discord.AllowedMentions.none(),
                 )
             except discord.DiscordException:
                 logger.warning(
@@ -1684,9 +1689,9 @@ class EveryCodeBridge:
         session.control_interruptions_enabled = interruptions_enabled
 
         try:
-            message = await channel.send(
+            message = await send_every_code_message(
+                channel,
                 self.format_waiting_for_direction(session),
-                allowed_mentions=discord.AllowedMentions.none(),
             )
             await self.add_message_reactions(message, self.session_control_reactions(session))
         except discord.DiscordException:
@@ -1714,9 +1719,9 @@ class EveryCodeBridge:
     async def post_thread_notice(self, thread_id: int, text: str) -> None:
         channel = self.bot.get_channel(thread_id)
         if isinstance(channel, discord.Thread):
-            await channel.send(
+            await send_every_code_message(
+                channel,
                 text[:DISCORD_MESSAGE_LIMIT],
-                allowed_mentions=discord.AllowedMentions.none(),
             )
 
     async def close_session_thread(self, session: EveryCodeSession) -> None:
@@ -1744,9 +1749,9 @@ class EveryCodeBridge:
                 logger.warning("Unable to unarchive Every Code thread %s", thread.id)
 
         try:
-            await thread.send(
+            await send_every_code_message(
+                thread,
                 "Every Code session disconnected",
-                allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.DiscordException:
             logger.warning("Unable to post close notice in Every Code thread %s", thread.id)
@@ -1945,9 +1950,9 @@ class EveryCodeBridge:
         if replaced:
             return
         session.control_message_id = None
-        message = await thread.send(
+        message = await send_every_code_message(
+            thread,
             self.format_waiting_for_direction(session),
-            allowed_mentions=discord.AllowedMentions.none(),
         )
         await self.add_message_reactions(message, self.session_control_reactions(session))
         session.control_message_id = message.id

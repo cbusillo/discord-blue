@@ -44,6 +44,7 @@ class FakeReplyMessage:
         self.replies: list[str] = []
         self.reply_mentions: list[bool] = []
         self.edits: list[tuple[str, bool]] = []
+        self.edit_kwargs: list[dict[str, object]] = []
         self.deleted = False
         self.delete_raises = False
 
@@ -64,6 +65,7 @@ class FakeReplyMessage:
     async def edit(self, content: str, **kwargs: object) -> None:
         self.content = content
         self.edits.append((content, kwargs.get("view") is None))
+        self.edit_kwargs.append(kwargs)
 
     async def delete(self) -> None:
         if self.delete_raises:
@@ -84,6 +86,7 @@ class FakeThread:
         self._history: list[FakeReplyMessage] = []
         self.sent_messages: list[str] = []
         self.sent_views: list[object] = []
+        self.sent_kwargs: list[dict[str, object]] = []
         self.edits: list[dict[str, object]] = []
 
     def add_message(self, message: FakeReplyMessage) -> None:
@@ -119,6 +122,7 @@ class FakeThread:
         stored_content = content or ""
         self.sent_messages.append(stored_content)
         self.sent_views.append(kwargs.get("view"))
+        self.sent_kwargs.append(kwargs)
         message = FakeReplyMessage(
             900 + len(self.sent_messages),
             self,
@@ -141,10 +145,23 @@ class FakeTextChannel:
         self.id = channel_id
         self.threads = [thread for thread in threads if not thread.archived]
         self._archived_threads = [thread for thread in threads if thread.archived]
+        self.sent_messages: list[str] = []
+        self.sent_kwargs: list[dict[str, object]] = []
 
     async def archived_threads(self, **_: object) -> AsyncIterator[FakeThread]:
         for thread in self._archived_threads:
             yield thread
+
+    async def create_thread(self, **kwargs: object) -> FakeThread:
+        thread = FakeThread(9000 + len(self.threads))
+        self.threads.append(thread)
+        return thread
+
+    async def send(self, content: str | None = None, **kwargs: object) -> FakeReplyMessage:
+        stored_content = content or ""
+        self.sent_messages.append(stored_content)
+        self.sent_kwargs.append(kwargs)
+        return FakeReplyMessage(800 + len(self.sent_messages), FakeThread(self.id), stored_content)
 
 
 class FakeInteractionResponse:
