@@ -6,6 +6,7 @@ from pathlib import Path
 
 import discord
 
+from discord_blue.doodads.every_code.messages import send_every_code_message
 from discord_blue.doodads.every_code.protocol import SessionHello
 from discord_blue.plugs.discord_plug import BlueBot
 
@@ -87,11 +88,8 @@ async def create_session_thread(bot: BlueBot, hello: SessionHello) -> SessionThr
         name=session_thread_name(hello),
         auto_archive_duration=1440,
     )
-    notification = await channel.send(
-        session_notification_message(hello, thread),
-        allowed_mentions=discord.AllowedMentions.none(),
-    )
-    await thread.send(session_start_message(hello))
+    notification = await send_every_code_message(channel, session_notification_message(hello, thread))
+    await send_every_code_message(thread, session_start_message(hello))
     await auto_join_configured_users(bot, thread)
     return SessionThread(thread=thread, notification_message_id=notification.id)
 
