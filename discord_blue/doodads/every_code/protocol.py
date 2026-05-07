@@ -5,6 +5,30 @@ from typing import Any, Literal
 
 
 @dataclass(slots=True)
+class SessionOrigin:
+    kind: str
+    request_id: str | None
+    repository: str | None
+    issue_number: int | None
+    issue_url: str | None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "SessionOrigin":
+        issue_number = payload.get("issue_number")
+        try:
+            parsed_issue_number = int(issue_number) if issue_number is not None else None
+        except (TypeError, ValueError):
+            parsed_issue_number = None
+        return cls(
+            kind=str(payload.get("kind") or ""),
+            request_id=str(payload["request_id"]) if payload.get("request_id") else None,
+            repository=str(payload["repository"]) if payload.get("repository") else None,
+            issue_number=parsed_issue_number,
+            issue_url=str(payload["issue_url"]) if payload.get("issue_url") else None,
+        )
+
+
+@dataclass(slots=True)
 class SessionHello:
     session_id: str
     session_epoch: str
@@ -12,9 +36,12 @@ class SessionHello:
     cwd: str
     branch: str | None
     pid: int
+    origin: SessionOrigin | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "SessionHello":
+        origin_payload = payload.get("origin")
+        origin = SessionOrigin.from_payload(origin_payload) if isinstance(origin_payload, dict) else None
         return cls(
             session_id=str(payload["session_id"]),
             session_epoch=str(payload["session_epoch"]),
@@ -22,6 +49,7 @@ class SessionHello:
             cwd=str(payload.get("cwd") or ""),
             branch=str(payload["branch"]) if payload.get("branch") else None,
             pid=int(payload.get("pid") or 0),
+            origin=origin,
         )
 
 

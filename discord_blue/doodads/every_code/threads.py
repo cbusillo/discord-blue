@@ -19,9 +19,32 @@ class SessionThread:
 
 
 def session_thread_name(hello: SessionHello) -> str:
-    repo = Path(hello.cwd).name or "session"
+    repo = session_display_name(hello)
     branch = f" · {hello.branch}" if hello.branch else ""
     return f"{repo}{branch}"
+
+
+def session_display_name(hello: SessionHello) -> str:
+    repo = Path(hello.cwd).name or "session"
+    if hello.origin and hello.origin.kind == "every_code" and hello.origin.repository:
+        repo = hello.origin.repository.rsplit("/", 1)[-1]
+        issue = f"#{hello.origin.issue_number}" if hello.origin.issue_number is not None else ""
+        return f"EC {repo}{issue}"
+    return repo
+
+
+def session_origin_lines(hello: SessionHello) -> list[str]:
+    if not hello.origin or hello.origin.kind != "every_code":
+        return []
+    lines = ["origin: `Every Code automation`"]
+    if hello.origin.repository:
+        issue = f"#{hello.origin.issue_number}" if hello.origin.issue_number is not None else ""
+        lines.append(f"source: `{hello.origin.repository}{issue}`")
+    if hello.origin.issue_url:
+        lines.append(f"issue: {hello.origin.issue_url}")
+    if hello.origin.request_id:
+        lines.append(f"request: `{hello.origin.request_id}`")
+    return lines
 
 
 def session_start_message(hello: SessionHello) -> str:
@@ -30,6 +53,7 @@ def session_start_message(hello: SessionHello) -> str:
         [
             "Every Code session connected",
             "",
+            *session_origin_lines(hello),
             f"host: {hello.host_label}",
             f"cwd: `{hello.cwd}`",
             f"branch: `{branch}`",
@@ -40,8 +64,13 @@ def session_start_message(hello: SessionHello) -> str:
 
 def session_notification_message(hello: SessionHello, thread: discord.Thread) -> str:
     repo = Path(hello.cwd).name or "session"
+    prefix = "Every Code session connected"
+    if hello.origin and hello.origin.kind == "every_code" and hello.origin.repository:
+        issue = f"#{hello.origin.issue_number}" if hello.origin.issue_number is not None else ""
+        repo = f"{hello.origin.repository}{issue}"
+        prefix = "Every Code automated session connected"
     branch = f" on `{hello.branch}`" if hello.branch else ""
-    return f"Every Code session connected for `{repo}`{branch}: <#{thread.id}>"
+    return f"{prefix} for `{repo}`{branch}: <#{thread.id}>"
 
 
 async def get_every_code_channel(bot: BlueBot) -> discord.TextChannel:

@@ -37,6 +37,7 @@ from discord_blue.doodads.every_code.threads import SessionThread
 from discord_blue.doodads.every_code.threads import auto_join_configured_users
 from discord_blue.doodads.every_code.threads import create_session_thread
 from discord_blue.doodads.every_code.threads import get_every_code_channel
+from discord_blue.doodads.every_code.threads import session_display_name
 from discord_blue.doodads.every_code.threads import session_start_message
 from discord_blue.plugs.discord_plug import BlueBot
 
@@ -894,7 +895,7 @@ class EveryCodeBridge:
 
         lines = ["Live Every Code sessions:"]
         for session in sessions:
-            repo = Path(session.hello.cwd).name or "session"
+            repo = session_display_name(session.hello)
             branch = f" on `{session.hello.branch}`" if session.hello.branch else ""
             thread = f" <#{session.thread_id}>" if session.thread_id is not None else ""
             state = "offline" if session.websocket.closed else "online"
@@ -915,7 +916,7 @@ class EveryCodeBridge:
         if session is None:
             return "This thread is not attached to a live Every Code session."
 
-        repo = Path(session.hello.cwd).name or "session"
+        repo = session_display_name(session.hello)
         branch = f" on `{session.hello.branch}`" if session.hello.branch else ""
         state = "offline" if session.websocket.closed else "online"
         status = session.last_status_message or "No status update received yet."

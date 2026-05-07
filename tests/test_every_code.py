@@ -65,6 +65,7 @@ RemoteRequestUserInput = protocol_module.RemoteRequestUserInput
 RequestUserInputQuestion = protocol_module.RequestUserInputQuestion
 RequestUserInputQuestionOption = protocol_module.RequestUserInputQuestionOption
 SessionHello = protocol_module.SessionHello
+SessionOrigin = protocol_module.SessionOrigin
 SessionStatus = protocol_module.SessionStatus
 sessions_module = importlib.import_module("discord_blue.doodads.every_code.sessions")
 EveryCodeSession = sessions_module.EveryCodeSession
@@ -172,6 +173,29 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(hello.cwd, "/tmp/project")
         self.assertIsNone(hello.branch)
         self.assertEqual(hello.pid, 0)
+        self.assertIsNone(hello.origin)
+
+    def test_session_hello_from_payload_parses_origin(self) -> None:
+        hello = SessionHello.from_payload(
+            {
+                "session_id": "session-1",
+                "session_epoch": "epoch-1",
+                "cwd": "/tmp/project",
+                "origin": {
+                    "kind": "every_code",
+                    "request_id": "every-code-cbusillo-syo-67",
+                    "repository": "cbusillo/sellyouroutboard",
+                    "issue_number": 67,
+                    "issue_url": "https://github.com/cbusillo/sellyouroutboard/issues/67",
+                },
+            }
+        )
+
+        self.assertIsNotNone(hello.origin)
+        assert hello.origin is not None
+        self.assertEqual(hello.origin.kind, "every_code")
+        self.assertEqual(hello.origin.repository, "cbusillo/sellyouroutboard")
+        self.assertEqual(hello.origin.issue_number, 67)
 
     def test_remote_command_serializes_bridge_message(self) -> None:
         command = RemoteCommand(
@@ -315,6 +339,38 @@ class ThreadFormattingTests(unittest.TestCase):
             "Every Code session connected for `session`: <#555>",
         )
         self.assertIn("branch: `unknown`", session_start_message(hello))
+
+    def test_session_thread_text_marks_every_code_origin(self) -> None:
+        hello = SessionHello(
+            session_id="session-1",
+            session_epoch="epoch-1",
+            host_label="Mac Studio",
+            cwd="/tmp/worktree",
+            branch="every-code/cbusillo-syo-67",
+            pid=42,
+            origin=SessionOrigin(
+                kind="every_code",
+                request_id="every-code-cbusillo-syo-67",
+                repository="cbusillo/sellyouroutboard",
+                issue_number=67,
+                issue_url="https://github.com/cbusillo/sellyouroutboard/issues/67",
+            ),
+        )
+        thread = SimpleNamespace(id=555)
+
+        self.assertEqual(
+            session_thread_name(hello),
+            "EC sellyouroutboard#67 · every-code/cbusillo-syo-67",
+        )
+        self.assertEqual(
+            session_notification_message(hello, thread),
+            "Every Code automated session connected for `cbusillo/sellyouroutboard#67` on `every-code/cbusillo-syo-67`: <#555>",
+        )
+        start_message = session_start_message(hello)
+        self.assertIn("origin: `Every Code automation`", start_message)
+        self.assertIn("source: `cbusillo/sellyouroutboard#67`", start_message)
+        self.assertIn("issue: https://github.com/cbusillo/sellyouroutboard/issues/67", start_message)
+        self.assertIn("request: `every-code-cbusillo-syo-67`", start_message)
 
 
 class FakeThreadTests(unittest.IsolatedAsyncioTestCase):
@@ -1689,6 +1745,42 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(bridge.active_sessions_summary(), "No live Every Code sessions.")
 
+    async def test_active_sessions_summary_marks_every_code_origin(self) -> None:
+        config = Config()
+        bridge = EveryCodeBridge(FakeBot(config))
+        hello = SessionHello(
+            session_id="session-1",
+            session_epoch="epoch-1",
+            host_label="Mac Studio",
+            cwd="/tmp/project",
+            branch="main",
+            pid=42,
+            origin=SessionOrigin(
+                kind="every_code",
+                request_id="every-code-cbusillo-syo-67",
+                repository="cbusillo/sellyouroutboard",
+                issue_number=67,
+                issue_url="https://github.com/cbusillo/sellyouroutboard/issues/67",
+            ),
+        )
+        session = EveryCodeSession(
+            hello=hello,
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        self.assertEqual(
+            bridge.active_sessions_summary(),
+            "\n".join(
+                [
+                    "Live Every Code sessions:",
+                    "- `EC sellyouroutboard#67` on `main` (online, Mac Studio) <#555>",
+                ]
+            ),
+        )
+
     async def test_session_status_summary_uses_last_status(self) -> None:
         config = Config()
         config.discord.employee_role_name = ""
@@ -1720,6 +1812,46 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     "state: online",
                     "host: Mac Studio",
                     "status: Turn started",
+                ]
+            ),
+        )
+
+    async def test_session_status_summary_marks_every_code_origin(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        hello = SessionHello(
+            session_id="session-1",
+            session_epoch="epoch-1",
+            host_label="Mac Studio",
+            cwd="/tmp/project",
+            branch="main",
+            pid=42,
+            origin=SessionOrigin(
+                kind="every_code",
+                request_id="every-code-cbusillo-syo-67",
+                repository="cbusillo/sellyouroutboard",
+                issue_number=67,
+                issue_url="https://github.com/cbusillo/sellyouroutboard/issues/67",
+            ),
+        )
+        session = EveryCodeSession(
+            hello=hello,
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        self.assertEqual(
+            bridge.session_status_summary(thread, SimpleNamespace(id=123)),
+            "\n".join(
+                [
+                    "Every Code `EC sellyouroutboard#67` on `main`",
+                    "state: online",
+                    "host: Mac Studio",
+                    "status: No status update received yet.",
                 ]
             ),
         )
