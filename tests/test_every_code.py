@@ -58,6 +58,7 @@ write_default_config()
 Config = importlib.import_module("discord_blue.config").Config
 bridge_module = importlib.import_module("discord_blue.doodads.every_code.bridge")
 EveryCodeBridge = bridge_module.EveryCodeBridge
+messages_module = importlib.import_module("discord_blue.doodads.every_code.messages")
 protocol_module = importlib.import_module("discord_blue.doodads.every_code.protocol")
 RemoteCommand = protocol_module.RemoteCommand
 RemoteApprovalRequest = protocol_module.RemoteApprovalRequest
@@ -304,9 +305,11 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.original_text_channel_type = threads_module.discord.TextChannel
         threads_module.discord.TextChannel = FakeTextChannel
+        messages_module.MISSING_MANAGE_MESSAGES_DESTINATIONS.clear()
 
     async def asyncTearDown(self) -> None:
         threads_module.discord.TextChannel = self.original_text_channel_type
+        messages_module.MISSING_MANAGE_MESSAGES_DESTINATIONS.clear()
 
     async def test_create_session_thread_suppresses_embeds_on_start_messages(self) -> None:
         config = Config()
@@ -317,6 +320,29 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(channel.sent_kwargs[0]["suppress_embeds"])
         self.assertTrue(session_thread.thread.sent_kwargs[0]["suppress_embeds"])
+
+    async def test_create_session_thread_warns_when_manage_messages_missing(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        channel = FakeTextChannel(321, [], manage_messages=False)
+
+        session_thread = await create_session_thread(FakeBot(config, channel=channel), make_hello())
+
+        self.assertNotIn("suppress_embeds", channel.sent_kwargs[0])
+        self.assertIn("missing the `Manage Messages` permission", channel.sent_messages[1])
+        self.assertNotIn("suppress_embeds", session_thread.thread.sent_kwargs[0])
+        self.assertIn("missing the `Manage Messages` permission", session_thread.thread.sent_messages[1])
+
+    async def test_missing_manage_messages_notice_posts_once_per_destination(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        channel = FakeTextChannel(321, [], manage_messages=False)
+
+        await create_session_thread(FakeBot(config, channel=channel), make_hello())
+        await messages_module.send_every_code_message(channel, "Second message")
+
+        notices = [message for message in channel.sent_messages if "missing the `Manage Messages` permission" in message]
+        self.assertEqual(len(notices), 1)
 
     def test_session_thread_text_uses_repo_branch_and_no_mentions(self) -> None:
         hello = make_hello()
