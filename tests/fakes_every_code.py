@@ -31,7 +31,7 @@ class FakeReplyMessage:
     def __init__(
         self,
         message_id: int,
-        channel: FakeThread,
+        channel: FakeThread | FakeTextChannel,
         content: str = "",
         *,
         author_id: int = 123,
@@ -168,8 +168,34 @@ class FakeTextChannel:
         self._manage_messages = manage_messages
         self.threads = [thread for thread in threads if not thread.archived]
         self._archived_threads = [thread for thread in threads if thread.archived]
+        self._messages: dict[int, FakeReplyMessage] = {}
+        self._history: list[FakeReplyMessage] = []
         self.sent_messages: list[str] = []
         self.sent_kwargs: list[dict[str, object]] = []
+
+    def add_message(self, message: FakeReplyMessage) -> None:
+        self._messages[message.id] = message
+        self._history.append(message)
+
+    def delete_message(self, message_id: int) -> None:
+        message = self._messages.pop(message_id, None)
+        if message is None:
+            return
+        message.deleted = True
+        self._history = [stored for stored in self._history if stored.id != message_id]
+
+    async def history(
+        self,
+        limit: int | None = None,
+        oldest_first: bool = False,
+    ) -> AsyncIterator[FakeReplyMessage]:
+        messages = list(self._history)
+        if not oldest_first:
+            messages.reverse()
+        if limit is not None:
+            messages = messages[:limit]
+        for message in messages:
+            yield message
 
     async def archived_threads(self, **_: object) -> AsyncIterator[FakeThread]:
         for thread in self._archived_threads:
@@ -187,7 +213,9 @@ class FakeTextChannel:
         stored_content = content or ""
         self.sent_messages.append(stored_content)
         self.sent_kwargs.append(kwargs)
-        return FakeReplyMessage(800 + len(self.sent_messages), FakeThread(self.id), stored_content)
+        message = FakeReplyMessage(800 + len(self.sent_messages), self, stored_content, author_id=999)
+        self.add_message(message)
+        return message
 
 
 class FakeInteractionResponse:
@@ -252,7 +280,7 @@ def make_hello() -> SessionHello:
     )
 
 
-def add_bot_message(thread: FakeThread, message_id: int, content: str) -> FakeReplyMessage:
-    message = FakeReplyMessage(message_id, thread, content, author_id=999)
-    thread.add_message(message)
+def add_bot_message(channel: FakeThread | FakeTextChannel, message_id: int, content: str) -> FakeReplyMessage:
+    message = FakeReplyMessage(message_id, channel, content, author_id=999)
+    channel.add_message(message)
     return message

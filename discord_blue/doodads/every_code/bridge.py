@@ -54,6 +54,10 @@ SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 2
 SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = 5
 SESSION_START_PREFIX = "Every Code session connected"
 SESSION_NOTIFICATION_PREFIX = "Every Code session connected for "
+SESSION_NOTIFICATION_PREFIXES = (
+    SESSION_NOTIFICATION_PREFIX,
+    "Every Code automated session connected for ",
+)
 MARKDOWN_CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})(?P<info>[^`~\n]*)$")
 RESUME_SESSION_RE = re.compile(
     r"\bresume\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b",
@@ -381,7 +385,7 @@ class EveryCodeBridge:
             async for message in channel.history():
                 if message.author.id != bot_user.id:
                     continue
-                if not message.content.startswith(SESSION_NOTIFICATION_PREFIX):
+                if not message.content.startswith(SESSION_NOTIFICATION_PREFIXES):
                     continue
                 try:
                     await message.delete()

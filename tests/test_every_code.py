@@ -500,6 +500,37 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(bridge._authorized(SimpleNamespace(headers={"Authorization": "Bearer wrong"})))
         self.assertTrue(bridge._authorized(SimpleNamespace(headers={"Authorization": "Bearer shared-secret"})))
 
+    async def test_cleanup_stale_session_notifications_deletes_human_and_automated_notices(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        channel = FakeTextChannel(321, [])
+        human_notice = add_bot_message(
+            channel,
+            101,
+            "Every Code session connected for `project` on `main`: <#555>",
+        )
+        automated_notice = add_bot_message(
+            channel,
+            102,
+            "Every Code automated session connected for `cbusillo/sellyouroutboard#67`: <#556>",
+        )
+        unrelated_bot_notice = add_bot_message(channel, 103, "Every Code status summary")
+        user_notice = FakeReplyMessage(
+            104,
+            channel,
+            "Every Code automated session connected for `user/post`: <#557>",
+            author_id=123,
+        )
+        channel.add_message(user_notice)
+        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+
+        await bridge.cleanup_stale_session_notifications()
+
+        self.assertTrue(human_notice.deleted)
+        self.assertTrue(automated_notice.deleted)
+        self.assertFalse(unrelated_bot_notice.deleted)
+        self.assertFalse(user_notice.deleted)
+
     async def test_stop_disconnects_sessions_before_runner_cleanup(self) -> None:
         config = Config()
         bridge = EveryCodeBridge(FakeBot(config))
