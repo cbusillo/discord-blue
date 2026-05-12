@@ -12,7 +12,7 @@ same managed environment. After `uv sync`, IDEs may point at the repo-local
 Use `uv run mypy .` for static type checking.
 Use `uv run ruff check .` for linting.
 Use `uv run ruff format .` for formatting.
-Use `.github/github-repo-workflow.json` for non-secret repo workflow facts,
+Use `.github/github.json` for non-secret repo workflow facts,
 validation commands, GitHub signal availability, docs routing, important
 workflows, and cleanup policy.
 

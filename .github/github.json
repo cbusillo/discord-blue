@@ -33,7 +33,11 @@
     "inspection": {
       "tool": "jetbrains",
       "ide": "PyCharm",
-      "scopePreference": ["changed_files", "directory", "whole_project"]
+      "scopePreference": [
+        "changed_files",
+        "directory",
+        "whole_project"
+      ]
     },
     "docsRequiredWhen": [
       "behavior changes",
@@ -46,12 +50,13 @@
       "systemd or container wiring changes"
     ]
   },
-  "importantWorkflows": ["Deploy to Production"],
+  "importantWorkflows": [
+    "Deploy to Production"
+  ],
   "qaLabels": [],
   "deployLabels": [],
   "healthUrls": [],
   "relatedRepos": [],
-  "validatedThrough": ["Deploy to Production"],
   "githubSignals": {
     "postMerge": {
       "waitForActions": true,
