@@ -99,6 +99,7 @@ class FakeThread:
         self.send_raises = False
         self.send_failures_remaining = 0
         self.edits: list[dict[str, object]] = []
+        self.name: str | None = None
 
     def add_message(self, message: FakeReplyMessage) -> None:
         self._messages[message.id] = message
@@ -158,6 +159,8 @@ class FakeThread:
             self.archived = bool(kwargs["archived"])
         if "locked" in kwargs:
             self.locked = bool(kwargs["locked"])
+        if "name" in kwargs:
+            self.name = str(kwargs["name"])
         self.edits.append(kwargs)
 
 
@@ -260,6 +263,7 @@ class FakeBot:
         self.user = SimpleNamespace(id=999)
         self._thread = thread
         self._channel = channel
+        self.fetch_channel_calls: list[int] = []
 
     def get_channel(self, channel_id: int) -> FakeThread | FakeTextChannel | None:
         if self._thread is not None and self._thread.id == channel_id:
@@ -267,6 +271,26 @@ class FakeBot:
         if self._channel is not None and self._channel.id == channel_id:
             return self._channel
         return None
+
+    async def fetch_channel(self, channel_id: int) -> FakeThread | FakeTextChannel:
+        self.fetch_channel_calls.append(channel_id)
+        channel = self.get_channel(channel_id)
+        if channel is not None:
+            return channel
+        raise discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "channel not found")
+
+
+class FetchOnlyFakeBot(FakeBot):
+    def get_channel(self, channel_id: int) -> None:
+        return None
+
+    async def fetch_channel(self, channel_id: int) -> FakeThread | FakeTextChannel:
+        self.fetch_channel_calls.append(channel_id)
+        if self._thread is not None and self._thread.id == channel_id:
+            return self._thread
+        if self._channel is not None and self._channel.id == channel_id:
+            return self._channel
+        raise discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "channel not found")
 
 
 def make_hello() -> SessionHello:
