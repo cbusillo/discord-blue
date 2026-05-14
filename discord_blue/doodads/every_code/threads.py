@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import discord
@@ -26,7 +27,25 @@ def session_thread_name(hello: SessionHello) -> str:
     if hello.origin and hello.origin.kind == "every_code":
         return _truncate_thread_name(repo)
     branch = f" · {hello.branch}" if session_branch_is_title_worthy(hello.branch) else ""
-    return _truncate_thread_name(f"{repo}{branch}")
+    discriminator = f" · {session_discriminator(hello)}"
+    return _truncate_thread_name(f"{repo}{branch}{discriminator}")
+
+
+def session_discriminator(hello: SessionHello) -> str:
+    short_id = _short_session_id(hello.session_id)
+    try:
+        epoch_millis = int(hello.session_epoch)
+    except ValueError:
+        return short_id
+    if epoch_millis <= 0:
+        return short_id
+    started = datetime.fromtimestamp(epoch_millis / 1000)
+    return f"{started:%H:%M} {short_id}"
+
+
+def _short_session_id(session_id: str) -> str:
+    short_id = "".join(char for char in session_id if char.isalnum())[:4]
+    return short_id or "sess"
 
 
 def session_branch_is_title_worthy(branch: str | None) -> bool:
@@ -78,14 +97,15 @@ def session_start_message(hello: SessionHello) -> str:
 
 
 def session_notification_message(hello: SessionHello, thread: discord.Thread) -> str:
-    repo = Path(hello.cwd).name or "session"
+    repo = session_thread_name(hello)
     prefix = "Every Code session connected"
     if hello.origin and hello.origin.kind == "every_code" and hello.origin.repository:
         issue = f"#{hello.origin.issue_number}" if hello.origin.issue_number is not None else ""
         repo = f"{hello.origin.repository}{issue}"
         prefix = "Every Code automated session connected"
-    branch = f" on `{hello.branch}`" if session_branch_is_title_worthy(hello.branch) else ""
-    return f"{prefix} for `{repo}`{branch}: <#{thread.id}>"
+        branch = f" on `{hello.branch}`" if session_branch_is_title_worthy(hello.branch) else ""
+        return f"{prefix} for `{repo}`{branch}: <#{thread.id}>"
+    return f"{prefix} for `{repo}`: <#{thread.id}>"
 
 
 async def get_every_code_channel(bot: BlueBot) -> discord.TextChannel:
