@@ -388,10 +388,10 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         hello = make_hello()
         thread = SimpleNamespace(id=555)
 
-        self.assertEqual(session_thread_name(hello), "project")
+        self.assertEqual(session_thread_name(hello), "project · sess")
         self.assertEqual(
             session_notification_message(hello, thread),
-            "Every Code session connected for `project`: <#555>",
+            "Every Code session connected for `project · sess`: <#555>",
         )
         self.assertEqual(
             session_start_message(hello),
@@ -418,10 +418,10 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         )
         thread = SimpleNamespace(id=555)
 
-        self.assertEqual(session_thread_name(hello), "session")
+        self.assertEqual(session_thread_name(hello), "session · sess")
         self.assertEqual(
             session_notification_message(hello, thread),
-            "Every Code session connected for `session`: <#555>",
+            "Every Code session connected for `session · sess`: <#555>",
         )
         self.assertIn("branch: `unknown`", session_start_message(hello))
 
@@ -430,11 +430,18 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         hello.branch = "code/project-task"
         thread = SimpleNamespace(id=555)
 
-        self.assertEqual(session_thread_name(hello), "project · code/project-task")
+        self.assertEqual(session_thread_name(hello), "project · code/project-task · sess")
         self.assertEqual(
             session_notification_message(hello, thread),
-            "Every Code session connected for `project` on `code/project-task`: <#555>",
+            "Every Code session connected for `project · code/project-task · sess`: <#555>",
         )
+
+    def test_session_thread_text_uses_start_time_and_short_session_id(self) -> None:
+        hello = make_hello()
+        hello.session_id = "05ddf473-6cf3-4850-ac00-8f0a158d0c9d"
+        hello.session_epoch = "1710000000000"
+
+        self.assertRegex(session_thread_name(hello), r"^project · \d{2}:\d{2} 05dd$")
 
     def test_session_thread_text_omits_common_default_branch_names(self) -> None:
         thread = SimpleNamespace(id=555)
@@ -443,10 +450,10 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
             hello = make_hello()
             hello.branch = branch
 
-            self.assertEqual(session_thread_name(hello), "project")
+            self.assertEqual(session_thread_name(hello), "project · sess")
             self.assertEqual(
                 session_notification_message(hello, thread),
-                "Every Code session connected for `project`: <#555>",
+                "Every Code session connected for `project · sess`: <#555>",
             )
 
     def test_session_thread_text_marks_every_code_origin(self) -> None:
@@ -1916,7 +1923,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             "\n".join(
                 [
                     "Live Every Code sessions:",
-                    "- `project` (online, Mac Studio) <#555>",
+                    "- `project · sess` (online, Mac Studio) <#555>",
                 ]
             ),
         )
@@ -1990,7 +1997,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             bridge.session_status_summary(thread, SimpleNamespace(id=123)),
             "\n".join(
                 [
-                    "Every Code `project`",
+                    "Every Code `project · sess`",
                     "state: online",
                     "host: Mac Studio",
                     "status: Turn started",
@@ -2062,7 +2069,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session.hello.cwd, "/tmp/project")
         self.assertEqual(session.hello.branch, "code/project-task")
-        self.assertEqual(thread.name, "project · code/project-task")
+        self.assertEqual(thread.name, "project · code/project-task · sess")
         self.assertEqual(thread.edits[-1]["reason"], "Every Code working branch selected")
 
     async def test_session_metadata_changed_preserves_missing_branch(self) -> None:
@@ -2116,7 +2123,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(bot.fetch_channel_calls, [555])
-        self.assertEqual(thread.name, "project · code/project-task")
+        self.assertEqual(thread.name, "project · code/project-task · sess")
 
     async def test_session_metadata_changed_skips_every_code_origin_rename(self) -> None:
         config = Config()

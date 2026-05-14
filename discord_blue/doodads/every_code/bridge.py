@@ -41,8 +41,6 @@ from discord_blue.doodads.every_code.threads import SessionThread
 from discord_blue.doodads.every_code.threads import auto_join_configured_users
 from discord_blue.doodads.every_code.threads import create_session_thread
 from discord_blue.doodads.every_code.threads import get_every_code_channel
-from discord_blue.doodads.every_code.threads import session_branch_is_title_worthy
-from discord_blue.doodads.every_code.threads import session_display_name
 from discord_blue.doodads.every_code.threads import session_thread_name
 from discord_blue.doodads.every_code.threads import session_start_message
 from discord_blue.plugs.discord_plug import BlueBot
@@ -908,11 +906,10 @@ class EveryCodeBridge:
 
         lines = ["Live Every Code sessions:"]
         for session in sessions:
-            repo = session_display_name(session.hello)
-            branch = f" on `{session.hello.branch}`" if session_branch_is_title_worthy(session.hello.branch) else ""
+            title = session_thread_name(session.hello)
             thread = f" <#{session.thread_id}>" if session.thread_id is not None else ""
             state = "offline" if session.websocket.closed else "online"
-            lines.append(f"- `{repo}`{branch} ({state}, {session.hello.host_label}){thread}")
+            lines.append(f"- `{title}` ({state}, {session.hello.host_label}){thread}")
         return "\n".join(lines)
 
     def session_status_summary(
@@ -929,13 +926,12 @@ class EveryCodeBridge:
         if session is None:
             return "This thread is not attached to a live Every Code session."
 
-        repo = session_display_name(session.hello)
-        branch = f" on `{session.hello.branch}`" if session_branch_is_title_worthy(session.hello.branch) else ""
+        title = session_thread_name(session.hello)
         state = "offline" if session.websocket.closed else "online"
         status = session.last_status_message or "No status update received yet."
         return "\n".join(
             [
-                f"Every Code `{repo}`{branch}",
+                f"Every Code `{title}`",
                 f"state: {state}",
                 f"host: {session.hello.host_label}",
                 f"status: {status}",
