@@ -25,7 +25,6 @@ from discord_blue.doodads.every_code.protocol import (
     RemoteCommand,
     RemoteRequestUserInput,
     SessionHello,
-    SessionMetadataChanged,
     SessionStatus,
     UserMessage,
 )
@@ -479,9 +478,6 @@ class EveryCodeBridge:
                 await websocket.send_json({"type": "hello_ack", "thread_id": session_thread.thread.id})
             elif message_type == "heartbeat" and session is not None:
                 session.touch()
-            elif message_type == "session_metadata_changed":
-                metadata = SessionMetadataChanged.from_payload(payload)
-                await self.handle_session_metadata_changed(metadata)
             elif message_type == "user_message":
                 user_message = UserMessage.from_payload(payload)
                 await self.handle_user_message(user_message)
@@ -1430,31 +1426,6 @@ class EveryCodeBridge:
                 if replaced:
                     return
             await self.post_session_controls(session)
-
-    async def handle_session_metadata_changed(self, metadata: SessionMetadataChanged) -> None:
-        session = self.sessions.get(metadata.session_id)
-        if session is None or session.thread_id is None:
-            logger.warning("Every Code metadata update for unknown session: %s", metadata.session_id)
-            return
-        if metadata.session_epoch != session.session_epoch:
-            logger.warning("Every Code metadata update for stale session epoch: %s", metadata.session_id)
-            return
-
-        old_name = session_thread_name(session.hello)
-        if metadata.branch is not None:
-            session.hello.branch = metadata.branch
-        new_name = session_thread_name(session.hello)
-        if metadata.reason != "working_branch_selected" or session.hello.origin is not None or new_name == old_name:
-            return
-
-        thread = await self.get_thread(session.thread_id)
-        if thread is None:
-            logger.warning("Unable to rename Every Code thread %s: thread is unavailable", session.thread_id)
-            return
-        try:
-            await thread.edit(name=new_name, reason="Every Code working branch selected")
-        except discord.DiscordException:
-            logger.warning("Unable to rename Every Code thread %s", session.thread_id)
 
     async def handle_user_message(self, user_message: UserMessage) -> None:
         session = self.sessions.get(user_message.session_id)

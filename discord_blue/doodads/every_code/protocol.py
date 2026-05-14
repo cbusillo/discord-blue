@@ -54,25 +54,6 @@ class SessionHello:
 
 
 @dataclass(slots=True)
-class SessionMetadataChanged:
-    session_id: str
-    session_epoch: str
-    cwd: str | None
-    branch: str | None
-    reason: str
-
-    @classmethod
-    def from_payload(cls, payload: dict[str, Any]) -> "SessionMetadataChanged":
-        return cls(
-            session_id=str(payload["session_id"]),
-            session_epoch=str(payload["session_epoch"]),
-            cwd=str(payload["cwd"]) if payload.get("cwd") else None,
-            branch=str(payload["branch"]) if payload.get("branch") else None,
-            reason=str(payload.get("reason") or ""),
-        )
-
-
-@dataclass(slots=True)
 class SessionStatus:
     session_id: str
     session_epoch: str
