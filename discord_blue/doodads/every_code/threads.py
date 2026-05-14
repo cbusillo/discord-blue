@@ -12,6 +12,7 @@ from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
 DISCORD_THREAD_NAME_LIMIT = 100
+DEFAULT_BRANCH_NAMES = {"main", "master", "develop", "development", "dev", "trunk"}
 
 
 @dataclass(slots=True)
@@ -24,8 +25,12 @@ def session_thread_name(hello: SessionHello) -> str:
     repo = session_display_name(hello)
     if hello.origin and hello.origin.kind == "every_code":
         return _truncate_thread_name(repo)
-    branch = f" · {hello.branch}" if hello.branch else ""
+    branch = f" · {hello.branch}" if session_branch_is_title_worthy(hello.branch) else ""
     return _truncate_thread_name(f"{repo}{branch}")
+
+
+def session_branch_is_title_worthy(branch: str | None) -> bool:
+    return bool(branch and branch.lower() not in DEFAULT_BRANCH_NAMES)
 
 
 def session_display_name(hello: SessionHello) -> str:
@@ -79,7 +84,7 @@ def session_notification_message(hello: SessionHello, thread: discord.Thread) ->
         issue = f"#{hello.origin.issue_number}" if hello.origin.issue_number is not None else ""
         repo = f"{hello.origin.repository}{issue}"
         prefix = "Every Code automated session connected"
-    branch = f" on `{hello.branch}`" if hello.branch else ""
+    branch = f" on `{hello.branch}`" if session_branch_is_title_worthy(hello.branch) else ""
     return f"{prefix} for `{repo}`{branch}: <#{thread.id}>"
 
 

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from tests.fakes_every_code import FakeBot
+from tests.fakes_every_code import FetchOnlyFakeBot
 from tests.fakes_every_code import FakeInteraction
 from tests.fakes_every_code import FakeReplyMessage
 from tests.fakes_every_code import FakeTextChannel
@@ -66,6 +67,7 @@ RemoteRequestUserInput = protocol_module.RemoteRequestUserInput
 RequestUserInputQuestion = protocol_module.RequestUserInputQuestion
 RequestUserInputQuestionOption = protocol_module.RequestUserInputQuestionOption
 SessionHello = protocol_module.SessionHello
+SessionMetadataChanged = protocol_module.SessionMetadataChanged
 SessionOrigin = protocol_module.SessionOrigin
 SessionStatus = protocol_module.SessionStatus
 sessions_module = importlib.import_module("discord_blue.doodads.every_code.sessions")
@@ -199,6 +201,23 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(hello.origin.kind, "every_code")
         self.assertEqual(hello.origin.repository, "cbusillo/sellyouroutboard")
         self.assertEqual(hello.origin.issue_number, 67)
+
+    def test_session_metadata_changed_from_payload(self) -> None:
+        metadata = SessionMetadataChanged.from_payload(
+            {
+                "session_id": "session-1",
+                "session_epoch": "epoch-1",
+                "cwd": "/tmp/project-worktree",
+                "branch": "code/project-task",
+                "reason": "working_branch_selected",
+            }
+        )
+
+        self.assertEqual(metadata.session_id, "session-1")
+        self.assertEqual(metadata.session_epoch, "epoch-1")
+        self.assertEqual(metadata.cwd, "/tmp/project-worktree")
+        self.assertEqual(metadata.branch, "code/project-task")
+        self.assertEqual(metadata.reason, "working_branch_selected")
 
     def test_remote_command_serializes_bridge_message(self) -> None:
         command = RemoteCommand(
@@ -369,10 +388,10 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         hello = make_hello()
         thread = SimpleNamespace(id=555)
 
-        self.assertEqual(session_thread_name(hello), "project · main")
+        self.assertEqual(session_thread_name(hello), "project")
         self.assertEqual(
             session_notification_message(hello, thread),
-            "Every Code session connected for `project` on `main`: <#555>",
+            "Every Code session connected for `project`: <#555>",
         )
         self.assertEqual(
             session_start_message(hello),
@@ -405,6 +424,30 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
             "Every Code session connected for `session`: <#555>",
         )
         self.assertIn("branch: `unknown`", session_start_message(hello))
+
+    def test_session_thread_text_includes_non_default_branch(self) -> None:
+        hello = make_hello()
+        hello.branch = "code/project-task"
+        thread = SimpleNamespace(id=555)
+
+        self.assertEqual(session_thread_name(hello), "project · code/project-task")
+        self.assertEqual(
+            session_notification_message(hello, thread),
+            "Every Code session connected for `project` on `code/project-task`: <#555>",
+        )
+
+    def test_session_thread_text_omits_common_default_branch_names(self) -> None:
+        thread = SimpleNamespace(id=555)
+
+        for branch in ["main", "master", "develop", "development", "dev", "trunk", "MAIN"]:
+            hello = make_hello()
+            hello.branch = branch
+
+            self.assertEqual(session_thread_name(hello), "project")
+            self.assertEqual(
+                session_notification_message(hello, thread),
+                "Every Code session connected for `project`: <#555>",
+            )
 
     def test_session_thread_text_marks_every_code_origin(self) -> None:
         hello = SessionHello(
@@ -1873,7 +1916,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             "\n".join(
                 [
                     "Live Every Code sessions:",
-                    "- `project` on `main` (online, Mac Studio) <#555>",
+                    "- `project` (online, Mac Studio) <#555>",
                 ]
             ),
         )
@@ -1915,7 +1958,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             "\n".join(
                 [
                     "Live Every Code sessions:",
-                    "- `EC sellyouroutboard#67` on `main` (online, Mac Studio) <#555>",
+                    "- `EC sellyouroutboard#67` (online, Mac Studio) <#555>",
                 ]
             ),
         )
@@ -1947,7 +1990,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             bridge.session_status_summary(thread, SimpleNamespace(id=123)),
             "\n".join(
                 [
-                    "Every Code `project` on `main`",
+                    "Every Code `project`",
                     "state: online",
                     "host: Mac Studio",
                     "status: Turn started",
@@ -1987,13 +2030,129 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             bridge.session_status_summary(thread, SimpleNamespace(id=123)),
             "\n".join(
                 [
-                    "Every Code `EC sellyouroutboard#67` on `main`",
+                    "Every Code `EC sellyouroutboard#67`",
                     "state: online",
                     "host: Mac Studio",
                     "status: No status update received yet.",
                 ]
             ),
         )
+
+    async def test_session_metadata_changed_renames_human_thread_to_working_branch(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        await bridge.handle_session_metadata_changed(
+            SessionMetadataChanged(
+                session_id="session-1",
+                session_epoch="epoch-1",
+                cwd="/tmp/project-worktree",
+                branch="code/project-task",
+                reason="working_branch_selected",
+            )
+        )
+
+        self.assertEqual(session.hello.cwd, "/tmp/project")
+        self.assertEqual(session.hello.branch, "code/project-task")
+        self.assertEqual(thread.name, "project · code/project-task")
+        self.assertEqual(thread.edits[-1]["reason"], "Every Code working branch selected")
+
+    async def test_session_metadata_changed_preserves_missing_branch(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        await bridge.handle_session_metadata_changed(
+            SessionMetadataChanged(
+                session_id="session-1",
+                session_epoch="epoch-1",
+                cwd="/tmp/project-worktree",
+                branch=None,
+                reason="working_branch_selected",
+            )
+        )
+
+        self.assertEqual(session.hello.cwd, "/tmp/project")
+        self.assertEqual(session.hello.branch, "main")
+        self.assertIsNone(thread.name)
+        self.assertEqual(thread.edits, [])
+
+    async def test_session_metadata_changed_fetches_uncached_thread_before_renaming(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bot = FetchOnlyFakeBot(config, thread)
+        bridge = EveryCodeBridge(bot)
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        await bridge.handle_session_metadata_changed(
+            SessionMetadataChanged(
+                session_id="session-1",
+                session_epoch="epoch-1",
+                cwd="/tmp/project-worktree",
+                branch="code/project-task",
+                reason="working_branch_selected",
+            )
+        )
+
+        self.assertEqual(bot.fetch_channel_calls, [555])
+        self.assertEqual(thread.name, "project · code/project-task")
+
+    async def test_session_metadata_changed_skips_every_code_origin_rename(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        hello = SessionHello(
+            session_id="session-1",
+            session_epoch="epoch-1",
+            host_label="Mac Studio",
+            cwd="/tmp/project",
+            branch="main",
+            pid=42,
+            origin=SessionOrigin(
+                kind="every_code",
+                request_id="every-code-cbusillo-syo-67",
+                repository="cbusillo/sellyouroutboard",
+                issue_number=67,
+                issue_url="https://github.com/cbusillo/sellyouroutboard/issues/67",
+            ),
+        )
+        session = EveryCodeSession(hello=hello, websocket=FakeWebSocket(), thread_id=555)
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        await bridge.handle_session_metadata_changed(
+            SessionMetadataChanged(
+                session_id="session-1",
+                session_epoch="epoch-1",
+                cwd="/tmp/project-worktree",
+                branch="code/project-task",
+                reason="working_branch_selected",
+            )
+        )
+
+        self.assertEqual(session.hello.branch, "code/project-task")
+        self.assertEqual(thread.edits, [])
 
     async def test_reconnect_reuses_matching_thread_with_assistant_history(self) -> None:
         config = Config()
