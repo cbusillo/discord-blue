@@ -1046,6 +1046,33 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             thread.sent_messages,
             ["Every Code could not go ahead: Auto Drive is already running"],
         )
+
+    async def test_continue_autonomously_reports_default_reject_reason_for_empty_reason(self) -> None:
+        config = Config()
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        websocket = FakeWebSocket()
+        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+
+        await bridge.send_continue_autonomously(thread, SimpleNamespace(id=123))
+        command_id = websocket.sent_json[0]["command_id"]
+        self.assertIsInstance(command_id, str)
+        await bridge.handle_command_reject(
+            {
+                "command_id": command_id,
+                "session_id": "session-1",
+                "session_epoch": "epoch-1",
+                "reason": "",
+            }
+        )
+
+        self.assertEqual(
+            thread.sent_messages,
+            ["Every Code could not go ahead: command was rejected"],
+        )
         self.assertNotIn(command_id, session.pending_commands)
 
     async def test_new_session_routes_to_registered_session_websocket(self) -> None:
@@ -1793,6 +1820,37 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(approval_message.content, "**Approval expired**\napproval timed out")
+        self.assertEqual(approval_message.reactions, [])
+        self.assertEqual(session.pending_approvals, {})
+
+    async def test_approval_decision_reject_uses_default_reason_for_empty_reason(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = EveryCodeBridge(FakeBot(config, thread))
+        approval_message = FakeReplyMessage(901, thread, "**Approval sent**")
+        thread.add_message(approval_message)
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        session.pending_approvals["approval-1"] = sessions_module.PendingRemoteApproval(
+            thread_id=555,
+            message_id=901,
+            decision="approved",
+            decided_by=123,
+        )
+        bridge.sessions.register(session)
+
+        await bridge.handle_approval_decision_reject(
+            {
+                "session_id": "session-1",
+                "approval_id": "approval-1",
+                "reason": "",
+            }
+        )
+
+        self.assertEqual(approval_message.content, "**Approval expired**\napproval was rejected")
         self.assertEqual(approval_message.reactions, [])
         self.assertEqual(session.pending_approvals, {})
 
