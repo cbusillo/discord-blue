@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import patch
 
 from tests.fakes_every_code import FakeBot
 from tests.fakes_every_code import FakeInteraction
@@ -598,6 +599,34 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(live_notice.deleted)
         self.assertTrue(stale_notice.deleted)
+
+    async def test_cleanup_stale_session_notifications_rechecks_live_session_notice(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        channel = FakeTextChannel(321, [])
+        live_notice = add_bot_message(
+            channel,
+            101,
+            "Every Code session connected for `project`: <#555>",
+        )
+        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+        )
+        bridge.sessions.register(session)
+        original_notification_thread_id = EveryCodeBridge.notification_thread_id
+
+        def bind_during_cleanup(content: str) -> int | None:
+            thread_id = original_notification_thread_id(content)
+            if thread_id == 555 and bridge.sessions.get_by_thread(555) is None:
+                bridge.sessions.bind_thread("session-1", 555)
+            return thread_id
+
+        with patch.object(EveryCodeBridge, "notification_thread_id", side_effect=bind_during_cleanup):
+            await bridge.cleanup_stale_session_notifications()
+
+        self.assertFalse(live_notice.deleted)
 
     async def test_delete_session_notification_for_thread_deletes_matching_bot_notice(self) -> None:
         config = Config()

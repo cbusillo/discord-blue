@@ -383,14 +383,14 @@ class EveryCodeBridge:
             return
 
         deleted = 0
-        active_thread_ids = set(self.sessions.by_thread)
         try:
             async for message in channel.history():
                 if message.author.id != bot_user.id:
                     continue
                 if not message.content.startswith(SESSION_NOTIFICATION_PREFIXES):
                     continue
-                if self.notification_thread_id(message.content) in active_thread_ids:
+                thread_id = self.notification_thread_id(message.content)
+                if thread_id is not None and self.sessions.get_by_thread(thread_id) is not None:
                     continue
                 try:
                     await message.delete()
