@@ -342,7 +342,7 @@ class EveryCodeBridge:
     def payload_string(payload: dict[str, object], key: str, default: str = "") -> str:
         value = payload.get(key)
         if isinstance(value, str):
-            return value
+            return value or default
         if value is None:
             return default
         return str(value)
