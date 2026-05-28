@@ -40,6 +40,7 @@ from discord_blue.doodads.every_code.threads import SessionThread
 from discord_blue.doodads.every_code.threads import auto_join_configured_users
 from discord_blue.doodads.every_code.threads import create_session_thread
 from discord_blue.doodads.every_code.threads import get_every_code_channel
+from discord_blue.doodads.every_code.threads import session_notification_message
 from discord_blue.doodads.every_code.threads import session_thread_name
 from discord_blue.doodads.every_code.threads import session_start_message
 from discord_blue.plugs.discord_plug import BlueBot
@@ -58,6 +59,7 @@ SESSION_NOTIFICATION_PREFIXES = (
     SESSION_NOTIFICATION_PREFIX,
     "Every Code automated session connected for ",
 )
+SESSION_NOTIFICATION_THREAD_RE = re.compile(r"<#(?P<thread_id>\d+)>")
 MARKDOWN_CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})(?P<info>[^`~\n]*)$")
 RESUME_SESSION_RE = re.compile(
     r"\bresume\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b",
@@ -381,11 +383,14 @@ class EveryCodeBridge:
             return
 
         deleted = 0
+        active_thread_ids = set(self.sessions.by_thread)
         try:
             async for message in channel.history():
                 if message.author.id != bot_user.id:
                     continue
                 if not message.content.startswith(SESSION_NOTIFICATION_PREFIXES):
+                    continue
+                if self.notification_thread_id(message.content) in active_thread_ids:
                     continue
                 try:
                     await message.delete()
@@ -525,7 +530,47 @@ class EveryCodeBridge:
             except discord.DiscordException:
                 logger.warning("Unable to reopen Every Code thread %s", thread.id)
         await auto_join_configured_users(self.bot, thread)
-        return SessionThread(thread=thread, notification_message_id=None)
+        notification_message_id = await self.ensure_session_notification(hello, thread)
+        return SessionThread(thread=thread, notification_message_id=notification_message_id)
+
+    async def ensure_session_notification(self, hello: SessionHello, thread: discord.Thread) -> int | None:
+        existing_message_id = await self.find_session_notification_for_thread(thread.id)
+        if existing_message_id is not None:
+            return existing_message_id
+        try:
+            channel = await get_every_code_channel(self.bot)
+            message = await send_every_code_message(channel, session_notification_message(hello, thread))
+        except (discord.DiscordException, ValueError):
+            logger.warning("Unable to create Every Code notification for thread %s", thread.id)
+            return None
+        return message.id
+
+    async def find_session_notification_for_thread(self, thread_id: int) -> int | None:
+        try:
+            channel = await get_every_code_channel(self.bot)
+        except ValueError:
+            return None
+        bot_user = self.bot.user
+        if bot_user is None:
+            return None
+        try:
+            async for message in channel.history(limit=50):
+                if message.author.id != bot_user.id:
+                    continue
+                if not message.content.startswith(SESSION_NOTIFICATION_PREFIXES):
+                    continue
+                if self.notification_thread_id(message.content) == thread_id:
+                    return message.id
+        except discord.DiscordException:
+            logger.warning("Unable to scan Every Code notifications for thread %s", thread_id)
+        return None
+
+    @staticmethod
+    def notification_thread_id(content: str) -> int | None:
+        match = SESSION_NOTIFICATION_THREAD_RE.search(content)
+        if match is None:
+            return None
+        return int(match.group("thread_id"))
 
     async def find_existing_session_thread(self, hello: SessionHello) -> discord.Thread | None:
         try:
