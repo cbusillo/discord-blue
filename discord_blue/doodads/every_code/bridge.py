@@ -395,8 +395,14 @@ class EveryCodeBridge:
                 if not message.content.startswith(SESSION_NOTIFICATION_PREFIXES):
                     continue
                 thread_id = self.notification_thread_id(message.content)
-                if thread_id is not None and self.sessions.get_by_thread(thread_id) is not None:
-                    continue
+                if thread_id is not None:
+                    session = self.sessions.get_by_thread(thread_id)
+                    if session is not None:
+                        if session.notification_message_id == message.id:
+                            continue
+                        if session.notification_message_id is None:
+                            session.notification_message_id = message.id
+                            continue
                 try:
                     await message.delete()
                     deleted += 1

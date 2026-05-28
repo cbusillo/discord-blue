@@ -98,7 +98,6 @@ class ConfigTests(unittest.TestCase):
                 env=env,
                 capture_output=True,
                 text=True,
-                check=False,
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -600,6 +599,63 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(live_notice.deleted)
         self.assertTrue(stale_notice.deleted)
 
+    async def test_cleanup_stale_session_notifications_deletes_duplicate_live_notice(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        channel = FakeTextChannel(321, [])
+        current_notice = add_bot_message(
+            channel,
+            101,
+            "Every Code session connected for `project`: <#555>",
+        )
+        duplicate_notice = add_bot_message(
+            channel,
+            102,
+            "Every Code session connected for `project`: <#555>",
+        )
+        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+            notification_message_id=current_notice.id,
+        )
+        bridge.sessions.register(session)
+
+        await bridge.cleanup_stale_session_notifications()
+
+        self.assertFalse(current_notice.deleted)
+        self.assertTrue(duplicate_notice.deleted)
+        self.assertEqual(session.notification_message_id, current_notice.id)
+
+    async def test_cleanup_stale_session_notifications_adopts_one_live_notice(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        channel = FakeTextChannel(321, [])
+        older_notice = add_bot_message(
+            channel,
+            101,
+            "Every Code session connected for `project`: <#555>",
+        )
+        newer_notice = add_bot_message(
+            channel,
+            102,
+            "Every Code session connected for `project`: <#555>",
+        )
+        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+
+        await bridge.cleanup_stale_session_notifications()
+
+        self.assertTrue(older_notice.deleted)
+        self.assertFalse(newer_notice.deleted)
+        self.assertEqual(session.notification_message_id, newer_notice.id)
+
     async def test_cleanup_stale_session_notifications_rechecks_live_session_notice(self) -> None:
         config = Config()
         config.every_code.channel_id = 321
@@ -638,7 +694,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             "Every Code session connected for `project`: <#555>",
         )
         bridge = EveryCodeBridge(FakeBot(config, channel=channel))
-        session_attach_lock = cast(Any, bridge)._session_attach_lock
+        session_attach_lock = bridge._session_attach_lock
         await session_attach_lock.acquire()
         cleanup_task = asyncio.create_task(bridge.cleanup_stale_session_notifications())
         await asyncio.sleep(0)
@@ -763,7 +819,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 test_case.assertIsNone(bridge.sessions.get("session-1"))
 
         runner = FakeRunner()
-        cast(Any, bridge)._runner = runner
+        bridge._runner = runner
 
         await bridge.stop()
 
@@ -772,7 +828,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(websocket.close_messages, [b"bridge shutdown"])
         self.assertIsNone(bridge.sessions.get("session-1"))
         self.assertIsNone(bridge.sessions.get_by_thread(555))
-        self.assertIsNone(cast(Any, bridge)._runner)
+        self.assertIsNone(bridge._runner)
 
     async def test_stop_disconnects_sessions_concurrently(self) -> None:
         config = Config()
@@ -817,7 +873,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge_module_any = cast(Any, bridge_module)
         original_timeout = bridge_module_any.SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
         bridge_module_any.SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 0.25
-        cast(Any, bridge)._runner = FakeRunner()
+        bridge._runner = FakeRunner()
         try:
             await bridge.stop()
         finally:
@@ -849,9 +905,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge_module_any = cast(Any, bridge_module)
         original_timeout = bridge_module_any.SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS
         bridge_module_any.SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = 0.01
-        cast(Any, bridge)._runner = runner
+        bridge._runner = runner
         try:
-            with self.assertLogs(cast(Any, bridge_module).logger, level="WARNING") as logs:
+            with self.assertLogs(bridge_module.logger, level="WARNING") as logs:
                 await bridge.stop()
         finally:
             bridge_module_any.SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = original_timeout
@@ -859,7 +915,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Every Code bridge runner cleanup timed out during shutdown", "\n".join(logs.output))
         self.assertTrue(runner.cleanup_started)
         self.assertTrue(runner.cleanup_cancelled)
-        self.assertIsNone(cast(Any, bridge)._runner)
+        self.assertIsNone(bridge._runner)
 
     async def test_thread_reply_routes_to_registered_session_websocket(self) -> None:
         config = Config()
@@ -888,7 +944,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent["kind"], "reply")
         self.assertEqual(sent["text"], "run the focused test")
         self.assertEqual(sent["issued_by"], "123")
-        self.assertIn(str(sent["command_id"]), session.pending_commands)
+        command_id = sent["command_id"]
+        self.assertIsInstance(command_id, str)
+        self.assertIn(command_id, session.pending_commands)
         self.assertEqual(message.reactions, [bridge_module.REACTION_QUEUED])
 
     async def test_thread_reply_reports_offline_session(self) -> None:
@@ -932,7 +990,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent["kind"], "continue_autonomously")
         self.assertIsNone(sent["text"])
         self.assertEqual(sent["issued_by"], "123")
-        pending = session.pending_commands[str(sent["command_id"])]
+        command_id = sent["command_id"]
+        self.assertIsInstance(command_id, str)
+        pending = session.pending_commands[command_id]
         self.assertEqual(pending.thread_id, 555)
         self.assertIsNone(pending.message_id)
         self.assertEqual(pending.reject_notice, "Every Code could not go ahead")
@@ -948,7 +1008,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.bind_thread("session-1", 555)
 
         await bridge.send_continue_autonomously(thread, SimpleNamespace(id=123))
-        command_id = str(websocket.sent_json[0]["command_id"])
+        command_id = websocket.sent_json[0]["command_id"]
+        self.assertIsInstance(command_id, str)
         await bridge.handle_command_reject(
             {
                 "command_id": command_id,
@@ -985,7 +1046,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent["kind"], "new_session")
         self.assertIsNone(sent["text"])
         self.assertEqual(sent["issued_by"], "123")
-        pending = session.pending_commands[str(sent["command_id"])]
+        command_id = sent["command_id"]
+        self.assertIsInstance(command_id, str)
+        pending = session.pending_commands[command_id]
         self.assertEqual(pending.thread_id, 555)
         self.assertIsNone(pending.message_id)
         self.assertEqual(pending.kind, "new_session")
