@@ -628,6 +628,29 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(duplicate_notice.deleted)
         self.assertEqual(session.notification_message_id, current_notice.id)
 
+    async def test_cleanup_stale_session_notifications_readopts_when_stored_notice_missing(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        channel = FakeTextChannel(321, [])
+        replacement_notice = add_bot_message(
+            channel,
+            102,
+            "Every Code session connected for `project`: <#555>",
+        )
+        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+            notification_message_id=101,
+        )
+        bridge.sessions.register(session)
+
+        await bridge.cleanup_stale_session_notifications()
+
+        self.assertFalse(replacement_notice.deleted)
+        self.assertEqual(session.notification_message_id, replacement_notice.id)
+
     async def test_cleanup_stale_session_notifications_adopts_one_live_notice(self) -> None:
         config = Config()
         config.every_code.channel_id = 321
