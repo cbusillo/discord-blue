@@ -328,14 +328,24 @@ class EveryCodeBridge:
         if close_tasks:
             await asyncio.gather(*close_tasks)
 
-    async def close_session_websocket(self, session_id: str, session: EveryCodeSession) -> None:
+    @staticmethod
+    async def close_session_websocket(session_id: str, session: EveryCodeSession) -> None:
         try:
             await asyncio.wait_for(
                 session.websocket.close(message=b"bridge shutdown", drain=False),
                 timeout=SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS,
             )
-        except Exception:
+        except (OSError, TimeoutError, asyncio.TimeoutError, RuntimeError, discord.DiscordException):
             logger.warning("Unable to close Every Code websocket %s during shutdown", session_id, exc_info=True)
+
+    @staticmethod
+    def payload_string(payload: dict[str, object], key: str, default: str = "") -> str:
+        value = payload.get(key)
+        if isinstance(value, str):
+            return value
+        if value is None:
+            return default
+        return str(value)
 
     async def close_active_sessions(self) -> None:
         for session_id in list(self.sessions.by_session):
@@ -388,8 +398,10 @@ class EveryCodeBridge:
             return
 
         deleted = 0
+        deferred_live_notices: dict[int, list[discord.Message]] = {}
+        stored_live_notice_thread_ids: set[int] = set()
         try:
-            async for message in channel.history():
+            async for message in channel.history(limit=None):
                 if message.author.id != bot_user.id:
                     continue
                 if not message.content.startswith(SESSION_NOTIFICATION_PREFIXES):
@@ -399,10 +411,10 @@ class EveryCodeBridge:
                     session = self.sessions.get_by_thread(thread_id)
                     if session is not None:
                         if session.notification_message_id == message.id:
+                            stored_live_notice_thread_ids.add(thread_id)
                             continue
-                        if session.notification_message_id is None:
-                            session.notification_message_id = message.id
-                            continue
+                        deferred_live_notices.setdefault(thread_id, []).append(message)
+                        continue
                 try:
                     await message.delete()
                     deleted += 1
@@ -414,6 +426,25 @@ class EveryCodeBridge:
         except discord.DiscordException:
             logger.warning("Unable to scan Every Code channel for stale notifications")
             return
+
+        for thread_id, messages in deferred_live_notices.items():
+            session = self.sessions.get_by_thread(thread_id)
+            if session is None or thread_id in stored_live_notice_thread_ids:
+                keep_message: discord.Message | None = None
+            else:
+                keep_message = messages[0]
+                session.notification_message_id = messages[0].id
+            for message in messages:
+                if message is keep_message:
+                    continue
+                try:
+                    await message.delete()
+                    deleted += 1
+                except discord.DiscordException:
+                    logger.warning(
+                        "Unable to delete stale Every Code notification %s",
+                        message.id,
+                    )
 
         if deleted:
             logger.info("Deleted %s stale Every Code notification(s)", deleted)
@@ -1027,12 +1058,12 @@ class EveryCodeBridge:
                     )
                 )
             if command.reject_notice is not None:
-                reason = str(payload.get("reason") or "command was rejected")
+                reason = self.payload_string(payload, "reason", "command was rejected")
                 await self.post_thread_notice(command.thread_id, f"{command.reject_notice}: {reason}")
 
     def command_context(self, payload: dict[str, object]) -> tuple[str, EveryCodeSession] | None:
-        command_id = str(payload.get("command_id") or "")
-        session_id = str(payload.get("session_id") or "")
+        command_id = self.payload_string(payload, "command_id")
+        session_id = self.payload_string(payload, "session_id")
         if not command_id or not session_id:
             return None
         session = self.sessions.get(session_id)
@@ -1401,8 +1432,8 @@ class EveryCodeBridge:
         return True
 
     async def handle_approval_decision_ack(self, payload: dict[str, object]) -> None:
-        session_id = str(payload.get("session_id") or "")
-        approval_id = str(payload.get("approval_id") or "")
+        session_id = self.payload_string(payload, "session_id")
+        approval_id = self.payload_string(payload, "approval_id")
         session = self.sessions.get(session_id)
         if session is None or not approval_id:
             return
@@ -1415,9 +1446,9 @@ class EveryCodeBridge:
         )
 
     async def handle_approval_decision_reject(self, payload: dict[str, object]) -> None:
-        session_id = str(payload.get("session_id") or "")
-        approval_id = str(payload.get("approval_id") or "")
-        reason = str(payload.get("reason") or "approval was rejected")
+        session_id = self.payload_string(payload, "session_id")
+        approval_id = self.payload_string(payload, "approval_id")
+        reason = self.payload_string(payload, "reason", "approval was rejected")
         session = self.sessions.get(session_id)
         if session is None or not approval_id:
             return
