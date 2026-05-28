@@ -558,16 +558,24 @@ class EveryCodeBridge:
         channel: discord.TextChannel,
     ) -> list[discord.Thread]:
         candidates = list(channel.threads)
-        for private in (False, True):
-            try:
-                async for thread in channel.archived_threads(
-                    private=private,
-                    joined=True,
-                    limit=50,
-                ):
-                    candidates.append(thread)
-            except (discord.DiscordException, ValueError):
-                logger.warning("Unable to scan archived Every Code threads")
+        try:
+            async for thread in channel.archived_threads(
+                private=False,
+                joined=False,
+                limit=50,
+            ):
+                candidates.append(thread)
+        except (discord.DiscordException, ValueError):
+            logger.warning("Unable to scan public archived Every Code threads")
+        try:
+            async for thread in channel.archived_threads(
+                private=True,
+                joined=True,
+                limit=50,
+            ):
+                candidates.append(thread)
+        except (discord.DiscordException, ValueError):
+            logger.warning("Unable to scan joined private archived Every Code threads")
         return candidates
 
     async def session_thread_matches(
@@ -1729,6 +1737,9 @@ class EveryCodeBridge:
         if session.thread_id is None:
             return
 
+        if session.notification_message_id is None:
+            await self.delete_session_notification_for_thread(session.thread_id)
+
         thread = await self.get_thread(session.thread_id)
         if thread is None:
             return
@@ -1776,6 +1787,31 @@ class EveryCodeBridge:
             await message.delete()
         except (discord.DiscordException, ValueError):
             logger.warning("Unable to delete Every Code notification message %s", message_id)
+
+    async def delete_session_notification_for_thread(self, thread_id: int) -> None:
+        try:
+            channel = await get_every_code_channel(self.bot)
+        except ValueError:
+            logger.warning("Unable to delete Every Code notification for thread %s: channel is unavailable", thread_id)
+            return
+
+        bot_user = self.bot.user
+        if bot_user is None:
+            return
+
+        mention = f"<#{thread_id}>"
+        try:
+            async for message in channel.history(limit=50):
+                if message.author.id != bot_user.id:
+                    continue
+                if not message.content.startswith(SESSION_NOTIFICATION_PREFIXES):
+                    continue
+                if mention not in message.content:
+                    continue
+                await message.delete()
+                return
+        except discord.DiscordException:
+            logger.warning("Unable to delete Every Code notification for thread %s", thread_id)
 
     async def get_thread(self, thread_id: int) -> discord.Thread | None:
         channel = self.bot.get_channel(thread_id)

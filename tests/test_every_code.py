@@ -365,6 +365,23 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         notices = [message for message in thread.sent_messages if "missing the `Manage Messages` permission" in message]
         self.assertEqual(len(notices), 1)
 
+    async def test_session_thread_candidates_uses_valid_archived_thread_scans(self) -> None:
+        active_thread = FakeThread(555)
+        archived_thread = FakeThread(556, archived=True)
+        channel = FakeTextChannel(321, [active_thread, archived_thread])
+
+        candidates = await bridge_module.EveryCodeBridge.session_thread_candidates(channel)
+
+        self.assertIn(active_thread, candidates)
+        self.assertIn(archived_thread, candidates)
+        self.assertEqual(
+            channel.archived_thread_calls,
+            [
+                {"private": False, "joined": False, "limit": 50},
+                {"private": True, "joined": True, "limit": 50},
+            ],
+        )
+
     def test_session_thread_text_uses_repo_branch_and_no_mentions(self) -> None:
         hello = make_hello()
         thread = SimpleNamespace(id=555)
@@ -543,7 +560,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             104,
             channel,
             "Every Code automated session connected for `user/post`: <#557>",
-            author_id=123,
         )
         channel.add_message(user_notice)
         bridge = EveryCodeBridge(FakeBot(config, channel=channel))
@@ -554,6 +570,57 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(automated_notice.deleted)
         self.assertFalse(unrelated_bot_notice.deleted)
         self.assertFalse(user_notice.deleted)
+
+    async def test_delete_session_notification_for_thread_deletes_matching_bot_notice(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        channel = FakeTextChannel(321, [])
+        matching_notice = add_bot_message(
+            channel,
+            101,
+            "Every Code session connected for `project`: <#555>",
+        )
+        other_notice = add_bot_message(
+            channel,
+            102,
+            "Every Code session connected for `project`: <#556>",
+        )
+        user_notice = FakeReplyMessage(
+            103,
+            channel,
+            "Every Code session connected for `project`: <#555>",
+        )
+        channel.add_message(user_notice)
+        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+
+        await bridge.delete_session_notification_for_thread(555)
+
+        self.assertTrue(matching_notice.deleted)
+        self.assertFalse(other_notice.deleted)
+        self.assertFalse(user_notice.deleted)
+
+    async def test_close_session_thread_deletes_reused_thread_notification(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        thread = FakeThread(555)
+        channel = FakeTextChannel(321, [thread])
+        notification = add_bot_message(
+            channel,
+            101,
+            "Every Code session connected for `project`: <#555>",
+        )
+        bridge = EveryCodeBridge(FakeBot(config, thread=thread, channel=channel))
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+
+        await bridge.close_session_thread(session)
+
+        self.assertTrue(notification.deleted)
+        self.assertTrue(thread.archived)
+        self.assertTrue(thread.locked)
 
     async def test_stop_disconnects_sessions_before_runner_cleanup(self) -> None:
         config = Config()
