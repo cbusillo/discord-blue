@@ -100,6 +100,7 @@ class FakeThread:
         self.send_failures_remaining = 0
         self.edits: list[dict[str, object]] = []
         self.name: str | None = None
+        self.left = False
 
     def add_message(self, message: FakeReplyMessage) -> None:
         self._messages[message.id] = message
@@ -160,8 +161,16 @@ class FakeThread:
         if "locked" in kwargs:
             self.locked = bool(kwargs["locked"])
         if "name" in kwargs:
-            self.name = str(kwargs["name"])
+            name = kwargs["name"]
+            self.name = name if isinstance(name, str) else None
         self.edits.append(kwargs)
+
+    @staticmethod
+    async def fetch_members() -> list[object]:
+        return []
+
+    async def leave(self) -> None:
+        self.left = True
 
 
 class FakeTextChannel:
@@ -175,6 +184,7 @@ class FakeTextChannel:
         self._history: list[FakeReplyMessage] = []
         self.sent_messages: list[str] = []
         self.sent_kwargs: list[dict[str, object]] = []
+        self.archived_thread_calls: list[dict[str, object]] = []
 
     def add_message(self, message: FakeReplyMessage) -> None:
         self._messages[message.id] = message
@@ -200,14 +210,15 @@ class FakeTextChannel:
         for message in messages:
             yield message
 
-    async def archived_threads(self, **_: object) -> AsyncIterator[FakeThread]:
+    async def archived_threads(self, **kwargs: object) -> AsyncIterator[FakeThread]:
+        self.archived_thread_calls.append(kwargs)
         for thread in self._archived_threads:
             yield thread
 
     def permissions_for(self, _member: object) -> object:
         return SimpleNamespace(manage_messages=self._manage_messages)
 
-    async def create_thread(self, **kwargs: object) -> FakeThread:
+    async def create_thread(self, **_kwargs: object) -> FakeThread:
         thread = FakeThread(9000 + len(self.threads), manage_messages=self._manage_messages)
         self.threads.append(thread)
         return thread
