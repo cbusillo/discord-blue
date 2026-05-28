@@ -628,6 +628,34 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(live_notice.deleted)
 
+    async def test_cleanup_stale_session_notifications_waits_for_session_attach(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        channel = FakeTextChannel(321, [])
+        live_notice = add_bot_message(
+            channel,
+            101,
+            "Every Code session connected for `project`: <#555>",
+        )
+        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+        session_attach_lock = cast(Any, bridge)._session_attach_lock
+        await session_attach_lock.acquire()
+        cleanup_task = asyncio.create_task(bridge.cleanup_stale_session_notifications())
+        await asyncio.sleep(0)
+        self.assertFalse(cleanup_task.done())
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+        session_attach_lock.release()
+
+        await cleanup_task
+
+        self.assertFalse(live_notice.deleted)
+
     async def test_delete_session_notification_for_thread_deletes_matching_bot_notice(self) -> None:
         config = Config()
         config.every_code.channel_id = 321

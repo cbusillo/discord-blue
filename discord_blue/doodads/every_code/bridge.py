@@ -271,6 +271,7 @@ class EveryCodeBridge:
         self._site: web.TCPSite | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
+        self._session_attach_lock = asyncio.Lock()
 
     async def start(self) -> None:
         if self._runner is not None:
@@ -372,6 +373,10 @@ class EveryCodeBridge:
             await self.close_session_thread(removed)
 
     async def cleanup_stale_session_notifications(self) -> None:
+        async with self._session_attach_lock:
+            await self.cleanup_stale_session_notifications_locked()
+
+    async def cleanup_stale_session_notifications_locked(self) -> None:
         try:
             channel = await get_every_code_channel(self.bot)
         except ValueError:
@@ -468,18 +473,19 @@ class EveryCodeBridge:
             message_type = payload.get("type")
             if message_type == "hello":
                 hello = SessionHello.from_payload(payload)
-                session = EveryCodeSession(hello=hello, websocket=websocket)
-                self.sessions.register(session)
-                session_thread = await self.find_or_create_session_thread(hello)
-                self.sessions.bind_thread(
-                    hello.session_id,
-                    session_thread.thread.id,
-                    session_thread.notification_message_id,
-                )
-                await self.backfill_latest_assistant_message(
-                    session_thread.thread,
-                    hello,
-                )
+                async with self._session_attach_lock:
+                    session = EveryCodeSession(hello=hello, websocket=websocket)
+                    self.sessions.register(session)
+                    session_thread = await self.find_or_create_session_thread(hello)
+                    self.sessions.bind_thread(
+                        hello.session_id,
+                        session_thread.thread.id,
+                        session_thread.notification_message_id,
+                    )
+                    await self.backfill_latest_assistant_message(
+                        session_thread.thread,
+                        hello,
+                    )
                 await websocket.send_json({"type": "hello_ack", "thread_id": session_thread.thread.id})
             elif message_type == "heartbeat" and session is not None:
                 session.touch()
