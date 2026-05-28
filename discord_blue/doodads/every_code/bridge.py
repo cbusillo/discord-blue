@@ -554,7 +554,7 @@ class EveryCodeBridge:
         if bot_user is None:
             return None
         try:
-            async for message in channel.history(limit=50):
+            async for message in channel.history(limit=None):
                 if message.author.id != bot_user.id:
                     continue
                 if not message.content.startswith(SESSION_NOTIFICATION_PREFIXES):
@@ -1846,7 +1846,7 @@ class EveryCodeBridge:
 
         mention = f"<#{thread_id}>"
         try:
-            async for message in channel.history(limit=50):
+            async for message in channel.history(limit=None):
                 if message.author.id != bot_user.id:
                     continue
                 if not message.content.startswith(SESSION_NOTIFICATION_PREFIXES):

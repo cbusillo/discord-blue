@@ -627,6 +627,38 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(other_notice.deleted)
         self.assertFalse(user_notice.deleted)
 
+    async def test_delete_session_notification_for_thread_scans_full_history(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        channel = FakeTextChannel(321, [])
+        matching_notice = add_bot_message(
+            channel,
+            101,
+            "Every Code session connected for `project`: <#555>",
+        )
+        for index in range(60):
+            add_bot_message(channel, 200 + index, f"Every Code status summary {index}")
+        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+
+        await bridge.delete_session_notification_for_thread(555)
+
+        self.assertTrue(matching_notice.deleted)
+
+    async def test_find_session_notification_for_thread_scans_full_history(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        channel = FakeTextChannel(321, [])
+        matching_notice = add_bot_message(
+            channel,
+            101,
+            "Every Code session connected for `project`: <#555>",
+        )
+        for index in range(60):
+            add_bot_message(channel, 200 + index, f"Every Code status summary {index}")
+        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+
+        self.assertEqual(await bridge.find_session_notification_for_thread(555), matching_notice.id)
+
     async def test_close_session_thread_deletes_reused_thread_notification(self) -> None:
         config = Config()
         config.every_code.channel_id = 321
