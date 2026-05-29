@@ -1,11 +1,11 @@
-# Project Coding Agent Guide - Codex Cloud
+# Project Coding Agent Guide - Every Code
 
 ## Runtime
 
 * **Python:** 3.13
 * **Env manager:** uv
 
-Use `uv run ...` for Python commands so local and Codex Cloud runs share the
+Use `uv run ...` for Python commands so local and Every Code runs share the
 same managed environment. After `uv sync`, IDEs may point at the repo-local
 `.venv/bin/python`; avoid hard-coding `/workspace/...` paths in repo guidance.
 
