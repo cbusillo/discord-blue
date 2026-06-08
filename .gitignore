@@ -50,3 +50,4 @@ dist/
 
 # Agent-local scratch state
 .code/
+/handoff*.md
