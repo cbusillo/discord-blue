@@ -144,6 +144,29 @@ The Every Code bridge listens on the configured `[every_code]` host and port.
 The image exposes port `8787`, and the local Compose file binds it to
 `127.0.0.1:8787`.
 
+When the Every Code doodad is loaded and `[every_code].enabled` is `true`, the
+same listener exposes an unauthenticated Launchplane-compatible health endpoint:
+
+```bash
+curl http://127.0.0.1:8787/health
+```
+
+`GET /health` returns JSON after the bot has reached Discord readiness and the
+bridge listener has started. The payload includes the `discord-blue` service
+name, package version, top-level status, Discord readiness component state, and
+informational Every Code bridge state. The protected WebSocket route remains
+`/every-code/connect` and still requires the configured bearer token; `/health`
+does not.
+
+Launchplane may provide deployment identity through
+`LAUNCHPLANE_RUNTIME_IDENTITY_JSON`. When set to a JSON object, Discord Blue
+parses it and includes it as the `runtime_identity` object in the health
+payload. Missing identity is omitted for local development. Malformed or
+non-object identity values are represented as bounded `runtime_identity` error
+objects so the response remains parseable and non-secret. Optional
+`LAUNCHPLANE_SOURCE_GIT_REF` and `LAUNCHPLANE_IMAGE_REFERENCE` values are also
+echoed when present.
+
 ## Launchplane/Dokploy migration target
 
 Production deploys run through Launchplane and Dokploy. The product workflow
