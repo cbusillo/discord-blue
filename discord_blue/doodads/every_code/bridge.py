@@ -43,6 +43,7 @@ from discord_blue.doodads.every_code.threads import get_every_code_channel
 from discord_blue.doodads.every_code.threads import session_notification_message
 from discord_blue.doodads.every_code.threads import session_thread_name
 from discord_blue.doodads.every_code.threads import session_start_message
+from discord_blue.health import health_payload
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
@@ -278,6 +279,7 @@ class EveryCodeBridge:
             return
 
         app = web.Application()
+        app.router.add_get("/health", self.handle_health)
         app.router.add_get("/every-code/connect", self.handle_connect)
         self._runner = web.AppRunner(app, shutdown_timeout=SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS)
         await self._runner.setup()
@@ -294,6 +296,26 @@ class EveryCodeBridge:
         )
         self._cleanup_task = asyncio.create_task(self.cleanup_stale_sessions())
         self._heartbeat_task = asyncio.create_task(self.monitor_heartbeats())
+
+    async def handle_health(self, _request: web.Request) -> web.Response:
+        discord_ready = self.discord_ready()
+        return web.json_response(
+            health_payload(
+                discord_status="ok" if discord_ready else "unhealthy",
+                every_code_enabled=self.bot.config.every_code.enabled,
+                active_every_code_sessions=len(self.sessions.by_session),
+            ),
+            status=200 if discord_ready else 503,
+        )
+
+    def discord_ready(self) -> bool:
+        if self.bot.user is None:
+            return False
+        is_closed = getattr(self.bot, "is_closed", None)
+        if callable(is_closed) and is_closed():
+            return False
+        is_ready = getattr(self.bot, "is_ready", None)
+        return not callable(is_ready) or bool(is_ready())
 
     async def stop(self) -> None:
         if self._runner is None:

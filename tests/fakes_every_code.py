@@ -275,6 +275,14 @@ class FakeBot:
         self._thread = thread
         self._channel = channel
         self.fetch_channel_calls: list[int] = []
+        self.closed = False
+        self.ready = True
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    def is_ready(self) -> bool:
+        return self.ready
 
     def get_channel(self, channel_id: int) -> FakeThread | FakeTextChannel | None:
         if self._thread is not None and self._thread.id == channel_id:
