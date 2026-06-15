@@ -54,6 +54,8 @@ DISCORD_CODE_FENCE_WRAP_RESERVE = 80
 STARTUP_RECONNECT_GRACE_SECONDS = 20
 SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 2
 SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = 5
+AGENT_SESSION_CONNECT_PATH = "/agent-session/connect"
+EVERY_CODE_CONNECT_PATH = "/every-code/connect"
 SESSION_START_PREFIX = "Every Code session connected"
 SESSION_NOTIFICATION_PREFIX = "Every Code session connected for "
 SESSION_NOTIFICATION_PREFIXES = (
@@ -279,8 +281,7 @@ class EveryCodeBridge:
             return
 
         app = web.Application()
-        app.router.add_get("/health", self.handle_health)
-        app.router.add_get("/every-code/connect", self.handle_connect)
+        self.register_routes(app)
         self._runner = web.AppRunner(app, shutdown_timeout=SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS)
         await self._runner.setup()
         self._site = web.TCPSite(
@@ -296,6 +297,11 @@ class EveryCodeBridge:
         )
         self._cleanup_task = asyncio.create_task(self.cleanup_stale_sessions())
         self._heartbeat_task = asyncio.create_task(self.monitor_heartbeats())
+
+    def register_routes(self, app: web.Application) -> None:
+        app.router.add_get("/health", self.handle_health)
+        app.router.add_get(AGENT_SESSION_CONNECT_PATH, self.handle_connect)
+        app.router.add_get(EVERY_CODE_CONNECT_PATH, self.handle_connect)
 
     async def handle_health(self, _request: web.Request) -> web.Response:
         discord_ready = self.discord_ready()

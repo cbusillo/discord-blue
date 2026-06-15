@@ -13,6 +13,8 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
+from aiohttp import web
+
 from tests.fakes_every_code import FakeBot
 from tests.fakes_every_code import FakeInteraction
 from tests.fakes_every_code import FakeReplyMessage
@@ -540,6 +542,22 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(bridge._authorized(SimpleNamespace(headers={})))
         self.assertFalse(bridge._authorized(SimpleNamespace(headers={"Authorization": "Bearer wrong"})))
         self.assertTrue(bridge._authorized(SimpleNamespace(headers={"Authorization": "Bearer shared-secret"})))
+
+    async def test_register_routes_keeps_legacy_and_generic_connect_paths(self) -> None:
+        bridge = EveryCodeBridge(FakeBot(Config()))
+        app = web.Application()
+
+        bridge.register_routes(app)
+
+        resources = {resource.canonical: resource for resource in app.router.resources()}
+        resource_paths = set(resources)
+        self.assertIn("/health", resource_paths)
+        self.assertIn("/agent-session/connect", resource_paths)
+        self.assertIn("/every-code/connect", resource_paths)
+        agent_session_route = next(iter(resources["/agent-session/connect"]))
+        every_code_route = next(iter(resources["/every-code/connect"]))
+        self.assertEqual(agent_session_route.handler, bridge.handle_connect)
+        self.assertEqual(every_code_route.handler, bridge.handle_connect)
 
     async def test_cleanup_stale_session_notifications_deletes_human_and_automated_notices(self) -> None:
         config = Config()

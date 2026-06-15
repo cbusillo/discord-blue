@@ -154,9 +154,10 @@ curl http://127.0.0.1:8787/health
 `GET /health` returns JSON after the bot has reached Discord readiness and the
 bridge listener has started. The payload includes the `discord-blue` service
 name, package version, top-level status, Discord readiness component state, and
-informational Every Code bridge state. The protected WebSocket route remains
-`/every-code/connect` and still requires the configured bearer token; `/health`
-does not.
+informational Every Code bridge state. The preferred protected WebSocket route
+is `/agent-session/connect`; the legacy `/every-code/connect` route remains
+available during migration. Both WebSocket routes require the configured bearer
+token; `/health` does not.
 
 Launchplane may provide deployment identity through
 `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`. When set to a JSON object, Discord Blue
