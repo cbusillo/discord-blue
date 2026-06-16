@@ -1,8 +1,8 @@
 # Discord Blue
 
 Discord Blue is a basic Discord bot plugin system built with the **discord.py**
-library. It includes an Every Code doodad that bridges Discord session threads
-to a local Every Code remote inbox.
+library. It includes an agent-session bridge that connects Discord session
+threads to a local remote agent inbox.
 
 ## LXC Installation
 
@@ -76,7 +76,9 @@ to a local Every Code remote inbox.
 from `/var/lib/discord-blue/.config/discord-blue/config.toml`. Slash commands
 sync directly to the first guild the bot joins, so they appear immediately.
 
-To enable Every Code, set the doodad extension name in the generated config:
+To enable the agent-session bridge, set the doodad extension name in the
+generated config. The compatibility config names remain `every_code` until the
+Codex Lab migration is complete:
 
 ```toml
 [discord]
@@ -137,14 +139,14 @@ docker compose up -d
 Compose creates a `discord-blue-state` volume mounted at
 `/var/lib/discord-blue`. For the production LXC, Dokploy/Launchplane should bind
 the real `/var/lib/discord-blue` directory instead so
-`.config/discord-blue/config.toml` and `.code` Every Code state survive image
+`.config/discord-blue/config.toml` and `.code` agent state survive image
 replacement.
 
-The Every Code bridge listens on the configured `[every_code]` host and port.
+The agent-session bridge listens on the configured `[every_code]` host and port.
 The image exposes port `8787`, and the local Compose file binds it to
 `127.0.0.1:8787`.
 
-When the Every Code doodad is loaded and `[every_code].enabled` is `true`, the
+When the agent-session doodad is loaded and `[every_code].enabled` is `true`, the
 same listener exposes an unauthenticated Launchplane-compatible health endpoint:
 
 ```bash
@@ -154,7 +156,7 @@ curl http://127.0.0.1:8787/health
 `GET /health` returns JSON after the bot has reached Discord readiness and the
 bridge listener has started. The payload includes the `discord-blue` service
 name, package version, top-level status, Discord readiness component state, and
-informational Every Code bridge state. The preferred protected WebSocket route
+informational agent-session bridge state. The preferred protected WebSocket route
 is `/agent-session/connect`; the legacy `/every-code/connect` route remains
 available during migration. Both WebSocket routes require the configured bearer
 token; `/health` does not.

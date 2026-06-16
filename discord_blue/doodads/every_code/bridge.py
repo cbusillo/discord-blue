@@ -63,6 +63,8 @@ SESSION_NOTIFICATION_PREFIXES = (
     SESSION_NOTIFICATION_PREFIX,
     "Every Code automated session connected for ",
 )
+CONTINUE_AUTONOMOUSLY_DELIVERED = "Asked the agent session to go ahead until it needs you."
+PAUSE_CURRENT_TURN_DELIVERED = "Asked the agent session to pause what it is doing now."
 SESSION_NOTIFICATION_THREAD_RE = re.compile(r"<#(?P<thread_id>\d+)>")
 MARKDOWN_CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})(?P<info>[^`~\n]*)$")
 RESUME_SESSION_RE = re.compile(
@@ -675,7 +677,7 @@ class EveryCodeBridge:
             logger.warning("Unable to find reusable Every Code thread: channel is unavailable")
             return None
 
-        expected_start = session_start_message(hello)
+        expected_starts = self.expected_session_start_messages(hello)
         best_thread: discord.Thread | None = None
         best_score: tuple[int, int, int] | None = None
         seen: set[int] = set()
@@ -686,13 +688,21 @@ class EveryCodeBridge:
             mapped_session_id = self.sessions.by_thread.get(thread.id)
             if mapped_session_id is not None and mapped_session_id != hello.session_id:
                 continue
-            if not await self.session_thread_matches(thread, expected_start):
+            if not await self.session_thread_matches(thread, expected_starts):
                 continue
             score = await self.score_session_thread(thread)
             if best_score is None or score > best_score:
                 best_thread = thread
                 best_score = score
         return best_thread
+
+    @staticmethod
+    def expected_session_start_messages(hello: SessionHello) -> set[str]:
+        expected = session_start_message(hello)
+        starts = {expected}
+        if hello.host_label == "Agent":
+            starts.add(expected.replace("\nhost: Agent\n", "\nhost: Every Code\n"))
+        return starts
 
     @staticmethod
     async def session_thread_candidates(
@@ -722,7 +732,7 @@ class EveryCodeBridge:
     async def session_thread_matches(
         self,
         thread: discord.Thread,
-        expected_start: str,
+        expected_starts: set[str],
     ) -> bool:
         bot_user = self.bot.user
         if bot_user is None:
@@ -731,7 +741,7 @@ class EveryCodeBridge:
             async for message in thread.history(limit=10, oldest_first=True):
                 if message.author.id != bot_user.id:
                     continue
-                if message.content == expected_start:
+                if message.content in expected_starts:
                     return True
         except discord.DiscordException:
             logger.warning("Unable to inspect Every Code thread %s", thread.id)
@@ -890,15 +900,15 @@ class EveryCodeBridge:
         user: discord.User | discord.Member,
     ) -> str:
         if not isinstance(channel, discord.Thread):
-            return "Use `/code go-ahead` inside an Every Code session thread."
+            return "Use `/code go-ahead` inside an agent session thread."
         if not self.is_operator(user):
-            return "Only Every Code operators can ask a session to continue."
+            return "Only agent session operators can ask a session to continue."
 
         session = self.sessions.get_by_thread(channel.id)
         if session is None:
-            return "This thread is not attached to a live Every Code session."
+            return "This thread is not attached to a live agent session."
         if session.websocket.closed:
-            return "Every Code session is offline; go-ahead was not delivered."
+            return "Agent session is offline; go-ahead was not delivered."
 
         command = RemoteCommand(
             command_id=str(uuid.uuid4()),
@@ -911,10 +921,10 @@ class EveryCodeBridge:
             thread_id=channel.id,
             message_id=session.control_message_id,
             kind="continue_autonomously",
-            reject_notice="Every Code could not go ahead",
+            reject_notice="Agent session could not go ahead",
         )
         await session.websocket.send_json(command.to_message())
-        return "Asked Every Code to go ahead until it needs you."
+        return CONTINUE_AUTONOMOUSLY_DELIVERED
 
     async def send_pause_current_turn(
         self,
@@ -922,15 +932,15 @@ class EveryCodeBridge:
         user: discord.User | discord.Member,
     ) -> str:
         if not isinstance(channel, discord.Thread):
-            return "Use `/code pause` inside an Every Code session thread."
+            return "Use `/code pause` inside an agent session thread."
         if not self.is_operator(user):
-            return "Only Every Code operators can pause a turn."
+            return "Only agent session operators can pause a turn."
 
         session = self.sessions.get_by_thread(channel.id)
         if session is None:
-            return "This thread is not attached to a live Every Code session."
+            return "This thread is not attached to a live agent session."
         if session.websocket.closed:
-            return "Every Code session is offline; pause was not delivered."
+            return "Agent session is offline; pause was not delivered."
 
         command = RemoteCommand(
             command_id=str(uuid.uuid4()),
@@ -943,10 +953,10 @@ class EveryCodeBridge:
             thread_id=channel.id,
             message_id=session.control_message_id,
             kind="pause_current_turn",
-            reject_notice="Every Code could not pause the current turn",
+            reject_notice="Agent session could not pause the current turn",
         )
         await session.websocket.send_json(command.to_message())
-        return "Asked Every Code to pause what it is doing now."
+        return PAUSE_CURRENT_TURN_DELIVERED
 
     async def send_new_session(
         self,
@@ -954,15 +964,15 @@ class EveryCodeBridge:
         user: discord.User | discord.Member,
     ) -> str:
         if not isinstance(channel, discord.Thread):
-            return "Use `/code new` inside an Every Code session thread."
+            return "Use `/code new` inside an agent session thread."
         if not self.is_operator(user):
-            return "Only Every Code operators can start a new session."
+            return "Only agent session operators can start a new session."
 
         session = self.sessions.get_by_thread(channel.id)
         if session is None:
-            return "This thread is not attached to a live Every Code session."
+            return "This thread is not attached to a live agent session."
         if session.websocket.closed:
-            return "Every Code session is offline; new session was not started."
+            return "Agent session is offline; new session was not started."
 
         command = RemoteCommand(
             command_id=str(uuid.uuid4()),
@@ -975,10 +985,10 @@ class EveryCodeBridge:
             thread_id=channel.id,
             message_id=session.control_message_id,
             kind="new_session",
-            reject_notice="Every Code could not start a new session",
+            reject_notice="Agent session could not start a new session",
         )
         await session.websocket.send_json(command.to_message())
-        return "Asked Every Code to start a new session in this folder."
+        return "Asked the agent session to start a new session in this folder."
 
     async def send_end_session(
         self,
@@ -986,15 +996,15 @@ class EveryCodeBridge:
         user: discord.User | discord.Member,
     ) -> str:
         if not isinstance(channel, discord.Thread):
-            return "Use `/code end-session` inside an Every Code session thread."
+            return "Use `/code end-session` inside an agent session thread."
         if not self.is_operator(user):
-            return "Only Every Code operators can end a session."
+            return "Only agent session operators can end a session."
 
         session = self.sessions.get_by_thread(channel.id)
         if session is None:
-            return "This thread is not attached to a live Every Code session."
+            return "This thread is not attached to a live agent session."
         if session.websocket.closed:
-            return "Every Code session is already offline."
+            return "Agent session is already offline."
 
         command = RemoteCommand(
             command_id=str(uuid.uuid4()),
@@ -1007,10 +1017,10 @@ class EveryCodeBridge:
             thread_id=channel.id,
             message_id=session.control_message_id,
             kind="end_session",
-            reject_notice="Every Code could not end the session",
+            reject_notice="Agent session could not end the session",
         )
         await session.websocket.send_json(command.to_message())
-        return "Asked Every Code to end this session."
+        return "Asked the agent session to end this session."
 
     async def handle_go_ahead_interaction(
         self,
@@ -1021,7 +1031,7 @@ class EveryCodeBridge:
             interaction.user,
         )
         await interaction.response.send_message(response, ephemeral=True)
-        if response != "Asked Every Code to go ahead until it needs you.":
+        if response != CONTINUE_AUTONOMOUSLY_DELIVERED:
             return
         message = interaction.message
         if message is None or not isinstance(interaction.channel, discord.Thread):
@@ -1047,9 +1057,9 @@ class EveryCodeBridge:
     def active_sessions_summary(self) -> str:
         sessions = list(self.sessions.by_session.values())
         if not sessions:
-            return "No live Every Code sessions."
+            return "No live agent sessions."
 
-        lines = ["Live Every Code sessions:"]
+        lines = ["Live agent sessions:"]
         for session in sessions:
             title = session_thread_name(session.hello)
             thread = f" <#{session.thread_id}>" if session.thread_id is not None else ""
@@ -1063,20 +1073,20 @@ class EveryCodeBridge:
         user: discord.User | discord.Member,
     ) -> str:
         if not isinstance(channel, discord.Thread):
-            return "Use `/code status` inside an Every Code session thread."
+            return "Use `/code status` inside an agent session thread."
         if not self.is_operator(user):
-            return "Only Every Code operators can inspect session status."
+            return "Only agent session operators can inspect session status."
 
         session = self.sessions.get_by_thread(channel.id)
         if session is None:
-            return "This thread is not attached to a live Every Code session."
+            return "This thread is not attached to a live agent session."
 
         title = session_thread_name(session.hello)
         state = "offline" if session.websocket.closed else "online"
         status = session.last_status_message or "No status update received yet."
         return "\n".join(
             [
-                f"Every Code `{title}`",
+                f"Agent session `{title}`",
                 f"state: {state}",
                 f"host: {session.hello.host_label}",
                 f"status: {status}",
@@ -1351,7 +1361,7 @@ class EveryCodeBridge:
 
         if emoji == REACTION_CONTROL_CONTINUE:
             response = await self.send_continue_autonomously(thread, user)
-            if response == "Asked Every Code to go ahead until it needs you.":
+            if response == CONTINUE_AUTONOMOUSLY_DELIVERED:
                 await self.replace_message_reactions(
                     thread,
                     message_id,
@@ -1371,7 +1381,7 @@ class EveryCodeBridge:
             return True
         if emoji == REACTION_CONTROL_PAUSE:
             response = await self.send_pause_current_turn(thread, user)
-            if response == "Asked Every Code to pause what it is doing now.":
+            if response == PAUSE_CURRENT_TURN_DELIVERED:
                 await self.replace_message_reactions(
                     thread,
                     message_id,
@@ -1422,7 +1432,7 @@ class EveryCodeBridge:
             return True
 
         response = await self.send_end_session(thread, user)
-        if response == "Asked Every Code to end this session.":
+        if response == "Asked the agent session to end this session.":
             session.control_status_reaction = None
             await self.replace_message_reactions(
                 thread,
