@@ -346,15 +346,21 @@ class EveryCodeBridge:
             self._site = None
 
     async def disconnect_active_sessions(self) -> None:
-        close_tasks: list[asyncio.Task[None]] = []
-        for session_id in list(self.sessions.by_session):
-            session = self.sessions.remove(session_id)
-            if session is None or session.websocket.closed:
-                continue
-            close_tasks.append(asyncio.create_task(self.close_session_websocket(session_id, session)))
+        async with self._session_attach_lock:
+            close_tasks: list[asyncio.Task[None]] = []
+            for session_id in list(self.sessions.by_session):
+                session = self.sessions.remove(session_id)
+                if session is None:
+                    continue
+                close_tasks.append(asyncio.create_task(self.disconnect_active_session(session_id, session)))
 
-        if close_tasks:
-            await asyncio.gather(*close_tasks)
+            if close_tasks:
+                await asyncio.gather(*close_tasks)
+
+    async def disconnect_active_session(self, session_id: str, session: EveryCodeSession) -> None:
+        if not session.websocket.closed:
+            await self.close_session_websocket(session_id, session)
+        await self.close_session_thread(session)
 
     @staticmethod
     async def close_session_websocket(session_id: str, session: EveryCodeSession) -> None:

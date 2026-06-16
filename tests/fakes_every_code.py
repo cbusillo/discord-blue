@@ -197,6 +197,15 @@ class FakeTextChannel:
         message.deleted = True
         self._history = [stored for stored in self._history if stored.id != message_id]
 
+    async def fetch_message(self, message_id: int) -> FakeReplyMessage:
+        message = self._messages.get(message_id)
+        if message is None:
+            raise discord.NotFound(
+                response=SimpleNamespace(status=404, reason="Not Found"),
+                message=f"Message {message_id} not found",
+            )
+        return message
+
     async def history(
         self,
         limit: int | None = None,

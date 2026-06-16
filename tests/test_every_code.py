@@ -838,7 +838,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_disconnects_sessions_before_runner_cleanup(self) -> None:
         config = Config()
-        bridge = EveryCodeBridge(FakeBot(config))
+        config.every_code.channel_id = 321
+        thread = FakeThread(555)
+        channel = FakeTextChannel(321, [thread])
+        notification = add_bot_message(
+            channel,
+            777,
+            "Every Code session connected for `project`: <#555>",
+        )
+        bridge = EveryCodeBridge(FakeBot(config, thread=thread, channel=channel))
         websocket = FakeWebSocket()
         session = EveryCodeSession(
             hello=make_hello(),
@@ -867,9 +875,83 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(runner.cleaned)
         self.assertTrue(websocket.closed)
         self.assertEqual(websocket.close_messages, [b"bridge shutdown"])
+        self.assertTrue(notification.deleted)
+        self.assertTrue(thread.archived)
+        self.assertTrue(thread.locked)
+        self.assertTrue(thread.left)
         self.assertIsNone(bridge.sessions.get("session-1"))
         self.assertIsNone(bridge.sessions.get_by_thread(555))
         self.assertIsNone(bridge._runner)
+
+    async def test_stop_closes_thread_for_already_closed_websocket(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        thread = FakeThread(555)
+        channel = FakeTextChannel(321, [thread])
+        notification = add_bot_message(
+            channel,
+            777,
+            "Every Code session connected for `project`: <#555>",
+        )
+        bridge = EveryCodeBridge(FakeBot(config, thread=thread, channel=channel))
+        websocket = FakeWebSocket(closed=True)
+        session = EveryCodeSession(
+            hello=make_hello(),
+            websocket=websocket,
+            thread_id=555,
+            notification_message_id=777,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555, notification_message_id=777)
+
+        class FakeRunner:
+            async def cleanup(self) -> None:
+                pass
+
+        bridge._runner = FakeRunner()
+
+        await bridge.stop()
+
+        self.assertEqual(websocket.close_messages, [])
+        self.assertTrue(notification.deleted)
+        self.assertTrue(thread.archived)
+        self.assertTrue(thread.locked)
+        self.assertTrue(thread.left)
+        self.assertIsNone(bridge.sessions.get("session-1"))
+        self.assertIsNone(bridge.sessions.get_by_thread(555))
+
+    async def test_disconnect_active_sessions_waits_for_session_attach(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        thread = FakeThread(555)
+        channel = FakeTextChannel(321, [thread])
+        notification = add_bot_message(
+            channel,
+            777,
+            "Every Code session connected for `project`: <#555>",
+        )
+        bridge = EveryCodeBridge(FakeBot(config, thread=thread, channel=channel))
+        websocket = FakeWebSocket()
+        session = EveryCodeSession(hello=make_hello(), websocket=websocket)
+        bridge.sessions.register(session)
+        session_attach_lock = bridge._session_attach_lock
+        await session_attach_lock.acquire()
+        disconnect_task = asyncio.create_task(bridge.disconnect_active_sessions())
+        await asyncio.sleep(0)
+        self.assertFalse(disconnect_task.done())
+
+        bridge.sessions.bind_thread("session-1", 555, notification_message_id=777)
+        session_attach_lock.release()
+
+        await disconnect_task
+
+        self.assertEqual(websocket.close_messages, [b"bridge shutdown"])
+        self.assertTrue(notification.deleted)
+        self.assertTrue(thread.archived)
+        self.assertTrue(thread.locked)
+        self.assertTrue(thread.left)
+        self.assertIsNone(bridge.sessions.get("session-1"))
+        self.assertIsNone(bridge.sessions.get_by_thread(555))
 
     async def test_stop_disconnects_sessions_concurrently(self) -> None:
         config = Config()
