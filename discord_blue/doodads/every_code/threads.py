@@ -68,6 +68,7 @@ def session_start_message(hello: SessionHello) -> str:
         [
             "Every Code session connected",
             "",
+            f"session: `{hello.session_id}`",
             *session_origin_lines(hello),
             f"host: {hello.host_label}",
             f"cwd: `{hello.cwd}`",
