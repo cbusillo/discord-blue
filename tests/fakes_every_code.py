@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import Protocol, TYPE_CHECKING
 
 import discord
 
@@ -10,6 +10,10 @@ from discord_blue.doodads.every_code.protocol import SessionHello
 
 if TYPE_CHECKING:
     from discord_blue.config import Config
+
+
+class UserLike(Protocol):
+    id: int
 
 
 class FakeWebSocket:
@@ -85,6 +89,7 @@ class FakeThread:
         archived: bool = False,
         locked: bool = False,
         manage_messages: bool = True,
+        members: list[int] | None = None,
     ) -> None:
         self.id = thread_id
         self.archived = archived
@@ -101,6 +106,8 @@ class FakeThread:
         self.edits: list[dict[str, object]] = []
         self.name: str | None = None
         self.left = False
+        self._member_ids = list(members or [])
+        self.removed_user_ids: list[int] = []
 
     def add_message(self, message: FakeReplyMessage) -> None:
         self._messages[message.id] = message
@@ -165,9 +172,13 @@ class FakeThread:
             self.name = name if isinstance(name, str) else None
         self.edits.append(kwargs)
 
-    @staticmethod
-    async def fetch_members() -> list[object]:
-        return []
+    async def fetch_members(self) -> list[object]:
+        return [SimpleNamespace(id=member_id) for member_id in self._member_ids]
+
+    async def remove_user(self, user: UserLike) -> None:
+        user_id = user.id
+        self.removed_user_ids.append(user_id)
+        self._member_ids = [member_id for member_id in self._member_ids if member_id != user_id]
 
     async def leave(self) -> None:
         self.left = True
@@ -196,6 +207,15 @@ class FakeTextChannel:
             return
         message.deleted = True
         self._history = [stored for stored in self._history if stored.id != message_id]
+
+    async def fetch_message(self, message_id: int) -> FakeReplyMessage:
+        message = self._messages.get(message_id)
+        if message is None:
+            raise discord.NotFound(
+                response=SimpleNamespace(status=404, reason="Not Found"),
+                message=f"Message {message_id} not found",
+            )
+        return message
 
     async def history(
         self,

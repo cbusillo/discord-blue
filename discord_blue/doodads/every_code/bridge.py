@@ -54,6 +54,7 @@ DISCORD_CODE_FENCE_WRAP_RESERVE = 80
 STARTUP_RECONNECT_GRACE_SECONDS = 20
 SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 2
 SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = 5
+SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS = 5
 AGENT_SESSION_CONNECT_PATH = "/agent-session/connect"
 EVERY_CODE_CONNECT_PATH = "/every-code/connect"
 SESSION_START_PREFIX = "Every Code session connected"
@@ -275,10 +276,12 @@ class EveryCodeBridge:
         self._cleanup_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._session_attach_lock = asyncio.Lock()
+        self._stopping = False
 
     async def start(self) -> None:
         if self._runner is not None:
             return
+        self._stopping = False
 
         app = web.Application()
         self.register_routes(app)
@@ -326,6 +329,7 @@ class EveryCodeBridge:
     async def stop(self) -> None:
         if self._runner is None:
             return
+        self._stopping = True
         if self._cleanup_task is not None:
             self._cleanup_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -346,15 +350,27 @@ class EveryCodeBridge:
             self._site = None
 
     async def disconnect_active_sessions(self) -> None:
-        close_tasks: list[asyncio.Task[None]] = []
-        for session_id in list(self.sessions.by_session):
-            session = self.sessions.remove(session_id)
-            if session is None or session.websocket.closed:
-                continue
-            close_tasks.append(asyncio.create_task(self.close_session_websocket(session_id, session)))
+        async with self._session_attach_lock:
+            close_tasks: list[asyncio.Task[None]] = []
+            for session_id in list(self.sessions.by_session):
+                session = self.sessions.remove(session_id)
+                if session is None:
+                    continue
+                close_tasks.append(asyncio.create_task(self.disconnect_active_session(session_id, session)))
 
-        if close_tasks:
-            await asyncio.gather(*close_tasks)
+            if close_tasks:
+                await asyncio.gather(*close_tasks)
+
+    async def disconnect_active_session(self, session_id: str, session: EveryCodeSession) -> None:
+        if not session.websocket.closed:
+            await self.close_session_websocket(session_id, session)
+        try:
+            await asyncio.wait_for(
+                self.close_session_thread(session),
+                timeout=SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.warning("Every Code thread cleanup for %s timed out during shutdown", session_id)
 
     @staticmethod
     async def close_session_websocket(session_id: str, session: EveryCodeSession) -> None:
@@ -538,20 +554,29 @@ class EveryCodeBridge:
             message_type = payload.get("type")
             if message_type == "hello":
                 hello = SessionHello.from_payload(payload)
+                rejecting_stopping_session = False
+                session_thread: SessionThread | None = None
                 async with self._session_attach_lock:
-                    session = EveryCodeSession(hello=hello, websocket=websocket)
-                    self.sessions.register(session)
-                    session_thread = await self.find_or_create_session_thread(hello)
-                    self.sessions.bind_thread(
-                        hello.session_id,
-                        session_thread.thread.id,
-                        session_thread.notification_message_id,
-                    )
-                    await self.backfill_latest_assistant_message(
-                        session_thread.thread,
-                        hello,
-                    )
-                await websocket.send_json({"type": "hello_ack", "thread_id": session_thread.thread.id})
+                    if self._stopping:
+                        rejecting_stopping_session = True
+                    else:
+                        session = EveryCodeSession(hello=hello, websocket=websocket)
+                        self.sessions.register(session)
+                        session_thread = await self.find_or_create_session_thread(hello)
+                        self.sessions.bind_thread(
+                            hello.session_id,
+                            session_thread.thread.id,
+                            session_thread.notification_message_id,
+                        )
+                        await self.backfill_latest_assistant_message(
+                            session_thread.thread,
+                            hello,
+                        )
+                if rejecting_stopping_session:
+                    await websocket.close(message=b"bridge shutdown", drain=False)
+                    break
+                if session_thread is not None:
+                    await websocket.send_json({"type": "hello_ack", "thread_id": session_thread.thread.id})
             elif message_type == "heartbeat" and session is not None:
                 session.touch()
             elif message_type == "user_message":
