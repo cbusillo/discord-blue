@@ -401,6 +401,7 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
                 [
                     "Every Code session connected",
                     "",
+                    "session: `session-1`",
                     "host: Mac Studio",
                     "cwd: `/tmp/project`",
                     "branch: `main`",
@@ -2542,7 +2543,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             origin=hello.origin,
         )
         original_thread = FakeThread(555)
-        add_bot_message(original_thread, 1, session_start_message(legacy_hello))
+        add_bot_message(
+            original_thread,
+            1,
+            bridge_module.EveryCodeBridge.legacy_session_start_without_session(session_start_message(legacy_hello)),
+        )
         channel = FakeTextChannel(321, [original_thread])
         bridge = EveryCodeBridge(FakeBot(config, channel=channel))
 
@@ -2551,6 +2556,92 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(session_thread.thread, original_thread)
         self.assertEqual(session_thread.notification_message_id, 801)
         self.assertEqual(channel.sent_messages, [session_notification_message(hello, original_thread)])
+
+    async def test_reconnect_does_not_pid_relax_legacy_thread_without_session_id(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        hello = make_hello()
+        old_hello = SessionHello(
+            session_id=hello.session_id,
+            session_epoch=hello.session_epoch,
+            host_label=hello.host_label,
+            cwd=hello.cwd,
+            branch=hello.branch,
+            pid=hello.pid - 1,
+            origin=hello.origin,
+        )
+        original_thread = FakeThread(555)
+        add_bot_message(
+            original_thread,
+            1,
+            bridge_module.EveryCodeBridge.legacy_session_start_without_session(session_start_message(old_hello)),
+        )
+        channel = FakeTextChannel(321, [original_thread])
+        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+
+        session_thread = await bridge.find_or_create_session_thread(hello)
+
+        self.assertIsNot(session_thread.thread, original_thread)
+
+    async def test_reconnect_reuses_unambiguous_thread_when_pid_changes(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        hello = make_hello()
+        old_hello = SessionHello(
+            session_id=hello.session_id,
+            session_epoch=hello.session_epoch,
+            host_label=hello.host_label,
+            cwd=hello.cwd,
+            branch=hello.branch,
+            pid=hello.pid - 1,
+            origin=hello.origin,
+        )
+        original_thread = FakeThread(555)
+        add_bot_message(original_thread, 1, session_start_message(old_hello))
+        channel = FakeTextChannel(321, [original_thread])
+        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+
+        with self.assertLogs(bridge_module.__name__, level="INFO") as logs:
+            session_thread = await bridge.find_or_create_session_thread(hello)
+
+        self.assertIs(session_thread.thread, original_thread)
+        self.assertEqual(session_thread.notification_message_id, 801)
+        self.assertIn("despite pid mismatch", "\n".join(logs.output))
+
+    async def test_reconnect_does_not_reuse_ambiguous_pid_relaxed_threads(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        hello = make_hello()
+        first_old_hello = SessionHello(
+            session_id=hello.session_id,
+            session_epoch=hello.session_epoch,
+            host_label=hello.host_label,
+            cwd=hello.cwd,
+            branch=hello.branch,
+            pid=hello.pid - 1,
+            origin=hello.origin,
+        )
+        second_old_hello = SessionHello(
+            session_id=hello.session_id,
+            session_epoch=hello.session_epoch,
+            host_label=hello.host_label,
+            cwd=hello.cwd,
+            branch=hello.branch,
+            pid=hello.pid - 2,
+            origin=hello.origin,
+        )
+        first_thread = FakeThread(555)
+        second_thread = FakeThread(556)
+        add_bot_message(first_thread, 1, session_start_message(first_old_hello))
+        add_bot_message(second_thread, 2, session_start_message(second_old_hello))
+        channel = FakeTextChannel(321, [first_thread, second_thread])
+        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+
+        with self.assertLogs(bridge_module.__name__, level="WARNING") as logs:
+            session_thread = await bridge.find_or_create_session_thread(hello)
+
+        self.assertNotIn(session_thread.thread, [first_thread, second_thread])
+        self.assertIn("2 pid-relaxed candidates matched", "\n".join(logs.output))
 
     async def test_reconnect_reuses_existing_parent_notification(self) -> None:
         config = Config()

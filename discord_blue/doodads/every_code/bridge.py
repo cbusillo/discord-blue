@@ -678,31 +678,90 @@ class EveryCodeBridge:
             return None
 
         expected_starts = self.expected_session_start_messages(hello)
+        expected_starts_without_pid = self.session_start_messages_without_pid(expected_starts)
         best_thread: discord.Thread | None = None
         best_score: tuple[int, int, int] | None = None
         seen: set[int] = set()
+        skipped_mapped = 0
+        pid_relaxed_matches: list[tuple[discord.Thread, tuple[int, int, int]]] = []
         for thread in await self.session_thread_candidates(channel):
             if thread.id in seen:
                 continue
             seen.add(thread.id)
             mapped_session_id = self.sessions.by_thread.get(thread.id)
             if mapped_session_id is not None and mapped_session_id != hello.session_id:
+                skipped_mapped += 1
                 continue
             if not await self.session_thread_matches(thread, expected_starts):
+                if await self.session_thread_matches_without_pid(thread, expected_starts_without_pid):
+                    pid_relaxed_matches.append((thread, await self.score_session_thread(thread)))
                 continue
             score = await self.score_session_thread(thread)
             if best_score is None or score > best_score:
                 best_thread = thread
                 best_score = score
+        if best_thread is not None:
+            return best_thread
+        if len(pid_relaxed_matches) == 1:
+            thread, _score = pid_relaxed_matches[0]
+            logger.info(
+                "Reusing Every Code thread %s despite pid mismatch for cwd=%s branch=%s host=%s",
+                thread.id,
+                hello.cwd,
+                hello.branch or "unknown",
+                hello.host_label,
+            )
+            return thread
+        if pid_relaxed_matches:
+            logger.warning(
+                "Not reusing Every Code thread for cwd=%s branch=%s host=%s because %s pid-relaxed candidates matched",
+                hello.cwd,
+                hello.branch or "unknown",
+                hello.host_label,
+                len(pid_relaxed_matches),
+            )
+        else:
+            logger.info(
+                "No reusable Every Code thread found for cwd=%s branch=%s host=%s pid=%s "
+                "after checking %s candidate(s), skipped_mapped=%s",
+                hello.cwd,
+                hello.branch or "unknown",
+                hello.host_label,
+                hello.pid,
+                len(seen),
+                skipped_mapped,
+            )
         return best_thread
 
     @staticmethod
     def expected_session_start_messages(hello: SessionHello) -> set[str]:
         expected = session_start_message(hello)
-        starts = {expected}
+        starts = {expected, EveryCodeBridge.legacy_session_start_without_session(expected)}
         if hello.host_label == "Agent":
             starts.add(expected.replace("\nhost: Agent\n", "\nhost: Every Code\n"))
+            starts.add(
+                EveryCodeBridge.legacy_session_start_without_session(expected).replace("\nhost: Agent\n", "\nhost: Every Code\n")
+            )
         return starts
+
+    @staticmethod
+    def legacy_session_start_without_session(content: str) -> str:
+        return re.sub(r"\nsession: `[^`]+`\n", "\n", content, count=1)
+
+    @staticmethod
+    def session_start_messages_without_pid(starts: set[str]) -> set[str]:
+        return {start_without_pid for start in starts if (start_without_pid := EveryCodeBridge.session_start_without_pid(start))}
+
+    @staticmethod
+    def session_start_without_pid(content: str) -> str | None:
+        lines = content.splitlines()
+        if not lines or lines[0] != SESSION_START_PREFIX:
+            return None
+        if not any(line.startswith("session: `") for line in lines):
+            return None
+        if not lines[-1].startswith("pid: `"):
+            return None
+        return "\n".join(lines[:-1])
 
     @staticmethod
     async def session_thread_candidates(
@@ -742,6 +801,27 @@ class EveryCodeBridge:
                 if message.author.id != bot_user.id:
                     continue
                 if message.content in expected_starts:
+                    return True
+        except discord.DiscordException:
+            logger.warning("Unable to inspect Every Code thread %s", thread.id)
+        return False
+
+    async def session_thread_matches_without_pid(
+        self,
+        thread: discord.Thread,
+        expected_starts_without_pid: set[str],
+    ) -> bool:
+        if not expected_starts_without_pid:
+            return False
+        bot_user = self.bot.user
+        if bot_user is None:
+            return False
+        try:
+            async for message in thread.history(limit=10, oldest_first=True):
+                if message.author.id != bot_user.id:
+                    continue
+                start_without_pid = self.session_start_without_pid(message.content)
+                if start_without_pid in expected_starts_without_pid:
                     return True
         except discord.DiscordException:
             logger.warning("Unable to inspect Every Code thread %s", thread.id)
