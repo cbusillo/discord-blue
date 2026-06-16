@@ -24,6 +24,8 @@ from tests.fakes_every_code import FakeWebSocket
 from tests.fakes_every_code import add_bot_message
 from tests.fakes_every_code import make_hello
 
+from discord_blue.doodads.every_code_doodad import EveryCodeDoodad
+
 _TEST_HOME = tempfile.TemporaryDirectory()
 os.environ["HOME"] = _TEST_HOME.name
 _CONFIG_PATH = Path(_TEST_HOME.name) / ".config" / "discord-blue" / "config.toml"
@@ -174,7 +176,7 @@ class ProtocolTests(unittest.TestCase):
 
         self.assertEqual(hello.session_id, "session-1")
         self.assertEqual(hello.session_epoch, "epoch-1")
-        self.assertEqual(hello.host_label, "Every Code")
+        self.assertEqual(hello.host_label, "Agent")
         self.assertEqual(hello.cwd, "/tmp/project")
         self.assertIsNone(hello.branch)
         self.assertEqual(hello.pid, 0)
@@ -1131,7 +1133,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         response = await bridge.send_continue_autonomously(thread, SimpleNamespace(id=123))
 
-        self.assertEqual(response, "Asked Every Code to go ahead until it needs you.")
+        self.assertEqual(response, "Asked the agent session to go ahead until it needs you.")
         self.assertEqual(len(websocket.sent_json), 1)
         sent = websocket.sent_json[0]
         self.assertEqual(sent["type"], "command")
@@ -1145,7 +1147,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         pending = session.pending_commands[command_id]
         self.assertEqual(pending.thread_id, 555)
         self.assertIsNone(pending.message_id)
-        self.assertEqual(pending.reject_notice, "Every Code could not go ahead")
+        self.assertEqual(pending.reject_notice, "Agent session could not go ahead")
 
     async def test_continue_autonomously_reports_reject_in_thread(self) -> None:
         config = Config()
@@ -1171,7 +1173,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             thread.sent_messages,
-            ["Every Code could not go ahead: Auto Drive is already running"],
+            ["Agent session could not go ahead: Auto Drive is already running"],
         )
 
     async def test_continue_autonomously_reports_default_reject_reason_for_empty_reason(self) -> None:
@@ -1198,7 +1200,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             thread.sent_messages,
-            ["Every Code could not go ahead: command was rejected"],
+            ["Agent session could not go ahead: command was rejected"],
         )
         self.assertNotIn(command_id, session.pending_commands)
 
@@ -1214,7 +1216,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         response = await bridge.send_new_session(thread, SimpleNamespace(id=123))
 
-        self.assertEqual(response, "Asked Every Code to start a new session in this folder.")
+        self.assertEqual(response, "Asked the agent session to start a new session in this folder.")
         self.assertEqual(len(websocket.sent_json), 1)
         sent = websocket.sent_json[0]
         self.assertEqual(sent["type"], "command")
@@ -1229,7 +1231,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pending.thread_id, 555)
         self.assertIsNone(pending.message_id)
         self.assertEqual(pending.kind, "new_session")
-        self.assertEqual(pending.reject_notice, "Every Code could not start a new session")
+        self.assertEqual(pending.reject_notice, "Agent session could not start a new session")
 
     async def test_go_ahead_interaction_replies_ephemerally(self) -> None:
         config = Config()
@@ -1246,7 +1248,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             interaction.response.messages,
-            [("Asked Every Code to go ahead until it needs you.", True)],
+            [("Asked the agent session to go ahead until it needs you.", True)],
         )
         self.assertEqual(websocket.sent_json[0]["kind"], "continue_autonomously")
 
@@ -1745,6 +1747,26 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         control_message = await thread.fetch_message(901)
         self.assertEqual(control_message.reactions, [bridge_module.REACTION_QUEUED])
+        self.assertEqual(websocket.sent_json[0]["kind"], "pause_current_turn")
+
+    async def test_pause_command_routes_to_registered_session_websocket(self) -> None:
+        config = Config()
+        config.every_code.enabled = True
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        doodad = EveryCodeDoodad(cast(Any, FakeBot(config, thread)))
+        websocket = FakeWebSocket()
+        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        doodad.bridge.sessions.register(session)
+        doodad.bridge.sessions.bind_thread("session-1", 555)
+        interaction = FakeInteraction(thread)
+
+        await cast(Any, doodad.pause_command).callback(doodad, interaction)
+
+        self.assertEqual(
+            interaction.response.messages,
+            [("Asked the agent session to pause what it is doing now.", True)],
+        )
         self.assertEqual(websocket.sent_json[0]["kind"], "pause_current_turn")
 
     async def test_end_session_reaction_requires_confirmation(self) -> None:
@@ -2351,7 +2373,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             bridge.active_sessions_summary(),
             "\n".join(
                 [
-                    "Live Every Code sessions:",
+                    "Live agent sessions:",
                     "- `project` (online, Mac Studio) <#555>",
                 ]
             ),
@@ -2361,7 +2383,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         bridge = EveryCodeBridge(FakeBot(config))
 
-        self.assertEqual(bridge.active_sessions_summary(), "No live Every Code sessions.")
+        self.assertEqual(bridge.active_sessions_summary(), "No live agent sessions.")
 
     async def test_active_sessions_summary_marks_every_code_origin(self) -> None:
         config = Config()
@@ -2393,7 +2415,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             bridge.active_sessions_summary(),
             "\n".join(
                 [
-                    "Live Every Code sessions:",
+                    "Live agent sessions:",
                     "- `EC sellyouroutboard#67` (online, Mac Studio) <#555>",
                 ]
             ),
@@ -2426,7 +2448,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             bridge.session_status_summary(thread, SimpleNamespace(id=123)),
             "\n".join(
                 [
-                    "Every Code `project`",
+                    "Agent session `project`",
                     "state: online",
                     "host: Mac Studio",
                     "status: Turn started",
@@ -2466,7 +2488,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             bridge.session_status_summary(thread, SimpleNamespace(id=123)),
             "\n".join(
                 [
-                    "Every Code `EC sellyouroutboard#67`",
+                    "Agent session `EC sellyouroutboard#67`",
                     "state: online",
                     "host: Mac Studio",
                     "status: No status update received yet.",
@@ -2497,6 +2519,38 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             original_thread.edits[0]["reason"],
             "Reattaching live Every Code session after bridge restart",
         )
+
+    async def test_reconnect_reuses_thread_with_legacy_default_host_label(self) -> None:
+        config = Config()
+        config.every_code.channel_id = 321
+        hello = SessionHello.from_payload(
+            {
+                "session_id": "session-1",
+                "session_epoch": "epoch-1",
+                "cwd": "/tmp/project",
+                "branch": "main",
+                "pid": 42,
+            }
+        )
+        legacy_hello = SessionHello(
+            session_id=hello.session_id,
+            session_epoch=hello.session_epoch,
+            host_label="Every Code",
+            cwd=hello.cwd,
+            branch=hello.branch,
+            pid=hello.pid,
+            origin=hello.origin,
+        )
+        original_thread = FakeThread(555)
+        add_bot_message(original_thread, 1, session_start_message(legacy_hello))
+        channel = FakeTextChannel(321, [original_thread])
+        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+
+        session_thread = await bridge.find_or_create_session_thread(hello)
+
+        self.assertIs(session_thread.thread, original_thread)
+        self.assertEqual(session_thread.notification_message_id, 801)
+        self.assertEqual(channel.sent_messages, [session_notification_message(hello, original_thread)])
 
     async def test_reconnect_reuses_existing_parent_notification(self) -> None:
         config = Config()

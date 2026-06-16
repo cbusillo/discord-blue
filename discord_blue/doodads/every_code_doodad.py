@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class EveryCodeDoodad(commands.Cog):
-    code_group = app_commands.Group(name="code", description="Every Code controls")
+    code_group = app_commands.Group(name="code", description="Agent session controls")
 
     def __init__(self, bot: BlueBot) -> None:
         self.bot = bot
@@ -73,11 +73,11 @@ class EveryCodeDoodad(commands.Cog):
 
     @code_group.command(
         name="go-ahead",
-        description="Ask this Every Code session to continue until it needs you.",
+        description="Ask this agent session to continue until it needs you.",
     )
     async def go_ahead_command(self, interaction: discord.Interaction[BlueBot]) -> None:
         if not self.bot.config.every_code.enabled:
-            await interaction.response.send_message("Every Code is not enabled.", ephemeral=True)
+            await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
 
         response = await self.bridge.send_continue_autonomously(
@@ -88,15 +88,15 @@ class EveryCodeDoodad(commands.Cog):
 
     @code_group.command(
         name="active",
-        description="Show live Every Code sessions.",
+        description="Show live agent sessions.",
     )
     async def active_command(self, interaction: discord.Interaction[BlueBot]) -> None:
         if not self.bot.config.every_code.enabled:
-            await interaction.response.send_message("Every Code is not enabled.", ephemeral=True)
+            await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
         if not self.bridge.is_operator(interaction.user):
             await interaction.response.send_message(
-                "Only Every Code operators can list sessions.",
+                "Only agent session operators can list sessions.",
                 ephemeral=True,
             )
             return
@@ -108,11 +108,11 @@ class EveryCodeDoodad(commands.Cog):
 
     @code_group.command(
         name="status",
-        description="Show the current Every Code session status.",
+        description="Show the current agent session status.",
     )
     async def status_command(self, interaction: discord.Interaction[BlueBot]) -> None:
         if not self.bot.config.every_code.enabled:
-            await interaction.response.send_message("Every Code is not enabled.", ephemeral=True)
+            await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
 
         await interaction.response.send_message(
@@ -121,12 +121,27 @@ class EveryCodeDoodad(commands.Cog):
         )
 
     @code_group.command(
+        name="pause",
+        description="Ask this agent session to pause its current turn.",
+    )
+    async def pause_command(self, interaction: discord.Interaction[BlueBot]) -> None:
+        if not self.bot.config.every_code.enabled:
+            await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
+            return
+
+        response = await self.bridge.send_pause_current_turn(
+            interaction.channel,
+            interaction.user,
+        )
+        await interaction.response.send_message(response, ephemeral=True)
+
+    @code_group.command(
         name="new",
-        description="Ask this Every Code session to start a fresh chat in the same folder.",
+        description="Ask this agent session to start a fresh chat in the same folder.",
     )
     async def new_session_command(self, interaction: discord.Interaction[BlueBot]) -> None:
         if not self.bot.config.every_code.enabled:
-            await interaction.response.send_message("Every Code is not enabled.", ephemeral=True)
+            await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
 
         response = await self.bridge.send_new_session(
@@ -137,11 +152,11 @@ class EveryCodeDoodad(commands.Cog):
 
     @code_group.command(
         name="end-session",
-        description="Ask this Every Code session to disconnect.",
+        description="Ask this agent session to disconnect.",
     )
     async def end_session_command(self, interaction: discord.Interaction[BlueBot]) -> None:
         if not self.bot.config.every_code.enabled:
-            await interaction.response.send_message("Every Code is not enabled.", ephemeral=True)
+            await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
 
         response = await self.bridge.send_end_session(

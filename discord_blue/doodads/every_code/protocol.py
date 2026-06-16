@@ -45,7 +45,7 @@ class SessionHello:
         return cls(
             session_id=str(payload["session_id"]),
             session_epoch=str(payload["session_epoch"]),
-            host_label=str(payload.get("host_label") or "Every Code"),
+            host_label=str(payload.get("host_label") or "Agent"),
             cwd=str(payload.get("cwd") or ""),
             branch=str(payload["branch"]) if payload.get("branch") else None,
             pid=int(payload.get("pid") or 0),
