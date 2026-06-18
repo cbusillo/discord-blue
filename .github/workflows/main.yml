@@ -18,7 +18,7 @@ jobs:
       - chris-testing-discord-blue
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Install uv
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -47,7 +47,7 @@ jobs:
       - chris-testing-discord-blue
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Set image metadata
         id: image
         run: |
