@@ -33,11 +33,7 @@
     "inspection": {
       "tool": "jetbrains",
       "ide": "PyCharm",
-      "scopePreference": [
-        "changed_files",
-        "directory",
-        "whole_project"
-      ]
+      "scopePreference": ["changed_files", "directory", "whole_project"]
     },
     "docsRequiredWhen": [
       "behavior changes",
@@ -56,11 +52,15 @@
     "Dependency Graph",
     "Dependabot Updates"
   ],
-  "requiredStatusChecks": [
-    "validate",
-    "Analyze (actions)",
-    "Analyze (python)"
-  ],
+  "requiredStatusChecks": ["validate"],
+  "codeScanningMergeProtection": {
+    "ruleset": "Require code scanning results",
+    "target": "defaultBranch",
+    "tool": "CodeQL",
+    "alertsThreshold": "errors",
+    "securityAlertsThreshold": "high_or_higher",
+    "dependabotDefaultSetupException": true
+  },
   "qaLabels": [],
   "deployLabels": [],
   "healthUrls": [],
