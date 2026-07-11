@@ -92,6 +92,30 @@ jobs:
           fi
         shell: bash
 
+  ci_gate:
+    name: ci-gate
+    if: ${{ always() }}
+    needs:
+      - validate
+      - image
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Confirm validation and image jobs passed
+        env:
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          IMAGE_RESULT: ${{ needs.image.result }}
+        run: |
+          set -euo pipefail
+
+          if [ "$VALIDATE_RESULT" != "success" ] || [ "$IMAGE_RESULT" != "success" ]; then
+            echo "validate=$VALIDATE_RESULT" >&2
+            echo "image=$IMAGE_RESULT" >&2
+            exit 1
+          fi
+
+          echo "Validation and image checks passed."
+
   launchplane-deploy:
     needs: image
     if: >-
