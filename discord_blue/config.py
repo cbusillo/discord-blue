@@ -60,7 +60,7 @@ class DiscordConfig(Serializable):
         self.loaded_doodads = []
 
 
-class EveryCodeConfig(Serializable):
+class AgentSessionConfig(Serializable):
     enabled: bool = False
     listen_host: str = "0.0.0.0"
     listen_port: int = 8787
@@ -75,6 +75,24 @@ class EveryCodeConfig(Serializable):
         self.auto_join_user_ids = []
 
 
+def migrate_agent_session_config(data: dict[str, Any]) -> dict[str, Any]:
+    """Consume retired settings once; subsequent saves contain only current names."""
+    data = dict(data)
+    legacy = data.pop("every_code", None)
+    if "agent_session" not in data and legacy is not None:
+        data["agent_session"] = legacy
+    discord_config = data.get("discord")
+    if isinstance(discord_config, dict):
+        discord_config = dict(discord_config)
+        doodads = discord_config.get("loaded_doodads")
+        if isinstance(doodads, list):
+            discord_config["loaded_doodads"] = list(
+                dict.fromkeys("agent_session_doodad" if name == "every_code_doodad" else name for name in doodads)
+            )
+        data["discord"] = discord_config
+    return data
+
+
 class Config(Serializable):
     _instance = None
 
@@ -87,7 +105,7 @@ class Config(Serializable):
             self.filepath.touch()
 
         self.discord = DiscordConfig()
-        self.every_code = EveryCodeConfig()
+        self.agent_session = AgentSessionConfig()
 
         self.load()
 
@@ -105,6 +123,7 @@ class Config(Serializable):
         try:
             with self.filepath.open("rb") as file:
                 data = tomllib.load(file)
+                data = migrate_agent_session_config(data)
                 for key, value in data.items():
                     if key.startswith("_"):
                         continue

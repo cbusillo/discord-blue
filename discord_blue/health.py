@@ -57,8 +57,8 @@ def runtime_identity() -> dict[str, Any] | None:
 def health_payload(
     *,
     discord_status: Literal["ok", "unhealthy"],
-    every_code_enabled: bool = False,
-    active_every_code_sessions: int = 0,
+    agent_session_enabled: bool = False,
+    active_agent_sessions: int = 0,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "schema_version": 1,
@@ -67,10 +67,10 @@ def health_payload(
         "version": package_version(),
         "components": {
             "discord": {"status": discord_status},
-            "every_code": {
-                "status": "ok" if every_code_enabled else "disabled",
-                "enabled": every_code_enabled,
-                "active_sessions": active_every_code_sessions,
+            "agent_session": {
+                "status": "ok" if agent_session_enabled else "disabled",
+                "enabled": agent_session_enabled,
+                "active_sessions": active_agent_sessions,
             },
         },
     }

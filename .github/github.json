@@ -8,7 +8,8 @@
     "dockerfile": "Dockerfile",
     "dockerignore": ".dockerignore",
     "compose": "docker-compose.yml",
-    "systemdService": "discord-blue.service"
+    "systemdService": "discord-blue.service",
+    "agentSessionProtocol": "docs/agent-session-protocol.md"
   },
   "qualityGate": {
     "setup": {
@@ -40,7 +41,7 @@
       "api changes",
       "config changes",
       "Discord command surface changes",
-      "Every Code bridge behavior changes",
+      "Agent session bridge behavior changes",
       "deployment workflow changes",
       "runtime dependency changes",
       "systemd or container wiring changes"
@@ -63,7 +64,10 @@
   "qaLabels": [],
   "deployLabels": [],
   "healthUrls": [],
-  "relatedRepos": [],
+  "relatedRepos": [
+    "cbusillo/codex-lab",
+    "cbusillo/launchplane"
+  ],
   "githubSignals": {
     "postMerge": {
       "waitForActions": true,
@@ -96,7 +100,7 @@
       "cleanup policy changes",
       "deployment workflow changes",
       "Discord command surface changes",
-      "Every Code bridge behavior changes",
+      "Agent session bridge behavior changes",
       "runtime or service wiring changes"
     ]
   }

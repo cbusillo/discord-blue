@@ -6,7 +6,7 @@ from typing import Literal
 
 from aiohttp import web
 
-from discord_blue.doodads.every_code.protocol import SessionHello
+from discord_blue.doodads.agent_session.protocol import SessionHello
 
 
 @dataclass(slots=True)
@@ -39,7 +39,7 @@ class PendingRemoteUserInput:
 
 
 @dataclass(slots=True)
-class EveryCodeSession:
+class AgentSession:
     hello: SessionHello
     websocket: web.WebSocketResponse
     thread_id: int | None = None
@@ -68,12 +68,12 @@ class EveryCodeSession:
         self.last_seen = datetime.now(UTC)
 
 
-class EveryCodeSessionRegistry:
+class AgentSessionRegistry:
     def __init__(self) -> None:
-        self.by_session: dict[str, EveryCodeSession] = {}
+        self.by_session: dict[str, AgentSession] = {}
         self.by_thread: dict[int, str] = {}
 
-    def register(self, session: EveryCodeSession) -> None:
+    def register(self, session: AgentSession) -> None:
         self.by_session[session.session_id] = session
         if session.thread_id is not None:
             self.by_thread[session.thread_id] = session.session_id
@@ -92,22 +92,22 @@ class EveryCodeSessionRegistry:
             session.notification_message_id = notification_message_id
             self.by_thread[thread_id] = session_id
 
-    def get_by_thread(self, thread_id: int) -> EveryCodeSession | None:
+    def get_by_thread(self, thread_id: int) -> AgentSession | None:
         session_id = self.by_thread.get(thread_id)
         if session_id is None:
             return None
         return self.by_session.get(session_id)
 
-    def get(self, session_id: str) -> EveryCodeSession | None:
+    def get(self, session_id: str) -> AgentSession | None:
         return self.by_session.get(session_id)
 
-    def remove(self, session_id: str) -> EveryCodeSession | None:
+    def remove(self, session_id: str) -> AgentSession | None:
         session = self.by_session.pop(session_id, None)
         if session and session.thread_id is not None:
             self.by_thread.pop(session.thread_id, None)
         return session
 
-    def remove_if_current(self, session: EveryCodeSession) -> EveryCodeSession | None:
+    def remove_if_current(self, session: AgentSession) -> AgentSession | None:
         current = self.by_session.get(session.session_id)
         if current is not session:
             return None

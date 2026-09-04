@@ -6,22 +6,22 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from discord_blue.doodads.every_code.bridge import EveryCodeBridge
+from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
 
 
-class EveryCodeDoodad(commands.Cog):
+class AgentSessionDoodad(commands.Cog):
     code_group = app_commands.Group(name="code", description="Agent session controls")
 
     def __init__(self, bot: BlueBot) -> None:
         self.bot = bot
-        self.bridge = EveryCodeBridge(bot)
+        self.bridge = AgentSessionBridge(bot)
 
     @commands.Cog.listener("on_ready")
     async def start_bridge(self) -> None:
-        if not self.bot.config.every_code.enabled:
+        if not self.bot.config.agent_session.enabled:
             return
         await self.bridge.start()
 
@@ -29,20 +29,20 @@ class EveryCodeDoodad(commands.Cog):
     async def route_thread_reply(self, message: discord.Message) -> None:
         if message.author.bot:
             return
-        if not self.bot.config.every_code.enabled:
+        if not self.bot.config.agent_session.enabled:
             return
         if not self.bridge.is_operator(message.author):
             return
         delivered = await self.bridge.send_thread_reply(message)
         if delivered:
-            logger.info("Delivered Every Code thread reply from %s", message.author.id)
+            logger.info("Delivered Agent session thread reply from %s", message.author.id)
 
     @commands.Cog.listener("on_raw_reaction_add")
     async def route_quick_reaction(
         self,
         payload: discord.RawReactionActionEvent,
     ) -> None:
-        if not self.bot.config.every_code.enabled:
+        if not self.bot.config.agent_session.enabled:
             return
         if self.bot.user is not None and payload.user_id == self.bot.user.id:
             return
@@ -66,7 +66,7 @@ class EveryCodeDoodad(commands.Cog):
         )
         if handled:
             logger.info(
-                "Handled Every Code quick reaction %s from %s",
+                "Handled Agent session quick reaction %s from %s",
                 payload.emoji,
                 payload.user_id,
             )
@@ -76,7 +76,7 @@ class EveryCodeDoodad(commands.Cog):
         description="Ask this agent session to continue until it needs you.",
     )
     async def go_ahead_command(self, interaction: discord.Interaction[BlueBot]) -> None:
-        if not self.bot.config.every_code.enabled:
+        if not self.bot.config.agent_session.enabled:
             await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
 
@@ -91,7 +91,7 @@ class EveryCodeDoodad(commands.Cog):
         description="Show live agent sessions.",
     )
     async def active_command(self, interaction: discord.Interaction[BlueBot]) -> None:
-        if not self.bot.config.every_code.enabled:
+        if not self.bot.config.agent_session.enabled:
             await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
         if not self.bridge.is_operator(interaction.user):
@@ -111,7 +111,7 @@ class EveryCodeDoodad(commands.Cog):
         description="Show the current agent session status.",
     )
     async def status_command(self, interaction: discord.Interaction[BlueBot]) -> None:
-        if not self.bot.config.every_code.enabled:
+        if not self.bot.config.agent_session.enabled:
             await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
 
@@ -125,7 +125,7 @@ class EveryCodeDoodad(commands.Cog):
         description="Ask this agent session to pause its current turn.",
     )
     async def pause_command(self, interaction: discord.Interaction[BlueBot]) -> None:
-        if not self.bot.config.every_code.enabled:
+        if not self.bot.config.agent_session.enabled:
             await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
 
@@ -140,7 +140,7 @@ class EveryCodeDoodad(commands.Cog):
         description="Ask this agent session to start a fresh chat in the same folder.",
     )
     async def new_session_command(self, interaction: discord.Interaction[BlueBot]) -> None:
-        if not self.bot.config.every_code.enabled:
+        if not self.bot.config.agent_session.enabled:
             await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
 
@@ -155,7 +155,7 @@ class EveryCodeDoodad(commands.Cog):
         description="Ask this agent session to disconnect.",
     )
     async def end_session_command(self, interaction: discord.Interaction[BlueBot]) -> None:
-        if not self.bot.config.every_code.enabled:
+        if not self.bot.config.agent_session.enabled:
             await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
 
@@ -170,4 +170,4 @@ class EveryCodeDoodad(commands.Cog):
 
 
 async def setup(bot: BlueBot) -> None:
-    await bot.add_cog(EveryCodeDoodad(bot))
+    await bot.add_cog(AgentSessionDoodad(bot))

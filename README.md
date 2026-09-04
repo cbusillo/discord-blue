@@ -57,10 +57,6 @@ threads to a local remote agent inbox.
    install -D -m 600 -o discord-blue -g discord-blue \
      /root/.config/discord-blue/config.toml \
      /var/lib/discord-blue/.config/discord-blue/config.toml
-   if [ ! -e /var/lib/discord-blue/.code ] && [ -e /root/.code ]; then
-     cp -a /root/.code /var/lib/discord-blue/.code
-     chown -R discord-blue:discord-blue /var/lib/discord-blue/.code
-   fi
    ```
 
 6. Set up and Start the Systemd Service:
@@ -77,14 +73,13 @@ from `/var/lib/discord-blue/.config/discord-blue/config.toml`. Slash commands
 sync directly to the first guild the bot joins, so they appear immediately.
 
 To enable the agent-session bridge, set the doodad extension name in the
-generated config. The compatibility config names remain `every_code` until the
-Codex Lab migration is complete:
+generated config:
 
 ```toml
 [discord]
-loaded_doodads = ["every_code_doodad"]
+loaded_doodads = ["agent_session_doodad"]
 
-[every_code]
+[agent_session]
 enabled = true
 ```
 
@@ -139,14 +134,14 @@ docker compose up -d
 Compose creates a `discord-blue-state` volume mounted at
 `/var/lib/discord-blue`. For the production LXC, Dokploy/Launchplane should bind
 the real `/var/lib/discord-blue` directory instead so
-`.config/discord-blue/config.toml` and `.code` agent state survive image
-replacement.
+`.config/discord-blue/config.toml` survives image replacement. Agent session
+state remains on the client host.
 
-The agent-session bridge listens on the configured `[every_code]` host and port.
+The agent-session bridge listens on the configured `[agent_session]` host and port.
 The image exposes port `8787`, and the local Compose file binds it to
 `127.0.0.1:8787`.
 
-When the agent-session doodad is loaded and `[every_code].enabled` is `true`, the
+When the agent-session doodad is loaded and `[agent_session].enabled` is `true`, the
 same listener exposes an unauthenticated Launchplane-compatible health endpoint:
 
 ```bash
@@ -157,9 +152,17 @@ curl http://127.0.0.1:8787/health
 bridge listener has started. The payload includes the `discord-blue` service
 name, package version, top-level status, Discord readiness component state, and
 informational agent-session bridge state. The preferred protected WebSocket route
-is `/agent-session/connect`; the legacy `/every-code/connect` route remains
-available during migration. Both WebSocket routes require the configured bearer
-token; `/health` does not.
+is `/agent-session/connect` and requires the configured bearer token; `/health`
+does not. The retired `/every-code/connect` route is no longer registered.
+
+On startup, saved `[every_code]` settings and the `every_code_doodad` extension
+name are migrated to `[agent_session]` and `agent_session_doodad`. An existing
+`[agent_session]` section takes precedence. Saves retain only current names.
+The health component is now `agent_session`.
+
+See [the remote session contract](docs/agent-session-protocol.md) for client
+integration. Discord Blue does not launch the agent or read local rollout files;
+the client provides session events and optional reconnect history.
 
 Launchplane may provide deployment identity through
 `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`. When set to a JSON object, Discord Blue
@@ -177,6 +180,9 @@ validates the repo, publishes an immutable GHCR image, and asks Launchplane to
 deploy that image to the registered Dokploy application on the Discord Blue LXC.
 
 - CI proves the Docker image builds for every PR and push.
+- Production publishes both a digest and a `sha-<commit>` tag. The deploy request
+  uses the digest as `artifact_id` and the tag as `deploy_reference`, so Launchplane
+  can retain immutable evidence while Dokploy pulls the matching provider tag.
 - The required `ci-gate` context fails closed unless both application
   validation and the container image build succeed.
 - The production LXC keeps `/var/lib/discord-blue` as the durable state mount.

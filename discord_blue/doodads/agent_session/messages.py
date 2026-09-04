@@ -10,7 +10,7 @@ MISSING_MANAGE_MESSAGES_DESTINATIONS: set[int] = set()
 MISSING_MANAGE_MESSAGES_NOTICE_LOCK = asyncio.Lock()
 
 
-def every_code_allowed_mentions() -> discord.AllowedMentions:
+def agent_session_allowed_mentions() -> discord.AllowedMentions:
     return discord.AllowedMentions.none()
 
 
@@ -24,7 +24,7 @@ def can_suppress_embeds(destination: discord.abc.Messageable) -> bool:
     return bool(getattr(permissions, "manage_messages", False))
 
 
-async def send_every_code_message(
+async def send_agent_session_message(
     destination: discord.abc.Messageable,
     content: str | None = None,
     *,
@@ -35,28 +35,28 @@ async def send_every_code_message(
             if view is None:
                 return await destination.send(
                     content,
-                    allowed_mentions=every_code_allowed_mentions(),
+                    allowed_mentions=agent_session_allowed_mentions(),
                     suppress_embeds=True,
                 )
 
             return await destination.send(
                 content,
-                allowed_mentions=every_code_allowed_mentions(),
+                allowed_mentions=agent_session_allowed_mentions(),
                 suppress_embeds=True,
                 view=view,
             )
         except discord.Forbidden:
-            logger.warning("Unable to suppress Every Code embeds despite apparent Manage Messages permission")
+            logger.warning("Unable to suppress Agent session embeds despite apparent Manage Messages permission")
 
     if view is None:
         message = await destination.send(
             content,
-            allowed_mentions=every_code_allowed_mentions(),
+            allowed_mentions=agent_session_allowed_mentions(),
         )
     else:
         message = await destination.send(
             content,
-            allowed_mentions=every_code_allowed_mentions(),
+            allowed_mentions=agent_session_allowed_mentions(),
             view=view,
         )
 
@@ -71,14 +71,14 @@ async def notify_missing_manage_messages(destination: discord.abc.Messageable) -
             return
         try:
             await destination.send(
-                "Every Code could not suppress link previews because I am missing the `Manage Messages` permission here.",
-                allowed_mentions=every_code_allowed_mentions(),
+                "Agent session could not suppress link previews because I am missing the `Manage Messages` permission here.",
+                allowed_mentions=agent_session_allowed_mentions(),
             )
         except discord.DiscordException:
-            logger.warning("Unable to post Every Code missing Manage Messages notice in %s", destination_id)
+            logger.warning("Unable to post Agent session missing Manage Messages notice in %s", destination_id)
             return
         MISSING_MANAGE_MESSAGES_DESTINATIONS.add(destination_id)
 
 
-async def edit_every_code_message(message: discord.Message, *, content: str) -> discord.Message:
-    return await message.edit(content=content, allowed_mentions=every_code_allowed_mentions(), view=None)
+async def edit_agent_session_message(message: discord.Message, *, content: str) -> discord.Message:
+    return await message.edit(content=content, allowed_mentions=agent_session_allowed_mentions(), view=None)

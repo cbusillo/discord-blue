@@ -37,6 +37,7 @@ class SessionHello:
     branch: str | None
     pid: int
     origin: SessionOrigin | None = None
+    assistant_message: str | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "SessionHello":
@@ -50,6 +51,7 @@ class SessionHello:
             branch=str(payload["branch"]) if payload.get("branch") else None,
             pid=int(payload.get("pid") or 0),
             origin=origin,
+            assistant_message=str(payload["assistant_message"]) if payload.get("assistant_message") else None,
         )
 
 
