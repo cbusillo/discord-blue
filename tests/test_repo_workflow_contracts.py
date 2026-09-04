@@ -18,6 +18,18 @@ class RepoWorkflowContractTests(unittest.TestCase):
         self.assertIn("IMAGE_RESULT: ${{ needs.image.result }}", workflow)
         self.assertIn('if [ "$VALIDATE_RESULT" != "success" ]', workflow)
 
+    def test_deploy_preserves_digest_and_published_commit_tag(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
+
+        self.assertIn('echo "tag_sha=$image:sha-${GITHUB_SHA}"', workflow)
+        self.assertIn("docker push ${{ steps.image.outputs.tag_sha }}", workflow)
+        self.assertIn("image_reference: ${{ steps.push.outputs.image_reference }}", workflow)
+        self.assertIn("deploy_reference: ${{ steps.image.outputs.tag_sha }}", workflow)
+        self.assertIn('--arg image_reference "${{ needs.image.outputs.image_reference }}"', workflow)
+        self.assertIn('--arg deploy_reference "${{ needs.image.outputs.deploy_reference }}"', workflow)
+        self.assertIn("artifact_id: $image_reference,", workflow)
+        self.assertIn("deploy_reference: $deploy_reference,", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

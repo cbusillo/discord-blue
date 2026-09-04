@@ -41,6 +41,7 @@ jobs:
     needs: validate
     outputs:
       image_reference: ${{ steps.push.outputs.image_reference }}
+      deploy_reference: ${{ steps.image.outputs.tag_sha }}
     runs-on:
       - self-hosted
       - chris-testing
@@ -54,7 +55,7 @@ jobs:
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/discord-blue"
           {
             echo "image=$image"
-            echo "tag_sha=$image:${GITHUB_SHA}"
+            echo "tag_sha=$image:sha-${GITHUB_SHA}"
             echo "tag_main=$image:main"
             echo "cache=$image:buildcache"
           } >> "$GITHUB_OUTPUT"
@@ -161,6 +162,7 @@ jobs:
           request_payload="$({
             jq -n \
               --arg image_reference "${{ needs.image.outputs.image_reference }}" \
+              --arg deploy_reference "${{ needs.image.outputs.deploy_reference }}" \
               --arg source_git_ref "$GITHUB_SHA" \
               '{
                 schema_version: 1,
@@ -170,6 +172,7 @@ jobs:
                   product: "discord-blue",
                   instance: "prod",
                   artifact_id: $image_reference,
+                  deploy_reference: $deploy_reference,
                   source_git_ref: $source_git_ref
                 }
               }'

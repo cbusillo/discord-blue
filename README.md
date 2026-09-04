@@ -180,6 +180,9 @@ validates the repo, publishes an immutable GHCR image, and asks Launchplane to
 deploy that image to the registered Dokploy application on the Discord Blue LXC.
 
 - CI proves the Docker image builds for every PR and push.
+- Production publishes both a digest and a `sha-<commit>` tag. The deploy request
+  uses the digest as `artifact_id` and the tag as `deploy_reference`, so Launchplane
+  can retain immutable evidence while Dokploy pulls the matching provider tag.
 - The required `ci-gate` context fails closed unless both application
   validation and the container image build succeed.
 - The production LXC keeps `/var/lib/discord-blue` as the durable state mount.
