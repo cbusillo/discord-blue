@@ -9,11 +9,11 @@ from unittest.mock import patch
 
 from aiohttp import web
 
-from discord_blue.doodads.every_code.bridge import EveryCodeBridge
+from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.health import RUNTIME_IDENTITY_ENV
 from discord_blue.health import health_payload
 from discord_blue.plugs.discord_plug import BlueBot
-from tests.fakes_every_code import FakeBot
+from tests.fakes_agent_session import FakeBot
 
 
 class HealthPayloadTests(unittest.TestCase):
@@ -35,7 +35,7 @@ class HealthPayloadTests(unittest.TestCase):
             },
             clear=True,
         ):
-            payload = health_payload(discord_status="ok", every_code_enabled=True, active_every_code_sessions=2)
+            payload = health_payload(discord_status="ok", agent_session_enabled=True, active_agent_sessions=2)
 
         self.assertEqual(payload["schema_version"], 1)
         self.assertEqual(payload["service"], "discord-blue")
@@ -45,7 +45,7 @@ class HealthPayloadTests(unittest.TestCase):
         self.assertEqual(payload["image_reference"], "ghcr.io/example/discord-blue:abc123")
         self.assertEqual(payload["components"]["discord"], {"status": "ok"})
         self.assertEqual(
-            payload["components"]["every_code"],
+            payload["components"]["agent_session"],
             {"status": "ok", "enabled": True, "active_sessions": 2},
         )
 
@@ -87,14 +87,14 @@ class HealthPayloadTests(unittest.TestCase):
 class HealthEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def test_bridge_health_endpoint_returns_json_without_auth(self) -> None:
         config = SimpleNamespace(
-            every_code=SimpleNamespace(
+            agent_session=SimpleNamespace(
                 enabled=True,
                 token="shared-secret",
                 listen_host="127.0.0.1",
                 listen_port=8787,
             )
         )
-        bridge = EveryCodeBridge(cast(BlueBot, FakeBot(cast(Any, config))))
+        bridge = AgentSessionBridge(cast(BlueBot, FakeBot(cast(Any, config))))
 
         with patch.dict("os.environ", {}, clear=True):
             response = await bridge.handle_health(cast(web.Request, SimpleNamespace(headers={})))
@@ -108,7 +108,7 @@ class HealthEndpointTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bridge_health_endpoint_reports_unhealthy_when_discord_is_not_ready(self) -> None:
         config = SimpleNamespace(
-            every_code=SimpleNamespace(
+            agent_session=SimpleNamespace(
                 enabled=True,
                 token="shared-secret",
                 listen_host="127.0.0.1",
@@ -117,7 +117,7 @@ class HealthEndpointTests(unittest.IsolatedAsyncioTestCase):
         )
         bot = FakeBot(cast(Any, config))
         bot.ready = False
-        bridge = EveryCodeBridge(cast(BlueBot, bot))
+        bridge = AgentSessionBridge(cast(BlueBot, bot))
 
         with patch.dict("os.environ", {}, clear=True):
             response = await bridge.handle_health(cast(web.Request, SimpleNamespace(headers={})))

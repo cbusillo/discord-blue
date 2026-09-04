@@ -6,7 +6,7 @@ from typing import Protocol, TYPE_CHECKING
 
 import discord
 
-from discord_blue.doodads.every_code.protocol import SessionHello
+from discord_blue.doodads.agent_session.protocol import SessionHello
 
 if TYPE_CHECKING:
     from discord_blue.config import Config

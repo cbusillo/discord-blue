@@ -1,11 +1,11 @@
-# Project Coding Agent Guide - Every Code
+# Project Coding Agent Guide - Discord Blue
 
 ## Runtime
 
 * **Python:** 3.13
 * **Env manager:** uv
 
-Use `uv run ...` for Python commands so local and Every Code runs share the
+Use `uv run ...` for Python commands so local and Codex Lab runs share the
 same managed environment. After `uv sync`, IDEs may point at the repo-local
 `.venv/bin/python`; avoid hard-coding `/workspace/...` paths in repo guidance.
 
@@ -21,8 +21,8 @@ workflows, and cleanup policy.
 * Prefer Discord slash/app commands for all bot control surfaces. Do not add new
   `!command` style message parsers for operator actions.
 * Raw message handling is allowed only when the message content itself is the
-  product input, such as Every Code session-thread replies that are forwarded to
+  product input, such as agent session-thread replies that are forwarded to
   the local TUI.
-* Future Every Code control affordances such as status, summary, tail, or
+* Future agent session control affordances such as status, summary, tail, or
   active-session lookup should be slash/app commands unless there is a product
   reason to make them normal thread replies.

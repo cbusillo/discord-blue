@@ -5,20 +5,18 @@ import json
 import logging
 import re
 import shlex
-import subprocess
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Literal, cast
 
 import discord
 from aiohttp import WSMsgType, web
 
-from discord_blue.doodads.every_code.messages import edit_every_code_message
-from discord_blue.doodads.every_code.messages import every_code_allowed_mentions
-from discord_blue.doodads.every_code.messages import send_every_code_message
-from discord_blue.doodads.every_code.protocol import (
+from discord_blue.doodads.agent_session.messages import edit_agent_session_message
+from discord_blue.doodads.agent_session.messages import agent_session_allowed_mentions
+from discord_blue.doodads.agent_session.messages import send_agent_session_message
+from discord_blue.doodads.agent_session.protocol import (
     RequestUserInputQuestion,
     RemoteApprovalDecision,
     RemoteApprovalRequest,
@@ -28,21 +26,21 @@ from discord_blue.doodads.every_code.protocol import (
     SessionStatus,
     UserMessage,
 )
-from discord_blue.doodads.every_code.sessions import (
-    EveryCodeSession,
-    EveryCodeSessionRegistry,
+from discord_blue.doodads.agent_session.sessions import (
+    AgentSession,
+    AgentSessionRegistry,
     PendingRemoteApproval,
     PendingRemoteCommand,
     PendingRemoteUserInput,
     RejectedCommandMessage,
 )
-from discord_blue.doodads.every_code.threads import SessionThread
-from discord_blue.doodads.every_code.threads import auto_join_configured_users
-from discord_blue.doodads.every_code.threads import create_session_thread
-from discord_blue.doodads.every_code.threads import get_every_code_channel
-from discord_blue.doodads.every_code.threads import session_notification_message
-from discord_blue.doodads.every_code.threads import session_thread_name
-from discord_blue.doodads.every_code.threads import session_start_message
+from discord_blue.doodads.agent_session.threads import SessionThread
+from discord_blue.doodads.agent_session.threads import auto_join_configured_users
+from discord_blue.doodads.agent_session.threads import create_session_thread
+from discord_blue.doodads.agent_session.threads import get_agent_session_channel
+from discord_blue.doodads.agent_session.threads import session_notification_message
+from discord_blue.doodads.agent_session.threads import session_thread_name
+from discord_blue.doodads.agent_session.threads import session_start_message
 from discord_blue.health import health_payload
 from discord_blue.plugs.discord_plug import BlueBot
 
@@ -56,21 +54,16 @@ SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 2
 SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = 5
 SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS = 5
 AGENT_SESSION_CONNECT_PATH = "/agent-session/connect"
-EVERY_CODE_CONNECT_PATH = "/every-code/connect"
-SESSION_START_PREFIX = "Every Code session connected"
-SESSION_NOTIFICATION_PREFIX = "Every Code session connected for "
+SESSION_START_PREFIX = "Agent session connected"
+SESSION_NOTIFICATION_PREFIX = "Agent session connected for "
 SESSION_NOTIFICATION_PREFIXES = (
     SESSION_NOTIFICATION_PREFIX,
-    "Every Code automated session connected for ",
+    "Automated agent session connected for ",
 )
 CONTINUE_AUTONOMOUSLY_DELIVERED = "Asked the agent session to go ahead until it needs you."
 PAUSE_CURRENT_TURN_DELIVERED = "Asked the agent session to pause what it is doing now."
 SESSION_NOTIFICATION_THREAD_RE = re.compile(r"<#(?P<thread_id>\d+)>")
 MARKDOWN_CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})(?P<info>[^`~\n]*)$")
-RESUME_SESSION_RE = re.compile(
-    r"\bresume\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b",
-    re.IGNORECASE,
-)
 REACTION_QUEUED = "⏳"
 REACTION_DELIVERED = "📬"
 REACTION_IN_PROGRESS = "🔄"
@@ -138,7 +131,7 @@ class RequestUserInputSelect(discord.ui.Select[discord.ui.View]):
         await interaction.response.edit_message(
             content=self.parent_view.format_prompt(),
             view=self.parent_view,
-            allowed_mentions=every_code_allowed_mentions(),
+            allowed_mentions=agent_session_allowed_mentions(),
         )
 
 
@@ -148,7 +141,7 @@ class RequestUserInputAnswerModal(discord.ui.Modal):
         parent_view: RequestUserInputView,
         question: RequestUserInputQuestion,
     ) -> None:
-        title = (question.header or question.question or "Every Code input")[:45]
+        title = (question.header or question.question or "Agent session input")[:45]
         super().__init__(title=title)
         self.parent_view = parent_view
         self.question = question
@@ -168,7 +161,7 @@ class RequestUserInputAnswerModal(discord.ui.Modal):
         await interaction.response.edit_message(
             content=self.parent_view.format_prompt(),
             view=self.parent_view,
-            allowed_mentions=every_code_allowed_mentions(),
+            allowed_mentions=agent_session_allowed_mentions(),
         )
 
 
@@ -211,7 +204,7 @@ class RequestUserInputCancelButton(discord.ui.Button[discord.ui.View]):
 class RequestUserInputView(discord.ui.View):
     def __init__(
         self,
-        bridge: EveryCodeBridge,
+        bridge: AgentSessionBridge,
         session_id: str,
         request: RemoteRequestUserInput,
     ) -> None:
@@ -269,10 +262,10 @@ class RequestUserInputView(discord.ui.View):
         )
 
 
-class EveryCodeBridge:
+class AgentSessionBridge:
     def __init__(self, bot: BlueBot) -> None:
         self.bot = bot
-        self.sessions = EveryCodeSessionRegistry()
+        self.sessions = AgentSessionRegistry()
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
@@ -291,14 +284,14 @@ class EveryCodeBridge:
         await self._runner.setup()
         self._site = web.TCPSite(
             self._runner,
-            self.bot.config.every_code.listen_host,
-            self.bot.config.every_code.listen_port,
+            self.bot.config.agent_session.listen_host,
+            self.bot.config.agent_session.listen_port,
         )
         await self._site.start()
         logger.info(
-            "Every Code bridge listening on %s:%s",
-            self.bot.config.every_code.listen_host,
-            self.bot.config.every_code.listen_port,
+            "Agent session bridge listening on %s:%s",
+            self.bot.config.agent_session.listen_host,
+            self.bot.config.agent_session.listen_port,
         )
         self._cleanup_task = asyncio.create_task(self.cleanup_stale_sessions())
         self._heartbeat_task = asyncio.create_task(self.monitor_heartbeats())
@@ -306,15 +299,14 @@ class EveryCodeBridge:
     def register_routes(self, app: web.Application) -> None:
         app.router.add_get("/health", self.handle_health)
         app.router.add_get(AGENT_SESSION_CONNECT_PATH, self.handle_connect)
-        app.router.add_get(EVERY_CODE_CONNECT_PATH, self.handle_connect)
 
     async def handle_health(self, _request: web.Request) -> web.Response:
         discord_ready = self.discord_ready()
         return web.json_response(
             health_payload(
                 discord_status="ok" if discord_ready else "unhealthy",
-                every_code_enabled=self.bot.config.every_code.enabled,
-                active_every_code_sessions=len(self.sessions.by_session),
+                agent_session_enabled=self.bot.config.agent_session.enabled,
+                active_agent_sessions=len(self.sessions.by_session),
             ),
             status=200 if discord_ready else 503,
         )
@@ -346,7 +338,7 @@ class EveryCodeBridge:
         try:
             await asyncio.wait_for(self._runner.cleanup(), timeout=SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS)
         except TimeoutError:
-            logger.warning("Every Code bridge runner cleanup timed out during shutdown")
+            logger.warning("Agent session bridge runner cleanup timed out during shutdown")
         finally:
             self._runner = None
             self._site = None
@@ -363,7 +355,7 @@ class EveryCodeBridge:
             if close_tasks:
                 await asyncio.gather(*close_tasks)
 
-    async def disconnect_active_session(self, session_id: str, session: EveryCodeSession) -> None:
+    async def disconnect_active_session(self, session_id: str, session: AgentSession) -> None:
         if not session.websocket.closed:
             await self.close_session_websocket(session_id, session)
         try:
@@ -372,17 +364,17 @@ class EveryCodeBridge:
                 timeout=SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS,
             )
         except (TimeoutError, asyncio.TimeoutError):
-            logger.warning("Every Code thread cleanup for %s timed out during shutdown", session_id)
+            logger.warning("Agent session thread cleanup for %s timed out during shutdown", session_id)
 
     @staticmethod
-    async def close_session_websocket(session_id: str, session: EveryCodeSession) -> None:
+    async def close_session_websocket(session_id: str, session: AgentSession) -> None:
         try:
             await asyncio.wait_for(
                 session.websocket.close(message=b"bridge shutdown", drain=False),
                 timeout=SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS,
             )
         except (OSError, TimeoutError, asyncio.TimeoutError, RuntimeError, discord.DiscordException):
-            logger.warning("Unable to close Every Code websocket %s during shutdown", session_id, exc_info=True)
+            logger.warning("Unable to close Agent session websocket %s during shutdown", session_id, exc_info=True)
 
     @staticmethod
     def payload_string(payload: dict[str, object], key: str, default: str = "") -> str:
@@ -406,11 +398,11 @@ class EveryCodeBridge:
 
     async def monitor_heartbeats(self) -> None:
         while True:
-            await asyncio.sleep(self.bot.config.every_code.heartbeat_check_interval_seconds)
+            await asyncio.sleep(self.bot.config.agent_session.heartbeat_check_interval_seconds)
             await self.close_timed_out_sessions()
 
     async def close_timed_out_sessions(self) -> None:
-        timeout = timedelta(seconds=self.bot.config.every_code.heartbeat_timeout_seconds)
+        timeout = timedelta(seconds=self.bot.config.agent_session.heartbeat_timeout_seconds)
         now = datetime.now(UTC)
         for session_id, session in list(self.sessions.by_session.items()):
             if now - session.last_seen <= timeout:
@@ -421,9 +413,9 @@ class EveryCodeBridge:
                 continue
 
             logger.warning(
-                "Every Code session %s timed out after %s seconds without heartbeat",
+                "Agent session %s timed out after %s seconds without heartbeat",
                 session_id,
-                self.bot.config.every_code.heartbeat_timeout_seconds,
+                self.bot.config.agent_session.heartbeat_timeout_seconds,
             )
             await removed.websocket.close(message=b"heartbeat timeout")
             await self.close_session_thread(removed)
@@ -434,9 +426,9 @@ class EveryCodeBridge:
 
     async def cleanup_stale_session_notifications_locked(self) -> None:
         try:
-            channel = await get_every_code_channel(self.bot)
+            channel = await get_agent_session_channel(self.bot)
         except ValueError:
-            logger.warning("Unable to clean Every Code notifications: channel is unavailable")
+            logger.warning("Unable to clean Agent session notifications: channel is unavailable")
             return
 
         bot_user = self.bot.user
@@ -466,11 +458,11 @@ class EveryCodeBridge:
                     deleted += 1
                 except discord.DiscordException:
                     logger.warning(
-                        "Unable to delete stale Every Code notification %s",
+                        "Unable to delete stale Agent session notification %s",
                         message.id,
                     )
         except discord.DiscordException:
-            logger.warning("Unable to scan Every Code channel for stale notifications")
+            logger.warning("Unable to scan Agent session channel for stale notifications")
             return
 
         for thread_id, messages in deferred_live_notices.items():
@@ -488,18 +480,18 @@ class EveryCodeBridge:
                     deleted += 1
                 except discord.DiscordException:
                     logger.warning(
-                        "Unable to delete stale Every Code notification %s",
+                        "Unable to delete stale Agent session notification %s",
                         message.id,
                     )
 
         if deleted:
-            logger.info("Deleted %s stale Every Code notification(s)", deleted)
+            logger.info("Deleted %s stale Agent session notification(s)", deleted)
 
     async def cleanup_stale_session_threads(self) -> None:
         try:
-            channel = await get_every_code_channel(self.bot)
+            channel = await get_agent_session_channel(self.bot)
         except ValueError:
-            logger.warning("Unable to clean Every Code threads: channel is unavailable")
+            logger.warning("Unable to clean Agent session threads: channel is unavailable")
             return
 
         candidates = await self.session_thread_candidates(channel)
@@ -512,7 +504,7 @@ class EveryCodeBridge:
             seen.add(thread.id)
             if thread.id in self.sessions.by_thread:
                 continue
-            if not await self.is_every_code_session_thread(thread):
+            if not await self.is_agent_session_session_thread(thread):
                 continue
             if thread.id in self.sessions.by_thread:
                 continue
@@ -520,9 +512,9 @@ class EveryCodeBridge:
             closed += 1
 
         if closed:
-            logger.info("Closed %s stale Every Code thread(s)", closed)
+            logger.info("Closed %s stale Agent session thread(s)", closed)
 
-    async def is_every_code_session_thread(self, thread: discord.Thread) -> bool:
+    async def is_agent_session_session_thread(self, thread: discord.Thread) -> bool:
         bot_user = self.bot.user
         if bot_user is None:
             return False
@@ -533,7 +525,7 @@ class EveryCodeBridge:
                 if message.content.startswith(SESSION_START_PREFIX):
                     return True
         except discord.DiscordException:
-            logger.warning("Unable to inspect Every Code thread %s", thread.id)
+            logger.warning("Unable to inspect Agent session thread %s", thread.id)
         return False
 
     async def handle_connect(self, request: web.Request) -> web.WebSocketResponse:
@@ -542,7 +534,7 @@ class EveryCodeBridge:
 
         websocket = web.WebSocketResponse()
         await websocket.prepare(request)
-        session: EveryCodeSession | None = None
+        session: AgentSession | None = None
 
         async for message in websocket:
             if message.type != WSMsgType.TEXT:
@@ -550,7 +542,7 @@ class EveryCodeBridge:
             try:
                 payload = json.loads(message.data)
             except json.JSONDecodeError:
-                logger.warning("Invalid Every Code bridge JSON: %s", message.data)
+                logger.warning("Invalid Agent session bridge JSON: %s", message.data)
                 continue
 
             message_type = payload.get("type")
@@ -562,7 +554,7 @@ class EveryCodeBridge:
                     if self._stopping:
                         rejecting_stopping_session = True
                     else:
-                        session = EveryCodeSession(hello=hello, websocket=websocket)
+                        session = AgentSession(hello=hello, websocket=websocket)
                         self.sessions.register(session)
                         session_thread = await self.find_or_create_session_thread(hello)
                         self.sessions.bind_thread(
@@ -594,16 +586,16 @@ class EveryCodeBridge:
                 request_user_input = RemoteRequestUserInput.from_payload(payload)
                 await self.handle_request_user_input(request_user_input)
             elif message_type == "approval_decision_ack":
-                logger.info("Every Code approval decision ack: %s", payload.get("approval_id"))
+                logger.info("Agent session approval decision ack: %s", payload.get("approval_id"))
                 await self.handle_approval_decision_ack(payload)
             elif message_type == "approval_decision_reject":
-                logger.warning("Every Code approval decision reject: %s", payload)
+                logger.warning("Agent session approval decision reject: %s", payload)
                 await self.handle_approval_decision_reject(payload)
             elif message_type == "command_ack":
-                logger.info("Every Code command ack: %s", payload.get("command_id"))
+                logger.info("Agent session command ack: %s", payload.get("command_id"))
                 await self.handle_command_ack(payload)
             elif message_type == "command_reject":
-                logger.warning("Every Code command reject: %s", payload)
+                logger.warning("Agent session command reject: %s", payload)
                 await self.handle_command_reject(payload)
 
         if session is not None:
@@ -623,10 +615,10 @@ class EveryCodeBridge:
                 await thread.edit(
                     archived=False,
                     locked=False,
-                    reason="Reattaching live Every Code session after bridge restart",
+                    reason="Reattaching live Agent session after bridge restart",
                 )
             except discord.DiscordException:
-                logger.warning("Unable to reopen Every Code thread %s", thread.id)
+                logger.warning("Unable to reopen Agent session thread %s", thread.id)
         await auto_join_configured_users(self.bot, thread)
         notification_message_id = await self.ensure_session_notification(hello, thread)
         return SessionThread(thread=thread, notification_message_id=notification_message_id)
@@ -636,16 +628,16 @@ class EveryCodeBridge:
         if existing_message_id is not None:
             return existing_message_id
         try:
-            channel = await get_every_code_channel(self.bot)
-            message = await send_every_code_message(channel, session_notification_message(hello, thread))
+            channel = await get_agent_session_channel(self.bot)
+            message = await send_agent_session_message(channel, session_notification_message(hello, thread))
         except (discord.DiscordException, ValueError):
-            logger.warning("Unable to create Every Code notification for thread %s", thread.id)
+            logger.warning("Unable to create Agent session notification for thread %s", thread.id)
             return None
         return message.id
 
     async def find_session_notification_for_thread(self, thread_id: int) -> int | None:
         try:
-            channel = await get_every_code_channel(self.bot)
+            channel = await get_agent_session_channel(self.bot)
         except ValueError:
             return None
         bot_user = self.bot.user
@@ -660,7 +652,7 @@ class EveryCodeBridge:
                 if self.notification_thread_id(message.content) == thread_id:
                     return message.id
         except discord.DiscordException:
-            logger.warning("Unable to scan Every Code notifications for thread %s", thread_id)
+            logger.warning("Unable to scan Agent session notifications for thread %s", thread_id)
         return None
 
     @staticmethod
@@ -672,9 +664,9 @@ class EveryCodeBridge:
 
     async def find_existing_session_thread(self, hello: SessionHello) -> discord.Thread | None:
         try:
-            channel = await get_every_code_channel(self.bot)
+            channel = await get_agent_session_channel(self.bot)
         except ValueError:
-            logger.warning("Unable to find reusable Every Code thread: channel is unavailable")
+            logger.warning("Unable to find reusable Agent session thread: channel is unavailable")
             return None
 
         expected_starts = self.expected_session_start_messages(hello)
@@ -705,7 +697,7 @@ class EveryCodeBridge:
         if len(pid_relaxed_matches) == 1:
             thread, _score = pid_relaxed_matches[0]
             logger.info(
-                "Reusing Every Code thread %s despite pid mismatch for cwd=%s branch=%s host=%s",
+                "Reusing Agent session thread %s despite pid mismatch for cwd=%s branch=%s host=%s",
                 thread.id,
                 hello.cwd,
                 hello.branch or "unknown",
@@ -714,7 +706,7 @@ class EveryCodeBridge:
             return thread
         if pid_relaxed_matches:
             logger.warning(
-                "Not reusing Every Code thread for cwd=%s branch=%s host=%s because %s pid-relaxed candidates matched",
+                "Not reusing Agent session thread for cwd=%s branch=%s host=%s because %s pid-relaxed candidates matched",
                 hello.cwd,
                 hello.branch or "unknown",
                 hello.host_label,
@@ -722,7 +714,7 @@ class EveryCodeBridge:
             )
         else:
             logger.info(
-                "No reusable Every Code thread found for cwd=%s branch=%s host=%s pid=%s "
+                "No reusable Agent session thread found for cwd=%s branch=%s host=%s pid=%s "
                 "after checking %s candidate(s), skipped_mapped=%s",
                 hello.cwd,
                 hello.branch or "unknown",
@@ -736,11 +728,13 @@ class EveryCodeBridge:
     @staticmethod
     def expected_session_start_messages(hello: SessionHello) -> set[str]:
         expected = session_start_message(hello)
-        starts = {expected, EveryCodeBridge.legacy_session_start_without_session(expected)}
+        starts = {expected, AgentSessionBridge.legacy_session_start_without_session(expected)}
         if hello.host_label == "Agent":
-            starts.add(expected.replace("\nhost: Agent\n", "\nhost: Every Code\n"))
+            starts.add(expected.replace("\nhost: Agent\n", "\nhost: Agent session\n"))
             starts.add(
-                EveryCodeBridge.legacy_session_start_without_session(expected).replace("\nhost: Agent\n", "\nhost: Every Code\n")
+                AgentSessionBridge.legacy_session_start_without_session(expected).replace(
+                    "\nhost: Agent\n", "\nhost: Agent session\n"
+                )
             )
         return starts
 
@@ -750,7 +744,7 @@ class EveryCodeBridge:
 
     @staticmethod
     def session_start_messages_without_pid(starts: set[str]) -> set[str]:
-        return {start_without_pid for start in starts if (start_without_pid := EveryCodeBridge.session_start_without_pid(start))}
+        return {start_without_pid for start in starts if (start_without_pid := AgentSessionBridge.session_start_without_pid(start))}
 
     @staticmethod
     def session_start_without_pid(content: str) -> str | None:
@@ -776,7 +770,7 @@ class EveryCodeBridge:
             ):
                 candidates.append(thread)
         except (discord.DiscordException, ValueError):
-            logger.warning("Unable to scan public archived Every Code threads")
+            logger.warning("Unable to scan public archived Agent session threads")
         try:
             async for thread in channel.archived_threads(
                 private=True,
@@ -785,7 +779,7 @@ class EveryCodeBridge:
             ):
                 candidates.append(thread)
         except (discord.DiscordException, ValueError):
-            logger.warning("Unable to scan joined private archived Every Code threads")
+            logger.warning("Unable to scan joined private archived Agent session threads")
         return candidates
 
     async def session_thread_matches(
@@ -803,7 +797,7 @@ class EveryCodeBridge:
                 if message.content in expected_starts:
                     return True
         except discord.DiscordException:
-            logger.warning("Unable to inspect Every Code thread %s", thread.id)
+            logger.warning("Unable to inspect Agent session thread %s", thread.id)
         return False
 
     async def session_thread_matches_without_pid(
@@ -824,7 +818,7 @@ class EveryCodeBridge:
                 if start_without_pid in expected_starts_without_pid:
                     return True
         except discord.DiscordException:
-            logger.warning("Unable to inspect Every Code thread %s", thread.id)
+            logger.warning("Unable to inspect Agent session thread %s", thread.id)
         return False
 
     @staticmethod
@@ -837,7 +831,7 @@ class EveryCodeBridge:
                 if message.content.startswith("**Assistant**"):
                     assistant_messages += 1
         except discord.DiscordException:
-            logger.warning("Unable to score Every Code thread %s", thread.id)
+            logger.warning("Unable to score Agent session thread %s", thread.id)
         return assistant_messages, messages, thread.id
 
     async def backfill_latest_assistant_message(
@@ -847,14 +841,11 @@ class EveryCodeBridge:
     ) -> None:
         if await self.thread_has_assistant_message(thread):
             return
-        assistant_message = await asyncio.to_thread(
-            self.recover_latest_assistant_message,
-            hello,
-        )
+        assistant_message = hello.assistant_message
         if assistant_message is None:
             return
         for message in self.format_assistant_messages(assistant_message):
-            await send_every_code_message(
+            await send_agent_session_message(
                 thread,
                 message[:DISCORD_MESSAGE_LIMIT],
             )
@@ -866,81 +857,8 @@ class EveryCodeBridge:
                 if message.content.startswith("**Assistant**"):
                     return True
         except discord.DiscordException:
-            logger.warning("Unable to inspect Every Code assistant history %s", thread.id)
+            logger.warning("Unable to inspect Agent session assistant history %s", thread.id)
         return False
-
-    def recover_latest_assistant_message(self, hello: SessionHello) -> str | None:
-        session_id = self.resume_session_id_for_pid(hello.pid)
-        if session_id is None:
-            return None
-        rollout_path = self.rollout_path_for_session(session_id)
-        if rollout_path is None:
-            return None
-        return self.latest_assistant_message_from_rollout(rollout_path)
-
-    @staticmethod
-    def resume_session_id_for_pid(pid: int) -> str | None:
-        if pid <= 0:
-            return None
-        try:
-            result = subprocess.run(
-                ["ps", "-p", str(pid), "-o", "command="],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        if result.returncode != 0:
-            return None
-        match = RESUME_SESSION_RE.search(result.stdout)
-        return match.group(1) if match else None
-
-    @staticmethod
-    def rollout_path_for_session(session_id: str) -> Path | None:
-        code_home = Path.home() / ".code"
-        catalog_path = code_home / "sessions" / "index" / "catalog.jsonl"
-        try:
-            lines = catalog_path.read_text(errors="replace").splitlines()
-        except OSError:
-            return None
-        for line in reversed(lines):
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if entry.get("session_id") != session_id:
-                continue
-            rollout_path = entry.get("rollout_path")
-            if not isinstance(rollout_path, str) or not rollout_path:
-                return None
-            return code_home / rollout_path
-        return None
-
-    @staticmethod
-    def latest_assistant_message_from_rollout(rollout_path: Path) -> str | None:
-        try:
-            lines = rollout_path.read_text(errors="replace").splitlines()
-        except OSError:
-            return None
-        latest: str | None = None
-        for line in lines:
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            payload = entry.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            message = payload.get("msg")
-            if not isinstance(message, dict):
-                continue
-            if message.get("type") != "agent_message":
-                continue
-            text = message.get("message")
-            if isinstance(text, str) and text.strip():
-                latest = text.strip()
-        return latest
 
     async def send_thread_reply(self, message: discord.Message) -> bool:
         if not isinstance(message.channel, discord.Thread):
@@ -950,7 +868,7 @@ class EveryCodeBridge:
         if session is None:
             return False
         if session.websocket.closed:
-            await message.reply("Every Code session is offline; reply was not delivered.", mention_author=False)
+            await message.reply("Agent session is offline; reply was not delivered.", mention_author=False)
             return True
         text = message.content.strip()
         if not text or text.startswith("!"):
@@ -1204,7 +1122,7 @@ class EveryCodeBridge:
                 reason = self.payload_string(payload, "reason", "command was rejected")
                 await self.post_thread_notice(command.thread_id, f"{command.reject_notice}: {reason}")
 
-    def command_context(self, payload: dict[str, object]) -> tuple[str, EveryCodeSession] | None:
+    def command_context(self, payload: dict[str, object]) -> tuple[str, AgentSession] | None:
         command_id = self.payload_string(payload, "command_id")
         session_id = self.payload_string(payload, "session_id")
         if not command_id or not session_id:
@@ -1216,7 +1134,7 @@ class EveryCodeBridge:
 
     async def update_command_message_reaction(
         self,
-        session: EveryCodeSession,
+        session: AgentSession,
         command: PendingRemoteCommand,
         reaction: str,
     ) -> None:
@@ -1236,17 +1154,17 @@ class EveryCodeBridge:
     async def handle_approval_request(self, approval: RemoteApprovalRequest) -> None:
         session = self.sessions.get(approval.session_id)
         if session is None or session.thread_id is None:
-            logger.warning("Every Code approval for unknown session: %s", approval.session_id)
+            logger.warning("Agent session approval for unknown session: %s", approval.session_id)
             return
         if approval.session_epoch != session.session_epoch:
-            logger.warning("Every Code approval for stale session epoch: %s", approval.session_id)
+            logger.warning("Agent session approval for stale session epoch: %s", approval.session_id)
             return
 
         channel = self.bot.get_channel(session.thread_id)
         if not isinstance(channel, discord.Thread):
             return
 
-        message = await send_every_code_message(
+        message = await send_agent_session_message(
             channel,
             self.format_approval_request(approval),
         )
@@ -1262,25 +1180,25 @@ class EveryCodeBridge:
     async def handle_request_user_input(self, request: RemoteRequestUserInput) -> None:
         session = self.sessions.get(request.session_id)
         if session is None or session.thread_id is None:
-            logger.warning("Every Code request_user_input for unknown session: %s", request.session_id)
+            logger.warning("Agent session request_user_input for unknown session: %s", request.session_id)
             return
         if request.session_epoch != session.session_epoch:
             logger.warning(
-                "Every Code request_user_input for stale session epoch: %s",
+                "Agent session request_user_input for stale session epoch: %s",
                 request.session_id,
             )
             return
 
         await self.clear_pending_user_inputs(
             session,
-            "Every Code is waiting on a newer prompt.",
+            "Agent session is waiting on a newer prompt.",
         )
 
         channel = self.bot.get_channel(session.thread_id)
         if not isinstance(channel, discord.Thread):
             return
 
-        message = await send_every_code_message(
+        message = await send_agent_session_message(
             channel,
             self.format_request_user_input(request, {}),
             view=self.request_user_input_view(session.session_id, request),
@@ -1303,7 +1221,7 @@ class EveryCodeBridge:
     ) -> None:
         if not self.is_operator(interaction.user):
             await interaction.response.send_message(
-                "Only Every Code operators can answer prompts.",
+                "Only Agent session operators can answer prompts.",
                 ephemeral=True,
             )
             return
@@ -1311,7 +1229,7 @@ class EveryCodeBridge:
         session = self.sessions.get(session_id)
         if session is None or session.websocket.closed:
             await interaction.response.send_message(
-                "Every Code session is offline; answer was not delivered.",
+                "Agent session is offline; answer was not delivered.",
                 ephemeral=True,
             )
             return
@@ -1345,7 +1263,7 @@ class EveryCodeBridge:
         await interaction.response.edit_message(
             content=self.format_request_user_input_pending(interaction.user, cancelled=cancelled),
             view=None,
-            allowed_mentions=every_code_allowed_mentions(),
+            allowed_mentions=agent_session_allowed_mentions(),
         )
 
     async def handle_approval_interaction(
@@ -1357,7 +1275,7 @@ class EveryCodeBridge:
     ) -> None:
         if not self.is_operator(interaction.user):
             await interaction.response.send_message(
-                "Only Every Code operators can respond to approvals.",
+                "Only Agent session operators can respond to approvals.",
                 ephemeral=True,
             )
             return
@@ -1365,7 +1283,7 @@ class EveryCodeBridge:
         session = self.sessions.get(session_id)
         if session is None or session.websocket.closed:
             await interaction.response.send_message(
-                "Every Code session is offline; approval was not delivered.",
+                "Agent session is offline; approval was not delivered.",
                 ephemeral=True,
             )
             return
@@ -1391,7 +1309,7 @@ class EveryCodeBridge:
         await interaction.response.edit_message(
             content=self.format_approval_pending(decision, interaction.user),
             view=None,
-            allowed_mentions=every_code_allowed_mentions(),
+            allowed_mentions=agent_session_allowed_mentions(),
         )
 
     async def handle_thread_reaction(
@@ -1424,7 +1342,7 @@ class EveryCodeBridge:
 
     async def handle_session_control_reaction(
         self,
-        session: EveryCodeSession,
+        session: AgentSession,
         thread: discord.Thread,
         message_id: int,
         emoji: str,
@@ -1484,7 +1402,7 @@ class EveryCodeBridge:
 
     async def handle_pending_control_confirmation(
         self,
-        session: EveryCodeSession,
+        session: AgentSession,
         thread: discord.Thread,
         message_id: int,
         emoji: str,
@@ -1531,7 +1449,7 @@ class EveryCodeBridge:
 
     async def handle_approval_reaction(
         self,
-        session: EveryCodeSession,
+        session: AgentSession,
         thread: discord.Thread,
         approval_id: str,
         emoji: str,
@@ -1549,7 +1467,7 @@ class EveryCodeBridge:
             return True
         if session.websocket.closed:
             await self.remove_message_reaction(thread, pending.message_id, emoji, user)
-            await self.post_thread_notice(thread.id, "Every Code session is offline; approval was not delivered.")
+            await self.post_thread_notice(thread.id, "Agent session is offline; approval was not delivered.")
             return True
 
         decision: Literal["approved", "denied"]
@@ -1606,21 +1524,21 @@ class EveryCodeBridge:
             return
         try:
             message = await channel.fetch_message(pending.message_id)
-            await edit_every_code_message(
+            await edit_agent_session_message(
                 message,
                 content=content[:DISCORD_MESSAGE_LIMIT],
             )
             await self.clear_message_reactions(message)
         except discord.DiscordException:
-            logger.warning("Unable to edit Every Code approval message %s", pending.message_id)
+            logger.warning("Unable to edit Agent session approval message %s", pending.message_id)
 
     async def handle_session_status(self, message_type: str, status: SessionStatus) -> None:
         session = self.sessions.get(status.session_id)
         if session is None or session.thread_id is None:
-            logger.warning("Every Code status for unknown session: %s", status.session_id)
+            logger.warning("Agent session status for unknown session: %s", status.session_id)
             return
         if status.session_epoch != session.session_epoch:
-            logger.warning("Every Code status for stale session epoch: %s", status.session_id)
+            logger.warning("Agent session status for stale session epoch: %s", status.session_id)
             return
         session.last_status_message = status.message
 
@@ -1634,7 +1552,7 @@ class EveryCodeBridge:
                 reaction = REACTION_IN_PROGRESS
             await self.clear_pending_user_inputs(
                 session,
-                "Every Code is no longer waiting on this prompt.",
+                "Agent session is no longer waiting on this prompt.",
             )
             await self.update_session_status_reaction(session, reaction)
             return
@@ -1642,7 +1560,7 @@ class EveryCodeBridge:
         if message_type == "error":
             await self.clear_pending_user_inputs(
                 session,
-                "Every Code stopped waiting on this prompt.",
+                "Agent session stopped waiting on this prompt.",
             )
             await self.update_session_status_reaction(session, REACTION_REJECTED)
             return
@@ -1654,7 +1572,7 @@ class EveryCodeBridge:
             await self.update_active_command_reaction(session, REACTION_FINISHED, clear=True)
             await self.clear_pending_user_inputs(
                 session,
-                "Every Code is no longer waiting on this prompt.",
+                "Agent session is no longer waiting on this prompt.",
             )
             if status.assistant_message and session.control_interruptions_enabled:
                 replaced = await self.spawn_session_controls(
@@ -1669,10 +1587,10 @@ class EveryCodeBridge:
     async def handle_user_message(self, user_message: UserMessage) -> None:
         session = self.sessions.get(user_message.session_id)
         if session is None or session.thread_id is None:
-            logger.warning("Every Code user message for unknown session: %s", user_message.session_id)
+            logger.warning("Agent session user message for unknown session: %s", user_message.session_id)
             return
         if user_message.session_epoch != session.session_epoch:
-            logger.warning("Every Code user message for stale session epoch: %s", user_message.session_id)
+            logger.warning("Agent session user message for stale session epoch: %s", user_message.session_id)
             return
         if not user_message.message.strip():
             return
@@ -1680,7 +1598,7 @@ class EveryCodeBridge:
         if not isinstance(channel, discord.Thread):
             return
 
-        await send_every_code_message(
+        await send_agent_session_message(
             channel,
             self.format_user_message_notice(user_message.message)[:DISCORD_MESSAGE_LIMIT],
         )
@@ -1692,7 +1610,7 @@ class EveryCodeBridge:
 
     async def update_active_command_reaction(
         self,
-        session: EveryCodeSession,
+        session: AgentSession,
         reaction: str,
         *,
         clear: bool = False,
@@ -1712,7 +1630,7 @@ class EveryCodeBridge:
             if command.message_id == session.control_message_id:
                 session.control_status_reaction = None
 
-    async def clear_rejected_command_reactions(self, session: EveryCodeSession) -> None:
+    async def clear_rejected_command_reactions(self, session: AgentSession) -> None:
         rejected_messages = session.rejected_command_messages
         session.rejected_command_messages = []
         for rejected_message in rejected_messages:
@@ -1720,7 +1638,7 @@ class EveryCodeBridge:
 
     async def update_session_status_reaction(
         self,
-        session: EveryCodeSession,
+        session: AgentSession,
         reaction: str,
     ) -> None:
         if session.active_command_id is not None:
@@ -1732,7 +1650,7 @@ class EveryCodeBridge:
 
     async def update_control_anchor_status(
         self,
-        session: EveryCodeSession,
+        session: AgentSession,
         thread_id: int,
         reaction: str,
     ) -> None:
@@ -1744,7 +1662,7 @@ class EveryCodeBridge:
 
     async def show_active_session_controls(
         self,
-        session: EveryCodeSession,
+        session: AgentSession,
         thread: discord.Thread,
         reaction: str,
     ) -> None:
@@ -1754,14 +1672,14 @@ class EveryCodeBridge:
 
     async def show_or_refresh_session_controls(
         self,
-        session: EveryCodeSession,
+        session: AgentSession,
         thread: discord.Thread,
     ) -> None:
         if session.control_message_id is not None:
             await self.refresh_session_controls(session, thread)
             if session.control_message_id is not None:
                 return
-        message = await send_every_code_message(
+        message = await send_agent_session_message(
             thread,
             self.format_waiting_for_direction(session),
         )
@@ -1775,7 +1693,7 @@ class EveryCodeBridge:
         try:
             message = await channel.fetch_message(message_id)
         except discord.DiscordException:
-            logger.warning("Unable to fetch Every Code reply message %s", message_id)
+            logger.warning("Unable to fetch Agent session reply message %s", message_id)
             return
 
         bot_user = self.bot.user
@@ -1786,7 +1704,7 @@ class EveryCodeBridge:
                     with suppress(discord.DiscordException):
                         await message.remove_reaction(existing, bot_user)
         except discord.DiscordException:
-            logger.warning("Unable to update Every Code reply reaction %s", message_id)
+            logger.warning("Unable to update Agent session reply reaction %s", message_id)
 
     async def clear_message_transient_reactions(self, thread_id: int, message_id: int) -> None:
         channel = self.bot.get_channel(thread_id)
@@ -1798,7 +1716,7 @@ class EveryCodeBridge:
         try:
             message = await channel.fetch_message(message_id)
         except discord.DiscordException:
-            logger.warning("Unable to fetch Every Code reply message %s", message_id)
+            logger.warning("Unable to fetch Agent session reply message %s", message_id)
             return
 
         for existing in TRANSIENT_REACTIONS:
@@ -1813,7 +1731,7 @@ class EveryCodeBridge:
     def format_assistant_messages(cls, text: str) -> list[str]:
         return [f"**Assistant**\n{chunk}" for chunk in cls._split_discord_message(text, DISCORD_ASSISTANT_CHUNK_LIMIT)]
 
-    async def post_session_controls(self, session: EveryCodeSession) -> None:
+    async def post_session_controls(self, session: AgentSession) -> None:
         if session.thread_id is None:
             return
         channel = self.bot.get_channel(session.thread_id)
@@ -1832,7 +1750,7 @@ class EveryCodeBridge:
                 return
             session.control_message_id = None
 
-        message = await send_every_code_message(
+        message = await send_agent_session_message(
             channel,
             self.format_waiting_for_direction(session),
         )
@@ -1844,7 +1762,7 @@ class EveryCodeBridge:
 
     async def clear_pending_user_inputs(
         self,
-        session: EveryCodeSession,
+        session: AgentSession,
         content: str,
     ) -> None:
         if not session.pending_user_inputs:
@@ -1858,17 +1776,17 @@ class EveryCodeBridge:
                 continue
             try:
                 message = await channel.fetch_message(pending.message_id)
-                await edit_every_code_message(
+                await edit_agent_session_message(
                     message,
                     content=content[:DISCORD_MESSAGE_LIMIT],
                 )
             except discord.DiscordException:
                 logger.warning(
-                    "Unable to clear Every Code request_user_input message %s",
+                    "Unable to clear Agent session request_user_input message %s",
                     pending.message_id,
                 )
 
-    async def clear_session_controls(self, session: EveryCodeSession) -> None:
+    async def clear_session_controls(self, session: AgentSession) -> None:
         if session.thread_id is None or session.control_message_id is None:
             return
         channel = self.bot.get_channel(session.thread_id)
@@ -1881,7 +1799,7 @@ class EveryCodeBridge:
             session.control_message_id = None
         except discord.DiscordException:
             logger.warning(
-                "Unable to clear Every Code control message %s",
+                "Unable to clear Agent session control message %s",
                 session.control_message_id,
             )
         else:
@@ -1901,11 +1819,11 @@ class EveryCodeBridge:
         except discord.NotFound:
             return
         except discord.DiscordException:
-            logger.warning("Unable to clear Every Code control message %s", message_id)
+            logger.warning("Unable to clear Agent session control message %s", message_id)
 
     async def spawn_session_controls(
         self,
-        session: EveryCodeSession,
+        session: AgentSession,
         *,
         reaction: str | None,
         interruptions_enabled: bool,
@@ -1926,7 +1844,7 @@ class EveryCodeBridge:
         session.control_interruptions_enabled = interruptions_enabled
 
         try:
-            message = await send_every_code_message(
+            message = await send_agent_session_message(
                 channel,
                 self.format_waiting_for_direction(session),
             )
@@ -1945,7 +1863,7 @@ class EveryCodeBridge:
 
     @staticmethod
     def rebind_session_control_commands(
-        session: EveryCodeSession,
+        session: AgentSession,
         old_message_id: int,
         new_message_id: int,
     ) -> None:
@@ -1956,12 +1874,12 @@ class EveryCodeBridge:
     async def post_thread_notice(self, thread_id: int, text: str) -> None:
         channel = self.bot.get_channel(thread_id)
         if isinstance(channel, discord.Thread):
-            await send_every_code_message(
+            await send_agent_session_message(
                 channel,
                 text[:DISCORD_MESSAGE_LIMIT],
             )
 
-    async def close_session_thread(self, session: EveryCodeSession) -> None:
+    async def close_session_thread(self, session: AgentSession) -> None:
         if session.notification_message_id is not None:
             await self.delete_session_notification(session.notification_message_id)
 
@@ -1983,47 +1901,47 @@ class EveryCodeBridge:
                 await thread.edit(
                     archived=False,
                     locked=False,
-                    reason="Preparing to close Every Code session thread",
+                    reason="Preparing to close Agent session thread",
                 )
             except discord.DiscordException:
-                logger.warning("Unable to unarchive Every Code thread %s", thread.id)
+                logger.warning("Unable to unarchive Agent session thread %s", thread.id)
 
         try:
-            await send_every_code_message(
+            await send_agent_session_message(
                 thread,
-                "Every Code session disconnected",
+                "Agent session disconnected",
             )
         except discord.DiscordException:
-            logger.warning("Unable to post close notice in Every Code thread %s", thread.id)
+            logger.warning("Unable to post close notice in Agent session thread %s", thread.id)
         await self.remove_thread_members(thread)
 
         try:
             await thread.edit(
                 archived=True,
                 locked=True,
-                reason="Every Code session disconnected",
+                reason="Agent session disconnected",
             )
         except discord.DiscordException:
-            logger.warning("Unable to archive Every Code thread %s", thread.id)
+            logger.warning("Unable to archive Agent session thread %s", thread.id)
 
         try:
             await thread.leave()
         except discord.DiscordException:
-            logger.warning("Unable to leave Every Code thread %s", thread.id)
+            logger.warning("Unable to leave Agent session thread %s", thread.id)
 
     async def delete_session_notification(self, message_id: int) -> None:
         try:
-            channel = await get_every_code_channel(self.bot)
+            channel = await get_agent_session_channel(self.bot)
             message = await channel.fetch_message(message_id)
             await message.delete()
         except (discord.DiscordException, ValueError):
-            logger.warning("Unable to delete Every Code notification message %s", message_id)
+            logger.warning("Unable to delete Agent session notification message %s", message_id)
 
     async def delete_session_notification_for_thread(self, thread_id: int) -> None:
         try:
-            channel = await get_every_code_channel(self.bot)
+            channel = await get_agent_session_channel(self.bot)
         except ValueError:
-            logger.warning("Unable to delete Every Code notification for thread %s: channel is unavailable", thread_id)
+            logger.warning("Unable to delete Agent session notification for thread %s: channel is unavailable", thread_id)
             return
 
         bot_user = self.bot.user
@@ -2042,7 +1960,7 @@ class EveryCodeBridge:
                 await message.delete()
                 return
         except discord.DiscordException:
-            logger.warning("Unable to delete Every Code notification for thread %s", thread_id)
+            logger.warning("Unable to delete Agent session notification for thread %s", thread_id)
 
     async def get_thread(self, thread_id: int) -> discord.Thread | None:
         channel = self.bot.get_channel(thread_id)
@@ -2069,13 +1987,13 @@ class EveryCodeBridge:
                 await thread.remove_user(discord.Object(id=member.id))
             except discord.DiscordException:
                 logger.warning(
-                    "Unable to remove user %s from Every Code thread %s",
+                    "Unable to remove user %s from Agent session thread %s",
                     member.id,
                     thread.id,
                 )
 
     def is_operator(self, user: discord.User | discord.Member) -> bool:
-        role_name = self.bot.config.every_code.operator_role_name or self.bot.config.discord.employee_role_name
+        role_name = self.bot.config.agent_session.operator_role_name or self.bot.config.discord.employee_role_name
         if not role_name:
             return True
         if not isinstance(user, discord.Member):
@@ -2114,7 +2032,7 @@ class EveryCodeBridge:
         user: discord.User | discord.Member,
     ) -> str:
         label = "Approval sent" if decision == "approved" else "Denial sent"
-        return f"**{label}**\nWaiting for local Every Code to accept the decision.\nby: `{user}`"
+        return f"**{label}**\nWaiting for local agent to accept the decision.\nby: `{user}`"
 
     @staticmethod
     def format_approval_finished(decision: str | None, decided_by: int | None) -> str:
@@ -2156,18 +2074,18 @@ class EveryCodeBridge:
         cancelled: bool = False,
     ) -> str:
         label = "Answer cancelled" if cancelled else "Answer sent"
-        return f"**{label}**\nWaiting for local Every Code to accept the response.\nby: `{user}`"
+        return f"**{label}**\nWaiting for local agent to accept the response.\nby: `{user}`"
 
     @staticmethod
     def format_user_message_notice(message: str) -> str:
         return f"**You**\n>>> {message.strip()}"
 
     @staticmethod
-    def format_waiting_for_direction(_session: EveryCodeSession) -> str:
+    def format_waiting_for_direction(_session: AgentSession) -> str:
         return "\u200b"
 
     @staticmethod
-    def session_control_reactions(session: EveryCodeSession) -> list[str]:
+    def session_control_reactions(session: AgentSession) -> list[str]:
         if session.pending_control_confirmation is not None:
             return [REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY]
         if session.control_status_reaction is not None:
@@ -2199,7 +2117,7 @@ class EveryCodeBridge:
 
     async def refresh_session_controls(
         self,
-        session: EveryCodeSession,
+        session: AgentSession,
         thread: discord.Thread,
         *,
         remove_user_reaction: tuple[str, discord.User | discord.Member] | None = None,
@@ -2215,7 +2133,7 @@ class EveryCodeBridge:
         if replaced:
             return
         session.control_message_id = None
-        message = await send_every_code_message(
+        message = await send_agent_session_message(
             thread,
             self.format_waiting_for_direction(session),
         )
@@ -2223,7 +2141,7 @@ class EveryCodeBridge:
         session.control_message_id = message.id
 
     def _authorized(self, request: web.Request) -> bool:
-        token = self.bot.config.every_code.token
+        token = self.bot.config.agent_session.token
         if not token:
             return False
         expected = f"Bearer {token}"
@@ -2238,7 +2156,7 @@ class EveryCodeBridge:
             try:
                 await message.add_reaction(reaction)
             except discord.DiscordException:
-                logger.warning("Unable to add Every Code reaction %s to %s", reaction, message.id)
+                logger.warning("Unable to add Agent session reaction %s to %s", reaction, message.id)
 
     @staticmethod
     async def clear_message_reactions(message: discord.Message) -> None:
@@ -2256,7 +2174,7 @@ class EveryCodeBridge:
             message = await thread.fetch_message(message_id)
             await message.remove_reaction(reaction, user)
         except discord.DiscordException:
-            logger.warning("Unable to remove Every Code reaction %s from %s", reaction, message_id)
+            logger.warning("Unable to remove Agent session reaction %s from %s", reaction, message_id)
 
     async def replace_message_reactions(
         self,
@@ -2276,7 +2194,7 @@ class EveryCodeBridge:
             await self.add_message_reactions(message, reactions)
             return True
         except discord.DiscordException:
-            logger.warning("Unable to replace Every Code reactions on %s", message_id)
+            logger.warning("Unable to replace Agent session reactions on %s", message_id)
             return False
 
     @staticmethod
@@ -2286,8 +2204,8 @@ class EveryCodeBridge:
             return []
 
         plain_limit = max(1, limit - DISCORD_CODE_FENCE_WRAP_RESERVE)
-        chunks = EveryCodeBridge._split_discord_message_plain(normalized, plain_limit)
-        return EveryCodeBridge._wrap_split_code_fences(chunks)
+        chunks = AgentSessionBridge._split_discord_message_plain(normalized, plain_limit)
+        return AgentSessionBridge._wrap_split_code_fences(chunks)
 
     @staticmethod
     def _split_discord_message_plain(text: str, limit: int) -> list[str]:
@@ -2310,9 +2228,9 @@ class EveryCodeBridge:
         wrapped: list[str] = []
         fence_state: tuple[str, int, str] | None = None
         for chunk in chunks:
-            prefix = EveryCodeBridge._opening_code_fence(fence_state)
-            next_fence_state = EveryCodeBridge._scan_code_fence_state(chunk, fence_state)
-            suffix = EveryCodeBridge._closing_code_fence(next_fence_state)
+            prefix = AgentSessionBridge._opening_code_fence(fence_state)
+            next_fence_state = AgentSessionBridge._scan_code_fence_state(chunk, fence_state)
+            suffix = AgentSessionBridge._closing_code_fence(next_fence_state)
             wrapped.append(f"{prefix}{chunk}{suffix}")
             fence_state = next_fence_state
         return wrapped

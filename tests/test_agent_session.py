@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import importlib
 import subprocess
@@ -11,20 +10,21 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 
-from tests.fakes_every_code import FakeBot
-from tests.fakes_every_code import FakeInteraction
-from tests.fakes_every_code import FakeReplyMessage
-from tests.fakes_every_code import FakeTextChannel
-from tests.fakes_every_code import FakeThread
-from tests.fakes_every_code import FakeWebSocket
-from tests.fakes_every_code import add_bot_message
-from tests.fakes_every_code import make_hello
+from tests.fakes_agent_session import FakeBot
+from tests.fakes_agent_session import FakeInteraction
+from tests.fakes_agent_session import FakeReplyMessage
+from tests.fakes_agent_session import FakeTextChannel
+from tests.fakes_agent_session import FakeThread
+from tests.fakes_agent_session import FakeWebSocket
+from tests.fakes_agent_session import add_bot_message
+from tests.fakes_agent_session import make_hello
 
-from discord_blue.doodads.every_code_doodad import EveryCodeDoodad
+from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 
 _TEST_HOME = tempfile.TemporaryDirectory()
 os.environ["HOME"] = _TEST_HOME.name
@@ -43,7 +43,7 @@ def write_default_config() -> None:
                 'employee_role_name = "employee"',
                 "loaded_doodads = []",
                 "",
-                "[every_code]",
+                "[agent_session]",
                 "enabled = false",
                 'listen_host = "0.0.0.0"',
                 "listen_port = 8787",
@@ -61,10 +61,10 @@ def write_default_config() -> None:
 write_default_config()
 
 Config = importlib.import_module("discord_blue.config").Config
-bridge_module = importlib.import_module("discord_blue.doodads.every_code.bridge")
-EveryCodeBridge = bridge_module.EveryCodeBridge
-messages_module = importlib.import_module("discord_blue.doodads.every_code.messages")
-protocol_module = importlib.import_module("discord_blue.doodads.every_code.protocol")
+bridge_module = importlib.import_module("discord_blue.doodads.agent_session.bridge")
+AgentSessionBridge = bridge_module.AgentSessionBridge
+messages_module = importlib.import_module("discord_blue.doodads.agent_session.messages")
+protocol_module = importlib.import_module("discord_blue.doodads.agent_session.protocol")
 RemoteCommand = protocol_module.RemoteCommand
 RemoteApprovalRequest = protocol_module.RemoteApprovalRequest
 RemoteRequestUserInput = protocol_module.RemoteRequestUserInput
@@ -73,19 +73,15 @@ RequestUserInputQuestionOption = protocol_module.RequestUserInputQuestionOption
 SessionHello = protocol_module.SessionHello
 SessionOrigin = protocol_module.SessionOrigin
 SessionStatus = protocol_module.SessionStatus
-sessions_module = importlib.import_module("discord_blue.doodads.every_code.sessions")
-EveryCodeSession = sessions_module.EveryCodeSession
-EveryCodeSessionRegistry = sessions_module.EveryCodeSessionRegistry
+sessions_module = importlib.import_module("discord_blue.doodads.agent_session.sessions")
+AgentSession = sessions_module.AgentSession
+AgentSessionRegistry = sessions_module.AgentSessionRegistry
 PendingRemoteApproval = sessions_module.PendingRemoteApproval
-threads_module = importlib.import_module("discord_blue.doodads.every_code.threads")
+threads_module = importlib.import_module("discord_blue.doodads.agent_session.threads")
 create_session_thread = threads_module.create_session_thread
 session_notification_message = threads_module.session_notification_message
 session_start_message = threads_module.session_start_message
 session_thread_name = threads_module.session_thread_name
-
-
-def stub_recovered_assistant_message(bridge: object, recovered_message: str | None) -> None:
-    cast(Any, bridge).recover_latest_assistant_message = lambda _hello: recovered_message
 
 
 class ConfigTests(unittest.TestCase):
@@ -107,7 +103,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse((Path(home) / ".config" / "discord-blue" / "config.toml").exists())
 
-    def test_every_code_config_loads_and_saves(self) -> None:
+    def test_agent_session_config_loads_and_saves(self) -> None:
         _CONFIG_PATH.write_text(
             "\n".join(
                 [
@@ -116,9 +112,9 @@ class ConfigTests(unittest.TestCase):
                     "guild_id = 1",
                     "bot_channel_id = 2",
                     'employee_role_name = "employee"',
-                    'loaded_doodads = ["every_code_doodad"]',
+                    'loaded_doodads = ["agent_session_doodad"]',
                     "",
-                    "[every_code]",
+                    "[agent_session]",
                     "enabled = true",
                     'listen_host = "127.0.0.1"',
                     "listen_port = 8788",
@@ -134,24 +130,49 @@ class ConfigTests(unittest.TestCase):
 
         config = Config()
 
-        self.assertTrue(config.every_code.enabled)
-        self.assertEqual(config.every_code.listen_host, "127.0.0.1")
-        self.assertEqual(config.every_code.listen_port, 8788)
-        self.assertEqual(config.every_code.token, "shared-secret")
-        self.assertEqual(config.every_code.channel_id, 3)
-        self.assertEqual(config.every_code.operator_role_name, "code-operator")
-        self.assertEqual(config.every_code.auto_join_user_ids, [10, 11])
-        self.assertEqual(config.every_code.heartbeat_timeout_seconds, 45)
-        self.assertEqual(config.every_code.heartbeat_check_interval_seconds, 5)
+        self.assertTrue(config.agent_session.enabled)
+        self.assertEqual(config.agent_session.listen_host, "127.0.0.1")
+        self.assertEqual(config.agent_session.listen_port, 8788)
+        self.assertEqual(config.agent_session.token, "shared-secret")
+        self.assertEqual(config.agent_session.channel_id, 3)
+        self.assertEqual(config.agent_session.operator_role_name, "code-operator")
+        self.assertEqual(config.agent_session.auto_join_user_ids, [10, 11])
+        self.assertEqual(config.agent_session.heartbeat_timeout_seconds, 45)
+        self.assertEqual(config.agent_session.heartbeat_check_interval_seconds, 5)
         saved = _CONFIG_PATH.read_text()
-        self.assertIn("[every_code]", saved)
+        self.assertIn("[agent_session]", saved)
         self.assertIn('token = "shared-secret"', saved)
+
+    def test_retired_config_is_migrated_and_saved_without_aliases(self) -> None:
+        write_default_config()
+        legacy = _CONFIG_PATH.read_text().replace("[agent_session]", "[every_code]")
+        legacy = legacy.replace("enabled = false", "enabled = true")
+        legacy = legacy.replace('token = ""', 'token = "migration-token"')
+        legacy = legacy.replace("loaded_doodads = []", 'loaded_doodads = ["every_code_doodad", "agent_session_doodad"]')
+        _CONFIG_PATH.write_text(legacy)
+
+        config = Config()
+
+        self.assertTrue(config.agent_session.enabled)
+        self.assertEqual(config.agent_session.token, "migration-token")
+        self.assertEqual(config.discord.loaded_doodads, ["agent_session_doodad"])
+        self.assertNotIn("every_code", _CONFIG_PATH.read_text())
+        self.assertEqual(Config().agent_session.token, "migration-token")
+
+    def test_current_config_wins_over_retired_config(self) -> None:
+        write_default_config()
+        with _CONFIG_PATH.open("a") as output:
+            output.write('\n[every_code]\nenabled = true\ntoken = "old-token"\n')
+        config = Config()
+        self.assertFalse(config.agent_session.enabled)
+        self.assertEqual(config.agent_session.token, "")
+        self.assertNotIn("every_code", _CONFIG_PATH.read_text())
 
 
 class SessionRegistryTests(unittest.TestCase):
     def test_session_registration_binds_thread_mapping(self) -> None:
-        registry = EveryCodeSessionRegistry()
-        session = EveryCodeSession(hello=make_hello(), websocket=FakeWebSocket())
+        registry = AgentSessionRegistry()
+        session = AgentSession(hello=make_hello(), websocket=FakeWebSocket())
 
         registry.register(session)
         registry.bind_thread("session-1", 555, notification_message_id=777)
@@ -181,6 +202,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertIsNone(hello.branch)
         self.assertEqual(hello.pid, 0)
         self.assertIsNone(hello.origin)
+        self.assertIsNone(hello.assistant_message)
 
     def test_session_hello_from_payload_parses_origin(self) -> None:
         hello = SessionHello.from_payload(
@@ -188,8 +210,9 @@ class ProtocolTests(unittest.TestCase):
                 "session_id": "session-1",
                 "session_epoch": "epoch-1",
                 "cwd": "/tmp/project",
+                "assistant_message": "Last completed answer",
                 "origin": {
-                    "kind": "every_code",
+                    "kind": "launchplane",
                     "request_id": "every-code-cbusillo-syo-67",
                     "repository": "cbusillo/sellyouroutboard",
                     "issue_number": 67,
@@ -198,9 +221,10 @@ class ProtocolTests(unittest.TestCase):
             }
         )
 
+        self.assertEqual(hello.assistant_message, "Last completed answer")
         self.assertIsNotNone(hello.origin)
         assert hello.origin is not None
-        self.assertEqual(hello.origin.kind, "every_code")
+        self.assertEqual(hello.origin.kind, "launchplane")
         self.assertEqual(hello.origin.repository, "cbusillo/sellyouroutboard")
         self.assertEqual(hello.origin.issue_number, 67)
 
@@ -317,7 +341,7 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_create_session_thread_suppresses_embeds_on_start_messages(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         channel = FakeTextChannel(321, [])
 
         session_thread = await create_session_thread(FakeBot(config, channel=channel), make_hello())
@@ -327,7 +351,7 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_create_session_thread_warns_when_manage_messages_missing(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         channel = FakeTextChannel(321, [], manage_messages=False)
 
         session_thread = await create_session_thread(FakeBot(config, channel=channel), make_hello())
@@ -339,11 +363,11 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_manage_messages_notice_posts_once_per_destination(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         channel = FakeTextChannel(321, [], manage_messages=False)
 
         await create_session_thread(FakeBot(config, channel=channel), make_hello())
-        await messages_module.send_every_code_message(channel, "Second message")
+        await messages_module.send_agent_session_message(channel, "Second message")
 
         notices = [message for message in channel.sent_messages if "missing the `Manage Messages` permission" in message]
         self.assertEqual(len(notices), 1)
@@ -353,7 +377,7 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         thread.send_failures_remaining = 1
 
         await messages_module.notify_missing_manage_messages(thread)
-        await messages_module.send_every_code_message(thread, "Second message")
+        await messages_module.send_agent_session_message(thread, "Second message")
 
         notices = [message for message in thread.sent_messages if "missing the `Manage Messages` permission" in message]
         self.assertEqual(len(notices), 1)
@@ -362,8 +386,8 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555, manage_messages=False)
 
         await asyncio.gather(
-            messages_module.send_every_code_message(thread, "First message"),
-            messages_module.send_every_code_message(thread, "Second message"),
+            messages_module.send_agent_session_message(thread, "First message"),
+            messages_module.send_agent_session_message(thread, "Second message"),
         )
 
         notices = [message for message in thread.sent_messages if "missing the `Manage Messages` permission" in message]
@@ -374,7 +398,7 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         archived_thread = FakeThread(556, archived=True)
         channel = FakeTextChannel(321, [active_thread, archived_thread])
 
-        candidates = await bridge_module.EveryCodeBridge.session_thread_candidates(channel)
+        candidates = await bridge_module.AgentSessionBridge.session_thread_candidates(channel)
 
         self.assertIn(active_thread, candidates)
         self.assertIn(archived_thread, candidates)
@@ -393,13 +417,13 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session_thread_name(hello), "project")
         self.assertEqual(
             session_notification_message(hello, thread),
-            "Every Code session connected for `project`: <#555>",
+            "Agent session connected for `project`: <#555>",
         )
         self.assertEqual(
             session_start_message(hello),
             "\n".join(
                 [
-                    "Every Code session connected",
+                    "Agent session connected",
                     "",
                     "session: `session-1`",
                     "host: Mac Studio",
@@ -414,7 +438,7 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         hello = SessionHello(
             session_id="session-1",
             session_epoch="epoch-1",
-            host_label="Every Code",
+            host_label="Agent session",
             cwd="",
             branch=None,
             pid=0,
@@ -424,7 +448,7 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session_thread_name(hello), "session")
         self.assertEqual(
             session_notification_message(hello, thread),
-            "Every Code session connected for `session`: <#555>",
+            "Agent session connected for `session`: <#555>",
         )
         self.assertIn("branch: `unknown`", session_start_message(hello))
 
@@ -436,7 +460,7 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session_thread_name(hello), "project · code/project-task")
         self.assertEqual(
             session_notification_message(hello, thread),
-            "Every Code session connected for `project` on `code/project-task`: <#555>",
+            "Agent session connected for `project` on `code/project-task`: <#555>",
         )
 
     def test_session_thread_text_omits_common_default_branch_names(self) -> None:
@@ -449,10 +473,10 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(session_thread_name(hello), "project")
             self.assertEqual(
                 session_notification_message(hello, thread),
-                "Every Code session connected for `project`: <#555>",
+                "Agent session connected for `project`: <#555>",
             )
 
-    def test_session_thread_text_marks_every_code_origin(self) -> None:
+    def test_session_thread_text_marks_agent_session_origin(self) -> None:
         hello = SessionHello(
             session_id="session-1",
             session_epoch="epoch-1",
@@ -461,7 +485,7 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
             branch="every-code/cbusillo-syo-67",
             pid=42,
             origin=SessionOrigin(
-                kind="every_code",
+                kind="launchplane",
                 request_id="every-code-cbusillo-syo-67",
                 repository="cbusillo/sellyouroutboard",
                 issue_number=67,
@@ -472,14 +496,14 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             session_thread_name(hello),
-            "EC sellyouroutboard#67",
+            "Auto sellyouroutboard#67",
         )
         self.assertEqual(
             session_notification_message(hello, thread),
-            "Every Code automated session connected for `cbusillo/sellyouroutboard#67` on `every-code/cbusillo-syo-67`: <#555>",
+            "Automated agent session connected for `cbusillo/sellyouroutboard#67` on `every-code/cbusillo-syo-67`: <#555>",
         )
         start_message = session_start_message(hello)
-        self.assertIn("origin: `Every Code automation`", start_message)
+        self.assertIn("origin: `Launchplane automation`", start_message)
         self.assertIn("source: `cbusillo/sellyouroutboard#67`", start_message)
         self.assertIn("issue: https://github.com/cbusillo/sellyouroutboard/issues/67", start_message)
         self.assertIn("request: `every-code-cbusillo-syo-67`", start_message)
@@ -504,7 +528,7 @@ class FakeThreadTests(unittest.IsolatedAsyncioTestCase):
     async def test_send_creates_bot_authored_history_message(self) -> None:
         thread = FakeThread(555)
 
-        message = await thread.send("Every Code session connected")
+        message = await thread.send("Agent session connected")
 
         self.assertEqual(message.author.id, 999)
         self.assertEqual((await thread.fetch_message(message.id)).author.id, 999)
@@ -514,7 +538,7 @@ class FakeThreadTests(unittest.IsolatedAsyncioTestCase):
     async def test_delete_removes_message_from_fetch_and_history(self) -> None:
         thread = FakeThread(555)
 
-        message = await thread.send("Every Code session connected")
+        message = await thread.send("Agent session connected")
         await message.delete()
 
         self.assertTrue(message.deleted)
@@ -539,15 +563,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_websocket_auth_rejects_missing_or_wrong_token(self) -> None:
         config = Config()
-        config.every_code.token = "shared-secret"
-        bridge = EveryCodeBridge(FakeBot(config))
+        config.agent_session.token = "shared-secret"
+        bridge = AgentSessionBridge(FakeBot(config))
 
         self.assertFalse(bridge._authorized(SimpleNamespace(headers={})))
         self.assertFalse(bridge._authorized(SimpleNamespace(headers={"Authorization": "Bearer wrong"})))
         self.assertTrue(bridge._authorized(SimpleNamespace(headers={"Authorization": "Bearer shared-secret"})))
 
-    async def test_register_routes_keeps_legacy_and_generic_connect_paths(self) -> None:
-        bridge = EveryCodeBridge(FakeBot(Config()))
+    async def test_register_routes_retires_legacy_connect_path(self) -> None:
+        bridge = AgentSessionBridge(FakeBot(Config()))
         app = web.Application()
 
         bridge.register_routes(app)
@@ -556,34 +580,69 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         resource_paths = set(resources)
         self.assertIn("/health", resource_paths)
         self.assertIn("/agent-session/connect", resource_paths)
-        self.assertIn("/every-code/connect", resource_paths)
+        self.assertNotIn("/every-code/connect", resource_paths)
         agent_session_route = next(iter(resources["/agent-session/connect"]))
-        every_code_route = next(iter(resources["/every-code/connect"]))
         self.assertEqual(agent_session_route.handler, bridge.handle_connect)
-        self.assertEqual(every_code_route.handler, bridge.handle_connect)
+
+    async def test_client_handshake_snapshot_and_pause_over_websocket(self) -> None:
+        config = Config()
+        config.agent_session.token = "transport-test-token"
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        app = web.Application()
+        bridge.register_routes(app)
+        attachment = bridge_module.SessionThread(thread=thread, notification_message_id=None)
+        with patch.object(bridge, "find_or_create_session_thread", new=AsyncMock(return_value=attachment)):
+            async with TestClient(TestServer(app)) as client:
+                unauthorized = await client.get("/agent-session/connect")
+                self.assertEqual(unauthorized.status, 401)
+                retired = await client.get("/every-code/connect")
+                self.assertEqual(retired.status, 404)
+                async with client.ws_connect(
+                    "/agent-session/connect", headers={"Authorization": "Bearer transport-test-token"}
+                ) as websocket:
+                    await websocket.send_json(
+                        {
+                            "type": "hello",
+                            "session_id": "transport-session",
+                            "session_epoch": "epoch-1",
+                            "cwd": "/workspace/example",
+                            "host_label": "Codex Lab",
+                            "assistant_message": "Last answer",
+                        }
+                    )
+                    self.assertEqual(await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555})
+                    self.assertEqual(thread.sent_messages, ["**Assistant**\nLast answer"])
+                    await bridge.send_pause_current_turn(thread, FakeInteraction(thread).user)
+                    command = await websocket.receive_json(timeout=2)
+                    self.assertEqual(command["kind"], "pause_current_turn")
+                    self.assertEqual(command["session_id"], "transport-session")
+                    self.assertEqual(command["session_epoch"], "epoch-1")
+                    self.assertTrue(command["command_id"])
 
     async def test_cleanup_stale_session_notifications_deletes_human_and_automated_notices(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         channel = FakeTextChannel(321, [])
         human_notice = add_bot_message(
             channel,
             101,
-            "Every Code session connected for `project` on `main`: <#555>",
+            "Agent session connected for `project` on `main`: <#555>",
         )
         automated_notice = add_bot_message(
             channel,
             102,
-            "Every Code automated session connected for `cbusillo/sellyouroutboard#67`: <#556>",
+            "Automated agent session connected for `cbusillo/sellyouroutboard#67`: <#556>",
         )
-        unrelated_bot_notice = add_bot_message(channel, 103, "Every Code status summary")
+        unrelated_bot_notice = add_bot_message(channel, 103, "Agent session status summary")
         user_notice = FakeReplyMessage(
             104,
             channel,
-            "Every Code automated session connected for `user/post`: <#557>",
+            "Automated agent session connected for `user/post`: <#557>",
         )
         channel.add_message(user_notice)
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
         await bridge.cleanup_stale_session_notifications()
 
@@ -594,20 +653,20 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cleanup_stale_session_notifications_preserves_live_session_notice(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         channel = FakeTextChannel(321, [])
         live_notice = add_bot_message(
             channel,
             101,
-            "Every Code session connected for `project`: <#555>",
+            "Agent session connected for `project`: <#555>",
         )
         stale_notice = add_bot_message(
             channel,
             102,
-            "Every Code session connected for `other`: <#556>",
+            "Agent session connected for `other`: <#556>",
         )
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -622,20 +681,20 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cleanup_stale_session_notifications_deletes_duplicate_live_notice(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         channel = FakeTextChannel(321, [])
         current_notice = add_bot_message(
             channel,
             101,
-            "Every Code session connected for `project`: <#555>",
+            "Agent session connected for `project`: <#555>",
         )
         duplicate_notice = add_bot_message(
             channel,
             102,
-            "Every Code session connected for `project`: <#555>",
+            "Agent session connected for `project`: <#555>",
         )
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -651,15 +710,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cleanup_stale_session_notifications_readopts_when_stored_notice_missing(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         channel = FakeTextChannel(321, [])
         replacement_notice = add_bot_message(
             channel,
             102,
-            "Every Code session connected for `project`: <#555>",
+            "Agent session connected for `project`: <#555>",
         )
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -674,20 +733,20 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cleanup_stale_session_notifications_adopts_one_live_notice(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         channel = FakeTextChannel(321, [])
         older_notice = add_bot_message(
             channel,
             101,
-            "Every Code session connected for `project`: <#555>",
+            "Agent session connected for `project`: <#555>",
         )
         newer_notice = add_bot_message(
             channel,
             102,
-            "Every Code session connected for `project`: <#555>",
+            "Agent session connected for `project`: <#555>",
         )
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -702,20 +761,20 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cleanup_stale_session_notifications_rechecks_live_session_notice(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         channel = FakeTextChannel(321, [])
         live_notice = add_bot_message(
             channel,
             101,
-            "Every Code session connected for `project`: <#555>",
+            "Agent session connected for `project`: <#555>",
         )
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
         )
         bridge.sessions.register(session)
-        original_notification_thread_id = EveryCodeBridge.notification_thread_id
+        original_notification_thread_id = AgentSessionBridge.notification_thread_id
 
         def bind_during_cleanup(content: str) -> int | None:
             thread_id = original_notification_thread_id(content)
@@ -723,27 +782,27 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 bridge.sessions.bind_thread("session-1", 555)
             return thread_id
 
-        with patch.object(EveryCodeBridge, "notification_thread_id", side_effect=bind_during_cleanup):
+        with patch.object(AgentSessionBridge, "notification_thread_id", side_effect=bind_during_cleanup):
             await bridge.cleanup_stale_session_notifications()
 
         self.assertFalse(live_notice.deleted)
 
     async def test_cleanup_stale_session_notifications_waits_for_session_attach(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         channel = FakeTextChannel(321, [])
         live_notice = add_bot_message(
             channel,
             101,
-            "Every Code session connected for `project`: <#555>",
+            "Agent session connected for `project`: <#555>",
         )
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
         session_attach_lock = bridge._session_attach_lock
         await session_attach_lock.acquire()
         cleanup_task = asyncio.create_task(bridge.cleanup_stale_session_notifications())
         await asyncio.sleep(0)
         self.assertFalse(cleanup_task.done())
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -758,25 +817,25 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_delete_session_notification_for_thread_deletes_matching_bot_notice(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         channel = FakeTextChannel(321, [])
         matching_notice = add_bot_message(
             channel,
             101,
-            "Every Code session connected for `project`: <#555>",
+            "Agent session connected for `project`: <#555>",
         )
         other_notice = add_bot_message(
             channel,
             102,
-            "Every Code session connected for `project`: <#556>",
+            "Agent session connected for `project`: <#556>",
         )
         user_notice = FakeReplyMessage(
             103,
             channel,
-            "Every Code session connected for `project`: <#555>",
+            "Agent session connected for `project`: <#555>",
         )
         channel.add_message(user_notice)
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
         await bridge.delete_session_notification_for_thread(555)
 
@@ -786,16 +845,16 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_delete_session_notification_for_thread_scans_full_history(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         channel = FakeTextChannel(321, [])
         matching_notice = add_bot_message(
             channel,
             101,
-            "Every Code session connected for `project`: <#555>",
+            "Agent session connected for `project`: <#555>",
         )
         for index in range(60):
-            add_bot_message(channel, 200 + index, f"Every Code status summary {index}")
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+            add_bot_message(channel, 200 + index, f"Agent session status summary {index}")
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
         await bridge.delete_session_notification_for_thread(555)
 
@@ -803,31 +862,31 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_find_session_notification_for_thread_scans_full_history(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         channel = FakeTextChannel(321, [])
         matching_notice = add_bot_message(
             channel,
             101,
-            "Every Code session connected for `project`: <#555>",
+            "Agent session connected for `project`: <#555>",
         )
         for index in range(60):
-            add_bot_message(channel, 200 + index, f"Every Code status summary {index}")
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+            add_bot_message(channel, 200 + index, f"Agent session status summary {index}")
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
         self.assertEqual(await bridge.find_session_notification_for_thread(555), matching_notice.id)
 
     async def test_close_session_thread_deletes_reused_thread_notification(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         thread = FakeThread(555)
         channel = FakeTextChannel(321, [thread])
         notification = add_bot_message(
             channel,
             101,
-            "Every Code session connected for `project`: <#555>",
+            "Agent session connected for `project`: <#555>",
         )
-        bridge = EveryCodeBridge(FakeBot(config, thread=thread, channel=channel))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config, thread=thread, channel=channel))
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -841,17 +900,17 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_disconnects_sessions_before_runner_cleanup(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         thread = FakeThread(555, members=[111, 222, 999])
         channel = FakeTextChannel(321, [thread])
         notification = add_bot_message(
             channel,
             777,
-            "Every Code session connected for `project`: <#555>",
+            "Agent session connected for `project`: <#555>",
         )
-        bridge = EveryCodeBridge(FakeBot(config, thread=thread, channel=channel))
+        bridge = AgentSessionBridge(FakeBot(config, thread=thread, channel=channel))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
@@ -889,17 +948,17 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_closes_thread_for_already_closed_websocket(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         thread = FakeThread(555, members=[111, 999])
         channel = FakeTextChannel(321, [thread])
         notification = add_bot_message(
             channel,
             777,
-            "Every Code session connected for `project`: <#555>",
+            "Agent session connected for `project`: <#555>",
         )
-        bridge = EveryCodeBridge(FakeBot(config, thread=thread, channel=channel))
+        bridge = AgentSessionBridge(FakeBot(config, thread=thread, channel=channel))
         websocket = FakeWebSocket(closed=True)
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
@@ -927,17 +986,17 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_disconnect_active_sessions_waits_for_session_attach(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         thread = FakeThread(555, members=[111, 999])
         channel = FakeTextChannel(321, [thread])
         notification = add_bot_message(
             channel,
             777,
-            "Every Code session connected for `project`: <#555>",
+            "Agent session connected for `project`: <#555>",
         )
-        bridge = EveryCodeBridge(FakeBot(config, thread=thread, channel=channel))
+        bridge = AgentSessionBridge(FakeBot(config, thread=thread, channel=channel))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(hello=make_hello(), websocket=websocket)
+        session = AgentSession(hello=make_hello(), websocket=websocket)
         bridge.sessions.register(session)
         session_attach_lock = bridge._session_attach_lock
         await session_attach_lock.acquire()
@@ -961,8 +1020,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_disconnect_active_session_bounds_thread_cleanup(self) -> None:
         config = Config()
-        bridge = EveryCodeBridge(FakeBot(config))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config))
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(closed=True),
             thread_id=555,
@@ -981,11 +1040,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             bridge_module_any.SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS = original_timeout
 
-        self.assertIn("Every Code thread cleanup for session-1 timed out during shutdown", "\n".join(logs.output))
+        self.assertIn("Agent session thread cleanup for session-1 timed out during shutdown", "\n".join(logs.output))
 
     async def test_stop_disconnects_sessions_concurrently(self) -> None:
         config = Config()
-        bridge = EveryCodeBridge(FakeBot(config))
+        bridge = AgentSessionBridge(FakeBot(config))
         all_closes_started = asyncio.Event()
         started_closes = 0
         session_count = 3
@@ -1004,7 +1063,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             websocket = CoordinatedWebSocket()
             websockets.append(websocket)
             session_id = f"session-{index}"
-            session = EveryCodeSession(
+            session = AgentSession(
                 hello=SessionHello(
                     session_id=session_id,
                     session_epoch="epoch-1",
@@ -1039,7 +1098,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_bounds_slow_runner_cleanup(self) -> None:
         config = Config()
-        bridge = EveryCodeBridge(FakeBot(config))
+        bridge = AgentSessionBridge(FakeBot(config))
 
         class SlowRunner:
             def __init__(self) -> None:
@@ -1065,7 +1124,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             bridge_module_any.SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = original_timeout
 
-        self.assertIn("Every Code bridge runner cleanup timed out during shutdown", "\n".join(logs.output))
+        self.assertIn("Agent session bridge runner cleanup timed out during shutdown", "\n".join(logs.output))
         self.assertTrue(runner.cleanup_started)
         self.assertTrue(runner.cleanup_cancelled)
         self.assertIsNone(bridge._runner)
@@ -1073,9 +1132,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_thread_reply_routes_to_registered_session_websocket(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
@@ -1105,9 +1164,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_thread_reply_reports_offline_session(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket(closed=True)
-        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
         message = FakeReplyMessage(777, thread, "hello?")
@@ -1119,16 +1178,16 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(websocket.sent_json, [])
         self.assertEqual(
             message.replies,
-            ["Every Code session is offline; reply was not delivered."],
+            ["Agent session is offline; reply was not delivered."],
         )
 
     async def test_continue_autonomously_routes_to_registered_session_websocket(self) -> None:
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -1154,9 +1213,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -1181,9 +1240,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -1209,9 +1268,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -1238,9 +1297,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
         interaction = FakeInteraction(thread)
@@ -1257,9 +1316,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
@@ -1267,7 +1326,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
-        control_message = FakeReplyMessage(901, thread, "Every Code `project` on `main`")
+        control_message = FakeReplyMessage(901, thread, "Agent session `project` on `main`")
         thread.add_message(control_message)
         interaction = FakeInteraction(thread, message=control_message)
 
@@ -1281,8 +1340,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_tui_user_message_rebinds_pending_control_command_to_new_anchor(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -1321,8 +1380,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_turn_complete_posts_contextual_controls(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -1356,8 +1415,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_turn_complete_keeps_split_code_fences_balanced(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -1386,8 +1445,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_approval_request_posts_compact_reactions(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -1420,9 +1479,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -1453,11 +1512,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
         control_message = add_bot_message(thread, 801, "\u200b")
         control_message.reactions = ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"]
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
@@ -1488,11 +1547,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
         control_message = add_bot_message(thread, 801, "\u200b")
         control_message.reactions = ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"]
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
@@ -1523,11 +1582,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
         control_message = add_bot_message(thread, 801, "\u200b")
         control_message.reactions = ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"]
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
@@ -1570,11 +1629,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
         control_message = add_bot_message(thread, 801, "\u200b")
         control_message.reactions = ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"]
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
@@ -1608,11 +1667,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_turn_complete_clears_stale_reactions_before_deleting_old_anchor(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         control_message = add_bot_message(thread, 801, "\u200b")
         control_message.reactions = [bridge_module.REACTION_REJECTED]
         control_message.delete_raises = True
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -1643,11 +1702,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_turn_complete_restores_reaction_controls_on_existing_anchor(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
         control_message = add_bot_message(thread, 901, "\u200b")
         control_message.reactions = [bridge_module.REACTION_IN_PROGRESS]
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
@@ -1679,11 +1738,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_status_changed_updates_existing_control_anchor_reaction(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
         control_message = add_bot_message(thread, 901, "\u200b")
         control_message.reactions = [bridge_module.REACTION_QUEUED]
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
@@ -1722,9 +1781,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -1752,12 +1811,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pause_command_routes_to_registered_session_websocket(self) -> None:
         config = Config()
-        config.every_code.enabled = True
+        config.agent_session.enabled = True
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        doodad = EveryCodeDoodad(cast(Any, FakeBot(config, thread)))
+        doodad = AgentSessionDoodad(cast(Any, FakeBot(config, thread)))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
         doodad.bridge.sessions.register(session)
         doodad.bridge.sessions.bind_thread("session-1", 555)
         interaction = FakeInteraction(thread)
@@ -1774,9 +1833,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -1817,9 +1876,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -1856,9 +1915,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -1893,9 +1952,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = EveryCodeSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
         session.pending_approvals["approval-1"] = PendingRemoteApproval(thread_id=555, message_id=901)
@@ -1915,10 +1974,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_approval_decision_ack_marks_message_finished(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         approval_message = FakeReplyMessage(901, thread, "**Approval sent**")
         thread.add_message(approval_message)
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -1945,10 +2004,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_approval_decision_reject_marks_message_expired(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         approval_message = FakeReplyMessage(901, thread, "**Approval sent**")
         thread.add_message(approval_message)
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -1976,10 +2035,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_approval_decision_reject_uses_default_reason_for_empty_reason(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         approval_message = FakeReplyMessage(901, thread, "**Approval sent**")
         thread.add_message(approval_message)
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -2007,8 +2066,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_request_user_input_posts_select_prompt(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -2059,8 +2118,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_request_user_input_modal_prompt_uses_buttons(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -2106,8 +2165,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
         websocket = FakeWebSocket()
-        bridge = EveryCodeBridge(FakeBot(config, thread))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        session = AgentSession(
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
@@ -2156,8 +2215,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
         websocket = FakeWebSocket()
-        bridge = EveryCodeBridge(FakeBot(config, thread))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        session = AgentSession(
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
@@ -2201,12 +2260,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_status_changed_preserves_contextual_controls_for_active_reply_command(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         control_message = FakeReplyMessage(901, thread, "Waiting")
         reply_message = FakeReplyMessage(902, thread, "Continue")
         thread.add_message(control_message)
         thread.add_message(reply_message)
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -2246,11 +2305,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_status_changed_uses_existing_control_anchor_without_active_command(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         control_message = FakeReplyMessage(901, thread, "Waiting")
         control_message.reactions = ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"]
         thread.add_message(control_message)
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -2277,8 +2336,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_handle_user_message_formats_distinct_notice(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -2316,8 +2375,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_tui_user_message_turn_complete_moves_controls_after_assistant(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -2361,8 +2420,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_active_sessions_summary_lists_live_sessions(self) -> None:
         config = Config()
-        bridge = EveryCodeBridge(FakeBot(config))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config))
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -2382,13 +2441,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_active_sessions_summary_handles_empty_registry(self) -> None:
         config = Config()
-        bridge = EveryCodeBridge(FakeBot(config))
+        bridge = AgentSessionBridge(FakeBot(config))
 
         self.assertEqual(bridge.active_sessions_summary(), "No live agent sessions.")
 
-    async def test_active_sessions_summary_marks_every_code_origin(self) -> None:
+    async def test_active_sessions_summary_marks_agent_session_origin(self) -> None:
         config = Config()
-        bridge = EveryCodeBridge(FakeBot(config))
+        bridge = AgentSessionBridge(FakeBot(config))
         hello = SessionHello(
             session_id="session-1",
             session_epoch="epoch-1",
@@ -2397,14 +2456,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             branch="main",
             pid=42,
             origin=SessionOrigin(
-                kind="every_code",
+                kind="launchplane",
                 request_id="every-code-cbusillo-syo-67",
                 repository="cbusillo/sellyouroutboard",
                 issue_number=67,
                 issue_url="https://github.com/cbusillo/sellyouroutboard/issues/67",
             ),
         )
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=hello,
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -2417,7 +2476,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             "\n".join(
                 [
                     "Live agent sessions:",
-                    "- `EC sellyouroutboard#67` (online, Mac Studio) <#555>",
+                    "- `Auto sellyouroutboard#67` (online, Mac Studio) <#555>",
                 ]
             ),
         )
@@ -2426,8 +2485,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
-        session = EveryCodeSession(
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -2457,11 +2516,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-    async def test_session_status_summary_marks_every_code_origin(self) -> None:
+    async def test_session_status_summary_marks_agent_session_origin(self) -> None:
         config = Config()
         config.discord.employee_role_name = ""
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
         hello = SessionHello(
             session_id="session-1",
             session_epoch="epoch-1",
@@ -2470,14 +2529,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             branch="main",
             pid=42,
             origin=SessionOrigin(
-                kind="every_code",
+                kind="launchplane",
                 request_id="every-code-cbusillo-syo-67",
                 repository="cbusillo/sellyouroutboard",
                 issue_number=67,
                 issue_url="https://github.com/cbusillo/sellyouroutboard/issues/67",
             ),
         )
-        session = EveryCodeSession(
+        session = AgentSession(
             hello=hello,
             websocket=FakeWebSocket(),
             thread_id=555,
@@ -2489,7 +2548,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             bridge.session_status_summary(thread, SimpleNamespace(id=123)),
             "\n".join(
                 [
-                    "Agent session `EC sellyouroutboard#67`",
+                    "Agent session `Auto sellyouroutboard#67`",
                     "state: online",
                     "host: Mac Studio",
                     "status: No status update received yet.",
@@ -2499,7 +2558,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reconnect_reuses_matching_thread_with_assistant_history(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         hello = make_hello()
         empty_reconnect_thread = FakeThread(556)
         add_bot_message(empty_reconnect_thread, 1, session_start_message(hello))
@@ -2507,7 +2566,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         add_bot_message(original_thread, 2, session_start_message(hello))
         add_bot_message(original_thread, 3, "**Assistant**\nLast useful answer")
         channel = FakeTextChannel(321, [empty_reconnect_thread, original_thread])
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
         session_thread = await bridge.find_or_create_session_thread(hello)
 
@@ -2518,12 +2577,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(original_thread.locked)
         self.assertEqual(
             original_thread.edits[0]["reason"],
-            "Reattaching live Every Code session after bridge restart",
+            "Reattaching live Agent session after bridge restart",
         )
 
     async def test_reconnect_reuses_thread_with_legacy_default_host_label(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         hello = SessionHello.from_payload(
             {
                 "session_id": "session-1",
@@ -2536,7 +2595,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         legacy_hello = SessionHello(
             session_id=hello.session_id,
             session_epoch=hello.session_epoch,
-            host_label="Every Code",
+            host_label="Agent session",
             cwd=hello.cwd,
             branch=hello.branch,
             pid=hello.pid,
@@ -2546,10 +2605,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         add_bot_message(
             original_thread,
             1,
-            bridge_module.EveryCodeBridge.legacy_session_start_without_session(session_start_message(legacy_hello)),
+            bridge_module.AgentSessionBridge.legacy_session_start_without_session(session_start_message(legacy_hello)),
         )
         channel = FakeTextChannel(321, [original_thread])
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
         session_thread = await bridge.find_or_create_session_thread(hello)
 
@@ -2559,7 +2618,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reconnect_does_not_pid_relax_legacy_thread_without_session_id(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         hello = make_hello()
         old_hello = SessionHello(
             session_id=hello.session_id,
@@ -2574,10 +2633,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         add_bot_message(
             original_thread,
             1,
-            bridge_module.EveryCodeBridge.legacy_session_start_without_session(session_start_message(old_hello)),
+            bridge_module.AgentSessionBridge.legacy_session_start_without_session(session_start_message(old_hello)),
         )
         channel = FakeTextChannel(321, [original_thread])
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
         session_thread = await bridge.find_or_create_session_thread(hello)
 
@@ -2585,7 +2644,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reconnect_reuses_unambiguous_thread_when_pid_changes(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         hello = make_hello()
         old_hello = SessionHello(
             session_id=hello.session_id,
@@ -2599,7 +2658,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         original_thread = FakeThread(555)
         add_bot_message(original_thread, 1, session_start_message(old_hello))
         channel = FakeTextChannel(321, [original_thread])
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
         with self.assertLogs(bridge_module.__name__, level="INFO") as logs:
             session_thread = await bridge.find_or_create_session_thread(hello)
@@ -2610,7 +2669,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reconnect_does_not_reuse_ambiguous_pid_relaxed_threads(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         hello = make_hello()
         first_old_hello = SessionHello(
             session_id=hello.session_id,
@@ -2635,7 +2694,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         add_bot_message(first_thread, 1, session_start_message(first_old_hello))
         add_bot_message(second_thread, 2, session_start_message(second_old_hello))
         channel = FakeTextChannel(321, [first_thread, second_thread])
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
         with self.assertLogs(bridge_module.__name__, level="WARNING") as logs:
             session_thread = await bridge.find_or_create_session_thread(hello)
@@ -2645,13 +2704,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reconnect_reuses_existing_parent_notification(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         hello = make_hello()
         original_thread = FakeThread(555)
         add_bot_message(original_thread, 1, session_start_message(hello))
         channel = FakeTextChannel(321, [original_thread])
         notice = add_bot_message(channel, 701, session_notification_message(hello, original_thread))
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
         session_thread = await bridge.find_or_create_session_thread(hello)
 
@@ -2661,21 +2720,21 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_same_session_reconnect_reuses_current_thread(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         hello = make_hello()
         original_thread = FakeThread(555)
         add_bot_message(original_thread, 1, session_start_message(hello))
         add_bot_message(original_thread, 2, "**Assistant**\nLast useful answer")
         channel = FakeTextChannel(321, [original_thread])
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
-        old_session = EveryCodeSession(
+        old_session = AgentSession(
             hello=hello,
             websocket=FakeWebSocket(),
             thread_id=original_thread.id,
         )
         bridge.sessions.register(old_session)
-        new_session = EveryCodeSession(hello=hello, websocket=FakeWebSocket())
+        new_session = AgentSession(hello=hello, websocket=FakeWebSocket())
         bridge.sessions.register(new_session)
 
         session_thread = await bridge.find_or_create_session_thread(hello)
@@ -2692,7 +2751,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reconnect_ignores_thread_for_different_session_metadata(self) -> None:
         config = Config()
-        config.every_code.channel_id = 321
+        config.agent_session.channel_id = 321
         hello = make_hello()
         other_thread = FakeThread(555)
         other_hello = SessionHello(
@@ -2705,17 +2764,18 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         add_bot_message(other_thread, 1, session_start_message(other_hello))
         channel = FakeTextChannel(321, [other_thread])
-        bridge = EveryCodeBridge(FakeBot(config, channel=channel))
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
         self.assertIsNone(await bridge.find_existing_session_thread(hello))
 
     async def test_backfill_posts_latest_assistant_when_thread_has_none(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        bridge = EveryCodeBridge(FakeBot(config, thread))
-        stub_recovered_assistant_message(bridge, "Recovered answer")
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        hello = make_hello()
+        hello.assistant_message = "Recovered answer"
 
-        await bridge.backfill_latest_assistant_message(thread, make_hello())
+        await bridge.backfill_latest_assistant_message(thread, hello)
 
         self.assertEqual(thread.sent_messages, ["**Assistant**\nRecovered answer"])
         self.assertTrue(thread.sent_kwargs[0]["suppress_embeds"])
@@ -2724,47 +2784,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         thread = FakeThread(555)
         add_bot_message(thread, 1, "**Assistant**\nAlready present")
-        bridge = EveryCodeBridge(FakeBot(config, thread))
-        stub_recovered_assistant_message(bridge, "Recovered answer")
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        hello = make_hello()
+        hello.assistant_message = "Recovered answer"
 
-        await bridge.backfill_latest_assistant_message(thread, make_hello())
+        await bridge.backfill_latest_assistant_message(thread, hello)
 
         self.assertEqual(thread.sent_messages, [])
-
-    def test_latest_assistant_message_from_rollout_reads_last_agent_message(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            rollout = Path(tmp) / "rollout.jsonl"
-            rollout.write_text(
-                "\n".join(
-                    [
-                        json.dumps(
-                            {
-                                "payload": {
-                                    "msg": {
-                                        "type": "agent_message",
-                                        "message": "First",
-                                    }
-                                }
-                            }
-                        ),
-                        json.dumps(
-                            {
-                                "payload": {
-                                    "msg": {
-                                        "type": "agent_message",
-                                        "message": "Second",
-                                    }
-                                }
-                            }
-                        ),
-                    ]
-                )
-            )
-
-            self.assertEqual(
-                EveryCodeBridge.latest_assistant_message_from_rollout(rollout),
-                "Second",
-            )
 
 
 if __name__ == "__main__":
