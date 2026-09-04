@@ -743,6 +743,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_websocket_replacement_survives_old_connection_close(self) -> None:
         async with self.transport() as (bridge, thread, client):
             old = await self.connect_transport(client)
+            retired_session = bridge.sessions.get("transport-session")
             current = await self.connect_transport(client, epoch="epoch-2")
             reply = FakeReplyMessage(101, thread, "Use the current session")
             thread.add_message(reply)
@@ -758,7 +759,18 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     "session_epoch": "epoch-2",
                 }
             )
-            await old.close()
+            removed = asyncio.Event()
+            remove_if_current = bridge.sessions.remove_if_current
+
+            def observe_removal(candidate: object) -> object:
+                result = remove_if_current(candidate)
+                if candidate is retired_session:
+                    removed.set()
+                return result
+
+            with patch.object(bridge.sessions, "remove_if_current", new=observe_removal):
+                await old.close()
+                await asyncio.wait_for(removed.wait(), timeout=2)
             self.assertEqual(reply.reactions, [bridge_module.REACTION_QUEUED])
             self.assertFalse(thread.archived)
             await self.send_transport_event(
