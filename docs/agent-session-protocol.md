@@ -52,6 +52,8 @@ executing a repeated command ID twice.
 
 All session events carry `session_id` and `session_epoch`. Field shapes live in
 [protocol.py](../discord_blue/doodads/agent_session/protocol.py).
+The bridge ignores events before `hello`, from a replaced connection, or with
+an ID or epoch that differs from the connection's current session.
 
 | Type | Additional fields / behavior |
 | --- | --- |
