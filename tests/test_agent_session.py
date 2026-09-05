@@ -7,12 +7,15 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
-from aiohttp import web
+from aiohttp import ClientWebSocketResponse, web
 from aiohttp.test_utils import TestClient, TestServer
 
 from tests.fakes_agent_session import FakeBot
@@ -25,6 +28,9 @@ from tests.fakes_agent_session import add_bot_message
 from tests.fakes_agent_session import make_hello
 
 from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
+
+if TYPE_CHECKING:
+    from discord_blue.doodads.agent_session.bridge import AgentSessionBridge as SessionBridge
 
 _TEST_HOME = tempfile.TemporaryDirectory()
 os.environ["HOME"] = _TEST_HOME.name
@@ -560,6 +566,221 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         bridge_module.discord.Thread = self.original_thread_type
         bridge_module.discord.TextChannel = self.original_text_channel_type
+
+    @asynccontextmanager
+    async def transport(self) -> AsyncIterator[tuple[Any, FakeThread, TestClient]]:
+        config = Config()
+        config.agent_session.token = "transport-test-token"
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        app = web.Application()
+        bridge.register_routes(app)
+        attachment = bridge_module.SessionThread(thread=thread, notification_message_id=None)
+        with patch.object(bridge, "find_or_create_session_thread", new=AsyncMock(return_value=attachment)):
+            async with TestClient(TestServer(app)) as client:
+                yield bridge, thread, client
+
+    async def connect_transport(self, client: TestClient, epoch: str = "epoch-1") -> ClientWebSocketResponse:
+        websocket = await client.ws_connect("/agent-session/connect", headers={"Authorization": "Bearer transport-test-token"})
+        await websocket.send_json(
+            {"type": "hello", "session_id": "transport-session", "session_epoch": epoch, "cwd": "/workspace/example"}
+        )
+        self.assertEqual(await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555})
+        return websocket
+
+    async def send_transport_event(
+        self, bridge: SessionBridge, websocket: ClientWebSocketResponse, payload: dict[str, object]
+    ) -> None:
+        # Observe completion of the real handler; no sleeps or mocked protocol processing.
+        handled = asyncio.Event()
+        handler = bridge.handle_command_ack
+
+        async def observe(payload: dict[str, object]) -> None:
+            await handler(payload)
+            if payload.get("command_id") == "transport-barrier":
+                handled.set()
+
+        with patch.object(bridge, "handle_command_ack", new=observe):
+            await websocket.send_json({"session_id": "transport-session", "session_epoch": "epoch-1", **payload})
+            session = bridge.sessions.get("transport-session")
+            assert session is not None
+            await websocket.send_json(
+                {
+                    "type": "command_ack",
+                    "command_id": "transport-barrier",
+                    "session_id": session.session_id,
+                    "session_epoch": session.session_epoch,
+                }
+            )
+            await asyncio.wait_for(handled.wait(), timeout=2)
+
+    async def test_websocket_reply_ack_and_reject_update_discord_message(self) -> None:
+        async with self.transport() as (bridge, thread, client):
+            websocket = await self.connect_transport(client)
+            reply = FakeReplyMessage(101, thread, "Keep 'quotes', $variables and\nnewlines")
+            thread.add_message(reply)
+            self.assertTrue(await bridge.send_thread_reply(reply))
+            command = await websocket.receive_json(timeout=2)
+            self.assertEqual(
+                {key: command[key] for key in ("type", "kind", "text", "session_id", "session_epoch", "issued_by")},
+                {
+                    "type": "command",
+                    "kind": "reply",
+                    "text": reply.content,
+                    "session_id": "transport-session",
+                    "session_epoch": "epoch-1",
+                    "issued_by": "123",
+                },
+            )
+            await self.send_transport_event(bridge, websocket, {"type": "command_ack", "command_id": command["command_id"]})
+            self.assertEqual(reply.reactions, [])
+            self.assertEqual(bridge.sessions.get("transport-session").active_command_id, command["command_id"])
+            await self.send_transport_event(
+                bridge,
+                websocket,
+                {"type": "command_reject", "command_id": command["command_id"], "reason": "Session is busy"},
+            )
+            self.assertEqual(reply.reactions, [bridge_module.REACTION_REJECTED])
+            self.assertNotIn(command["command_id"], bridge.sessions.get("transport-session").pending_commands)
+
+    async def test_websocket_heartbeat_requires_current_session_identity(self) -> None:
+        async with self.transport() as (bridge, _, client):
+            websocket = await self.connect_transport(client)
+            session = bridge.sessions.get("transport-session")
+            previous_seen = session.last_seen - timedelta(days=1)
+            session.last_seen = previous_seen
+            for identity in (
+                {"session_epoch": None},
+                {"session_epoch": "old-epoch"},
+                {"session_id": "different-session"},
+            ):
+                with self.subTest(identity=identity):
+                    await self.send_transport_event(bridge, websocket, {"type": "heartbeat", **identity})
+                    self.assertEqual(session.last_seen, previous_seen)
+            await self.send_transport_event(bridge, websocket, {"type": "heartbeat"})
+            self.assertGreater(session.last_seen, previous_seen)
+
+    async def test_websocket_approval_round_trip_and_stale_ack(self) -> None:
+        async with self.transport() as (bridge, thread, client):
+            websocket = await self.connect_transport(client)
+            await self.send_transport_event(
+                bridge,
+                websocket,
+                {
+                    "type": "approval_request",
+                    "approval_id": "approval-1",
+                    "call_id": "call-1",
+                    "turn_id": "turn-1",
+                    "command": ["echo", "hello world"],
+                    "cwd": "/workspace/example",
+                },
+            )
+            session = bridge.sessions.get("transport-session")
+            message = await thread.fetch_message(session.pending_approvals["approval-1"].message_id)
+            await bridge.handle_approval_reaction(
+                session, thread, "approval-1", bridge_module.REACTION_APPROVAL_APPROVE, FakeInteraction(thread).user
+            )
+            self.assertEqual(
+                await websocket.receive_json(timeout=2),
+                {
+                    "type": "approval_decision",
+                    "approval_id": "approval-1",
+                    "session_id": "transport-session",
+                    "session_epoch": "epoch-1",
+                    "decision": "approved",
+                },
+            )
+            await self.send_transport_event(
+                bridge,
+                websocket,
+                {"type": "approval_decision_ack", "approval_id": "approval-1", "session_epoch": "stale"},
+            )
+            self.assertIn("approval-1", session.pending_approvals)
+            self.assertIn("Approval sent", message.content)
+            await self.send_transport_event(bridge, websocket, {"type": "approval_decision_ack", "approval_id": "approval-1"})
+            self.assertEqual(message.content, "**Approved**\nby: `123`")
+            self.assertEqual(session.pending_approvals, {})
+
+    async def test_websocket_user_input_submit_and_cancel(self) -> None:
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                async with self.transport() as (bridge, thread, client):
+                    websocket = await self.connect_transport(client)
+                    await self.send_transport_event(
+                        bridge,
+                        websocket,
+                        {
+                            "type": "request_user_input",
+                            "call_id": "input-1",
+                            "turn_id": "turn-1",
+                            "questions": [
+                                {
+                                    "id": "mode",
+                                    "header": "Mode",
+                                    "question": "Choose a mode",
+                                    "isOther": False,
+                                    "isSecret": False,
+                                    "options": [{"label": "Safe", "description": "Full checks"}],
+                                }
+                            ],
+                        },
+                    )
+                    view = cast(Any, thread.sent_views[-1])
+                    interaction = FakeInteraction(thread)
+                    if cancel:
+                        await view.cancel(interaction)
+                    else:
+                        view.set_answer("mode", "Safe")
+                        await view.submit(interaction)
+                    response = await websocket.receive_json(timeout=2)
+                    self.assertEqual(response["kind"], "request_user_input_response")
+                    self.assertEqual(response["call_id"], "input-1")
+                    self.assertEqual(response["turn_id"], "turn-1")
+                    self.assertEqual(response["session_epoch"], "epoch-1")
+                    self.assertEqual(response["response"], {"answers": {} if cancel else {"mode": {"answers": ["Safe"]}}})
+
+    async def test_websocket_replacement_survives_old_connection_close(self) -> None:
+        async with self.transport() as (bridge, thread, client):
+            old = await self.connect_transport(client)
+            retired_session = bridge.sessions.get("transport-session")
+            current = await self.connect_transport(client, epoch="epoch-2")
+            reply = FakeReplyMessage(101, thread, "Use the current session")
+            thread.add_message(reply)
+            self.assertTrue(await bridge.send_thread_reply(reply))
+            command = await current.receive_json(timeout=2)
+            self.assertEqual(command["session_epoch"], "epoch-2")
+            # Even a matching epoch cannot authorize an event from a retired connection.
+            await old.send_json(
+                {
+                    "type": "command_ack",
+                    "command_id": command["command_id"],
+                    "session_id": "transport-session",
+                    "session_epoch": "epoch-2",
+                }
+            )
+            removed = asyncio.Event()
+            remove_if_current = bridge.sessions.remove_if_current
+
+            def observe_removal(candidate: object) -> object:
+                result = remove_if_current(candidate)
+                if candidate is retired_session:
+                    removed.set()
+                return result
+
+            with patch.object(bridge.sessions, "remove_if_current", new=observe_removal):
+                await old.close()
+                await asyncio.wait_for(removed.wait(), timeout=2)
+            self.assertEqual(reply.reactions, [bridge_module.REACTION_QUEUED])
+            self.assertFalse(thread.archived)
+            await self.send_transport_event(
+                bridge,
+                current,
+                {"type": "command_ack", "command_id": command["command_id"], "session_epoch": "epoch-2"},
+            )
+            self.assertEqual(reply.reactions, [])
+            self.assertEqual(bridge.sessions.get("transport-session").active_command_id, command["command_id"])
+            self.assertFalse(thread.archived)
 
     async def test_websocket_auth_rejects_missing_or_wrong_token(self) -> None:
         config = Config()

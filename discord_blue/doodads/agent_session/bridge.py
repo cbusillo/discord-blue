@@ -546,6 +546,21 @@ class AgentSessionBridge:
                 continue
 
             message_type = payload.get("type")
+            if message_type != "hello" and (
+                session is None
+                or self.sessions.get(session.session_id) is not session
+                or payload.get("session_id") != session.session_id
+                or payload.get("session_epoch") != session.session_epoch
+            ):
+                logger.warning(
+                    "Ignoring Agent session event %r for %r/%r outside connection %r/%r",
+                    message_type,
+                    payload.get("session_id"),
+                    payload.get("session_epoch"),
+                    session.session_id if session is not None else None,
+                    session.session_epoch if session is not None else None,
+                )
+                continue
             if message_type == "hello":
                 hello = SessionHello.from_payload(payload)
                 rejecting_stopping_session = False
