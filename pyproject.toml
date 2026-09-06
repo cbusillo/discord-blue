@@ -26,6 +26,7 @@ dev = [
 
 [project.scripts]
 discord-blue = "discord_blue.__main__:main"
+codex-lab-discord-dev = "discord_blue.codex_lab_adapter:main"
 
 [tool.uv]
 default-groups = "all"

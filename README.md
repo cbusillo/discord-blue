@@ -164,6 +164,10 @@ See [the remote session contract](docs/agent-session-protocol.md) for client
 integration. Discord Blue does not launch the agent or read local rollout files;
 the client provides session events and optional reconnect history.
 
+For opt-in Codex Lab testing, the [development adapter](docs/codex-lab-dev-adapter.md)
+connects Discord chat, output, status, and pause to an existing daemon-backed
+native TUI conversation. Approval and input decisions remain in the TUI.
+
 Launchplane may provide deployment identity through
 `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`. When set to a JSON object, Discord Blue
 parses it and includes it as the `runtime_identity` object in the health
