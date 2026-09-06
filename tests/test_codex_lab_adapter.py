@@ -74,6 +74,29 @@ class FailingWebSocket:
         raise ConnectionError("ambiguous websocket write")
 
 
+class GuardedWebSocket:
+    def __init__(self) -> None:
+        self.active = False
+        self.overlapped = False
+        self.encoded: list[str] = []
+
+    async def send_json(self, payload: Json) -> None:
+        if self.active:
+            self.overlapped = True
+            raise RuntimeError("overlapping websocket writes")
+        self.active = True
+        try:
+            await asyncio.sleep(0.002)
+            self.encoded.append(json.dumps(payload))
+        finally:
+            self.active = False
+
+
+class BlockingWebSocket:
+    async def send_json(self, _payload: Json) -> None:
+        await asyncio.Event().wait()
+
+
 def thread(*, status: str = "idle", **fields: object) -> Json:
     return {
         "id": "thread-1",
@@ -85,8 +108,22 @@ def thread(*, status: str = "idle", **fields: object) -> Json:
     }
 
 
-def adapter_for(rpc: FakeRpc, *, command_limit: int = 10_000) -> DevAdapter:
-    return DevAdapter(cast(AppServerClient, rpc), "thread-1", command_limit=command_limit)
+def adapter_for(
+    rpc: FakeRpc,
+    *,
+    command_limit: int = 10_000,
+    heartbeat_interval: float = 30,
+    reconnect_delay: float = 2,
+    io_timeout: float = 15,
+) -> DevAdapter:
+    return DevAdapter(
+        cast(AppServerClient, rpc),
+        "thread-1",
+        command_limit=command_limit,
+        heartbeat_interval=heartbeat_interval,
+        reconnect_delay=reconnect_delay,
+        io_timeout=io_timeout,
+    )
 
 
 def command(adapter: DevAdapter, command_id: str, kind: str, **fields: object) -> Json:
@@ -145,7 +182,7 @@ class AdapterAttachTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "threadId": "thread-1",
                         "excludeTurns": True,
-                        "initialTurnsPage": {"limit": 1, "itemsView": "summary"},
+                        "initialTurnsPage": {"limit": 1, "itemsView": "summary", "sortDirection": "desc"},
                     },
                 )
             ],
@@ -180,6 +217,25 @@ class AdapterAttachTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter.completed, {"turn-before-attach"})
         self.assertEqual([event["type"] for event in published], ["status_changed"])
 
+    async def test_attach_omits_absent_branch_and_rejects_snapshot_turn_without_id(self) -> None:
+        no_branch_rpc = FakeRpc({"thread/resume": [{"thread": thread(gitInfo=None), "initialTurnsPage": {"data": []}}]})
+        adapter = adapter_for(no_branch_rpc)
+        await adapter.attach()
+        self.assertNotIn("branch", adapter.hello)
+
+        invalid_rpc = FakeRpc(
+            {
+                "thread/resume": [
+                    {
+                        "thread": thread(),
+                        "initialTurnsPage": {"data": [{"status": "completed", "items": []}]},
+                    }
+                ]
+            }
+        )
+        with self.assertRaisesRegex(TransportError, "Invalid app-server turn snapshot"):
+            await adapter_for(invalid_rpc).attach()
+
     async def test_attach_converts_known_resume_rejection_without_retry(self) -> None:
         rpc = FakeRpc({"thread/resume": [RpcError(-32602)]})
 
@@ -193,7 +249,7 @@ class AdapterEventTests(unittest.IsolatedAsyncioTestCase):
     async def test_completed_turn_combines_item_event_and_turn_fallback_once(self) -> None:
         rpc = FakeRpc()
         adapter = adapter_for(rpc)
-        events = [
+        events: list[Json] = [
             {
                 "method": "item/completed",
                 "params": {
@@ -254,6 +310,32 @@ class AdapterEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(secret, json.dumps(published))
         self.assertEqual(rpc.requests, [])
 
+    async def test_local_request_tracking_clears_only_after_every_request_resolves(self) -> None:
+        rpc = FakeRpc()
+        adapter = adapter_for(rpc)
+        events: list[Json] = [
+            {"id": "request-1", "method": "item/requestApproval", "params": {"threadId": "thread-1"}},
+            {"id": 2, "method": "item/requestUserInput", "params": {"threadId": "thread-1"}},
+            {"method": "serverRequest/resolved", "params": {"threadId": "thread-1", "requestId": "request-1"}},
+            {"method": "serverRequest/resolved", "params": {"threadId": "thread-1", "requestId": 2}},
+        ]
+
+        published = await collect_events(adapter, rpc, events, 3)
+
+        self.assertEqual(adapter.local_requests, set())
+        self.assertEqual([event["type"] for event in published], ["status_changed"] * 3)
+        self.assertTrue(all("request-1" not in json.dumps(event) for event in published))
+        self.assertEqual(published[-1]["message"], "Local request resolved; see native TUI for its outcome.")
+
+    async def test_pending_local_requests_have_a_hard_limit(self) -> None:
+        rpc = FakeRpc()
+        adapter = adapter_for(rpc)
+        adapter.local_requests.update(range(100))
+        rpc.put({"id": "over-limit", "method": "item/requestApproval", "params": {"threadId": "thread-1"}})
+
+        with self.assertRaisesRegex(TransportError, "Too many pending local requests"):
+            await adapter.app_events()
+
     async def test_completed_output_and_incomplete_turn_tracking_are_bounded(self) -> None:
         adapter = adapter_for(FakeRpc())
         oversized = "x" * (OUTPUT_LIMIT + 100)
@@ -265,7 +347,7 @@ class AdapterEventTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(TransportError, "Too many incomplete turns"):
             adapter.remember_answer("turn-65", {"id": "answer-65", "text": "x"})
 
-        turn_payload = {"items": [{"type": "agentMessage", "text": oversized}]}
+        turn_payload = {"items": [{"id": "answer-1", "type": "agentMessage", "text": oversized}]}
         self.assertEqual(len(assistant_text(turn_payload)), OUTPUT_LIMIT)
 
     def test_output_backlog_has_a_hard_limit(self) -> None:
@@ -426,6 +508,19 @@ class AdapterCommandTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AdapterConfigurationTests(unittest.TestCase):
+    def test_timing_defaults_and_bounds_are_explicit(self) -> None:
+        adapter = adapter_for(FakeRpc())
+        self.assertEqual((adapter.heartbeat_interval, adapter.reconnect_delay, adapter.io_timeout), (30, 2, 15))
+
+        for options in (
+            {"heartbeat_interval": 0},
+            {"reconnect_delay": 0},
+            {"io_timeout": 0},
+            {"command_limit": 0},
+        ):
+            with self.subTest(options=options), self.assertRaisesRegex(ValueError, "must be positive"):
+                adapter_for(FakeRpc(), **cast(Any, options))
+
     def test_bridge_url_requires_exact_secure_endpoint_or_literal_loopback(self) -> None:
         for accepted in (
             "wss://bridge.example.com/agent-session/connect",
@@ -446,6 +541,163 @@ class AdapterConfigurationTests(unittest.TestCase):
         ):
             with self.subTest(rejected=rejected), self.assertRaises(ValueError):
                 validate_url(rejected)
+
+
+class AdapterDiscordLoopTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def configured(adapter: DevAdapter) -> None:
+        adapter.hello = adapter.event(
+            "hello",
+            host_label="Codex Lab test adapter",
+            cwd="/workspace/project",
+            assistant_message="existing assistant snapshot",
+            pid=42,
+        )
+
+    async def test_idle_connection_sends_repeated_heartbeats_after_fresh_rpc_reads(self) -> None:
+        rpc = FakeRpc({"thread/read": [{"thread": thread()} for _ in range(20)]})
+        adapter = adapter_for(rpc, heartbeat_interval=0.003, reconnect_delay=0.001, io_timeout=0.5)
+        self.configured(adapter)
+        received: list[Json] = []
+        extensions: list[str | None] = []
+
+        async def handler(request: web.Request) -> web.WebSocketResponse:
+            extensions.append(request.headers.get("Sec-WebSocket-Extensions"))
+            websocket = web.WebSocketResponse()
+            await websocket.prepare(request)
+            received.append(await websocket.receive_json())
+            await websocket.send_json({"type": "hello_ack"})
+            received.append(await websocket.receive_json())
+            for _ in range(3):
+                received.append(await websocket.receive_json())
+            await websocket.send_json(command(adapter, "end-heartbeat-test", "end_session"))
+            received.append(await websocket.receive_json())
+            received.append(await websocket.receive_json())
+            return websocket
+
+        app = web.Application()
+        app.router.add_get("/agent-session/connect", handler)
+        async with TestServer(app) as server:
+            url = str(server.make_url("/agent-session/connect")).replace("http://", "ws://", 1)
+            await asyncio.wait_for(adapter.discord(url, "test-token"), timeout=2)
+
+        heartbeats = [message for message in received if message.get("type") == "heartbeat"]
+        reads = [request for request in rpc.requests if request[0] == "thread/read"]
+        self.assertGreaterEqual(len(heartbeats), 3)
+        self.assertGreaterEqual(len(reads), len(heartbeats))
+        self.assertEqual(extensions, [None])
+
+    async def test_close_after_ack_reconnects_same_epoch_without_snapshot_and_cached_command_does_not_repeat_rpc(self) -> None:
+        rpc = FakeRpc({"thread/read": [{"thread": thread()}], "turn/start": [{}]})
+        adapter = adapter_for(rpc, reconnect_delay=0.001, io_timeout=0.5)
+        self.configured(adapter)
+        hellos: list[Json] = []
+        responses: list[Json] = []
+        replayed_command: Json | None = None
+
+        async def handler(request: web.Request) -> web.WebSocketResponse:
+            nonlocal replayed_command
+            websocket = web.WebSocketResponse()
+            await websocket.prepare(request)
+            hello = await websocket.receive_json()
+            hellos.append(hello)
+            await websocket.send_json({"type": "hello_ack"})
+            await websocket.receive_json()  # initial status
+            if len(hellos) == 1:
+                replayed_command = command(adapter, "replayed-command", "reply", text="exactly once")
+                await websocket.send_json(replayed_command)
+                responses.append(await websocket.receive_json())
+                await websocket.close()
+            else:
+                assert replayed_command is not None
+                await websocket.send_json(replayed_command)
+                responses.append(await websocket.receive_json())
+                await websocket.send_json(command(adapter, "end-reconnect-test", "end_session"))
+                responses.append(await websocket.receive_json())
+                responses.append(await websocket.receive_json())
+            return websocket
+
+        app = web.Application()
+        app.router.add_get("/agent-session/connect", handler)
+        async with TestServer(app) as server:
+            url = str(server.make_url("/agent-session/connect")).replace("http://", "ws://", 1)
+            await asyncio.wait_for(adapter.discord(url, "test-token"), timeout=2)
+
+        self.assertEqual(len(hellos), 2)
+        self.assertEqual(hellos[0]["session_epoch"], hellos[1]["session_epoch"])
+        self.assertEqual(hellos[0]["assistant_message"], "existing assistant snapshot")
+        self.assertNotIn("assistant_message", hellos[1])
+        self.assertEqual([response["type"] for response in responses[:2]], ["command_ack", "command_ack"])
+        self.assertEqual([method for method, _ in rpc.requests], ["thread/read", "turn/start"])
+
+    async def test_close_before_hello_ack_is_transient_and_reconnects_cleanly(self) -> None:
+        adapter = adapter_for(FakeRpc(), reconnect_delay=0.001, io_timeout=0.5)
+        self.configured(adapter)
+        hellos: list[Json] = []
+
+        async def handler(request: web.Request) -> web.WebSocketResponse:
+            websocket = web.WebSocketResponse()
+            await websocket.prepare(request)
+            hellos.append(await websocket.receive_json())
+            if len(hellos) == 1:
+                await websocket.close()
+            else:
+                await websocket.send_json({"type": "hello_ack"})
+                await websocket.receive_json()
+                await websocket.send_json(command(adapter, "end-before-ack-test", "end_session"))
+                await websocket.receive_json()
+                await websocket.receive_json()
+            return websocket
+
+        app = web.Application()
+        app.router.add_get("/agent-session/connect", handler)
+        async with TestServer(app) as server:
+            url = str(server.make_url("/agent-session/connect")).replace("http://", "ws://", 1)
+            await asyncio.wait_for(adapter.discord(url, "test-token"), timeout=2)
+
+        self.assertEqual(len(hellos), 2)
+        self.assertEqual(hellos[0]["session_epoch"], hellos[1]["session_epoch"])
+        self.assertIn("assistant_message", hellos[1])
+
+    async def test_malformed_text_hello_ack_raises_transport_error(self) -> None:
+        adapter = adapter_for(FakeRpc(), reconnect_delay=0.001, io_timeout=0.5)
+        self.configured(adapter)
+
+        async def handler(request: web.Request) -> web.WebSocketResponse:
+            websocket = web.WebSocketResponse()
+            await websocket.prepare(request)
+            await websocket.receive_json()
+            await websocket.send_str("not JSON")
+            return websocket
+
+        app = web.Application()
+        app.router.add_get("/agent-session/connect", handler)
+        async with TestServer(app) as server:
+            url = str(server.make_url("/agent-session/connect")).replace("http://", "ws://", 1)
+            with self.assertRaisesRegex(TransportError, "hello acknowledgement JSON"):
+                await asyncio.wait_for(adapter.discord(url, "test-token"), timeout=2)
+
+    async def test_concurrent_large_completion_ack_and_heartbeat_writes_are_serialized_and_parseable(self) -> None:
+        adapter = adapter_for(FakeRpc(), io_timeout=0.5)
+        websocket = GuardedWebSocket()
+        messages = [
+            adapter.event("turn_complete", message="Turn completed", assistant_message="x" * 1_500),
+            adapter.event("command_ack", command_id="command-1"),
+            adapter.event("heartbeat"),
+        ]
+
+        await asyncio.gather(*(adapter.send(cast(aiohttp.ClientWebSocketResponse, websocket), message) for message in messages))
+
+        self.assertFalse(websocket.overlapped)
+        self.assertCountEqual(
+            [json.loads(encoded)["type"] for encoded in websocket.encoded], [message["type"] for message in messages]
+        )
+
+    async def test_send_timeout_bounds_lock_and_websocket_drain(self) -> None:
+        adapter = adapter_for(FakeRpc(), io_timeout=0.001)
+
+        with self.assertRaises(TimeoutError):
+            await adapter.send(cast(aiohttp.ClientWebSocketResponse, BlockingWebSocket()), adapter.event("heartbeat"))
 
 
 class AdapterBridgeIntegrationTests(unittest.IsolatedAsyncioTestCase):

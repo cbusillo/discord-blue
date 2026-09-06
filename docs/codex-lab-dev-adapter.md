@@ -70,7 +70,7 @@ embedded mode. Production wiring must follow Launchplane's authorization plan.
 | Approval / request-user-input | Remain local to the native TUI; Discord receives only a generic action-required status. |
 
 Completed assistant answers are mirrored once per observed turn. Streaming
-deltas and tool output are not posted. Answers over 32,000 characters are
+deltas, tool output, and prompts typed locally in the TUI are not posted. Answers over 32,000 characters are
 truncated with a notice. Existing history is used only for initial backfill,
 not reposted as new completions. The adapter uses the actual thread cwd/branch
 and its own PID for connection metadata; it emits no Launchplane provenance.
@@ -102,6 +102,9 @@ uncertain command is never automatically retried. Check the native TUI before
 sending it again. Heartbeats require a successful app-server read, preventing
 the adapter from reporting a disconnected daemon as healthy. Authentication or
 endpoint rejection is terminal; transient Discord transport loss reconnects.
+Discord writes are serialized and time-bounded, and a connection closed before
+the initial acknowledgement is retried. Malformed acknowledgement frames stop
+the adapter with a bounded diagnostic.
 
 ## Verification
 

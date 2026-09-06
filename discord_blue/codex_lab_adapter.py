@@ -26,7 +26,9 @@ LOCAL_ONLY = "Use the native TUI for approvals, input, autonomous continuation, 
 
 def assistant_text(turn: Json) -> str:
     return "\n\n".join(
-        item["text"] for item in turn.get("items", []) if item.get("type") == "agentMessage" and isinstance(item.get("text"), str)
+        item["text"]
+        for item in turn.get("items", [])
+        if item.get("type") == "agentMessage" and isinstance(item.get("text"), str) and isinstance(item.get("id"), str)
     )[:OUTPUT_LIMIT]
 
 
@@ -47,11 +49,27 @@ def validate_url(url: str) -> None:
 
 
 class DevAdapter:
-    def __init__(self, rpc: AppServerClient, thread_id: str, *, command_limit: int = 10_000) -> None:
+    def __init__(
+        self,
+        rpc: AppServerClient,
+        thread_id: str,
+        *,
+        command_limit: int = 10_000,
+        heartbeat_interval: float = 30,
+        reconnect_delay: float = 2,
+        io_timeout: float = 15,
+    ) -> None:
         self.rpc = rpc
         self.thread_id = thread_id
         self.epoch = str(uuid.uuid4())
         self.command_limit = command_limit
+        if min(heartbeat_interval, reconnect_delay, io_timeout, command_limit) <= 0:
+            raise ValueError("Adapter timing and bounds must be positive.")
+        self.heartbeat_interval = heartbeat_interval
+        self.reconnect_delay = reconnect_delay
+        self.io_timeout = io_timeout
+        self.send_lock = asyncio.Lock()
+        self.local_requests: set[str | int] = set()
         self.commands: dict[str, tuple[str, Json]] = {}
         self.completed: set[str] = set()
         self.answers: dict[str, dict[str, str]] = {}
@@ -75,7 +93,11 @@ class DevAdapter:
         try:
             result = await self.rpc.request(
                 "thread/resume",
-                {"threadId": self.thread_id, "excludeTurns": True, "initialTurnsPage": {"limit": 1, "itemsView": "summary"}},
+                {
+                    "threadId": self.thread_id,
+                    "excludeTurns": True,
+                    "initialTurnsPage": {"limit": 1, "itemsView": "summary", "sortDirection": "desc"},
+                },
             )
         except RpcError as exc:
             raise TransportError("Cannot attach thread. Start its first turn in the daemon-backed TUI and check its ID.") from exc
@@ -89,7 +111,11 @@ class DevAdapter:
             branch=(thread.get("gitInfo") or {}).get("branch"),
             pid=os.getpid(),
         )
+        if not self.hello.get("branch"):
+            self.hello.pop("branch", None)
         for turn in (result.get("initialTurnsPage") or {}).get("data", []):
+            if not isinstance(turn, dict) or not isinstance(turn.get("id"), str):
+                raise TransportError("Invalid app-server turn snapshot.")
             if turn.get("status") != "inProgress":
                 self.completed.add(turn["id"])
                 self.hello["assistant_message"] = assistant_text(turn)
@@ -103,8 +129,16 @@ class DevAdapter:
             method = event.get("method")
             if "id" in event:
                 # A second subscriber must not answer for, or disclose prompts from, the native TUI.
+                if len(self.local_requests) >= 100:
+                    raise TransportError("Too many pending local requests.")
+                self.local_requests.add(event["id"])
                 self.status = "Action required in the native TUI. " + LOCAL_ONLY
                 self.publish("status_changed", message=self.status)
+            elif method == "serverRequest/resolved":
+                self.local_requests.discard(params.get("requestId"))
+                if not self.local_requests:
+                    self.status = "Local request resolved; see native TUI for its outcome."
+                    self.publish("status_changed", message=self.status)
             elif method == "turn/started":
                 self.status = "Turn in progress"
                 self.publish("status_changed", message=self.status)
@@ -127,6 +161,7 @@ class DevAdapter:
                 if len(text) > OUTPUT_LIMIT:
                     text = text[:OUTPUT_LIMIT] + "\n[Output truncated; see the native TUI.]"
                 self.status = "Turn " + str(turn.get("status", "finished"))
+                self.local_requests.clear()
                 self.publish("turn_complete", message=self.status, assistant_message=text)
             elif method == "error":
                 self.publish("error", message="Codex Lab reported an error; see the native TUI for details.")
@@ -210,13 +245,20 @@ class DevAdapter:
         self.commands[command_id] = (fingerprint, response)
         return response
 
+    async def send(self, ws: aiohttp.ClientWebSocketResponse, message: Json) -> None:
+        # Bound both lock acquisition and drain; a blocked Discord writer must reconnect.
+        async with asyncio.timeout(self.io_timeout):
+            async with self.send_lock:
+                await ws.send_json(message)
+
     async def deliver(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         while True:
             await self.available.wait()
             while self.outbox:
                 # Discord has no event-delivery acknowledgement. Do not replay an ambiguous write.
                 event = self.outbox.popleft()
-                await ws.send_json(event)
+                await self.send(ws, event)
+            # No await between checking the empty queue and clearing its wakeup.
             self.available.clear()
 
     async def controls(self, ws: aiohttp.ClientWebSocketResponse) -> None:
@@ -231,39 +273,47 @@ class DevAdapter:
                 raise TransportError("Invalid Discord message.")
             if message.get("type") in {"command", "approval_decision"}:
                 response = await self.command(message)
-                await ws.send_json(response)
+                await self.send(ws, response)
                 if self.stopped.is_set():
-                    await ws.send_json(
-                        self.event("status_changed", message="Discord adapter detached; native TUI session continues.")
+                    await self.send(
+                        ws, self.event("status_changed", message="Discord adapter detached; native TUI session continues.")
                     )
                     return
 
     async def heartbeats(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         while True:
-            await asyncio.sleep(30)
+            await asyncio.sleep(self.heartbeat_interval)
             # A healthy adapter alone must not keep a dead app-server looking connected.
             await self.rpc.request("thread/read", {"threadId": self.thread_id, "includeTurns": False})
-            await ws.send_json(self.event("heartbeat"))
+            await self.send(ws, self.event("heartbeat"))
 
     async def discord(self, url: str, token: str) -> None:
         validate_url(url)
         if not token.strip():
             raise ValueError("Bridge token environment variable is empty.")
         first_connection = True
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, connect=20, sock_connect=20)) as session:
             while not self.stopped.is_set():
                 try:
                     async with session.ws_connect(url, headers={"Authorization": "Bearer " + token}, max_msg_size=128_000) as ws:
                         hello = dict(self.hello)
                         if not first_connection:
                             hello.pop("assistant_message", None)
-                        await ws.send_json(hello)
-                        async with asyncio.timeout(15):
-                            ack = await ws.receive_json()
+                        await self.send(ws, hello)
+                        async with asyncio.timeout(self.io_timeout):
+                            frame = await ws.receive()
+                        if frame.type in {aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR}:
+                            raise ConnectionError("Discord closed before hello acknowledgement.")
+                        if frame.type != aiohttp.WSMsgType.TEXT:
+                            raise TransportError("Invalid Discord hello acknowledgement frame.")
+                        try:
+                            ack = json.loads(frame.data)
+                        except ValueError as exc:
+                            raise TransportError("Invalid Discord hello acknowledgement JSON.") from exc
                         if not isinstance(ack, dict) or ack.get("type") != "hello_ack":
                             raise TransportError("Discord did not acknowledge the session.")
                         first_connection = False
-                        await ws.send_json(self.event("status_changed", message=self.status))
+                        await self.send(ws, self.event("status_changed", message=self.status))
                         tasks = [asyncio.create_task(fn(ws)) for fn in (self.controls, self.deliver, self.heartbeats)]
                         try:
                             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -279,7 +329,7 @@ class DevAdapter:
                 except (aiohttp.ClientError, TimeoutError, OSError):
                     pass
                 if not self.stopped.is_set():
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(self.reconnect_delay)
 
 
 async def run(socket_path: str, thread_id: str, url: str, token: str) -> None:
