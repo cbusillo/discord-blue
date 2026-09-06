@@ -6,6 +6,7 @@ import logging
 import re
 import shlex
 import uuid
+import weakref
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
@@ -45,6 +46,7 @@ from discord_blue.health import health_payload
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
+SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS = 10
 
 DISCORD_MESSAGE_LIMIT = 2000
 DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
@@ -271,7 +273,17 @@ class AgentSessionBridge:
         self._cleanup_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._session_attach_lock = asyncio.Lock()
+        # No await occurs while resolving the entry, so one event loop turn
+        # cannot create two locks for the same session ID.
+        self._session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._stopping = False
+
+    def session_lifecycle_lock(self, session_id: str) -> asyncio.Lock:
+        lock = self._session_lifecycle_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_lifecycle_locks[session_id] = lock
+        return lock
 
     async def start(self) -> None:
         if self._runner is not None:
@@ -407,18 +419,21 @@ class AgentSessionBridge:
         for session_id, session in list(self.sessions.by_session.items()):
             if now - session.last_seen <= timeout:
                 continue
+            lifecycle_lock = self.session_lifecycle_lock(session_id)
+            async with lifecycle_lock:
+                if self.sessions.get(session_id) is not session or now - session.last_seen <= timeout:
+                    continue
+                removed = self.sessions.remove_if_current(session)
+                if removed is None:
+                    continue
 
-            removed = self.sessions.remove(session_id)
-            if removed is None:
-                continue
-
-            logger.warning(
-                "Agent session %s timed out after %s seconds without heartbeat",
-                session_id,
-                self.bot.config.agent_session.heartbeat_timeout_seconds,
-            )
-            await removed.websocket.close(message=b"heartbeat timeout")
-            await self.close_session_thread(removed)
+                logger.warning(
+                    "Agent session %s timed out after %s seconds without heartbeat",
+                    session_id,
+                    self.bot.config.agent_session.heartbeat_timeout_seconds,
+                )
+                await removed.websocket.close(message=b"heartbeat timeout")
+                await self.close_session_thread(removed)
 
     async def cleanup_stale_session_notifications(self) -> None:
         async with self._session_attach_lock:
@@ -565,22 +580,32 @@ class AgentSessionBridge:
                 hello = SessionHello.from_payload(payload)
                 rejecting_stopping_session = False
                 session_thread: SessionThread | None = None
-                async with self._session_attach_lock:
-                    if self._stopping:
-                        rejecting_stopping_session = True
-                    else:
-                        session = AgentSession(hello=hello, websocket=websocket)
-                        self.sessions.register(session)
-                        session_thread = await self.find_or_create_session_thread(hello)
-                        self.sessions.bind_thread(
-                            hello.session_id,
-                            session_thread.thread.id,
-                            session_thread.notification_message_id,
-                        )
-                        await self.backfill_latest_assistant_message(
-                            session_thread.thread,
-                            hello,
-                        )
+                lifecycle_lock = self.session_lifecycle_lock(hello.session_id)
+                try:
+                    await asyncio.wait_for(lifecycle_lock.acquire(), timeout=SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS)
+                except TimeoutError:
+                    logger.warning("Timed out waiting to attach Agent session %s", hello.session_id)
+                    await websocket.close(message=b"session cleanup still in progress", drain=False)
+                    break
+                try:
+                    async with self._session_attach_lock:
+                        if self._stopping:
+                            rejecting_stopping_session = True
+                        else:
+                            session = AgentSession(hello=hello, websocket=websocket)
+                            self.sessions.register(session)
+                            session_thread = await self.find_or_create_session_thread(hello)
+                            self.sessions.bind_thread(
+                                hello.session_id,
+                                session_thread.thread.id,
+                                session_thread.notification_message_id,
+                            )
+                            await self.backfill_latest_assistant_message(
+                                session_thread.thread,
+                                hello,
+                            )
+                finally:
+                    lifecycle_lock.release()
                 if rejecting_stopping_session:
                     await websocket.close(message=b"bridge shutdown", drain=False)
                     break
@@ -614,9 +639,11 @@ class AgentSessionBridge:
                 await self.handle_command_reject(payload)
 
         if session is not None:
-            removed = self.sessions.remove_if_current(session)
-            if removed is not None:
-                await self.close_session_thread(removed)
+            lifecycle_lock = self.session_lifecycle_lock(session.session_id)
+            async with lifecycle_lock:
+                removed = self.sessions.remove_if_current(session)
+                if removed is not None:
+                    await self.close_session_thread(removed)
 
         return websocket
 
@@ -634,6 +661,11 @@ class AgentSessionBridge:
                 )
             except discord.DiscordException:
                 logger.warning("Unable to reopen Agent session thread %s", thread.id)
+        if thread.is_private():
+            try:
+                await thread.join()
+            except discord.DiscordException:
+                logger.warning("Unable to rejoin private Agent session thread %s", thread.id)
         await auto_join_configured_users(self.bot, thread)
         notification_message_id = await self.ensure_session_notification(hello, thread)
         return SessionThread(thread=thread, notification_message_id=notification_message_id)
@@ -691,7 +723,7 @@ class AgentSessionBridge:
         seen: set[int] = set()
         skipped_mapped = 0
         pid_relaxed_matches: list[tuple[discord.Thread, tuple[int, int, int]]] = []
-        for thread in await self.session_thread_candidates(channel):
+        for thread in await self.session_thread_candidates(channel, include_unjoined_private=True):
             if thread.id in seen:
                 continue
             seen.add(thread.id)
@@ -775,6 +807,8 @@ class AgentSessionBridge:
     @staticmethod
     async def session_thread_candidates(
         channel: discord.TextChannel,
+        *,
+        include_unjoined_private: bool = False,
     ) -> list[discord.Thread]:
         candidates = list(channel.threads)
         try:
@@ -786,15 +820,37 @@ class AgentSessionBridge:
                 candidates.append(thread)
         except (discord.DiscordException, ValueError):
             logger.warning("Unable to scan public archived Agent session threads")
+        if not include_unjoined_private:
+            try:
+                async for thread in channel.archived_threads(
+                    private=True,
+                    joined=True,
+                    limit=50,
+                ):
+                    candidates.append(thread)
+            except (discord.DiscordException, ValueError):
+                logger.warning("Unable to scan joined private archived Agent session threads")
+            return candidates
         try:
             async for thread in channel.archived_threads(
                 private=True,
-                joined=True,
+                joined=False,
                 limit=50,
             ):
                 candidates.append(thread)
+        except discord.Forbidden:
+            logger.warning("Unable to scan all private archived Agent session threads; falling back to joined private threads")
+            try:
+                async for thread in channel.archived_threads(
+                    private=True,
+                    joined=True,
+                    limit=50,
+                ):
+                    candidates.append(thread)
+            except (discord.DiscordException, ValueError):
+                logger.warning("Unable to scan joined private archived Agent session threads")
         except (discord.DiscordException, ValueError):
-            logger.warning("Unable to scan joined private archived Agent session threads")
+            logger.warning("Unable to scan private archived Agent session threads")
         return candidates
 
     async def session_thread_matches(

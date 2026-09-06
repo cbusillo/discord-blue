@@ -40,6 +40,12 @@ The server responds with `{"type":"hello_ack","thread_id":12345}` after
 attaching the Discord thread. Wait for this acknowledgement before publishing
 other events. Send `heartbeat` at an interval shorter than the configured timeout
 (default 120 seconds). On disconnect or timeout the bridge archives the thread.
+Reconnect discovery includes archived private threads that the bot has left,
+and reattachment restores its membership. The bot needs Discord’s
+`Manage Threads` and `Read Message History` permissions for private-thread
+recovery. Existing session metadata must still match before a thread is reused.
+Cleanup and reattachment are serialized per session ID so old disconnect cleanup
+cannot close a reattached session; unrelated sessions can still attach.
 
 Reconnect with the same session identity and metadata. Thread recovery matches
 persisted session markers; a changed PID can be tolerated only for one matching

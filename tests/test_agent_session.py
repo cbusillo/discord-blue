@@ -9,13 +9,14 @@ import tempfile
 import unittest
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
-from aiohttp import ClientWebSocketResponse, web
+from aiohttp import ClientWebSocketResponse, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
 
 from tests.fakes_agent_session import FakeBot
@@ -31,6 +32,8 @@ from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 
 if TYPE_CHECKING:
     from discord_blue.doodads.agent_session.bridge import AgentSessionBridge as SessionBridge
+    from discord_blue.doodads.agent_session.protocol import SessionHello as SessionHelloType
+    from discord_blue.doodads.agent_session.sessions import AgentSession as AgentSessionType
 
 _TEST_HOME = tempfile.TemporaryDirectory()
 os.environ["HOME"] = _TEST_HOME.name
@@ -401,10 +404,13 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_session_thread_candidates_uses_valid_archived_thread_scans(self) -> None:
         active_thread = FakeThread(555)
-        archived_thread = FakeThread(556, archived=True)
+        archived_thread = FakeThread(556, archived=True, joined=False)
         channel = FakeTextChannel(321, [active_thread, archived_thread])
 
-        candidates = await bridge_module.AgentSessionBridge.session_thread_candidates(channel)
+        candidates = await bridge_module.AgentSessionBridge.session_thread_candidates(
+            channel,
+            include_unjoined_private=True,
+        )
 
         self.assertIn(active_thread, candidates)
         self.assertIn(archived_thread, candidates)
@@ -412,6 +418,28 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
             channel.archived_thread_calls,
             [
                 {"private": False, "joined": False, "limit": 50},
+                {"private": True, "joined": False, "limit": 50},
+            ],
+        )
+
+    async def test_session_thread_candidates_falls_back_to_joined_private_threads_when_forbidden(self) -> None:
+        joined_thread = FakeThread(555, archived=True)
+        left_thread = FakeThread(556, archived=True, joined=False)
+        channel = FakeTextChannel(321, [joined_thread, left_thread])
+        channel.forbid_all_private_archives = True
+
+        with self.assertLogs(bridge_module.__name__, level="WARNING"):
+            candidates = await bridge_module.AgentSessionBridge.session_thread_candidates(
+                channel,
+                include_unjoined_private=True,
+            )
+
+        self.assertIn(joined_thread, candidates)
+        self.assertNotIn(left_thread, candidates)
+        self.assertEqual(
+            channel.archived_thread_calls[-2:],
+            [
+                {"private": True, "joined": False, "limit": 50},
                 {"private": True, "joined": True, "limit": 50},
             ],
         )
@@ -781,6 +809,136 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(reply.reactions, [])
             self.assertEqual(bridge.sessions.get("transport-session").active_command_id, command["command_id"])
             self.assertFalse(thread.archived)
+
+    async def test_reconnect_waits_for_cleanup_and_preserves_private_thread_delivery(self) -> None:
+        config = Config()
+        config.agent_session.token = "transport-test-token"
+        config.agent_session.channel_id = 321
+        config.discord.employee_role_name = ""
+        hello = make_hello()
+        other_hello = make_hello()
+        other_hello.session_id = "other-session"
+        other_hello.cwd = "/tmp/other-project"
+        thread = FakeThread(555)
+        other_thread = FakeThread(556)
+        add_bot_message(thread, 1, session_start_message(hello))
+        add_bot_message(other_thread, 2, session_start_message(other_hello))
+        channel = FakeTextChannel(321, [thread, other_thread])
+        bot = FakeBot(config, thread, channel)
+        original_get_channel = bot.get_channel
+
+        def get_channel(channel_id: int) -> FakeThread | FakeTextChannel | None:
+            return other_thread if channel_id == other_thread.id else original_get_channel(channel_id)
+
+        bridge = AgentSessionBridge(bot)
+        app = web.Application()
+        bridge.register_routes(app)
+        cleanup_started = asyncio.Event()
+        allow_cleanup = asyncio.Event()
+        original_close = bridge.close_session_thread
+
+        async def connect(client: TestClient, session_hello: SessionHelloType) -> ClientWebSocketResponse:
+            ws = await client.ws_connect("/agent-session/connect", headers={"Authorization": "Bearer transport-test-token"})
+            await ws.send_json({"type": "hello", **asdict(session_hello)})
+            return ws
+
+        class ProductionCleanupTestServer(TestServer):
+            async def _make_runner(self, **_kwargs: object) -> web.AppRunner:
+                # TestServer cancels on client disconnect by default; production
+                # AppRunner lets the handler finish its asynchronous cleanup.
+                return web.AppRunner(self.app, handler_cancellation=False)
+
+        with patch.object(bot, "get_channel", side_effect=get_channel):
+            async with TestClient(ProductionCleanupTestServer(app)) as client:
+                old = await connect(client, hello)
+                self.assertEqual((await old.receive_json(timeout=2))["thread_id"], thread.id)
+                old_session = bridge.sessions.get(hello.session_id)
+
+                async def paused_close(session: AgentSessionType) -> None:
+                    if session is old_session:
+                        cleanup_started.set()
+                        await allow_cleanup.wait()
+                    await original_close(session)
+
+                with patch.object(bridge, "close_session_thread", side_effect=paused_close):
+                    await old.close()
+                    await asyncio.wait_for(cleanup_started.wait(), timeout=2)
+                    current = await connect(client, hello)
+                    current_ack = asyncio.create_task(current.receive_json(timeout=2))
+                    try:
+                        other = await connect(client, other_hello)
+                        self.assertEqual((await other.receive_json(timeout=2))["thread_id"], other_thread.id)
+                        with self.assertRaises(TimeoutError):
+                            await asyncio.wait_for(asyncio.shield(current_ack), timeout=0.05)
+                    finally:
+                        allow_cleanup.set()
+                    self.assertEqual((await current_ack)["thread_id"], thread.id)
+                    self.assertFalse(thread.archived)
+                    self.assertFalse(thread.locked)
+                    self.assertTrue(thread.joined)
+                    reply = FakeReplyMessage(101, thread, "Reply after overlapping reconnect")
+                    thread.add_message(reply)
+                    self.assertTrue(await bridge.send_thread_reply(reply))
+                    command = await current.receive_json(timeout=2)
+                    self.assertEqual(command["text"], reply.content)
+                    self.assertEqual(command["session_id"], hello.session_id)
+                    self.assertEqual(len(channel._threads), 2)
+                    await current.close()
+                    await other.close()
+
+    async def test_heartbeat_timeout_rechecks_current_session_under_lifecycle_lock(self) -> None:
+        config = Config()
+        config.agent_session.heartbeat_timeout_seconds = 1
+        bridge = AgentSessionBridge(FakeBot(config))
+        old_session = AgentSession(hello=make_hello(), websocket=FakeWebSocket())
+        old_session.last_seen -= timedelta(seconds=2)
+        bridge.sessions.register(old_session)
+        lifecycle_lock = bridge.session_lifecycle_lock(old_session.session_id)
+        await lifecycle_lock.acquire()
+        timeout_task = asyncio.create_task(bridge.close_timed_out_sessions())
+        await asyncio.sleep(0)
+
+        new_session = AgentSession(hello=make_hello(), websocket=FakeWebSocket())
+        bridge.sessions.register(new_session)
+        lifecycle_lock.release()
+        await timeout_task
+
+        self.assertIs(bridge.sessions.get(old_session.session_id), new_session)
+        self.assertFalse(new_session.websocket.closed)
+
+    async def test_hello_closes_when_same_session_cleanup_lock_times_out(self) -> None:
+        async with self.transport() as (bridge, _, client):
+            existing_hello = SessionHello.from_payload(
+                {
+                    "type": "hello",
+                    "session_id": "transport-session",
+                    "session_epoch": "epoch-1",
+                    "cwd": "/workspace/example",
+                }
+            )
+            existing = AgentSession(hello=existing_hello, websocket=FakeWebSocket())
+            bridge.sessions.register(existing)
+            lifecycle_lock = bridge.session_lifecycle_lock("transport-session")
+            await lifecycle_lock.acquire()
+            websocket = await client.ws_connect(
+                "/agent-session/connect",
+                headers={"Authorization": "Bearer transport-test-token"},
+            )
+            try:
+                with patch.object(bridge_module, "SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS", 0.01):
+                    await websocket.send_json(
+                        {
+                            "type": "hello",
+                            "session_id": "transport-session",
+                            "session_epoch": "epoch-2",
+                            "cwd": "/workspace/example",
+                        }
+                    )
+                    message = await websocket.receive(timeout=2)
+                self.assertIn(message.type, {WSMsgType.CLOSE, WSMsgType.CLOSED})
+                self.assertIs(bridge.sessions.get("transport-session"), existing)
+            finally:
+                lifecycle_lock.release()
 
     async def test_websocket_auth_rejects_missing_or_wrong_token(self) -> None:
         config = Config()
@@ -2801,6 +2959,46 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             "Reattaching live Agent session after bridge restart",
         )
 
+    async def test_reconnect_reuses_private_thread_after_bot_left_it(self) -> None:
+        config = Config()
+        config.agent_session.channel_id = 321
+        hello = make_hello()
+        original_thread = FakeThread(555, members=[111, 999])
+        add_bot_message(original_thread, 1, session_start_message(hello))
+        channel = FakeTextChannel(321, [original_thread])
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
+
+        await bridge.close_thread(original_thread)
+
+        self.assertTrue(original_thread.archived)
+        self.assertTrue(original_thread.locked)
+        self.assertFalse(original_thread.joined)
+        self.assertNotIn(original_thread, channel.threads)
+
+        session_thread = await bridge.find_or_create_session_thread(hello)
+
+        self.assertIs(session_thread.thread, original_thread)
+        self.assertFalse(original_thread.archived)
+        self.assertFalse(original_thread.locked)
+        self.assertTrue(original_thread.joined)
+        self.assertFalse(original_thread.left)
+
+    async def test_startup_cleanup_does_not_revisit_private_thread_after_bot_left_it(self) -> None:
+        config = Config()
+        config.agent_session.channel_id = 321
+        hello = make_hello()
+        retired_thread = FakeThread(555, archived=True, locked=True, joined=False)
+        retired_thread.left = True
+        add_bot_message(retired_thread, 1, session_start_message(hello))
+        channel = FakeTextChannel(321, [retired_thread])
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
+
+        await bridge.cleanup_stale_session_threads()
+
+        self.assertEqual(retired_thread.sent_messages, [])
+        self.assertEqual(retired_thread.edits, [])
+        self.assertTrue(retired_thread.left)
+
     async def test_reconnect_reuses_thread_with_legacy_default_host_label(self) -> None:
         config = Config()
         config.agent_session.channel_id = 321
@@ -2974,7 +3172,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.agent_session.channel_id = 321
         hello = make_hello()
-        other_thread = FakeThread(555)
+        other_thread = FakeThread(555, archived=True, locked=True, joined=False)
         other_hello = SessionHello(
             session_id="session-2",
             session_epoch="epoch-1",
