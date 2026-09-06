@@ -88,12 +88,16 @@ class FakeThread:
         *,
         archived: bool = False,
         locked: bool = False,
+        private: bool = True,
+        joined: bool = True,
         manage_messages: bool = True,
         members: list[int] | None = None,
     ) -> None:
         self.id = thread_id
         self.archived = archived
         self.locked = locked
+        self._private = private
+        self.joined = joined
         self.guild = SimpleNamespace(me=SimpleNamespace(id=999))
         self._manage_messages = manage_messages
         self._messages: dict[int, FakeReplyMessage] = {}
@@ -182,6 +186,14 @@ class FakeThread:
 
     async def leave(self) -> None:
         self.left = True
+        self.joined = False
+
+    def is_private(self) -> bool:
+        return self._private
+
+    async def join(self) -> None:
+        self.left = False
+        self.joined = True
 
 
 class FakeTextChannel:
@@ -189,13 +201,17 @@ class FakeTextChannel:
         self.id = channel_id
         self.guild = SimpleNamespace(me=SimpleNamespace(id=999))
         self._manage_messages = manage_messages
-        self.threads = [thread for thread in threads if not thread.archived]
-        self._archived_threads = [thread for thread in threads if thread.archived]
+        self._threads = list(threads)
         self._messages: dict[int, FakeReplyMessage] = {}
         self._history: list[FakeReplyMessage] = []
         self.sent_messages: list[str] = []
         self.sent_kwargs: list[dict[str, object]] = []
         self.archived_thread_calls: list[dict[str, object]] = []
+        self.forbid_all_private_archives = False
+
+    @property
+    def threads(self) -> list[FakeThread]:
+        return [thread for thread in self._threads if not thread.archived]
 
     def add_message(self, message: FakeReplyMessage) -> None:
         self._messages[message.id] = message
@@ -232,7 +248,20 @@ class FakeTextChannel:
 
     async def archived_threads(self, **kwargs: object) -> AsyncIterator[FakeThread]:
         self.archived_thread_calls.append(kwargs)
-        for thread in self._archived_threads:
+        private = bool(kwargs.get("private", False))
+        joined = bool(kwargs.get("joined", False))
+        if private and not joined and self.forbid_all_private_archives:
+            raise discord.Forbidden(
+                response=SimpleNamespace(status=403, reason="Forbidden"),
+                message="Cannot list all private archived threads",
+            )
+        for thread in self._threads:
+            if not thread.archived:
+                continue
+            if thread.is_private() != private:
+                continue
+            if joined and not thread.joined:
+                continue
             yield thread
 
     def permissions_for(self, _member: object) -> object:
@@ -240,7 +269,7 @@ class FakeTextChannel:
 
     async def create_thread(self, **_kwargs: object) -> FakeThread:
         thread = FakeThread(9000 + len(self.threads), manage_messages=self._manage_messages)
-        self.threads.append(thread)
+        self._threads.append(thread)
         return thread
 
     async def send(self, content: str | None = None, **kwargs: object) -> FakeReplyMessage:
