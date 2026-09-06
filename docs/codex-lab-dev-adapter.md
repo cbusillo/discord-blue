@@ -70,10 +70,12 @@ embedded mode. Production wiring must follow Launchplane's authorization plan.
 | Approval / request-user-input | Remain local to the native TUI; Discord receives only a generic action-required status. |
 
 Completed assistant answers are mirrored once per observed turn. Streaming
-deltas, tool output, and prompts typed locally in the TUI are not posted. Answers over 32,000 characters are
-truncated with a notice. Existing history is used only for initial backfill,
-not reposted as new completions. The adapter uses the actual thread cwd/branch
-and its own PID for connection metadata; it emits no Launchplane provenance.
+deltas, tool output, and prompts typed locally in the TUI are not posted.
+Answers over 32,000 characters are truncated with a notice. Existing history is
+used only for initial backfill, not reposted as new completions. Backfill can be
+empty when the latest turn contains no supported text answer. The adapter uses
+the actual thread cwd/branch and its own PID for connection metadata; it emits
+no Launchplane provenance.
 
 Approval and input payloads, including secret prompts, are not forwarded. The
 adapter never answers an app-server approval request. App-server sends those

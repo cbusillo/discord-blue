@@ -336,6 +336,15 @@ class AdapterEventTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(TransportError, "Too many pending local requests"):
             await adapter.app_events()
 
+    async def test_malformed_resolved_request_id_stops_cleanly(self) -> None:
+        invalid_ids: list[object] = [[], {}, None, True]
+        for request_id in invalid_ids:
+            with self.subTest(request_id=request_id):
+                rpc = FakeRpc()
+                rpc.put({"method": "serverRequest/resolved", "params": {"threadId": "thread-1", "requestId": request_id}})
+                with self.assertRaisesRegex(TransportError, "Invalid resolved request ID"):
+                    await adapter_for(rpc).app_events()
+
     async def test_completed_output_and_incomplete_turn_tracking_are_bounded(self) -> None:
         adapter = adapter_for(FakeRpc())
         oversized = "x" * (OUTPUT_LIMIT + 100)

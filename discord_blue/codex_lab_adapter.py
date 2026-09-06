@@ -135,7 +135,10 @@ class DevAdapter:
                 self.status = "Action required in the native TUI. " + LOCAL_ONLY
                 self.publish("status_changed", message=self.status)
             elif method == "serverRequest/resolved":
-                self.local_requests.discard(params.get("requestId"))
+                request_id = params.get("requestId")
+                if isinstance(request_id, bool) or not isinstance(request_id, str | int):
+                    raise TransportError("Invalid resolved request ID.")
+                self.local_requests.discard(request_id)
                 if not self.local_requests:
                     self.status = "Local request resolved; see native TUI for its outcome."
                     self.publish("status_changed", message=self.status)
@@ -302,7 +305,12 @@ class DevAdapter:
                         await self.send(ws, hello)
                         async with asyncio.timeout(self.io_timeout):
                             frame = await ws.receive()
-                        if frame.type in {aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR}:
+                        if frame.type in {
+                            aiohttp.WSMsgType.CLOSE,
+                            aiohttp.WSMsgType.CLOSING,
+                            aiohttp.WSMsgType.CLOSED,
+                            aiohttp.WSMsgType.ERROR,
+                        }:
                             raise ConnectionError("Discord closed before hello acknowledgement.")
                         if frame.type != aiohttp.WSMsgType.TEXT:
                             raise TransportError("Invalid Discord hello acknowledgement frame.")
