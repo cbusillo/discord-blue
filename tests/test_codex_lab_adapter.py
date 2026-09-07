@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import unittest
 from collections.abc import AsyncIterator
-from contextlib import suppress
+from contextlib import redirect_stderr, suppress
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
@@ -671,7 +672,7 @@ class AdapterDiscordLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("assistant_message", hellos[1])
 
     async def test_slow_hello_uses_separate_deadline_without_early_status(self) -> None:
-        adapter = adapter_for(FakeRpc(), io_timeout=0.05, hello_timeout=1)
+        adapter = adapter_for(FakeRpc(), io_timeout=0.2, hello_timeout=2)
         self.configured(adapter)
         hellos: list[Json] = []
         responses: list[Json] = []
@@ -684,7 +685,7 @@ class AdapterDiscordLoopTests(unittest.IsolatedAsyncioTestCase):
             try:
                 await websocket.ping(b"hello keepalive")
                 with self.assertRaises(TimeoutError):
-                    await asyncio.wait_for(asyncio.shield(first_event), timeout=0.15)
+                    await asyncio.wait_for(asyncio.shield(first_event), timeout=0.6)
                 await websocket.send_json({"type": "hello_ack"})
                 responses.append(await first_event)
                 await websocket.send_json(command(adapter, "end-slow-hello-test", "end_session"))
@@ -728,12 +729,10 @@ class AdapterDiscordLoopTests(unittest.IsolatedAsyncioTestCase):
         app.router.add_get("/agent-session/connect", handler)
         async with TestServer(app) as server:
             url = str(server.make_url("/agent-session/connect")).replace("http://", "ws://", 1)
-            with patch("sys.stderr") as stderr:
+            with redirect_stderr(io.StringIO()) as stderr:
                 await asyncio.wait_for(adapter.discord(url, "test-token"), timeout=2)
 
-        self.assertIn(
-            "Bridge hello acknowledgement timed out; retrying.", "".join(call.args[0] for call in stderr.write.call_args_list)
-        )
+        self.assertIn("Bridge hello acknowledgement timed out; retrying.", stderr.getvalue())
 
         self.assertEqual(len(hellos), 2)
         self.assertEqual(hellos[0], hellos[1])
