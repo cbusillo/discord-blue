@@ -44,8 +44,14 @@ Reconnect discovery includes archived private threads that the bot has left,
 and reattachment restores its membership. The bot needs Discord’s
 `Manage Threads` and `Read Message History` permissions for private-thread
 recovery. Existing session metadata must still match before a thread is reused.
+If Discord denies access to all private archives, discovery falls back to private
+archives the bot has joined. Failure to reopen or rejoin a matching thread closes
+the connection without `hello_ack`; it does not create a replacement thread.
 Cleanup and reattachment are serialized per session ID so old disconnect cleanup
 cannot close a reattached session; unrelated sessions can still attach.
+An attachment waiting on the same session's cleanup closes after ten seconds.
+Heartbeat sweeps skip sessions whose lifecycle lock is busy and try them again on
+the next sweep, allowing other stale sessions to be cleaned up.
 
 Reconnect with the same session identity and metadata. Thread recovery matches
 persisted session markers; a changed PID can be tolerated only for one matching

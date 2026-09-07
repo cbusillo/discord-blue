@@ -886,7 +886,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     await current.close()
                     await other.close()
 
-    async def test_heartbeat_timeout_rechecks_current_session_under_lifecycle_lock(self) -> None:
+    async def test_heartbeat_sweep_preserves_replacement_after_contended_session(self) -> None:
         config = Config()
         config.agent_session.heartbeat_timeout_seconds = 1
         bridge = AgentSessionBridge(FakeBot(config))
@@ -902,9 +902,63 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(new_session)
         lifecycle_lock.release()
         await timeout_task
+        await bridge.close_timed_out_sessions()
 
         self.assertIs(bridge.sessions.get(old_session.session_id), new_session)
         self.assertFalse(new_session.websocket.closed)
+
+    async def test_heartbeat_sweep_skips_contended_session_and_closes_later_stale_session(self) -> None:
+        config = Config()
+        config.agent_session.heartbeat_timeout_seconds = 1
+        bridge = AgentSessionBridge(FakeBot(config))
+        first_hello = make_hello()
+        second_hello = make_hello()
+        second_hello.session_id = "session-2"
+        first = AgentSession(hello=first_hello, websocket=FakeWebSocket())
+        second = AgentSession(hello=second_hello, websocket=FakeWebSocket())
+        first.last_seen -= timedelta(seconds=2)
+        second.last_seen -= timedelta(seconds=2)
+        bridge.sessions.register(first)
+        bridge.sessions.register(second)
+        first_lock = bridge.session_lifecycle_lock(first.session_id)
+        await first_lock.acquire()
+        try:
+            await bridge.close_timed_out_sessions()
+        finally:
+            first_lock.release()
+
+        self.assertIs(bridge.sessions.get(first.session_id), first)
+        self.assertFalse(first.websocket.closed)
+        self.assertIsNone(bridge.sessions.get(second.session_id))
+        self.assertTrue(second.websocket.closed)
+        await bridge.close_timed_out_sessions()
+        self.assertIsNone(bridge.sessions.get(first.session_id))
+        self.assertTrue(first.websocket.closed)
+
+    async def test_join_failure_closes_hello_without_ack_or_duplicate_thread(self) -> None:
+        config = Config()
+        config.agent_session.token = "transport-test-token"
+        config.agent_session.channel_id = 321
+        hello = make_hello()
+        thread = FakeThread(555, archived=True, locked=True, joined=False)
+        thread.join_raises = True
+        add_bot_message(thread, 1, session_start_message(hello))
+        channel = FakeTextChannel(321, [thread])
+        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
+        app = web.Application()
+        bridge.register_routes(app)
+
+        async with TestClient(TestServer(app)) as client:
+            websocket = await client.ws_connect(
+                "/agent-session/connect",
+                headers={"Authorization": "Bearer transport-test-token"},
+            )
+            await websocket.send_json({"type": "hello", **asdict(hello)})
+            message = await websocket.receive(timeout=2)
+
+        self.assertIn(message.type, {WSMsgType.CLOSE, WSMsgType.CLOSED})
+        self.assertIsNone(bridge.sessions.get(hello.session_id))
+        self.assertEqual(len(channel._threads), 1)
 
     async def test_hello_closes_when_same_session_cleanup_lock_times_out(self) -> None:
         async with self.transport() as (bridge, _, client):

@@ -110,6 +110,7 @@ class FakeThread:
         self.edits: list[dict[str, object]] = []
         self.name: str | None = None
         self.left = False
+        self.join_raises = False
         self._member_ids = list(members or [])
         self.removed_user_ids: list[int] = []
 
@@ -192,6 +193,11 @@ class FakeThread:
         return self._private
 
     async def join(self) -> None:
+        if self.join_raises:
+            raise discord.Forbidden(
+                response=SimpleNamespace(status=403, reason="Forbidden"),
+                message=f"Cannot join {self.id}",
+            )
         self.left = False
         self.joined = True
 
@@ -268,7 +274,7 @@ class FakeTextChannel:
         return SimpleNamespace(manage_messages=self._manage_messages)
 
     async def create_thread(self, **_kwargs: object) -> FakeThread:
-        thread = FakeThread(9000 + len(self.threads), manage_messages=self._manage_messages)
+        thread = FakeThread(9000 + len(self._threads), manage_messages=self._manage_messages)
         self._threads.append(thread)
         return thread
 

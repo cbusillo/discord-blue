@@ -420,7 +420,10 @@ class AgentSessionBridge:
             if now - session.last_seen <= timeout:
                 continue
             lifecycle_lock = self.session_lifecycle_lock(session_id)
-            async with lifecycle_lock:
+            if lifecycle_lock.locked():
+                continue
+            await lifecycle_lock.acquire()
+            try:
                 if self.sessions.get(session_id) is not session or now - session.last_seen <= timeout:
                     continue
                 removed = self.sessions.remove_if_current(session)
@@ -434,6 +437,8 @@ class AgentSessionBridge:
                 )
                 await removed.websocket.close(message=b"heartbeat timeout")
                 await self.close_session_thread(removed)
+            finally:
+                lifecycle_lock.release()
 
     async def cleanup_stale_session_notifications(self) -> None:
         async with self._session_attach_lock:
@@ -579,6 +584,7 @@ class AgentSessionBridge:
             if message_type == "hello":
                 hello = SessionHello.from_payload(payload)
                 rejecting_stopping_session = False
+                attachment_failed = False
                 session_thread: SessionThread | None = None
                 lifecycle_lock = self.session_lifecycle_lock(hello.session_id)
                 try:
@@ -594,18 +600,28 @@ class AgentSessionBridge:
                         else:
                             session = AgentSession(hello=hello, websocket=websocket)
                             self.sessions.register(session)
-                            session_thread = await self.find_or_create_session_thread(hello)
-                            self.sessions.bind_thread(
-                                hello.session_id,
-                                session_thread.thread.id,
-                                session_thread.notification_message_id,
-                            )
-                            await self.backfill_latest_assistant_message(
-                                session_thread.thread,
-                                hello,
-                            )
+                            try:
+                                session_thread = await self.find_or_create_session_thread(hello)
+                            except discord.DiscordException:
+                                logger.warning("Unable to attach Discord thread for Agent session %s", hello.session_id)
+                                self.sessions.remove_if_current(session)
+                                session = None
+                                attachment_failed = True
+                            else:
+                                self.sessions.bind_thread(
+                                    hello.session_id,
+                                    session_thread.thread.id,
+                                    session_thread.notification_message_id,
+                                )
+                                await self.backfill_latest_assistant_message(
+                                    session_thread.thread,
+                                    hello,
+                                )
                 finally:
                     lifecycle_lock.release()
+                if attachment_failed:
+                    await websocket.close(message=b"unable to attach Discord thread", drain=False)
+                    break
                 if rejecting_stopping_session:
                     await websocket.close(message=b"bridge shutdown", drain=False)
                     break
@@ -653,19 +669,13 @@ class AgentSessionBridge:
             return await create_session_thread(self.bot, hello)
 
         if thread.archived or thread.locked:
-            try:
-                await thread.edit(
-                    archived=False,
-                    locked=False,
-                    reason="Reattaching live Agent session after bridge restart",
-                )
-            except discord.DiscordException:
-                logger.warning("Unable to reopen Agent session thread %s", thread.id)
+            await thread.edit(
+                archived=False,
+                locked=False,
+                reason="Reattaching live Agent session after bridge restart",
+            )
         if thread.is_private():
-            try:
-                await thread.join()
-            except discord.DiscordException:
-                logger.warning("Unable to rejoin private Agent session thread %s", thread.id)
+            await thread.join()
         await auto_join_configured_users(self.bot, thread)
         notification_message_id = await self.ensure_session_notification(hello, thread)
         return SessionThread(thread=thread, notification_message_id=notification_message_id)
