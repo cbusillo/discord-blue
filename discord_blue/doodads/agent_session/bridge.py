@@ -602,7 +602,7 @@ class AgentSessionBridge:
                             self.sessions.register(session)
                             try:
                                 session_thread = await self.find_or_create_session_thread(hello)
-                            except discord.DiscordException:
+                            except (discord.DiscordException, ValueError):
                                 logger.warning("Unable to attach Discord thread for Agent session %s", hello.session_id)
                                 self.sessions.remove_if_current(session)
                                 session = None

@@ -935,6 +935,50 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(bridge.sessions.get(first.session_id))
         self.assertTrue(first.websocket.closed)
 
+    async def test_heartbeat_sweep_rechecks_snapshot_after_prior_session_cleanup(self) -> None:
+        config = Config()
+        config.agent_session.heartbeat_timeout_seconds = 1
+        bridge = AgentSessionBridge(FakeBot(config))
+        first = AgentSession(hello=make_hello(), websocket=FakeWebSocket())
+        second_hello = make_hello()
+        second_hello.session_id = "session-2"
+        second = AgentSession(hello=second_hello, websocket=FakeWebSocket())
+        replacement = AgentSession(hello=second_hello, websocket=FakeWebSocket())
+        for session in (first, second, replacement):
+            session.last_seen -= timedelta(seconds=2)
+        bridge.sessions.register(first)
+        bridge.sessions.register(second)
+
+        async def replace_second(_session: AgentSessionType) -> None:
+            bridge.sessions.register(replacement)
+
+        with patch.object(bridge, "close_session_thread", side_effect=replace_second) as cleanup:
+            await bridge.close_timed_out_sessions()
+
+        self.assertEqual(cleanup.await_count, 1)
+        self.assertIs(bridge.sessions.get(second.session_id), replacement)
+        self.assertFalse(second.websocket.closed)
+        self.assertFalse(replacement.websocket.closed)
+
+    async def test_unavailable_channel_closes_hello_without_registered_session(self) -> None:
+        config = Config()
+        config.agent_session.token = "transport-test-token"
+        config.agent_session.channel_id = 321
+        hello = make_hello()
+        bridge = AgentSessionBridge(FakeBot(config))
+        app = web.Application()
+        bridge.register_routes(app)
+        async with TestClient(TestServer(app)) as client:
+            websocket = await client.ws_connect(
+                "/agent-session/connect",
+                headers={"Authorization": "Bearer transport-test-token"},
+            )
+            await websocket.send_json({"type": "hello", **asdict(hello)})
+            message = await websocket.receive(timeout=2)
+
+        self.assertIn(message.type, {WSMsgType.CLOSE, WSMsgType.CLOSED})
+        self.assertIsNone(bridge.sessions.get(hello.session_id))
+
     async def test_join_failure_closes_hello_without_ack_or_duplicate_thread(self) -> None:
         config = Config()
         config.agent_session.token = "transport-test-token"

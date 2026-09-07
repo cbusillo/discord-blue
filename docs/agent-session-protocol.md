@@ -47,6 +47,8 @@ recovery. Existing session metadata must still match before a thread is reused.
 If Discord denies access to all private archives, discovery falls back to private
 archives the bot has joined. Failure to reopen or rejoin a matching thread closes
 the connection without `hello_ack`; it does not create a replacement thread.
+If reopening succeeds but joining fails, the thread can remain open without an
+attached session until a successful retry or startup cleanup.
 Cleanup and reattachment are serialized per session ID so old disconnect cleanup
 cannot close a reattached session; unrelated sessions can still attach.
 An attachment waiting on the same session's cleanup closes after ten seconds.
