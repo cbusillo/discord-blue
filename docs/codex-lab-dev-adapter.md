@@ -108,6 +108,12 @@ Discord writes are serialized and time-bounded, and a connection closed before
 the initial acknowledgement is retried. Malformed acknowledgement frames stop
 the adapter with a bounded diagnostic.
 
+Thread attachment can take tens of seconds while the bot searches Discord
+archives. Each hello acknowledgement has a separate 90-second deadline; normal
+message writes retain their 15-second deadline. No status, queued output, or
+controls are processed before acknowledgement. A hello timeout retries with the
+same identity and retains the initial assistant snapshot until acknowledged.
+
 ## Verification
 
 ```sh

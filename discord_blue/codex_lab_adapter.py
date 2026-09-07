@@ -58,16 +58,18 @@ class DevAdapter:
         heartbeat_interval: float = 30,
         reconnect_delay: float = 2,
         io_timeout: float = 15,
+        hello_timeout: float = 90,
     ) -> None:
         self.rpc = rpc
         self.thread_id = thread_id
         self.epoch = str(uuid.uuid4())
         self.command_limit = command_limit
-        if min(heartbeat_interval, reconnect_delay, io_timeout, command_limit) <= 0:
+        if min(heartbeat_interval, reconnect_delay, io_timeout, hello_timeout, command_limit) <= 0:
             raise ValueError("Adapter timing and bounds must be positive.")
         self.heartbeat_interval = heartbeat_interval
         self.reconnect_delay = reconnect_delay
         self.io_timeout = io_timeout
+        self.hello_timeout = hello_timeout
         self.send_lock = asyncio.Lock()
         self.local_requests: set[str | int] = set()
         self.commands: dict[str, tuple[str, Json]] = {}
@@ -303,8 +305,13 @@ class DevAdapter:
                         if not first_connection:
                             hello.pop("assistant_message", None)
                         await self.send(ws, hello)
-                        async with asyncio.timeout(self.io_timeout):
-                            frame = await ws.receive()
+                        # Discovery can require many Discord history reads before attachment.
+                        try:
+                            async with asyncio.timeout(self.hello_timeout):
+                                frame = await ws.receive()
+                        except TimeoutError:
+                            print("Bridge hello acknowledgement timed out; retrying.", file=sys.stderr)
+                            raise
                         if frame.type in {
                             aiohttp.WSMsgType.CLOSE,
                             aiohttp.WSMsgType.CLOSING,

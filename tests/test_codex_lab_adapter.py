@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import unittest
 from collections.abc import AsyncIterator
-from contextlib import suppress
+from contextlib import redirect_stderr, suppress
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
@@ -115,6 +116,7 @@ def adapter_for(
     heartbeat_interval: float = 30,
     reconnect_delay: float = 2,
     io_timeout: float = 15,
+    hello_timeout: float = 90,
 ) -> DevAdapter:
     return DevAdapter(
         cast(AppServerClient, rpc),
@@ -123,6 +125,7 @@ def adapter_for(
         heartbeat_interval=heartbeat_interval,
         reconnect_delay=reconnect_delay,
         io_timeout=io_timeout,
+        hello_timeout=hello_timeout,
     )
 
 
@@ -667,6 +670,74 @@ class AdapterDiscordLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(hellos), 2)
         self.assertEqual(hellos[0]["session_epoch"], hellos[1]["session_epoch"])
         self.assertIn("assistant_message", hellos[1])
+
+    async def test_slow_hello_uses_separate_deadline_without_early_status(self) -> None:
+        adapter = adapter_for(FakeRpc(), io_timeout=0.2, hello_timeout=2)
+        self.configured(adapter)
+        hellos: list[Json] = []
+        responses: list[Json] = []
+
+        async def handler(request: web.Request) -> web.WebSocketResponse:
+            websocket = web.WebSocketResponse()
+            await websocket.prepare(request)
+            hellos.append(await websocket.receive_json())
+            first_event = asyncio.create_task(websocket.receive_json())
+            try:
+                await websocket.ping(b"hello keepalive")
+                with self.assertRaises(TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(first_event), timeout=0.6)
+                await websocket.send_json({"type": "hello_ack"})
+                responses.append(await first_event)
+                await websocket.send_json(command(adapter, "end-slow-hello-test", "end_session"))
+                await websocket.receive_json()
+                await websocket.receive_json()
+            finally:
+                first_event.cancel()
+                await asyncio.gather(first_event, return_exceptions=True)
+            return websocket
+
+        app = web.Application()
+        app.router.add_get("/agent-session/connect", handler)
+        async with TestServer(app) as server:
+            url = str(server.make_url("/agent-session/connect")).replace("http://", "ws://", 1)
+            await asyncio.wait_for(adapter.discord(url, "test-token"), timeout=2)
+
+        self.assertEqual(len(hellos), 1)
+        self.assertEqual([event["type"] for event in responses], ["status_changed"])
+
+    async def test_hello_timeout_retries_same_identity_and_initial_snapshot(self) -> None:
+        adapter = adapter_for(FakeRpc(), io_timeout=0.5, hello_timeout=0.03, reconnect_delay=0.001)
+        self.configured(adapter)
+        hellos: list[Json] = []
+        closed_frames: list[aiohttp.WSMsgType] = []
+
+        async def handler(request: web.Request) -> web.WebSocketResponse:
+            websocket = web.WebSocketResponse()
+            await websocket.prepare(request)
+            hellos.append(await websocket.receive_json())
+            if len(hellos) == 1:
+                closed_frames.append((await websocket.receive()).type)
+            else:
+                await websocket.send_json({"type": "hello_ack"})
+                await websocket.receive_json()
+                await websocket.send_json(command(adapter, "end-hello-timeout-test", "end_session"))
+                await websocket.receive_json()
+                await websocket.receive_json()
+            return websocket
+
+        app = web.Application()
+        app.router.add_get("/agent-session/connect", handler)
+        async with TestServer(app) as server:
+            url = str(server.make_url("/agent-session/connect")).replace("http://", "ws://", 1)
+            with redirect_stderr(io.StringIO()) as stderr:
+                await asyncio.wait_for(adapter.discord(url, "test-token"), timeout=2)
+
+        self.assertIn("Bridge hello acknowledgement timed out; retrying.", stderr.getvalue())
+
+        self.assertEqual(len(hellos), 2)
+        self.assertEqual(hellos[0], hellos[1])
+        self.assertIn("assistant_message", hellos[1])
+        self.assertEqual(closed_frames, [aiohttp.WSMsgType.CLOSE])
 
     async def test_malformed_text_hello_ack_raises_transport_error(self) -> None:
         adapter = adapter_for(FakeRpc(), reconnect_delay=0.001, io_timeout=0.5)
