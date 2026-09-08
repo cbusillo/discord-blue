@@ -139,6 +139,8 @@ an ID or epoch that differs from the connection's current session.
 | `approval_decision_reject` | `approval_id`, `reason`: decision expired or rejected. |
 | `request_user_input` | `call_id`, `turn_id`, `questions`: question objects described below. |
 
+Older bridges ignore these unknown resolution events.
+
 Resolution events are additive: clients may send them when another subscriber
 answers a shared request. No outcome or actor is inferred. Matching requires the
 current session epoch and request identity; unknown IDs, stale epochs and duplicate

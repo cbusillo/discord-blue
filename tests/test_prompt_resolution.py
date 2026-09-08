@@ -187,12 +187,71 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message.content, "**Resolved**")
         self.assertEqual(message.reactions, [])
 
+    async def test_ack_already_waiting_on_ui_lock_cannot_repaint_resolved_input(self) -> None:
+        view = await self.fixture.prompt()
+        await view.submit(cast(Any, FakeInteraction(self.thread)))
+        pending = self.session.pending_user_inputs["call-1"]
+        message = await self.thread.fetch_message(pending.message_id)
+        await pending.ui_lock.acquire()
+        ack = asyncio.create_task(
+            self.bridge.handle_command_ack(self.event("command_ack", command_id=self.socket.sent_json[0]["command_id"]))
+        )
+        await asyncio.sleep(0)
+        resolve = asyncio.create_task(
+            self.bridge.handle_prompt_resolved(
+                "request_user_input_resolved", self.event("request_user_input_resolved", call_id="call-1", turn_id="turn-1")
+            )
+        )
+        try:
+            await asyncio.sleep(0)
+            self.assertTrue(pending.retired)
+            self.assertFalse(ack.done())
+        finally:
+            pending.ui_lock.release()
+            await asyncio.gather(ack, resolve)
+        self.assertEqual(message.content, "**Resolved**")
+        self.assertEqual(message.reactions, [])
+
     def test_ack_copy_describes_submission_without_asserting_winner(self) -> None:
         self.assertEqual(self.bridge.format_approval_finished("approved", 123), "**Submitted: approved**\nby: `123`")
         self.assertEqual(self.bridge.format_approval_finished(None, None), "**Decision acknowledged**")
 
 
 class ResolutionTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_replaced_socket_cannot_resolve_current_connection_prompt(self) -> None:
+        async with transport_tests.CleanupTransportTests().transport() as (bridge, _thread, client, _finished):
+            headers = {"Authorization": "Bearer cleanup-transport-test"}
+            old = await client.ws_connect(bridge_module.AGENT_SESSION_CONNECT_PATH, headers=headers)
+            identity = transport_tests.CleanupTransportTests.hello()
+            await old.send_json(identity)
+            await old.receive_json(timeout=2)
+            current = await client.ws_connect(bridge_module.AGENT_SESSION_CONNECT_PATH, headers=headers)
+            await current.send_json({**identity, "session_epoch": "current"})
+            await current.receive_json(timeout=2)
+            session = bridge.sessions.get("cleanup-session")
+            assert session is not None
+            await bridge.handle_approval_request(
+                RemoteApprovalRequest(
+                    session_id=session.session_id,
+                    session_epoch=session.session_epoch,
+                    approval_id="approval",
+                    call_id="call",
+                    turn_id="turn",
+                    command=["test"],
+                    cwd="/test",
+                    reason=None,
+                )
+            )
+            payload = {**identity, "session_epoch": "current", "type": "approval_resolved", "approval_id": "approval"}
+            with self.assertLogs(bridge_module.logger, level="WARNING") as captured:
+                await old.send_json(payload)
+                # Closing waits for the old handler's serial receive loop to finish.
+                await old.close()
+            self.assertTrue(any("outside connection" in line for line in captured.output))
+            self.assertIn("approval", session.pending_approvals)
+            self.assertIs(bridge.sessions.get(session.session_id), session)
+            await current.close()
+
     async def test_serial_wire_request_then_resolution_and_stale_events(self) -> None:
         async with transport_tests.CleanupTransportTests().transport() as (bridge, thread, client, _finished):
             websocket = await client.ws_connect(
