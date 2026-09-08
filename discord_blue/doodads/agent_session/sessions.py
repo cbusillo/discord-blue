@@ -36,6 +36,8 @@ class PendingRemoteUserInput:
     thread_id: int
     message_id: int
     turn_id: str
+    call_id: str
+    submitted: bool = False
 
 
 @dataclass(slots=True)

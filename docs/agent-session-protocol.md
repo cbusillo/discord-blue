@@ -138,6 +138,11 @@ A command has `type: "command"`, `command_id`, `session_id`, `session_epoch`,
 | `status_request` | Publish current session status. |
 | `request_user_input_response` | Resolve `call_id` / `turn_id` using `response.answers`, mapping question IDs to `{"answers":["text"]}`. |
 
+Discord binds each question view to its session epoch, call ID, turn ID, and
+Discord message. Replaced views and already-submitted prompts cannot send another
+answer or restore a retired prompt through a stale modal. Submit and Cancel
+reserve the same prompt before delivery so concurrent clicks send at most once.
+
 Cancellation of a question produces an empty answers object. The client decides
 how cancellation resolves its pending tool request. Acknowledge only after local
 acceptance; reject unsupported or stale requests with a reason. Keep execution

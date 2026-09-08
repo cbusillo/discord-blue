@@ -2591,7 +2591,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(selects), 1)
         self.assertEqual([option.label for option in selects[0].options], ["Fast", "Safe"])
         self.assertEqual([button.label for button in buttons], ["Submit", "Cancel"])
-        self.assertIn("turn-1", session.pending_user_inputs)
+        self.assertIn("call-1", session.pending_user_inputs)
 
     async def test_request_user_input_modal_prompt_uses_buttons(self) -> None:
         config = Config()
