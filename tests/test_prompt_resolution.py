@@ -7,16 +7,14 @@ from unittest.mock import patch
 
 from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.protocol import RemoteApprovalRequest
-from tests import test_prompt_identity as identity_tests
+from tests.fakes_agent_prompts import prompt_fixture
 from tests import test_session_cleanup_transport as transport_tests
-from tests.fakes_agent_session import FakeInteraction, FakeReplyMessage
+from tests.fakes_agent_session import FakeInteraction
 
 
 class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        self.fixture = identity_tests.PromptIdentityTests()
-        await self.fixture.asyncSetUp()
-        self.addCleanup(self.fixture.doCleanups)
+        self.fixture = self.enterContext(prompt_fixture())
         self.bridge, self.session = self.fixture.bridge, self.fixture.session
         self.thread, self.socket = self.fixture.thread, self.fixture.socket
 
@@ -163,11 +161,11 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
         editing, release = asyncio.Event(), asyncio.Event()
         original = message.edit
 
-        async def edit(content: str, **kwargs: object) -> FakeReplyMessage:
+        async def edit(content: str, **kwargs: object) -> None:
             if "Approval sent" in content:
                 editing.set()
                 await release.wait()
-            return await original(content=content, **kwargs)
+            await original(content=content, **kwargs)
 
         with patch.object(message, "edit", new=edit):
             click = asyncio.create_task(
