@@ -192,6 +192,7 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
         await view.submit(cast(Any, FakeInteraction(self.thread)))
         pending = self.session.pending_user_inputs["call-1"]
         message = await self.thread.fetch_message(pending.message_id)
+        reaction_spy = self.enterContext(patch.object(self.bridge, "set_message_reaction", wraps=self.bridge.set_message_reaction))
         await pending.ui_lock.acquire()
         ack = asyncio.create_task(
             self.bridge.handle_command_ack(self.event("command_ack", command_id=self.socket.sent_json[0]["command_id"]))
@@ -209,6 +210,7 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
         finally:
             pending.ui_lock.release()
             await asyncio.gather(ack, resolve)
+        reaction_spy.assert_not_awaited()
         self.assertEqual(message.content, "**Resolved**")
         self.assertEqual(message.reactions, [])
 
@@ -226,7 +228,7 @@ class ResolutionTransportTests(unittest.IsolatedAsyncioTestCase):
             await old.send_json(identity)
             await old.receive_json(timeout=2)
             current = await client.ws_connect(bridge_module.AGENT_SESSION_CONNECT_PATH, headers=headers)
-            await current.send_json({**identity, "session_epoch": "current"})
+            await current.send_json(identity)
             await current.receive_json(timeout=2)
             session = bridge.sessions.get("cleanup-session")
             assert session is not None
@@ -242,7 +244,7 @@ class ResolutionTransportTests(unittest.IsolatedAsyncioTestCase):
                     reason=None,
                 )
             )
-            payload = {**identity, "session_epoch": "current", "type": "approval_resolved", "approval_id": "approval"}
+            payload = {**identity, "type": "approval_resolved", "approval_id": "approval"}
             with self.assertLogs(bridge_module.logger, level="WARNING") as captured:
                 await old.send_json(payload)
                 # Closing waits for the old handler's serial receive loop to finish.
