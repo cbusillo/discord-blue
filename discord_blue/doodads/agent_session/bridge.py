@@ -187,6 +187,8 @@ class RequestUserInputAnswerModal(discord.ui.Modal):
         self.add_item(self.answer)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await self.parent_view.interaction_check(interaction):
+            return
         self.parent_view.set_answer(self.question.id, self.answer.value.strip())
         await interaction.response.edit_message(
             content=self.parent_view.format_prompt(),
@@ -243,6 +245,7 @@ class RequestUserInputView(discord.ui.View):
         self.session_id = session_id
         self.request = request
         self.answers: dict[str, str] = {}
+        self.message_id: int | None = None
 
         for question in request.questions[:4]:
             if question.options:
@@ -251,6 +254,19 @@ class RequestUserInputView(discord.ui.View):
                 self.add_item(RequestUserInputAnswerButton(self, question))
         self.add_item(RequestUserInputSubmitButton(self))
         self.add_item(RequestUserInputCancelButton(self))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return (
+            await self.bridge.user_input_context(
+                cast(discord.Interaction[BlueBot], interaction),
+                self.session_id,
+                self.request.session_epoch,
+                self.request.call_id,
+                self.request.turn_id,
+                self.message_id,
+            )
+            is not None
+        )
 
     def set_answer(self, question_id: str, answer: str) -> None:
         self.answers[question_id] = answer
@@ -279,6 +295,8 @@ class RequestUserInputView(discord.ui.View):
             self.request.call_id,
             self.request.turn_id,
             self.response_payload(),
+            session_epoch=self.request.session_epoch,
+            message_id=self.message_id,
         )
 
     async def cancel(self, interaction: discord.Interaction[BlueBot]) -> None:
@@ -289,6 +307,8 @@ class RequestUserInputView(discord.ui.View):
             self.request.turn_id,
             {"answers": {}},
             cancelled=True,
+            session_epoch=self.request.session_epoch,
+            message_id=self.message_id,
         )
 
 
@@ -1552,16 +1572,58 @@ class AgentSessionBridge:
         if not isinstance(channel, discord.Thread):
             return
 
+        view = self.request_user_input_view(session.session_id, request)
         message = await send_agent_session_message(
             channel,
             self.format_request_user_input(request, {}),
-            view=self.request_user_input_view(session.session_id, request),
+            view=view,
         )
-        session.pending_user_inputs[request.turn_id] = PendingRemoteUserInput(
+        view.message_id = message.id
+        session.pending_user_inputs[request.call_id] = PendingRemoteUserInput(
             thread_id=session.thread_id,
             message_id=message.id,
             turn_id=request.turn_id,
+            call_id=request.call_id,
         )
+
+    async def user_input_context(
+        self,
+        interaction: discord.Interaction[BlueBot],
+        session_id: str,
+        session_epoch: str,
+        call_id: str,
+        turn_id: str,
+        message_id: int | None,
+    ) -> tuple[AgentSession, PendingRemoteUserInput] | None:
+        if not self.is_operator(interaction.user):
+            await interaction.response.send_message(
+                "Only Agent session operators can answer prompts.",
+                ephemeral=True,
+            )
+            return None
+        session = self.sessions.get(session_id)
+        if session is None or session.websocket.closed:
+            await interaction.response.send_message(
+                "Agent session is offline; answer was not delivered.",
+                ephemeral=True,
+            )
+            return None
+        pending = session.pending_user_inputs.get(call_id)
+        if (
+            session.session_epoch != session_epoch
+            or pending is None
+            or pending.turn_id != turn_id
+            or pending.message_id != message_id
+            or getattr(interaction.channel, "id", None) != pending.thread_id
+            or (interaction.message is not None and interaction.message.id != message_id)
+            or pending.submitted
+        ):
+            await interaction.response.send_message(
+                "This prompt is no longer active.",
+                ephemeral=True,
+            )
+            return None
+        return session, pending
 
     async def handle_request_user_input_interaction(
         self,
@@ -1571,31 +1633,23 @@ class AgentSessionBridge:
         turn_id: str,
         response: dict[str, object],
         *,
+        session_epoch: str,
+        message_id: int | None,
         cancelled: bool = False,
     ) -> None:
-        if not self.is_operator(interaction.user):
-            await interaction.response.send_message(
-                "Only Agent session operators can answer prompts.",
-                ephemeral=True,
-            )
+        context = await self.user_input_context(
+            interaction,
+            session_id,
+            session_epoch,
+            call_id,
+            turn_id,
+            message_id,
+        )
+        if context is None:
             return
-
-        session = self.sessions.get(session_id)
-        if session is None or session.websocket.closed:
-            await interaction.response.send_message(
-                "Agent session is offline; answer was not delivered.",
-                ephemeral=True,
-            )
-            return
-
-        pending = session.pending_user_inputs.get(turn_id)
-        if pending is None:
-            await interaction.response.send_message(
-                "This prompt is no longer active.",
-                ephemeral=True,
-            )
-            return
-
+        session, pending = context
+        # Reserve before the first I/O so simultaneous Submit/Cancel clicks send once.
+        pending.submitted = True
         command_id = str(uuid.uuid4())
         session.pending_commands[command_id] = PendingRemoteCommand(
             thread_id=pending.thread_id,
@@ -1614,6 +1668,9 @@ class AgentSessionBridge:
                 issued_by=str(interaction.user.id),
             ).to_message()
         )
+        if self.sessions.get(session_id) is not session or session.pending_user_inputs.get(call_id) is not pending:
+            await interaction.response.send_message("This prompt is no longer active.", ephemeral=True)
+            return
         await interaction.response.edit_message(
             content=self.format_request_user_input_pending(interaction.user, cancelled=cancelled),
             view=None,
@@ -1648,6 +1705,10 @@ class AgentSessionBridge:
                 "This approval is no longer active.",
                 ephemeral=True,
             )
+            return
+
+        if pending.decision is not None:
+            await interaction.response.send_message("This approval has already been answered.", ephemeral=True)
             return
 
         pending.decision = decision
@@ -2573,7 +2634,7 @@ class AgentSessionBridge:
         self,
         session_id: str,
         request: RemoteRequestUserInput,
-    ) -> discord.ui.View:
+    ) -> RequestUserInputView:
         return RequestUserInputView(self, session_id, request)
 
     @staticmethod
