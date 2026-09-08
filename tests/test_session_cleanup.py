@@ -113,7 +113,7 @@ class SessionCleanupTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         cleanup_started = asyncio.Event()
 
-        async def blocked_cleanup(_session: AgentSession) -> None:
+        async def blocked_cleanup(_session: AgentSession, _cleanup: PendingSessionCleanup | None = None) -> None:
             cleanup_started.set()
             await asyncio.Event().wait()
 

@@ -64,9 +64,9 @@ Closed WebSockets disappear from `/code active` and the health endpoint's
 active-session count while cleanup finishes.
 
 WebSocket close, notification cleanup, and thread cleanup have independent time
-budgets: two seconds for the socket and three seconds each for notification and
-thread cleanup. Thread cleanup reserves time for archiving and leaving even if
-posting the notice or removing members fails. The total eight-second cleanup
+budgets: one second for the socket, two seconds for notification cleanup, and
+six seconds for thread cleanup. Thread cleanup reserves time for archiving and leaving even if
+posting the notice or removing members fails. The total nine-second cleanup
 budget stays below the ten-second reconnect lock wait. A failed notification
 operation does not prevent thread cleanup, and a
 failed or slow session does not terminate the heartbeat monitor. Cleanup retains
@@ -75,7 +75,10 @@ cancelled; reconnect cannot race a detached archive operation.
 
 Failed Discord cleanup is retained for periodic retry in a bounded, deduplicated
 in-memory queue (256 records, up to five retry attempts). Maintenance runs every
-five minutes after the startup reconnect grace. Queue overflow and exhausted
+five minutes after the startup reconnect grace. Successful steps are removed
+from the shared retry record immediately, so cancellation retains only unfinished
+work. Busy attachments defer retries without consuming their attempt budget;
+discovery leaves archived, locked threads alone. Queue overflow and exhausted
 retries produce warnings; periodic
 orphan discovery provides recovery after records are dropped or the service
 restarts. Reconciliation checks

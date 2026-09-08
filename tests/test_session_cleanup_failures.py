@@ -15,7 +15,7 @@ from aiohttp import web
 from discord_blue.config import AgentSessionConfig, Config, DiscordConfig
 from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
-from discord_blue.doodads.agent_session.sessions import AgentSession
+from discord_blue.doodads.agent_session.sessions import AgentSession, PendingSessionCleanup
 from discord_blue.plugs.discord_plug import BlueBot
 from tests.fakes_agent_session import FakeBot, FakeThread, FakeWebSocket, make_hello
 
@@ -44,7 +44,7 @@ class CleanupFailureTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.bind_thread(first.session_id, 501)
         calls: list[str] = []
 
-        async def cleanup(session: AgentSession) -> None:
+        async def cleanup(session: AgentSession, _cleanup: PendingSessionCleanup | None = None) -> None:
             self.assertTrue(bridge.session_lifecycle_lock(session.session_id).locked())
             calls.append(session.session_id)
             if session is first:

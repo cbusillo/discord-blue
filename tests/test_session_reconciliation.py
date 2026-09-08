@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from unittest.mock import patch
 
 from discord_blue.doodads.agent_session import bridge as bridge_module
@@ -40,6 +41,34 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(public.edits, edits)
         self.assertEqual(private.sent_messages, [])
         self.assertEqual(private.edits, [])
+
+    async def test_cancelled_orphan_cleanup_keeps_progress_and_defers_rediscovery(self) -> None:
+        bridge = make_bridge()
+        thread = FakeThread(501)
+        channel = FakeTextChannel(321, [thread])
+        add_bot_message(thread, 1, "Agent session connected")
+        removing = asyncio.Event()
+
+        async def blocked_members(_thread: object) -> bool:
+            removing.set()
+            await asyncio.Event().wait()
+            return True
+
+        with (
+            patch.object(bridge_module, "get_agent_session_channel", return_value=channel),
+            patch.object(bridge, "remove_thread_members", new=blocked_members),
+        ):
+            task = asyncio.create_task(bridge.cleanup_stale_session_threads())
+            await asyncio.wait_for(removing.wait(), timeout=1)
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            pending = list(bridge._pending_cleanups.values())
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0].pending_steps, {"members", "archive", "leave"})
+            self.assertFalse(thread.archived)
+            await asyncio.wait_for(bridge.cleanup_stale_session_threads(), timeout=0.1)
+        self.assertEqual(thread.sent_messages, ["Agent session disconnected"])
 
     async def test_history_scan_does_not_hold_global_attach_lock(self) -> None:
         bridge = make_bridge()
