@@ -148,6 +148,19 @@ class CleanupFailureTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(payload["status"], "unhealthy")
                 self.assertEqual(payload["components"]["agent_session"]["monitor"][component]["status"], "stalled")
 
+    async def test_startup_health_allows_full_maintenance_discovery_budget(self) -> None:
+        bridge = make_bridge()
+        with patch.object(bridge_module.time, "monotonic", return_value=100):
+            bridge._monitor_last_progress = 100
+            bridge._maintenance_last_progress = 100 - (
+                bridge_module.STARTUP_RECONNECT_GRACE_SECONDS
+                + bridge_module.MAINTENANCE_DISCOVERY_TIMEOUT_SECONDS
+                + bridge_module.SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS
+            )
+            self.assertEqual(bridge.agent_session_monitor_health()["status"], "starting")
+            bridge._maintenance_last_progress -= 10
+            self.assertEqual(bridge.agent_session_monitor_health()["status"], "stalled")
+
     async def test_socket_or_notification_timeout_still_archives_thread(self) -> None:
         for phase in ("socket", "notification"):
             with self.subTest(phase=phase):

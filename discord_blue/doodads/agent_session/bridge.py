@@ -66,6 +66,7 @@ THREAD_MEMBER_CLEANUP_TIMEOUT_SECONDS = 0.5
 THREAD_ARCHIVE_TIMEOUT_SECONDS = 0.75
 THREAD_LEAVE_TIMEOUT_SECONDS = 0.75
 MAINTENANCE_INTERVAL_SECONDS = 300
+MAINTENANCE_DISCOVERY_TIMEOUT_SECONDS = 30
 PENDING_CLEANUP_LIMIT = 256
 PENDING_CLEANUP_MAX_ATTEMPTS = 5
 SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
@@ -413,7 +414,8 @@ class AgentSessionBridge:
             has_run=self._maintenance_has_run,
             stall_threshold=(
                 (STARTUP_RECONNECT_GRACE_SECONDS if not self._maintenance_has_run else MAINTENANCE_INTERVAL_SECONDS)
-                + SESSION_FINALIZATION_TIMEOUT_SECONDS
+                + MAINTENANCE_DISCOVERY_TIMEOUT_SECONDS
+                + SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS
                 + 5
             ),
         )
@@ -644,7 +646,7 @@ class AgentSessionBridge:
         while True:
             self.record_maintenance_progress()
             try:
-                message = await asyncio.wait_for(anext(messages), timeout=30)
+                message = await asyncio.wait_for(anext(messages), timeout=MAINTENANCE_DISCOVERY_TIMEOUT_SECONDS)
             except StopAsyncIteration:
                 break
             except Exception:
@@ -722,7 +724,9 @@ class AgentSessionBridge:
             return
         self.record_maintenance_progress()
         try:
-            candidates = await asyncio.wait_for(self.session_thread_candidates(channel), timeout=30)
+            candidates = await asyncio.wait_for(
+                self.session_thread_candidates(channel), timeout=MAINTENANCE_DISCOVERY_TIMEOUT_SECONDS
+            )
         except Exception:
             logger.warning("Unable to discover archived Agent session threads; checking active threads", exc_info=True)
             candidates = list(channel.threads)
@@ -733,6 +737,10 @@ class AgentSessionBridge:
             if thread.id in seen:
                 continue
             seen.add(thread.id)
+            # Discovery must not reopen completed threads or repost a disconnect
+            # notice each sweep. Explicit residual work is retried separately.
+            if thread.archived and thread.locked:
+                continue
             if thread.id in self.sessions.by_thread:
                 continue
             try:

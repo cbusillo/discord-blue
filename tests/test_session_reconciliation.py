@@ -19,6 +19,28 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.thread_patch.stop)
         self.addCleanup(self.channel_patch.stop)
 
+    async def test_periodic_scan_does_not_reopen_finalized_archived_threads(self) -> None:
+        bridge = make_bridge()
+        # Public archives remain discoverable even after the bot leaves; joined
+        # private archives can also survive until an explicit leave retry.
+        public = FakeThread(501, private=False)
+        private = FakeThread(502, archived=True, locked=True)
+        channel = FakeTextChannel(321, [public, private])
+        for thread in (public, private):
+            add_bot_message(thread, thread.id, "Agent session connected")
+        with patch.object(bridge_module, "get_agent_session_channel", return_value=channel):
+            await bridge.cleanup_stale_session_threads()
+            self.assertTrue(public.archived)
+            self.assertTrue(public.locked)
+            notices = list(public.sent_messages)
+            edits = list(public.edits)
+            await bridge.cleanup_stale_session_threads()
+            await bridge.cleanup_stale_session_threads()
+        self.assertEqual(public.sent_messages, notices)
+        self.assertEqual(public.edits, edits)
+        self.assertEqual(private.sent_messages, [])
+        self.assertEqual(private.edits, [])
+
     async def test_history_scan_does_not_hold_global_attach_lock(self) -> None:
         bridge = make_bridge()
         channel = FakeTextChannel(321, [])
