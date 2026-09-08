@@ -7,6 +7,9 @@ import textwrap
 import unittest
 from dataclasses import replace
 from typing import Any, cast
+from collections.abc import Awaitable, Callable
+from discord_blue.doodads.agent_session.sessions import AgentSession
+import discord
 from unittest.mock import AsyncMock, patch
 
 from aiohttp import WSMsgType
@@ -14,16 +17,14 @@ from aiohttp import WSMsgType
 from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.protocol import REMOTE_ACTIONS, RemoteApprovalRequest, RemoteRequestUserInput, SessionHello
 from discord_blue.doodads.agent_session.sessions import PendingRemoteApproval
-from tests import test_prompt_identity as identity_tests
+from tests.fakes_agent_prompts import prompt_fixture
 from tests import test_session_cleanup_transport as transport_tests
 from tests.fakes_agent_session import FakeInteraction, FakeReplyMessage
 
 
 class CapabilityTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        self.fixture = identity_tests.PromptIdentityTests()
-        await self.fixture.asyncSetUp()
-        self.addCleanup(self.fixture.doCleanups)
+        self.fixture = self.enterContext(prompt_fixture())
         self.bridge, self.session = self.fixture.bridge, self.fixture.session
         self.thread, self.socket = self.fixture.thread, self.fixture.socket
         self.user = cast(Any, FakeInteraction(self.thread).user)
@@ -166,6 +167,88 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(interaction.response.messages, [("This approval is no longer active.", True)])
         self.assertEqual(self.socket.sent_json, [])
 
+    async def test_partial_capabilities_send_supported_actions_and_reject_others(self) -> None:
+        self.restrict("reply", "status_request", "pause_current_turn", "end_session")
+        message = FakeReplyMessage(2100, self.thread, "hello")
+        self.thread.add_message(message)
+        await self.bridge.send_thread_reply(cast(Any, message))
+        await self.bridge.send_pause_current_turn(self.thread, self.user)
+        await self.bridge.send_end_session(self.thread, self.user)
+        self.assertIn("does not support", await self.bridge.send_new_session(self.thread, self.user))
+        self.assertIn("does not support", await self.bridge.send_continue_autonomously(self.thread, self.user))
+        self.assertEqual([item["kind"] for item in self.socket.sent_json], ["reply", "pause_current_turn", "end_session"])
+
+    async def test_every_failure_unwinds_input_and_approval_reservations(self) -> None:
+        view = await self.fixture.prompt()
+        pending = PendingRemoteApproval(thread_id=555, message_id=950)
+        self.session.pending_approvals["approval"] = pending
+        for failure in (RuntimeError(), ValueError(), asyncio.CancelledError()):
+            for kind in ("input", "approval"):
+                with self.subTest(failure=type(failure).__name__, kind=kind):
+                    interaction = FakeInteraction(
+                        self.thread, message=FakeReplyMessage(950, self.thread) if kind == "approval" else None
+                    )
+                    with patch.object(self.socket, "send_json", new=AsyncMock(side_effect=failure)):
+                        try:
+                            if kind == "input":
+                                await view.submit(cast(Any, interaction))
+                            else:
+                                await self.bridge.handle_approval_interaction(
+                                    cast(Any, interaction),
+                                    self.session.session_id,
+                                    "approval",
+                                    "approved",
+                                    session_epoch=self.session.session_epoch,
+                                )
+                        except (ValueError, asyncio.CancelledError):
+                            pass
+                    self.assertFalse(self.session.pending_user_inputs["call-1"].submitted)
+                    self.assertIsNone(pending.decision)
+                    self.assertIsNone(pending.decided_by)
+                    self.assertEqual(self.session.pending_commands, {})
+
+    async def test_midflight_gate_and_discord_failure_unwind_queued_reply(self) -> None:
+        for failure_kind in ("closed", "discord", "runtime"):
+            with self.subTest(failure_kind=failure_kind):
+                self.socket.closed = False
+                message = FakeReplyMessage(2100, self.thread, "hello")
+                self.thread.add_message(message)
+                original = self.bridge.show_active_session_controls
+
+                async def prepare(
+                    session: AgentSession,
+                    thread: discord.Thread,
+                    reaction: str,
+                    original: Callable[[AgentSession, discord.Thread, str], Awaitable[None]] = original,
+                    failure_kind: str = failure_kind,
+                ) -> None:
+                    await original(session, thread, reaction)
+                    if failure_kind == "closed":
+                        self.socket.closed = True
+                    elif failure_kind == "discord":
+                        raise OSError("Discord I/O failed")
+                    else:
+                        raise RuntimeError("unexpected preparation failure")
+
+                with patch.object(self.bridge, "show_active_session_controls", new=prepare):
+                    try:
+                        await self.bridge.send_thread_reply(cast(Any, message))
+                    except RuntimeError:
+                        self.assertEqual(failure_kind, "runtime")
+                self.assertEqual(self.session.pending_commands, {})
+                self.assertEqual(self.socket.sent_json, [])
+                self.assertNotIn("⏳", message.reactions)
+                self.assertIsNone(self.session.control_status_reaction)
+                if failure_kind == "discord":
+                    self.assertIn("Discord could not prepare", message.replies[0])
+
+    def test_shared_fixture_restores_patch_on_exit(self) -> None:
+        original = object()
+        with patch.object(bridge_module.discord, "Thread", original):
+            with prompt_fixture():
+                self.assertIsNot(bridge_module.discord.Thread, original)
+            self.assertIs(bridge_module.discord.Thread, original)
+
     def test_outbound_wire_sends_have_one_command_and_one_approval_dispatch_gate(self) -> None:
         tree = ast.parse(textwrap.dedent(inspect.getsource(bridge_module.AgentSessionBridge)))
         senders = {
@@ -223,6 +306,15 @@ class CapabilityTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(attached.pending_commands, {})
             await old.close()
             await current.close()
+
+    async def test_legacy_ack_shape_is_unchanged(self) -> None:
+        async with transport_tests.CleanupTransportTests().transport() as (_bridge, _thread, client, _finished):
+            websocket = await client.ws_connect(
+                bridge_module.AGENT_SESSION_CONNECT_PATH, headers={"Authorization": "Bearer cleanup-transport-test"}
+            )
+            await websocket.send_json(transport_tests.CleanupTransportTests.hello())
+            self.assertEqual(await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555})
+            await websocket.close()
 
     async def test_ack_echoes_only_negotiated_capabilities(self) -> None:
         async with transport_tests.CleanupTransportTests().transport() as (bridge, _thread, client, _finished):

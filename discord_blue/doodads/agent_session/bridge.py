@@ -1251,7 +1251,17 @@ class AgentSessionBridge:
         if self.sessions.get(session.session_id) is not session or session.websocket.closed:
             return "Agent session is offline; action was not delivered."
         if not session.hello.supports(action):
-            return f"This client does not support `{action}` from Discord. Use the native TUI."
+            label = {
+                "reply": "replies",
+                "status_request": "status requests",
+                "pause_current_turn": "pausing turns",
+                "end_session": "ending sessions",
+                "new_session": "starting new sessions",
+                "continue_autonomously": "autonomous continuation",
+                "request_user_input_response": "answering prompts",
+                "approval_decision": "approval decisions",
+            }.get(action, "this action")
+            return f"This client does not support {label} from Discord. Use the native TUI."
         return None
 
     async def dispatch_command(
@@ -1268,21 +1278,26 @@ class AgentSessionBridge:
         if input_pending is not None:
             input_pending.submitted = True
         session.pending_commands[command.command_id] = pending
+        delivered = False
         try:
             if before_send is not None:
-                await before_send()
+                try:
+                    await before_send()
+                except (OSError, discord.DiscordException):
+                    return "Discord could not prepare the reply controls; reply was not sent."
             if error := self.dispatch_error(session, command.kind):
+                return error
+            try:
+                await session.websocket.send_json(command.to_message())
+            except (OSError, RuntimeError):
+                return "Agent session connection failed; action delivery could not be confirmed. Check the native TUI."
+            delivered = True
+            return None
+        finally:
+            if not delivered:
                 session.pending_commands.pop(command.command_id, None)
                 if input_pending is not None:
                     input_pending.submitted = False
-                return error
-            await session.websocket.send_json(command.to_message())
-        except ConnectionError:
-            session.pending_commands.pop(command.command_id, None)
-            if input_pending is not None:
-                input_pending.submitted = False
-            return "Agent session connection failed; action delivery could not be confirmed. Check the native TUI."
-        return None
 
     async def dispatch_approval(
         self,
@@ -1297,6 +1312,7 @@ class AgentSessionBridge:
         if pending.decision is not None:
             return "This approval has already been answered."
         pending.decision, pending.decided_by = decision, user_id
+        delivered = False
         try:
             await session.websocket.send_json(
                 RemoteApprovalDecision(
@@ -1306,9 +1322,12 @@ class AgentSessionBridge:
                     decision=decision,
                 ).to_message()
             )
-        except ConnectionError:
-            pending.decision, pending.decided_by = None, None
+            delivered = True
+        except (OSError, RuntimeError):
             return "Agent session connection failed; approval delivery could not be confirmed. Check the native TUI."
+        finally:
+            if not delivered:
+                pending.decision, pending.decided_by = None, None
         return None
 
     async def send_thread_reply(self, message: discord.Message) -> bool:
@@ -1340,11 +1359,25 @@ class AgentSessionBridge:
         )
         thread = message.channel
 
+        queued = False
+
         async def show_queued() -> None:
+            nonlocal queued
+            queued = True
             await self.set_message_reaction(thread.id, message.id, REACTION_QUEUED)
             await self.show_active_session_controls(session, thread, REACTION_QUEUED)
 
-        if error := await self.dispatch_command(session, command, pending, before_send=show_queued):
+        error = None
+        delivered = False
+        try:
+            error = await self.dispatch_command(session, command, pending, before_send=show_queued)
+            delivered = error is None
+        finally:
+            if queued and not delivered:
+                await self.clear_message_transient_reactions(thread.id, message.id)
+                if self.sessions.get(session.session_id) is session and session.control_status_reaction == REACTION_QUEUED:
+                    await self.post_session_controls(session)
+        if error is not None:
             await message.reply(error, mention_author=False)
         return True
 

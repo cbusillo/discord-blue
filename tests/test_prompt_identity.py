@@ -8,38 +8,20 @@ from typing import Any, cast
 from unittest.mock import patch
 
 from discord_blue.doodads.agent_session import bridge as bridge_module
-from discord_blue.doodads.agent_session.protocol import RemoteRequestUserInput, RequestUserInputQuestion
 from discord_blue.doodads.agent_session.sessions import AgentSession, PendingRemoteApproval
-from tests import test_session_cleanup as cleanup_tests
-from tests.fakes_agent_session import FakeInteraction, FakeReplyMessage, FakeThread, FakeWebSocket, make_hello
+from tests.fakes_agent_prompts import prompt_fixture
+from tests.fakes_agent_session import FakeInteraction, FakeReplyMessage, FakeThread, make_hello
 
 
 class PromptIdentityTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        patcher = patch.object(bridge_module.discord, "Thread", FakeThread)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        self.thread = FakeThread(555)
-        self.bridge = cleanup_tests.SessionCleanupTests.make_bridge(self.thread)
-        self.bridge.bot.config.discord.employee_role_name = ""
-        self.socket = FakeWebSocket()
-        self.session = AgentSession(hello=make_hello(), websocket=cast(Any, self.socket), thread_id=555)
-        self.bridge.sessions.register(self.session)
+        self.fixture = self.enterContext(prompt_fixture())
+        self.thread, self.socket = self.fixture.thread, self.fixture.socket
+        self.bridge, self.session = self.fixture.bridge, self.fixture.session
 
     async def prompt(self, call_id: str = "call-1") -> bridge_module.RequestUserInputView:
-        request = RemoteRequestUserInput(
-            session_id=self.session.session_id,
-            session_epoch=self.session.session_epoch,
-            call_id=call_id,
-            turn_id="turn-1",
-            questions=[
-                RequestUserInputQuestion(id="answer", header="Answer", question="Choose", is_other=True, is_secret=False, options=[])
-            ],
-        )
-        await self.bridge.handle_request_user_input(request)
-        view = cast(bridge_module.RequestUserInputView, self.thread.sent_views[-1])
-        view.set_answer("answer", "yes")
-        return view
+        self.fixture.session = self.session
+        return await self.fixture.prompt(call_id)
 
     async def test_replacement_same_turn_rejects_old_submit_and_cancel(self) -> None:
         old = await self.prompt()
