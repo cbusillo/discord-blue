@@ -8,6 +8,7 @@ import shlex
 import time
 import uuid
 import weakref
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
@@ -866,7 +867,12 @@ class AgentSessionBridge:
                         logger.warning("Rejecting a second hello on Agent session connection %s", session.session_id)
                         await websocket.close(message=b"hello already received", drain=False)
                         break
-                    hello = SessionHello.from_payload(payload)
+                    try:
+                        hello = SessionHello.from_payload(payload)
+                    except (KeyError, TypeError, ValueError, OverflowError):
+                        logger.warning("Rejecting invalid Agent session hello")
+                        await websocket.close(message=b"invalid hello", drain=False)
+                        break
                     rejecting_stopping_session = False
                     attachment_failed = False
                     session_thread: SessionThread | None = None
@@ -910,7 +916,13 @@ class AgentSessionBridge:
                         await websocket.close(message=b"bridge shutdown", drain=False)
                         break
                     if session_thread is not None:
-                        await websocket.send_json({"type": "hello_ack", "thread_id": session_thread.thread.id})
+                        await websocket.send_json(
+                            {
+                                "type": "hello_ack",
+                                "thread_id": session_thread.thread.id,
+                                **({"capabilities": sorted(hello.capabilities)} if hello.capabilities is not None else {}),
+                            }
+                        )
                 elif message_type == "heartbeat" and session is not None:
                     session.touch()
                 elif message_type == "user_message":
@@ -1235,6 +1247,89 @@ class AgentSessionBridge:
             logger.warning("Unable to inspect Agent session assistant history %s", thread.id)
         return False
 
+    def dispatch_error(self, session: AgentSession, action: str) -> str | None:
+        if self.sessions.get(session.session_id) is not session or session.websocket.closed:
+            return "Agent session is offline; action was not delivered."
+        if not session.hello.supports(action):
+            label = {
+                "reply": "replies",
+                "status_request": "status requests",
+                "pause_current_turn": "pausing turns",
+                "end_session": "ending sessions",
+                "new_session": "starting new sessions",
+                "continue_autonomously": "autonomous continuation",
+                "request_user_input_response": "answering prompts",
+                "approval_decision": "approval decisions",
+            }.get(action, "this action")
+            return f"This client does not support {label} from Discord. Use the native TUI."
+        return None
+
+    async def dispatch_command(
+        self,
+        session: AgentSession,
+        command: RemoteCommand,
+        pending: PendingRemoteCommand,
+        *,
+        input_pending: PendingRemoteUserInput | None = None,
+        before_send: Callable[[], Awaitable[None]] | None = None,
+    ) -> str | None:
+        if error := self.dispatch_error(session, command.kind):
+            return error
+        if input_pending is not None:
+            input_pending.submitted = True
+        session.pending_commands[command.command_id] = pending
+        delivered = False
+        try:
+            if before_send is not None:
+                try:
+                    await before_send()
+                except (OSError, discord.DiscordException):
+                    return "Discord could not prepare the reply controls; reply was not sent."
+            if error := self.dispatch_error(session, command.kind):
+                return error
+            try:
+                await session.websocket.send_json(command.to_message())
+            except (OSError, RuntimeError):
+                return "Agent session connection failed; action delivery could not be confirmed. Check the native TUI."
+            delivered = True
+            return None
+        finally:
+            if not delivered:
+                session.pending_commands.pop(command.command_id, None)
+                if input_pending is not None:
+                    input_pending.submitted = False
+
+    async def dispatch_approval(
+        self,
+        session: AgentSession,
+        pending: PendingRemoteApproval,
+        approval_id: str,
+        decision: Literal["approved", "denied"],
+        user_id: int,
+    ) -> str | None:
+        if error := self.dispatch_error(session, "approval_decision"):
+            return error
+        if pending.decision is not None:
+            return "This approval has already been answered."
+        pending.decision, pending.decided_by = decision, user_id
+        delivered = False
+        try:
+            await session.websocket.send_json(
+                RemoteApprovalDecision(
+                    approval_id=approval_id,
+                    session_id=session.session_id,
+                    session_epoch=session.session_epoch,
+                    decision=decision,
+                ).to_message()
+            )
+            delivered = True
+        except (OSError, RuntimeError):
+            return "Agent session connection failed; approval delivery could not be confirmed. Check the native TUI."
+        finally:
+            if not delivered:
+                pending.decision, pending.decided_by = None, None
+        return None
+
     async def send_thread_reply(self, message: discord.Message) -> bool:
         if not isinstance(message.channel, discord.Thread):
             return False
@@ -1257,14 +1352,33 @@ class AgentSessionBridge:
             text=text,
             issued_by=str(message.author.id),
         )
-        session.pending_commands[command.command_id] = PendingRemoteCommand(
+        pending = PendingRemoteCommand(
             thread_id=message.channel.id,
             message_id=message.id,
             kind="reply",
         )
-        await self.set_message_reaction(message.channel.id, message.id, REACTION_QUEUED)
-        await self.show_active_session_controls(session, message.channel, REACTION_QUEUED)
-        await session.websocket.send_json(command.to_message())
+        thread = message.channel
+
+        queued = False
+
+        async def show_queued() -> None:
+            nonlocal queued
+            queued = True
+            await self.set_message_reaction(thread.id, message.id, REACTION_QUEUED)
+            await self.show_active_session_controls(session, thread, REACTION_QUEUED)
+
+        error = None
+        delivered = False
+        try:
+            error = await self.dispatch_command(session, command, pending, before_send=show_queued)
+            delivered = error is None
+        finally:
+            if queued and not delivered:
+                await self.clear_message_transient_reactions(thread.id, message.id)
+                if self.sessions.get(session.session_id) is session and session.control_status_reaction == REACTION_QUEUED:
+                    await self.post_session_controls(session)
+        if error is not None:
+            await message.reply(error, mention_author=False)
         return True
 
     async def send_continue_autonomously(
@@ -1290,13 +1404,14 @@ class AgentSessionBridge:
             kind="continue_autonomously",
             issued_by=str(user.id),
         )
-        session.pending_commands[command.command_id] = PendingRemoteCommand(
+        pending = PendingRemoteCommand(
             thread_id=channel.id,
             message_id=session.control_message_id,
             kind="continue_autonomously",
             reject_notice="Agent session could not go ahead",
         )
-        await session.websocket.send_json(command.to_message())
+        if error := await self.dispatch_command(session, command, pending):
+            return error
         return CONTINUE_AUTONOMOUSLY_DELIVERED
 
     async def send_pause_current_turn(
@@ -1322,13 +1437,14 @@ class AgentSessionBridge:
             kind="pause_current_turn",
             issued_by=str(user.id),
         )
-        session.pending_commands[command.command_id] = PendingRemoteCommand(
+        pending = PendingRemoteCommand(
             thread_id=channel.id,
             message_id=session.control_message_id,
             kind="pause_current_turn",
             reject_notice="Agent session could not pause the current turn",
         )
-        await session.websocket.send_json(command.to_message())
+        if error := await self.dispatch_command(session, command, pending):
+            return error
         return PAUSE_CURRENT_TURN_DELIVERED
 
     async def send_new_session(
@@ -1354,13 +1470,14 @@ class AgentSessionBridge:
             kind="new_session",
             issued_by=str(user.id),
         )
-        session.pending_commands[command.command_id] = PendingRemoteCommand(
+        pending = PendingRemoteCommand(
             thread_id=channel.id,
             message_id=session.control_message_id,
             kind="new_session",
             reject_notice="Agent session could not start a new session",
         )
-        await session.websocket.send_json(command.to_message())
+        if error := await self.dispatch_command(session, command, pending):
+            return error
         return "Asked the agent session to start a new session in this folder."
 
     async def send_end_session(
@@ -1386,13 +1503,14 @@ class AgentSessionBridge:
             kind="end_session",
             issued_by=str(user.id),
         )
-        session.pending_commands[command.command_id] = PendingRemoteCommand(
+        pending = PendingRemoteCommand(
             thread_id=channel.id,
             message_id=session.control_message_id,
             kind="end_session",
             reject_notice="Agent session could not end the session",
         )
-        await session.websocket.send_json(command.to_message())
+        if error := await self.dispatch_command(session, command, pending):
+            return error
         return "Asked the agent session to end this session."
 
     async def handle_go_ahead_interaction(
@@ -1534,6 +1652,12 @@ class AgentSessionBridge:
             logger.warning("Agent session approval for stale session epoch: %s", approval.session_id)
             return
 
+        if not session.hello.supports("approval_decision"):
+            await self.post_thread_notice(
+                session.thread_id, "Action required in the native TUI; this client does not support answering from Discord."
+            )
+            return
+
         channel = self.bot.get_channel(session.thread_id)
         if not isinstance(channel, discord.Thread):
             return
@@ -1567,6 +1691,12 @@ class AgentSessionBridge:
             session,
             "Agent session is waiting on a newer prompt.",
         )
+
+        if not session.hello.supports("request_user_input_response"):
+            await self.post_thread_notice(
+                session.thread_id, "Action required in the native TUI; this client does not support answering from Discord."
+            )
+            return
 
         channel = self.bot.get_channel(session.thread_id)
         if not isinstance(channel, discord.Thread):
@@ -1608,6 +1738,9 @@ class AgentSessionBridge:
                 ephemeral=True,
             )
             return None
+        if error := self.dispatch_error(session, "request_user_input_response"):
+            await interaction.response.send_message(error, ephemeral=True)
+            return None
         pending = session.pending_user_inputs.get(call_id)
         if (
             session.session_epoch != session_epoch
@@ -1648,28 +1781,29 @@ class AgentSessionBridge:
         if context is None:
             return
         session, pending = context
-        # Reserve before the first I/O so simultaneous Submit/Cancel clicks send once.
-        pending.submitted = True
         command_id = str(uuid.uuid4())
-        session.pending_commands[command_id] = PendingRemoteCommand(
+        pending_command = PendingRemoteCommand(
             thread_id=pending.thread_id,
             message_id=pending.message_id,
             kind="request_user_input_response",
         )
-        await session.websocket.send_json(
-            RemoteCommand(
-                command_id=command_id,
-                session_id=session.session_id,
-                session_epoch=session.session_epoch,
-                kind="request_user_input_response",
-                call_id=call_id,
-                turn_id=turn_id,
-                response=response,
-                issued_by=str(interaction.user.id),
-            ).to_message()
+        command = RemoteCommand(
+            command_id=command_id,
+            session_id=session.session_id,
+            session_epoch=session.session_epoch,
+            kind="request_user_input_response",
+            call_id=call_id,
+            turn_id=turn_id,
+            response=response,
+            issued_by=str(interaction.user.id),
         )
+        if error := await self.dispatch_command(session, command, pending_command, input_pending=pending):
+            await interaction.response.send_message(error, ephemeral=True)
+            return
         if self.sessions.get(session_id) is not session or session.pending_user_inputs.get(call_id) is not pending:
-            await interaction.response.send_message("This prompt is no longer active.", ephemeral=True)
+            await interaction.response.send_message(
+                "Answer sent; this prompt is no longer active. Check the native TUI for its outcome.", ephemeral=True
+            )
             return
         await interaction.response.edit_message(
             content=self.format_request_user_input_pending(interaction.user, cancelled=cancelled),
@@ -1683,6 +1817,8 @@ class AgentSessionBridge:
         session_id: str,
         approval_id: str,
         decision: Literal["approved", "denied"],
+        *,
+        session_epoch: str,
     ) -> None:
         if not self.is_operator(interaction.user):
             await interaction.response.send_message(
@@ -1700,7 +1836,13 @@ class AgentSessionBridge:
             return
 
         pending = session.pending_approvals.get(approval_id)
-        if pending is None:
+        if (
+            pending is None
+            or session.session_epoch != session_epoch
+            or interaction.message is None
+            or interaction.message.id != pending.message_id
+            or getattr(interaction.channel, "id", None) != pending.thread_id
+        ):
             await interaction.response.send_message(
                 "This approval is no longer active.",
                 ephemeral=True,
@@ -1711,16 +1853,9 @@ class AgentSessionBridge:
             await interaction.response.send_message("This approval has already been answered.", ephemeral=True)
             return
 
-        pending.decision = decision
-        pending.decided_by = interaction.user.id
-        await session.websocket.send_json(
-            RemoteApprovalDecision(
-                approval_id=approval_id,
-                session_id=session.session_id,
-                session_epoch=session.session_epoch,
-                decision=decision,
-            ).to_message()
-        )
+        if error := await self.dispatch_approval(session, pending, approval_id, decision, interaction.user.id):
+            await interaction.response.send_message(error, ephemeral=True)
+            return
         await interaction.response.edit_message(
             content=self.format_approval_pending(decision, interaction.user),
             view=None,
@@ -1806,6 +1941,10 @@ class AgentSessionBridge:
                 await self.post_thread_notice(thread.id, response)
             return True
         if emoji == REACTION_CONTROL_END:
+            if error := self.dispatch_error(session, "end_session"):
+                await self.remove_message_reaction(thread, message_id, emoji, user)
+                await self.post_thread_notice(thread.id, error)
+                return True
             session.pending_control_confirmation = "end_session"
             await self.refresh_session_controls(
                 session,
@@ -1891,16 +2030,9 @@ class AgentSessionBridge:
         else:
             decision = "denied"
 
-        pending.decision = decision
-        pending.decided_by = user.id
-        await session.websocket.send_json(
-            RemoteApprovalDecision(
-                approval_id=approval_id,
-                session_id=session.session_id,
-                session_epoch=session.session_epoch,
-                decision=decision,
-            ).to_message()
-        )
+        if error := await self.dispatch_approval(session, pending, approval_id, decision, user.id):
+            await self.post_thread_notice(thread.id, error)
+            return True
         await self.edit_approval_message(
             pending,
             self.format_approval_pending(decision, user),
@@ -2716,7 +2848,7 @@ class AgentSessionBridge:
 
     @staticmethod
     def session_control_reactions(session: AgentSession) -> list[str]:
-        if session.pending_control_confirmation is not None:
+        if session.pending_control_confirmation is not None and session.hello.supports("end_session"):
             return [REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY]
         if session.control_status_reaction is not None:
             active_command = (
@@ -2733,16 +2865,20 @@ class AgentSessionBridge:
                 REACTION_COMPACTING,
             }
             if status_can_be_interrupted and (session.control_interruptions_enabled or command_can_be_interrupted):
-                return [
-                    session.control_status_reaction,
-                    REACTION_CONTROL_PAUSE,
-                    REACTION_CONTROL_END,
+                return [session.control_status_reaction] + [
+                    emoji
+                    for emoji, action in [(REACTION_CONTROL_PAUSE, "pause_current_turn"), (REACTION_CONTROL_END, "end_session")]
+                    if session.hello.supports(action)
                 ]
             return [session.control_status_reaction]
         return [
-            REACTION_CONTROL_CONTINUE,
-            REACTION_CONTROL_STATUS,
-            REACTION_CONTROL_END,
+            emoji
+            for emoji, action in [
+                (REACTION_CONTROL_CONTINUE, "continue_autonomously"),
+                (REACTION_CONTROL_STATUS, None),
+                (REACTION_CONTROL_END, "end_session"),
+            ]
+            if action is None or session.hello.supports(action)
         ]
 
     async def refresh_session_controls(

@@ -109,6 +109,7 @@ class DevAdapter:
         self.hello = self.event(
             "hello",
             host_label="Codex Lab dev adapter",
+            capabilities=["reply", "status_request", "pause_current_turn", "end_session"],
             cwd=thread.get("cwd", ""),
             branch=(thread.get("gitInfo") or {}).get("branch"),
             pid=os.getpid(),

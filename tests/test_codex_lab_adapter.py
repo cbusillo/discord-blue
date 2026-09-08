@@ -191,6 +191,7 @@ class AdapterAttachTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(adapter.hello["type"], "hello")
+        self.assertEqual(adapter.hello["capabilities"], ["reply", "status_request", "pause_current_turn", "end_session"])
         self.assertEqual(adapter.hello["cwd"], "/workspace/project")
         self.assertEqual(adapter.hello["branch"], "feature/adapter")
         self.assertNotIn("assistant_message", adapter.hello)

@@ -4,6 +4,32 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
+# Actions a client can accept; omitted capabilities retain the legacy contract.
+REMOTE_ACTIONS = frozenset(
+    {
+        "reply",
+        "status_request",
+        "pause_current_turn",
+        "end_session",
+        "new_session",
+        "continue_autonomously",
+        "request_user_input_response",
+        "approval_decision",
+    }
+)
+
+
+def parse_capabilities(payload: dict[str, Any]) -> frozenset[str] | None:
+    if "capabilities" not in payload:
+        return None
+    value = payload["capabilities"]
+    if not isinstance(value, list) or len(value) > 32:
+        raise ValueError("capabilities must be an array of at most 32 strings")
+    if any(not isinstance(item, str) or len(item) > 64 for item in value):
+        raise ValueError("capabilities entries must be strings of at most 64 characters")
+    return frozenset(value) & REMOTE_ACTIONS
+
+
 @dataclass(slots=True)
 class SessionOrigin:
     kind: str
@@ -38,6 +64,10 @@ class SessionHello:
     pid: int
     origin: SessionOrigin | None = None
     assistant_message: str | None = None
+    capabilities: frozenset[str] | None = None
+
+    def supports(self, action: str) -> bool:
+        return action in REMOTE_ACTIONS and (self.capabilities is None or action in self.capabilities)
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "SessionHello":
@@ -50,6 +80,7 @@ class SessionHello:
             cwd=str(payload.get("cwd") or ""),
             branch=str(payload["branch"]) if payload.get("branch") else None,
             pid=int(payload.get("pid") or 0),
+            capabilities=parse_capabilities(payload),
             origin=origin,
             assistant_message=str(payload["assistant_message"]) if payload.get("assistant_message") else None,
         )
