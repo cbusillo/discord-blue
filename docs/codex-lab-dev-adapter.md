@@ -89,7 +89,9 @@ Approval and input payloads, including secret prompts, are not forwarded. The
 adapter never answers an app-server approval request. App-server sends those
 requests to all subscribers and the first response wins; its resolution event
 does not identify the winning client or decision. A future remote approval UI
-needs neutral resolution semantics before it can attribute decisions honestly.
+can use the bridge's neutral `approval_resolved` and `request_user_input_resolved`
+events to retire prompts without attributing a winning decision. The development
+adapter continues to withhold these prompts and does not enable remote answers.
 
 ## Recovery and limits
 
