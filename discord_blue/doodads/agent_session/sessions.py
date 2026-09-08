@@ -68,6 +68,30 @@ class AgentSession:
         self.last_seen = datetime.now(UTC)
 
 
+CleanupStep = Literal[
+    "notification",
+    "disconnect_notice",
+    "members",
+    "archive",
+    "leave",
+]
+
+
+@dataclass(slots=True)
+class PendingSessionCleanup:
+    session_id: str
+    session_epoch: str
+    thread_id: int | None
+    notification_message_id: int | None
+    pending_steps: set[CleanupStep]
+    attempts: int = 0
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    @property
+    def key(self) -> tuple[str, str, int | None]:
+        return self.session_id, self.session_epoch, self.thread_id
+
+
 class AgentSessionRegistry:
     def __init__(self) -> None:
         self.by_session: dict[str, AgentSession] = {}
@@ -100,6 +124,12 @@ class AgentSessionRegistry:
 
     def get(self, session_id: str) -> AgentSession | None:
         return self.by_session.get(session_id)
+
+    def live_sessions(self) -> list[AgentSession]:
+        return [session for session in self.by_session.values() if not session.websocket.closed]
+
+    def disconnected_sessions(self) -> list[AgentSession]:
+        return [session for session in self.by_session.values() if session.websocket.closed]
 
     def remove(self, session_id: str) -> AgentSession | None:
         session = self.by_session.pop(session_id, None)

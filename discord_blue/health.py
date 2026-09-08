@@ -59,21 +59,33 @@ def health_payload(
     discord_status: Literal["ok", "unhealthy"],
     agent_session_enabled: bool = False,
     active_agent_sessions: int = 0,
+    disconnected_agent_sessions: int | None = None,
+    pending_agent_session_cleanups: int | None = None,
+    agent_session_monitor: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    monitor_status = agent_session_monitor.get("status") if agent_session_monitor is not None else None
+    agent_session_unhealthy = agent_session_enabled and monitor_status in {"dead", "stalled"}
     payload: dict[str, Any] = {
         "schema_version": 1,
         "service": SERVICE_NAME,
-        "status": "ok" if discord_status == "ok" else "unhealthy",
+        "status": "ok" if discord_status == "ok" and not agent_session_unhealthy else "unhealthy",
         "version": package_version(),
         "components": {
             "discord": {"status": discord_status},
             "agent_session": {
-                "status": "ok" if agent_session_enabled else "disabled",
+                "status": "unhealthy" if agent_session_unhealthy else "ok" if agent_session_enabled else "disabled",
                 "enabled": agent_session_enabled,
                 "active_sessions": active_agent_sessions,
             },
         },
     }
+    agent_session_component = payload["components"]["agent_session"]
+    if disconnected_agent_sessions is not None:
+        agent_session_component["disconnected_sessions"] = disconnected_agent_sessions
+    if pending_agent_session_cleanups is not None:
+        agent_session_component["pending_cleanups"] = pending_agent_session_cleanups
+    if agent_session_monitor is not None:
+        agent_session_component["monitor"] = agent_session_monitor
     current_source_git_ref = source_git_ref()
     if current_source_git_ref is not None:
         payload["source_git_ref"] = current_source_git_ref

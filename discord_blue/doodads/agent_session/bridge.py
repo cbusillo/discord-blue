@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import shlex
+import time
 import uuid
 import weakref
 from contextlib import suppress
@@ -30,6 +31,8 @@ from discord_blue.doodads.agent_session.protocol import (
 from discord_blue.doodads.agent_session.sessions import (
     AgentSession,
     AgentSessionRegistry,
+    CleanupStep,
+    PendingSessionCleanup,
     PendingRemoteApproval,
     PendingRemoteCommand,
     PendingRemoteUserInput,
@@ -52,9 +55,33 @@ DISCORD_MESSAGE_LIMIT = 2000
 DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
 DISCORD_CODE_FENCE_WRAP_RESERVE = 80
 STARTUP_RECONNECT_GRACE_SECONDS = 20
-SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 2
+SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 2
+SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS = 3
+SESSION_THREAD_CLEANUP_TIMEOUT_SECONDS = 3
+SESSION_FINALIZATION_TIMEOUT_SECONDS = 8
+THREAD_LOOKUP_TIMEOUT_SECONDS = 0.25
+THREAD_UNARCHIVE_TIMEOUT_SECONDS = 0.25
+THREAD_DISCONNECT_NOTICE_TIMEOUT_SECONDS = 0.5
+THREAD_MEMBER_CLEANUP_TIMEOUT_SECONDS = 0.5
+THREAD_ARCHIVE_TIMEOUT_SECONDS = 0.75
+THREAD_LEAVE_TIMEOUT_SECONDS = 0.75
+MAINTENANCE_INTERVAL_SECONDS = 300
+PENDING_CLEANUP_LIMIT = 256
+PENDING_CLEANUP_MAX_ATTEMPTS = 5
+SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
 SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = 5
-SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS = 5
+SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS = SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS + SESSION_THREAD_CLEANUP_TIMEOUT_SECONDS
+
+assert SESSION_FINALIZATION_TIMEOUT_SECONDS < SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS
+assert (
+    THREAD_LOOKUP_TIMEOUT_SECONDS
+    + THREAD_UNARCHIVE_TIMEOUT_SECONDS
+    + THREAD_DISCONNECT_NOTICE_TIMEOUT_SECONDS
+    + THREAD_MEMBER_CLEANUP_TIMEOUT_SECONDS
+    + THREAD_ARCHIVE_TIMEOUT_SECONDS
+    + THREAD_LEAVE_TIMEOUT_SECONDS
+    <= SESSION_THREAD_CLEANUP_TIMEOUT_SECONDS
+)
 AGENT_SESSION_CONNECT_PATH = "/agent-session/connect"
 SESSION_START_PREFIX = "Agent session connected"
 SESSION_NOTIFICATION_PREFIX = "Agent session connected for "
@@ -276,6 +303,14 @@ class AgentSessionBridge:
         # No await occurs while resolving the entry, so one event loop turn
         # cannot create two locks for the same session ID.
         self._session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        # As above, lock creation is synchronous within one event loop turn.
+        self._thread_lifecycle_locks: weakref.WeakValueDictionary[int, asyncio.Lock] = weakref.WeakValueDictionary()
+        self._pending_cleanups: dict[tuple[str, str, int | None], PendingSessionCleanup] = {}
+        self._monitor_started_at = time.monotonic()
+        self._monitor_last_progress = self._monitor_started_at
+        self._monitor_has_run = False
+        self._maintenance_last_progress = self._monitor_started_at
+        self._maintenance_has_run = False
         self._stopping = False
 
     def session_lifecycle_lock(self, session_id: str) -> asyncio.Lock:
@@ -285,10 +320,22 @@ class AgentSessionBridge:
             self._session_lifecycle_locks[session_id] = lock
         return lock
 
+    def thread_lifecycle_lock(self, thread_id: int) -> asyncio.Lock:
+        lock = self._thread_lifecycle_locks.get(thread_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._thread_lifecycle_locks[thread_id] = lock
+        return lock
+
     async def start(self) -> None:
         if self._runner is not None:
             return
         self._stopping = False
+        self._monitor_started_at = time.monotonic()
+        self._monitor_last_progress = self._monitor_started_at
+        self._monitor_has_run = False
+        self._maintenance_last_progress = self._monitor_started_at
+        self._maintenance_has_run = False
 
         app = web.Application()
         self.register_routes(app)
@@ -314,14 +361,74 @@ class AgentSessionBridge:
 
     async def handle_health(self, _request: web.Request) -> web.Response:
         discord_ready = self.discord_ready()
+        monitor = self.agent_session_monitor_health()
+        monitor_healthy = not self.bot.config.agent_session.enabled or monitor["status"] not in {"dead", "stalled"}
         return web.json_response(
             health_payload(
                 discord_status="ok" if discord_ready else "unhealthy",
                 agent_session_enabled=self.bot.config.agent_session.enabled,
-                active_agent_sessions=len(self.sessions.by_session),
+                active_agent_sessions=len(self.sessions.live_sessions()),
+                disconnected_agent_sessions=len(self.sessions.disconnected_sessions()),
+                pending_agent_session_cleanups=len(self._pending_cleanups),
+                agent_session_monitor=monitor,
             ),
-            status=200 if discord_ready else 503,
+            status=200 if discord_ready and monitor_healthy else 503,
         )
+
+    def background_task_health(
+        self,
+        task: asyncio.Task[None] | None,
+        *,
+        last_progress: float,
+        has_run: bool,
+        stall_threshold: float,
+    ) -> dict[str, object]:
+        elapsed = max(0.0, time.monotonic() - last_progress)
+        if self._stopping:
+            status = "stopped"
+        elif task is not None and task.done():
+            status = "dead"
+        elif elapsed > stall_threshold:
+            status = "stalled"
+        elif not has_run:
+            status = "starting"
+        else:
+            status = "ok"
+        return {
+            "status": status,
+            "seconds_since_progress": round(elapsed, 3),
+        }
+
+    def agent_session_monitor_health(self) -> dict[str, object]:
+        heartbeat_interval = getattr(self.bot.config.agent_session, "heartbeat_check_interval_seconds", 30)
+        heartbeat = self.background_task_health(
+            self._heartbeat_task,
+            last_progress=self._monitor_last_progress,
+            has_run=self._monitor_has_run,
+            stall_threshold=heartbeat_interval + SESSION_FINALIZATION_TIMEOUT_SECONDS + 5,
+        )
+        maintenance = self.background_task_health(
+            self._cleanup_task,
+            last_progress=self._maintenance_last_progress,
+            has_run=self._maintenance_has_run,
+            stall_threshold=(
+                (STARTUP_RECONNECT_GRACE_SECONDS if not self._maintenance_has_run else MAINTENANCE_INTERVAL_SECONDS)
+                + SESSION_FINALIZATION_TIMEOUT_SECONDS
+                + 5
+            ),
+        )
+        statuses = {heartbeat["status"], maintenance["status"]}
+        if "dead" in statuses:
+            status = "dead"
+        elif "stalled" in statuses:
+            status = "stalled"
+        elif statuses == {"stopped"}:
+            status = "stopped"
+        elif "starting" in statuses:
+            status = "starting"
+        else:
+            status = "ok"
+        return {"status": status, "heartbeat": heartbeat, "maintenance": maintenance}
 
     def discord_ready(self) -> bool:
         if self.bot.user is None:
@@ -336,16 +443,10 @@ class AgentSessionBridge:
         if self._runner is None:
             return
         self._stopping = True
-        if self._cleanup_task is not None:
-            self._cleanup_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._cleanup_task
-            self._cleanup_task = None
-        if self._heartbeat_task is not None:
-            self._heartbeat_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._heartbeat_task
-            self._heartbeat_task = None
+        await self.stop_background_task("maintenance", self._cleanup_task)
+        self._cleanup_task = None
+        await self.stop_background_task("heartbeat", self._heartbeat_task)
+        self._heartbeat_task = None
         await self.disconnect_active_sessions()
         try:
             await asyncio.wait_for(self._runner.cleanup(), timeout=SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS)
@@ -355,38 +456,93 @@ class AgentSessionBridge:
             self._runner = None
             self._site = None
 
+    @staticmethod
+    async def stop_background_task(name: str, task: asyncio.Task[None] | None) -> None:
+        if task is None:
+            return
+        task.cancel()
+        result = (await asyncio.gather(task, return_exceptions=True))[0]
+        if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+            logger.warning("Agent session %s task failed before shutdown: %r", name, result)
+
     async def disconnect_active_sessions(self) -> None:
         async with self._session_attach_lock:
-            close_tasks: list[asyncio.Task[None]] = []
-            for session_id in list(self.sessions.by_session):
-                session = self.sessions.remove(session_id)
-                if session is None:
-                    continue
-                close_tasks.append(asyncio.create_task(self.disconnect_active_session(session_id, session)))
+            sessions = list(self.sessions.by_session.values())
 
-            if close_tasks:
-                await asyncio.gather(*close_tasks)
+        close_tasks = [
+            asyncio.create_task(self.finalize_session(session, close_message=b"bridge shutdown", shutdown=True))
+            for session in sessions
+        ]
+        results = await asyncio.gather(*close_tasks, return_exceptions=True)
+        for session, result in zip(sessions, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning("Unable to disconnect Agent session %s during shutdown: %r", session.session_id, result)
 
     async def disconnect_active_session(self, session_id: str, session: AgentSession) -> None:
-        if not session.websocket.closed:
-            await self.close_session_websocket(session_id, session)
-        try:
-            await asyncio.wait_for(
-                self.close_session_thread(session),
-                timeout=SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS,
-            )
-        except (TimeoutError, asyncio.TimeoutError):
-            logger.warning("Agent session thread cleanup for %s timed out during shutdown", session_id)
+        del session_id
+        await self.finalize_session(session, close_message=b"bridge shutdown", shutdown=True)
+
+    async def finalize_session(
+        self,
+        session: AgentSession,
+        *,
+        close_message: bytes = b"session disconnected",
+        shutdown: bool = False,
+    ) -> bool:
+        lifecycle_lock = self.session_lifecycle_lock(session.session_id)
+        async with lifecycle_lock:
+            removed = self.sessions.remove_if_current(session)
+            if removed is None:
+                return False
+
+            fallback_cleanup = self.pending_cleanup_for_session(removed)
+            try:
+                websocket_timeout = SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS if shutdown else SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
+                if not removed.websocket.closed:
+                    await self.close_session_websocket(
+                        removed.session_id,
+                        removed,
+                        message=close_message,
+                        timeout=websocket_timeout,
+                    )
+
+                try:
+                    residual = await asyncio.wait_for(
+                        self.close_session_thread(removed),
+                        timeout=SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS,
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        "Agent session thread cleanup for %s timed out%s",
+                        removed.session_id,
+                        " during shutdown" if shutdown else "",
+                    )
+                    residual = fallback_cleanup
+            except asyncio.CancelledError:
+                self.remember_pending_cleanup(fallback_cleanup)
+                raise
+            except Exception:
+                self.remember_pending_cleanup(fallback_cleanup)
+                raise
+            if residual is not None:
+                self.remember_pending_cleanup(residual)
+            return True
 
     @staticmethod
-    async def close_session_websocket(session_id: str, session: AgentSession) -> None:
+    async def close_session_websocket(
+        session_id: str,
+        session: AgentSession,
+        *,
+        message: bytes,
+        timeout: float,
+    ) -> None:
         try:
             await asyncio.wait_for(
-                session.websocket.close(message=b"bridge shutdown", drain=False),
-                timeout=SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS,
+                session.websocket.close(message=message, drain=False),
+                timeout=timeout,
             )
-        except (OSError, TimeoutError, asyncio.TimeoutError, RuntimeError, discord.DiscordException):
-            logger.warning("Unable to close Agent session websocket %s during shutdown", session_id, exc_info=True)
+        except Exception:
+            logger.warning("Unable to close Agent session websocket %s", session_id, exc_info=True)
 
     @staticmethod
     def payload_string(payload: dict[str, object], key: str, default: str = "") -> str:
@@ -398,141 +554,218 @@ class AgentSessionBridge:
         return str(value)
 
     async def close_active_sessions(self) -> None:
-        for session_id in list(self.sessions.by_session):
-            session = self.sessions.remove(session_id)
-            if session is not None:
-                await self.close_session_thread(session)
+        await self.disconnect_active_sessions()
 
     async def cleanup_stale_sessions(self) -> None:
         await asyncio.sleep(STARTUP_RECONNECT_GRACE_SECONDS)
-        await self.cleanup_stale_session_notifications()
-        await self.cleanup_stale_session_threads()
+        while True:
+            self.record_maintenance_progress()
+            try:
+                await self.retry_pending_cleanups()
+                await self.cleanup_stale_session_notifications()
+                await self.cleanup_stale_session_threads()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Agent session maintenance iteration failed")
+            finally:
+                self._maintenance_has_run = True
+                self.record_maintenance_progress()
+            await asyncio.sleep(MAINTENANCE_INTERVAL_SECONDS)
 
     async def monitor_heartbeats(self) -> None:
         while True:
             await asyncio.sleep(self.bot.config.agent_session.heartbeat_check_interval_seconds)
-            await self.close_timed_out_sessions()
+            self.record_monitor_progress()
+            try:
+                await self.close_timed_out_sessions()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Agent session heartbeat iteration failed")
+            finally:
+                self._monitor_has_run = True
+                self.record_monitor_progress()
+
+    def record_monitor_progress(self) -> None:
+        self._monitor_last_progress = time.monotonic()
+
+    def record_maintenance_progress(self) -> None:
+        self._maintenance_last_progress = time.monotonic()
 
     async def close_timed_out_sessions(self) -> None:
         timeout = timedelta(seconds=self.bot.config.agent_session.heartbeat_timeout_seconds)
         now = datetime.now(UTC)
         for session_id, session in list(self.sessions.by_session.items()):
-            if now - session.last_seen <= timeout:
+            if not session.websocket.closed and now - session.last_seen <= timeout:
                 continue
             lifecycle_lock = self.session_lifecycle_lock(session_id)
             if lifecycle_lock.locked():
                 continue
-            await lifecycle_lock.acquire()
             try:
-                if self.sessions.get(session_id) is not session or now - session.last_seen <= timeout:
-                    continue
-                removed = self.sessions.remove_if_current(session)
-                if removed is None:
-                    continue
-
-                logger.warning(
-                    "Agent session %s timed out after %s seconds without heartbeat",
-                    session_id,
-                    self.bot.config.agent_session.heartbeat_timeout_seconds,
-                )
-                await removed.websocket.close(message=b"heartbeat timeout")
-                await self.close_session_thread(removed)
+                if session.websocket.closed:
+                    close_message = b"session disconnected"
+                else:
+                    close_message = b"heartbeat timeout"
+                    logger.warning(
+                        "Agent session %s timed out after %s seconds without heartbeat",
+                        session_id,
+                        self.bot.config.agent_session.heartbeat_timeout_seconds,
+                    )
+                await self.finalize_session(session, close_message=close_message)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Unable to finalize stale Agent session %s", session_id)
             finally:
-                lifecycle_lock.release()
+                self.record_monitor_progress()
 
     async def cleanup_stale_session_notifications(self) -> None:
+        # Let an in-flight attachment finish, but never hold this global lock
+        # over channel history or Discord mutations. Thread locks fence those.
         async with self._session_attach_lock:
-            await self.cleanup_stale_session_notifications_locked()
+            pass
+        await self.cleanup_stale_session_notifications_locked()
 
     async def cleanup_stale_session_notifications_locked(self) -> None:
+        # Historical name retained for callers; mutation uses per-thread locks.
         try:
-            channel = await get_agent_session_channel(self.bot)
-        except ValueError:
-            logger.warning("Unable to clean Agent session notifications: channel is unavailable")
+            channel = await asyncio.wait_for(get_agent_session_channel(self.bot), timeout=3)
+        except Exception:
+            logger.warning("Unable to clean Agent session notifications: channel is unavailable", exc_info=True)
             return
-
         bot_user = self.bot.user
         if bot_user is None:
             return
 
-        deleted = 0
-        deferred_live_notices: dict[int, list[discord.Message]] = {}
-        stored_live_notice_thread_ids: set[int] = set()
-        try:
-            async for message in channel.history(limit=None):
-                if message.author.id != bot_user.id:
+        deferred: dict[int, list[discord.Message]] = {}
+        observed: dict[int, tuple[AgentSession, int | None]] = {}
+        messages = channel.history(limit=None).__aiter__()
+        while True:
+            self.record_maintenance_progress()
+            try:
+                message = await asyncio.wait_for(anext(messages), timeout=30)
+            except StopAsyncIteration:
+                break
+            except Exception:
+                logger.warning("Unable to scan Agent session channel for stale notifications", exc_info=True)
+                return
+            if message.author.id != bot_user.id or not message.content.startswith(SESSION_NOTIFICATION_PREFIXES):
+                continue
+            thread_id = self.notification_thread_id(message.content)
+            if thread_id is None:
+                await self.delete_discovered_notification(message, None)
+                continue
+            lock = self.thread_lifecycle_lock(thread_id)
+            if lock.locked():
+                continue
+            async with lock:
+                session = self.sessions.get_by_thread(thread_id)
+                if session is None:
+                    await self.delete_discovered_notification(message, thread_id)
+                else:
+                    deferred.setdefault(thread_id, []).append(message)
+                    observed.setdefault(thread_id, (session, session.notification_message_id))
+
+        for thread_id, notices in deferred.items():
+            self.record_maintenance_progress()
+            lock = self.thread_lifecycle_lock(thread_id)
+            if lock.locked():
+                continue
+            async with lock:
+                if self._session_attach_lock.locked():
                     continue
-                if not message.content.startswith(SESSION_NOTIFICATION_PREFIXES):
-                    continue
-                thread_id = self.notification_thread_id(message.content)
-                if thread_id is not None:
-                    session = self.sessions.get_by_thread(thread_id)
-                    if session is not None:
-                        if session.notification_message_id == message.id:
-                            stored_live_notice_thread_ids.add(thread_id)
-                            continue
-                        deferred_live_notices.setdefault(thread_id, []).append(message)
+                current = self.sessions.get_by_thread(thread_id)
+                old_session, old_notice = observed[thread_id]
+                if current is old_session and current.notification_message_id == old_notice:
+                    ids = {notice.id for notice in notices}
+                    if current.notification_message_id not in ids:
+                        # Only adopt if neither the connection nor its notice
+                        # changed during discovery. Reconnect always wins.
+                        current.notification_message_id = notices[0].id
+            for notice in notices:
+                self.record_maintenance_progress()
+                if lock.locked():
+                    break
+                async with lock:
+                    current = self.sessions.get_by_thread(thread_id)
+                    if current is not None and current.notification_message_id == notice.id:
                         continue
-                try:
-                    await message.delete()
-                    deleted += 1
-                except discord.DiscordException:
-                    logger.warning(
-                        "Unable to delete stale Agent session notification %s",
-                        message.id,
-                    )
-        except discord.DiscordException:
-            logger.warning("Unable to scan Agent session channel for stale notifications")
+                    await self.delete_discovered_notification(notice, thread_id)
+
+    async def delete_discovered_notification(self, message: discord.Message, thread_id: int | None) -> None:
+        if self._session_attach_lock.locked():
+            # A newly created thread can have a notice before bind_thread runs.
             return
-
-        for thread_id, messages in deferred_live_notices.items():
-            session = self.sessions.get_by_thread(thread_id)
-            if session is None or thread_id in stored_live_notice_thread_ids:
-                keep_message: discord.Message | None = None
-            else:
-                keep_message = messages[0]
-                session.notification_message_id = messages[0].id
-            for message in messages:
-                if message is keep_message:
-                    continue
-                try:
-                    await message.delete()
-                    deleted += 1
-                except discord.DiscordException:
-                    logger.warning(
-                        "Unable to delete stale Agent session notification %s",
-                        message.id,
-                    )
-
-        if deleted:
-            logger.info("Deleted %s stale Agent session notification(s)", deleted)
+        try:
+            await asyncio.wait_for(message.delete(), timeout=SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS)
+        except discord.NotFound:
+            return
+        except Exception:
+            logger.warning("Unable to delete stale Agent session notification %s", message.id, exc_info=True)
+            self.remember_pending_cleanup(
+                PendingSessionCleanup(
+                    session_id=f"orphan-notification-{message.id}",
+                    session_epoch="orphan",
+                    thread_id=thread_id,
+                    notification_message_id=message.id,
+                    pending_steps={"notification"},
+                )
+            )
 
     async def cleanup_stale_session_threads(self) -> None:
+        self.record_maintenance_progress()
         try:
-            channel = await get_agent_session_channel(self.bot)
-        except ValueError:
-            logger.warning("Unable to clean Agent session threads: channel is unavailable")
+            channel = await asyncio.wait_for(get_agent_session_channel(self.bot), timeout=3)
+        except Exception:
+            logger.warning("Unable to clean Agent session threads: channel is unavailable", exc_info=True)
             return
+        self.record_maintenance_progress()
+        try:
+            candidates = await asyncio.wait_for(self.session_thread_candidates(channel), timeout=30)
+        except Exception:
+            logger.warning("Unable to discover archived Agent session threads; checking active threads", exc_info=True)
+            candidates = list(channel.threads)
 
-        candidates = await self.session_thread_candidates(channel)
-
-        closed = 0
         seen: set[int] = set()
         for thread in candidates:
+            self.record_maintenance_progress()
             if thread.id in seen:
                 continue
             seen.add(thread.id)
             if thread.id in self.sessions.by_thread:
                 continue
-            if not await self.is_agent_session_session_thread(thread):
+            try:
+                matches = await asyncio.wait_for(self.is_agent_session_session_thread(thread), timeout=3)
+            except Exception:
+                logger.warning("Unable to inspect stale Agent session thread %s", thread.id, exc_info=True)
                 continue
-            if thread.id in self.sessions.by_thread:
+            if not matches:
                 continue
-            await self.close_thread(thread)
-            closed += 1
-
-        if closed:
-            logger.info("Closed %s stale Agent session thread(s)", closed)
+            lock = self.thread_lifecycle_lock(thread.id)
+            if lock.locked():
+                continue
+            async with lock:
+                if thread.id in self.sessions.by_thread or self._session_attach_lock.locked():
+                    # Creation may have published a marker before binding its
+                    # thread. Defer rather than racing an in-flight attachment.
+                    continue
+                try:
+                    remaining = await asyncio.wait_for(self.close_thread(thread), timeout=SESSION_THREAD_CLEANUP_TIMEOUT_SECONDS)
+                except Exception:
+                    logger.warning("Unable to close stale Agent session thread %s", thread.id, exc_info=True)
+                    remaining = {"disconnect_notice", "members", "archive", "leave"}
+                if remaining:
+                    self.remember_pending_cleanup(
+                        PendingSessionCleanup(
+                            session_id=f"orphan-thread-{thread.id}",
+                            session_epoch="orphan",
+                            thread_id=thread.id,
+                            notification_message_id=None,
+                            pending_steps=remaining,
+                        )
+                    )
+            self.record_maintenance_progress()
 
     async def is_agent_session_session_thread(self, thread: discord.Thread) -> bool:
         bot_user = self.bot.user
@@ -556,129 +789,151 @@ class AgentSessionBridge:
         await websocket.prepare(request)
         session: AgentSession | None = None
 
-        async for message in websocket:
-            if message.type != WSMsgType.TEXT:
-                continue
-            try:
-                payload = json.loads(message.data)
-            except json.JSONDecodeError:
-                logger.warning("Invalid Agent session bridge JSON: %s", message.data)
-                continue
+        try:
+            async for message in websocket:
+                if message.type != WSMsgType.TEXT:
+                    continue
+                try:
+                    payload = json.loads(message.data)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "Invalid Agent session bridge JSON type=%s length=%s",
+                        type(message.data).__name__,
+                        len(message.data),
+                    )
+                    continue
+                if not isinstance(payload, dict):
+                    logger.warning("Ignoring non-object Agent session bridge JSON type=%s", type(payload).__name__)
+                    continue
 
-            message_type = payload.get("type")
-            if message_type != "hello" and (
-                session is None
-                or self.sessions.get(session.session_id) is not session
-                or payload.get("session_id") != session.session_id
-                or payload.get("session_epoch") != session.session_epoch
-            ):
-                logger.warning(
-                    "Ignoring Agent session event %r for %r/%r outside connection %r/%r",
-                    message_type,
-                    payload.get("session_id"),
-                    payload.get("session_epoch"),
-                    session.session_id if session is not None else None,
-                    session.session_epoch if session is not None else None,
-                )
-                continue
-            if message_type == "hello":
-                hello = SessionHello.from_payload(payload)
-                rejecting_stopping_session = False
-                attachment_failed = False
-                session_thread: SessionThread | None = None
-                lifecycle_lock = self.session_lifecycle_lock(hello.session_id)
-                try:
-                    await asyncio.wait_for(lifecycle_lock.acquire(), timeout=SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS)
-                except TimeoutError:
-                    logger.warning("Timed out waiting to attach Agent session %s", hello.session_id)
-                    await websocket.close(message=b"session cleanup still in progress", drain=False)
-                    break
-                try:
-                    async with self._session_attach_lock:
-                        if self._stopping:
-                            rejecting_stopping_session = True
-                        else:
-                            session = AgentSession(hello=hello, websocket=websocket)
-                            self.sessions.register(session)
-                            try:
-                                session_thread = await self.find_or_create_session_thread(hello)
-                            except (discord.DiscordException, ValueError):
-                                logger.warning("Unable to attach Discord thread for Agent session %s", hello.session_id)
-                                self.sessions.remove_if_current(session)
-                                session = None
-                                attachment_failed = True
+                message_type = payload.get("type")
+                if message_type != "hello" and (
+                    session is None
+                    or self.sessions.get(session.session_id) is not session
+                    or payload.get("session_id") != session.session_id
+                    or payload.get("session_epoch") != session.session_epoch
+                ):
+                    logger.warning(
+                        "Ignoring Agent session event %r for %r/%r outside connection %r/%r",
+                        message_type,
+                        payload.get("session_id"),
+                        payload.get("session_epoch"),
+                        session.session_id if session is not None else None,
+                        session.session_epoch if session is not None else None,
+                    )
+                    continue
+                if message_type == "hello":
+                    if session is not None:
+                        logger.warning("Rejecting a second hello on Agent session connection %s", session.session_id)
+                        await websocket.close(message=b"hello already received", drain=False)
+                        break
+                    hello = SessionHello.from_payload(payload)
+                    rejecting_stopping_session = False
+                    attachment_failed = False
+                    session_thread: SessionThread | None = None
+                    lifecycle_lock = self.session_lifecycle_lock(hello.session_id)
+                    try:
+                        await asyncio.wait_for(lifecycle_lock.acquire(), timeout=SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS)
+                    except TimeoutError:
+                        logger.warning("Timed out waiting to attach Agent session %s", hello.session_id)
+                        await websocket.close(message=b"session cleanup still in progress", drain=False)
+                        break
+                    try:
+                        async with self._session_attach_lock:
+                            if self._stopping:
+                                rejecting_stopping_session = True
                             else:
-                                self.sessions.bind_thread(
-                                    hello.session_id,
-                                    session_thread.thread.id,
-                                    session_thread.notification_message_id,
-                                )
-                                await self.backfill_latest_assistant_message(
-                                    session_thread.thread,
-                                    hello,
-                                )
-                finally:
-                    lifecycle_lock.release()
-                if attachment_failed:
-                    await websocket.close(message=b"unable to attach Discord thread", drain=False)
-                    break
-                if rejecting_stopping_session:
-                    await websocket.close(message=b"bridge shutdown", drain=False)
-                    break
-                if session_thread is not None:
-                    await websocket.send_json({"type": "hello_ack", "thread_id": session_thread.thread.id})
-            elif message_type == "heartbeat" and session is not None:
-                session.touch()
-            elif message_type == "user_message":
-                user_message = UserMessage.from_payload(payload)
-                await self.handle_user_message(user_message)
-            elif message_type in {"status_changed", "turn_complete", "error"}:
-                status = SessionStatus.from_payload(payload)
-                await self.handle_session_status(message_type, status)
-            elif message_type == "approval_request":
-                approval = RemoteApprovalRequest.from_payload(payload)
-                await self.handle_approval_request(approval)
-            elif message_type == "request_user_input":
-                request_user_input = RemoteRequestUserInput.from_payload(payload)
-                await self.handle_request_user_input(request_user_input)
-            elif message_type == "approval_decision_ack":
-                logger.info("Agent session approval decision ack: %s", payload.get("approval_id"))
-                await self.handle_approval_decision_ack(payload)
-            elif message_type == "approval_decision_reject":
-                logger.warning("Agent session approval decision reject: %s", payload)
-                await self.handle_approval_decision_reject(payload)
-            elif message_type == "command_ack":
-                logger.info("Agent session command ack: %s", payload.get("command_id"))
-                await self.handle_command_ack(payload)
-            elif message_type == "command_reject":
-                logger.warning("Agent session command reject: %s", payload)
-                await self.handle_command_reject(payload)
-
-        if session is not None:
-            lifecycle_lock = self.session_lifecycle_lock(session.session_id)
-            async with lifecycle_lock:
-                removed = self.sessions.remove_if_current(session)
-                if removed is not None:
-                    await self.close_session_thread(removed)
+                                session = AgentSession(hello=hello, websocket=websocket)
+                                self.sessions.register(session)
+                                try:
+                                    session_thread = await self.find_or_create_session_thread(hello)
+                                except (discord.DiscordException, ValueError):
+                                    logger.warning("Unable to attach Discord thread for Agent session %s", hello.session_id)
+                                    self.sessions.remove_if_current(session)
+                                    session = None
+                                    attachment_failed = True
+                                else:
+                                    self.sessions.bind_thread(
+                                        hello.session_id,
+                                        session_thread.thread.id,
+                                        session_thread.notification_message_id,
+                                    )
+                                    await self.backfill_latest_assistant_message(
+                                        session_thread.thread,
+                                        hello,
+                                    )
+                    finally:
+                        lifecycle_lock.release()
+                    if attachment_failed:
+                        await websocket.close(message=b"unable to attach Discord thread", drain=False)
+                        break
+                    if rejecting_stopping_session:
+                        await websocket.close(message=b"bridge shutdown", drain=False)
+                        break
+                    if session_thread is not None:
+                        await websocket.send_json({"type": "hello_ack", "thread_id": session_thread.thread.id})
+                elif message_type == "heartbeat" and session is not None:
+                    session.touch()
+                elif message_type == "user_message":
+                    user_message = UserMessage.from_payload(payload)
+                    await self.handle_user_message(user_message)
+                elif message_type in {"status_changed", "turn_complete", "error"}:
+                    status = SessionStatus.from_payload(payload)
+                    await self.handle_session_status(message_type, status)
+                elif message_type == "approval_request":
+                    approval = RemoteApprovalRequest.from_payload(payload)
+                    await self.handle_approval_request(approval)
+                elif message_type == "request_user_input":
+                    request_user_input = RemoteRequestUserInput.from_payload(payload)
+                    await self.handle_request_user_input(request_user_input)
+                elif message_type == "approval_decision_ack":
+                    logger.info("Agent session approval decision ack: %s", payload.get("approval_id"))
+                    await self.handle_approval_decision_ack(payload)
+                elif message_type == "approval_decision_reject":
+                    logger.warning("Agent session approval decision reject: %s", payload)
+                    await self.handle_approval_decision_reject(payload)
+                elif message_type == "command_ack":
+                    logger.info("Agent session command ack: %s", payload.get("command_id"))
+                    await self.handle_command_ack(payload)
+                elif message_type == "command_reject":
+                    logger.warning("Agent session command reject: %s", payload)
+                    await self.handle_command_reject(payload)
+        finally:
+            if session is not None:
+                await self.finalize_session(session)
 
         return websocket
 
     async def find_or_create_session_thread(self, hello: SessionHello) -> SessionThread:
         thread = await self.find_existing_session_thread(hello)
         if thread is None:
-            return await create_session_thread(self.bot, hello)
+            session_thread = await create_session_thread(self.bot, hello)
+            thread_lock = self.thread_lifecycle_lock(session_thread.thread.id)
+            async with thread_lock:
+                self.sessions.bind_thread(
+                    hello.session_id,
+                    session_thread.thread.id,
+                    session_thread.notification_message_id,
+                )
+            return session_thread
 
-        if thread.archived or thread.locked:
-            await thread.edit(
-                archived=False,
-                locked=False,
-                reason="Reattaching live Agent session after bridge restart",
-            )
-        if thread.is_private():
-            await thread.join()
-        await auto_join_configured_users(self.bot, thread)
-        notification_message_id = await self.ensure_session_notification(hello, thread)
-        return SessionThread(thread=thread, notification_message_id=notification_message_id)
+        thread_lock = self.thread_lifecycle_lock(thread.id)
+        async with thread_lock:
+            mapped_session_id = self.sessions.by_thread.get(thread.id)
+            if mapped_session_id is not None and mapped_session_id != hello.session_id:
+                raise ValueError(f"Agent session thread {thread.id} is already attached")
+            if thread.archived or thread.locked:
+                await thread.edit(
+                    archived=False,
+                    locked=False,
+                    reason="Reattaching live Agent session after bridge restart",
+                )
+            if thread.is_private():
+                await thread.join()
+            await auto_join_configured_users(self.bot, thread)
+            notification_message_id = await self.ensure_session_notification(hello, thread)
+            self.sessions.bind_thread(hello.session_id, thread.id, notification_message_id)
+            return SessionThread(thread=thread, notification_message_id=notification_message_id)
 
     async def ensure_session_notification(self, hello: SessionHello, thread: discord.Thread) -> int | None:
         existing_message_id = await self.find_session_notification_for_thread(thread.id)
@@ -1134,7 +1389,7 @@ class AgentSessionBridge:
         )
 
     def active_sessions_summary(self) -> str:
-        sessions = list(self.sessions.by_session.values())
+        sessions = self.sessions.live_sessions()
         if not sessions:
             return "No live agent sessions."
 
@@ -1142,8 +1397,7 @@ class AgentSessionBridge:
         for session in sessions:
             title = session_thread_name(session.hello)
             thread = f" <#{session.thread_id}>" if session.thread_id is not None else ""
-            state = "offline" if session.websocket.closed else "online"
-            lines.append(f"- `{title}` ({state}, {session.hello.host_label}){thread}")
+            lines.append(f"- `{title}` (online, {session.hello.host_label}){thread}")
         return "\n".join(lines)
 
     def session_status_summary(
@@ -1960,74 +2214,232 @@ class AgentSessionBridge:
                 text[:DISCORD_MESSAGE_LIMIT],
             )
 
-    async def close_session_thread(self, session: AgentSession) -> None:
-        if session.notification_message_id is not None:
-            await self.delete_session_notification(session.notification_message_id)
+    @staticmethod
+    def pending_cleanup_for_session(session: AgentSession) -> PendingSessionCleanup:
+        pending_steps: set[CleanupStep] = set()
+        if session.notification_message_id is not None or session.thread_id is not None:
+            pending_steps.add("notification")
+        if session.thread_id is not None:
+            pending_steps.update({"disconnect_notice", "members", "archive", "leave"})
+        return PendingSessionCleanup(
+            session_id=session.session_id,
+            session_epoch=session.session_epoch,
+            thread_id=session.thread_id,
+            notification_message_id=session.notification_message_id,
+            pending_steps=pending_steps,
+        )
 
-        if session.thread_id is None:
+    def remember_pending_cleanup(self, cleanup: PendingSessionCleanup) -> None:
+        if not cleanup.pending_steps:
             return
-
-        if session.notification_message_id is None:
-            await self.delete_session_notification_for_thread(session.thread_id)
-
-        thread = await self.get_thread(session.thread_id)
-        if thread is None:
+        existing = self._pending_cleanups.get(cleanup.key)
+        if existing is not None:
+            existing.pending_steps.update(cleanup.pending_steps)
+            existing.notification_message_id = cleanup.notification_message_id or existing.notification_message_id
             return
+        if len(self._pending_cleanups) >= PENDING_CLEANUP_LIMIT:
+            logger.warning(
+                "Dropping Agent session cleanup retry for %s/%s because the %s-record limit was reached; "
+                "periodic orphan reconciliation remains enabled",
+                cleanup.session_id,
+                cleanup.session_epoch,
+                PENDING_CLEANUP_LIMIT,
+            )
+            return
+        self._pending_cleanups[cleanup.key] = cleanup
 
-        await self.close_thread(thread)
+    async def retry_pending_cleanups(self) -> None:
+        for key, cleanup in list(self._pending_cleanups.items()):
+            self.record_maintenance_progress()
+            lifecycle_lock = self.session_lifecycle_lock(cleanup.session_id)
+            if lifecycle_lock.locked():
+                continue
+            async with lifecycle_lock:
+                current = self.sessions.get(cleanup.session_id)
+                if current is not None and current.thread_id == cleanup.thread_id:
+                    self._pending_cleanups.pop(key, None)
+                    continue
+                cleanup.attempts += 1
+                try:
+                    residual = await self.cleanup_session_artifacts(cleanup)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Agent session cleanup retry failed for %s/%s",
+                        cleanup.session_id,
+                        cleanup.session_epoch,
+                    )
+                    residual = cleanup
+                if residual is None:
+                    self._pending_cleanups.pop(key, None)
+                elif cleanup.attempts >= PENDING_CLEANUP_MAX_ATTEMPTS:
+                    self._pending_cleanups.pop(key, None)
+                    logger.warning(
+                        "Dropping exhausted Agent session cleanup retry for %s/%s steps=%s; "
+                        "periodic orphan reconciliation remains enabled",
+                        cleanup.session_id,
+                        cleanup.session_epoch,
+                        sorted(cleanup.pending_steps),
+                    )
 
-    async def close_thread(self, thread: discord.Thread) -> None:
-        if thread.archived:
-            try:
-                await thread.edit(
-                    archived=False,
-                    locked=False,
-                    reason="Preparing to close Agent session thread",
+    async def close_session_thread(self, session: AgentSession) -> PendingSessionCleanup | None:
+        return await self.cleanup_session_artifacts(self.pending_cleanup_for_session(session))
+
+    async def cleanup_session_artifacts(self, cleanup: PendingSessionCleanup) -> PendingSessionCleanup | None:
+        if not cleanup.pending_steps:
+            return None
+        thread_lock = self.thread_lifecycle_lock(cleanup.thread_id) if cleanup.thread_id is not None else None
+        if thread_lock is None:
+            return await self.cleanup_session_artifacts_locked(cleanup)
+        async with thread_lock:
+            assert cleanup.thread_id is not None
+            owner = self.sessions.get_by_thread(cleanup.thread_id)
+            if owner is not None:
+                duplicate_notice = (
+                    "notification" in cleanup.pending_steps
+                    and cleanup.notification_message_id is not None
+                    and cleanup.notification_message_id != owner.notification_message_id
                 )
-            except discord.DiscordException:
-                logger.warning("Unable to unarchive Agent session thread %s", thread.id)
+                if not duplicate_notice:
+                    return None
+                cleanup.pending_steps = {"notification"}
+            return await self.cleanup_session_artifacts_locked(cleanup)
 
-        try:
-            await send_agent_session_message(
-                thread,
-                "Agent session disconnected",
-            )
-        except discord.DiscordException:
-            logger.warning("Unable to post close notice in Agent session thread %s", thread.id)
-        await self.remove_thread_members(thread)
+    async def cleanup_session_artifacts_locked(
+        self,
+        cleanup: PendingSessionCleanup,
+    ) -> PendingSessionCleanup | None:
+        remaining = set(cleanup.pending_steps)
+        if "notification" in remaining:
+            try:
+                if cleanup.notification_message_id is not None:
+                    deleted = await asyncio.wait_for(
+                        self.delete_session_notification(cleanup.notification_message_id),
+                        timeout=SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS,
+                    )
+                elif cleanup.thread_id is not None:
+                    deleted = await asyncio.wait_for(
+                        self.delete_session_notification_for_thread(cleanup.thread_id),
+                        timeout=SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS,
+                    )
+                else:
+                    deleted = True
+            except TimeoutError:
+                deleted = False
+                logger.warning("Agent session notification cleanup timed out for %s", cleanup.session_id)
+            except Exception:
+                deleted = False
+                logger.warning("Agent session notification cleanup failed for %s", cleanup.session_id, exc_info=True)
+            if deleted:
+                remaining.discard("notification")
 
-        try:
-            await thread.edit(
-                archived=True,
-                locked=True,
-                reason="Agent session disconnected",
-            )
-        except discord.DiscordException:
-            logger.warning("Unable to archive Agent session thread %s", thread.id)
+        thread_steps = remaining & {"disconnect_notice", "members", "archive", "leave"}
+        if cleanup.thread_id is not None and thread_steps:
+            try:
+                thread, resolved = await asyncio.wait_for(
+                    self.get_thread_for_cleanup(cleanup.thread_id),
+                    timeout=THREAD_LOOKUP_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                thread, resolved = None, False
+                logger.warning("Agent session thread lookup timed out for %s", cleanup.thread_id)
+            if resolved and thread is None:
+                remaining.difference_update(thread_steps)
+            elif thread is not None:
+                remaining.difference_update(thread_steps)
+                remaining.update(await self.close_thread(thread, thread_steps))
 
-        try:
-            await thread.leave()
-        except discord.DiscordException:
-            logger.warning("Unable to leave Agent session thread %s", thread.id)
+        cleanup.pending_steps = remaining
+        return cleanup if remaining else None
 
-    async def delete_session_notification(self, message_id: int) -> None:
+    async def close_thread(
+        self,
+        thread: discord.Thread,
+        pending_steps: set[CleanupStep] | None = None,
+    ) -> set[CleanupStep]:
+        steps = set(pending_steps or {"disconnect_notice", "members", "archive", "leave"})
+        remaining: set[CleanupStep] = set()
+        if thread.archived and steps & {"disconnect_notice", "members"}:
+            steps.update({"archive", "leave"})
+            try:
+                await asyncio.wait_for(
+                    thread.edit(
+                        archived=False,
+                        locked=False,
+                        reason="Preparing to close Agent session thread",
+                    ),
+                    timeout=THREAD_UNARCHIVE_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                logger.warning("Unable to unarchive Agent session thread %s", thread.id, exc_info=True)
+
+        if "disconnect_notice" in steps:
+            try:
+                await asyncio.wait_for(
+                    send_agent_session_message(thread, "Agent session disconnected"),
+                    timeout=THREAD_DISCONNECT_NOTICE_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                remaining.add("disconnect_notice")
+                logger.warning("Unable to post close notice in Agent session thread %s", thread.id, exc_info=True)
+        if "members" in steps:
+            try:
+                members_removed = await asyncio.wait_for(
+                    self.remove_thread_members(thread),
+                    timeout=THREAD_MEMBER_CLEANUP_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                members_removed = False
+                logger.warning("Unable to remove Agent session thread members from %s", thread.id, exc_info=True)
+            if not members_removed:
+                remaining.add("members")
+        if "archive" in steps:
+            try:
+                await asyncio.wait_for(
+                    thread.edit(
+                        archived=True,
+                        locked=True,
+                        reason="Agent session disconnected",
+                    ),
+                    timeout=THREAD_ARCHIVE_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                remaining.add("archive")
+                logger.warning("Unable to archive Agent session thread %s", thread.id, exc_info=True)
+        if "leave" in steps:
+            if "archive" in remaining:
+                remaining.add("leave")
+            else:
+                try:
+                    await asyncio.wait_for(thread.leave(), timeout=THREAD_LEAVE_TIMEOUT_SECONDS)
+                except Exception:
+                    remaining.add("leave")
+                    logger.warning("Unable to leave Agent session thread %s", thread.id, exc_info=True)
+        return remaining
+
+    async def delete_session_notification(self, message_id: int) -> bool:
         try:
             channel = await get_agent_session_channel(self.bot)
             message = await channel.fetch_message(message_id)
             await message.delete()
+        except discord.NotFound:
+            return True
         except (discord.DiscordException, ValueError):
             logger.warning("Unable to delete Agent session notification message %s", message_id)
+            return False
+        return True
 
-    async def delete_session_notification_for_thread(self, thread_id: int) -> None:
+    async def delete_session_notification_for_thread(self, thread_id: int) -> bool:
         try:
             channel = await get_agent_session_channel(self.bot)
         except ValueError:
             logger.warning("Unable to delete Agent session notification for thread %s: channel is unavailable", thread_id)
-            return
+            return False
 
         bot_user = self.bot.user
         if bot_user is None:
-            return
+            return False
 
         mention = f"<#{thread_id}>"
         try:
@@ -2039,9 +2451,24 @@ class AgentSessionBridge:
                 if mention not in message.content:
                     continue
                 await message.delete()
-                return
+                return True
         except discord.DiscordException:
             logger.warning("Unable to delete Agent session notification for thread %s", thread_id)
+            return False
+        return True
+
+    async def get_thread_for_cleanup(self, thread_id: int) -> tuple[discord.Thread | None, bool]:
+        channel = self.bot.get_channel(thread_id)
+        if isinstance(channel, discord.Thread):
+            return channel, True
+        try:
+            fetched = await self.bot.fetch_channel(thread_id)
+        except discord.NotFound:
+            return None, True
+        except discord.DiscordException:
+            logger.warning("Unable to fetch Agent session thread %s for cleanup", thread_id)
+            return None, False
+        return (fetched, True) if isinstance(fetched, discord.Thread) else (None, True)
 
     async def get_thread(self, thread_id: int) -> discord.Thread | None:
         channel = self.bot.get_channel(thread_id)
@@ -2053,12 +2480,14 @@ class AgentSessionBridge:
             return None
         return fetched if isinstance(fetched, discord.Thread) else None
 
-    async def remove_thread_members(self, thread: discord.Thread) -> None:
+    async def remove_thread_members(self, thread: discord.Thread) -> bool:
         bot_user = self.bot.user
         bot_user_id = bot_user.id if bot_user is not None else None
+        success = True
         try:
             members = await thread.fetch_members()
         except discord.DiscordException:
+            success = False
             members = thread.members
 
         for member in members:
@@ -2067,11 +2496,13 @@ class AgentSessionBridge:
             try:
                 await thread.remove_user(discord.Object(id=member.id))
             except discord.DiscordException:
+                success = False
                 logger.warning(
                     "Unable to remove user %s from Agent session thread %s",
                     member.id,
                     thread.id,
                 )
+        return success
 
     def is_operator(self, user: discord.User | discord.Member) -> bool:
         role_name = self.bot.config.agent_session.operator_role_name or self.bot.config.discord.employee_role_name

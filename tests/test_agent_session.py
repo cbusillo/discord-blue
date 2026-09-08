@@ -1503,6 +1503,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             websocket=FakeWebSocket(closed=True),
             thread_id=555,
         )
+        bridge.sessions.register(session)
 
         async def slow_close_thread(_session: object) -> None:
             await asyncio.sleep(60)
