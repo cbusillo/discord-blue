@@ -96,6 +96,26 @@ it has no assistant message. It is not a transcript replay protocol. A new chat
 gets a new session ID. The client must reject controls for stale epochs and avoid
 executing a repeated command ID twice.
 
+### Client capabilities
+
+A client may include `capabilities` in `hello`: an array of accepted outbound
+action names from the Server controls table, plus `approval_decision`. Omission
+preserves the legacy full control surface; `[]` allows no remote actions. A
+present field must be an array of at most 32 strings, each at most 64 characters.
+Malformed values (including null) close the connection before thread lookup.
+Unknown strings are ignored, duplicates collapse, and `hello_ack` echoes the
+recognized list when capabilities were supplied. Legacy acknowledgements omit it.
+
+Capabilities apply to the current connection. They describe supported features;
+they do not grant authorization or replace operator and session identity checks.
+Discord filters actionable controls, preserves status indicators and local
+`/code status`, and checks every outbound action again at dispatch. Unsupported
+thread replies are handled with a visible notice and no queued reaction or
+command. Unsupported approval/input events produce a generic native-TUI notice
+without rendering their payloads or collecting answers. Stale controls cannot
+bypass a restricted connection. Connection failures are reported as unconfirmed
+delivery; check the native TUI before retrying.
+
 ## Client events
 
 All session events carry `session_id` and `session_epoch`. Field shapes live in

@@ -151,19 +151,27 @@ class PromptIdentityTests(unittest.IsolatedAsyncioTestCase):
                     started.set()
                     await release.wait()
 
-                first_interaction = FakeInteraction(self.thread)
+                first_interaction = FakeInteraction(self.thread, message=FakeReplyMessage(901, self.thread))
                 with patch.object(self.socket, "send_json", new=send):
                     first = asyncio.create_task(
                         self.bridge.handle_approval_interaction(
-                            cast(Any, first_interaction), self.session.session_id, "approval", "approved"
+                            cast(Any, first_interaction),
+                            self.session.session_id,
+                            "approval",
+                            "approved",
+                            session_epoch=self.session.session_epoch,
                         )
                     )
                     try:
                         await asyncio.wait_for(started.wait(), 1)
-                        second = FakeInteraction(self.thread, user_id=456)
+                        second = FakeInteraction(self.thread, user_id=456, message=FakeReplyMessage(901, self.thread))
                         if second_kind == "button":
                             await self.bridge.handle_approval_interaction(
-                                cast(Any, second), self.session.session_id, "approval", "denied"
+                                cast(Any, second),
+                                self.session.session_id,
+                                "approval",
+                                "denied",
+                                session_epoch=self.session.session_epoch,
                             )
                         else:
                             await self.bridge.handle_approval_reaction(

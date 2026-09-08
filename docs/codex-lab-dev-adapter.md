@@ -60,6 +60,14 @@ embedded mode. Production wiring must follow Launchplane's authorization plan.
 
 ## Behavior
 
+The adapter advertises `reply`, `status_request`, `pause_current_turn`, and
+`end_session` in its hello. Discord hides unsupported remote actions and rejects
+stale controls before queueing them; global slash commands remain registered and
+explain when the attached client cannot perform them. The adapter also retains
+its own rejection checks when connected to an older bridge. Discord's status
+command is a local summary; the adapter's `status_request` action additionally
+checks app-server responsiveness.
+
 | Discord action | Development adapter behavior |
 | --- | --- |
 | Thread reply | Starts a turn when idle; steers the observed active turn using its ID. |

@@ -840,7 +840,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         async def connect(client: TestClient, session_hello: SessionHelloType) -> ClientWebSocketResponse:
             ws = await client.ws_connect("/agent-session/connect", headers={"Authorization": "Bearer transport-test-token"})
-            await ws.send_json({"type": "hello", **asdict(session_hello)})
+            await ws.send_json(
+                {"type": "hello", **{key: value for key, value in asdict(session_hello).items() if key != "capabilities"}}
+            )
             return ws
 
         class ProductionCleanupTestServer(TestServer):
@@ -974,7 +976,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 "/agent-session/connect",
                 headers={"Authorization": "Bearer transport-test-token"},
             )
-            await websocket.send_json({"type": "hello", **asdict(hello)})
+            await websocket.send_json(
+                {"type": "hello", **{key: value for key, value in asdict(hello).items() if key != "capabilities"}}
+            )
             message = await websocket.receive(timeout=2)
 
         self.assertIn(message.type, {WSMsgType.CLOSE, WSMsgType.CLOSED})
@@ -998,7 +1002,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 "/agent-session/connect",
                 headers={"Authorization": "Bearer transport-test-token"},
             )
-            await websocket.send_json({"type": "hello", **asdict(hello)})
+            await websocket.send_json(
+                {"type": "hello", **{key: value for key, value in asdict(hello).items() if key != "capabilities"}}
+            )
             message = await websocket.receive(timeout=2)
 
         self.assertIn(message.type, {WSMsgType.CLOSE, WSMsgType.CLOSED})
@@ -2436,13 +2442,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
         session.pending_approvals["approval-1"] = PendingRemoteApproval(thread_id=555, message_id=901)
-        interaction = FakeInteraction(thread)
+        interaction = FakeInteraction(thread, message=FakeReplyMessage(901, thread))
 
         await bridge.handle_approval_interaction(
             cast(Any, interaction),
             "session-1",
             "approval-1",
             "approved",
+            session_epoch="epoch-1",
         )
 
         self.assertIn("Approval sent", interaction.response.edits[0][0])
