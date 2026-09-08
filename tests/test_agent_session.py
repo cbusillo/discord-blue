@@ -728,7 +728,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("approval-1", session.pending_approvals)
             self.assertIn("Approval sent", message.content)
             await self.send_transport_event(bridge, websocket, {"type": "approval_decision_ack", "approval_id": "approval-1"})
-            self.assertEqual(message.content, "**Approved**\nby: `123`")
+            self.assertEqual(message.content, "**Submitted: approved**\nby: `123`")
             self.assertEqual(session.pending_approvals, {})
 
     async def test_websocket_user_input_submit_and_cancel(self) -> None:
@@ -2482,7 +2482,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        self.assertEqual(approval_message.content, "**Approved**\nby: `123`")
+        self.assertEqual(approval_message.content, "**Submitted: approved**\nby: `123`")
         self.assertEqual(approval_message.reactions, [])
         self.assertEqual(session.pending_approvals, {})
 

@@ -158,12 +158,7 @@ class RequestUserInputSelect(discord.ui.Select[discord.ui.View]):
         if value == "__other__":
             await interaction.response.send_modal(RequestUserInputAnswerModal(self.parent_view, self.question))
             return
-        self.parent_view.set_answer(self.question.id, value)
-        await interaction.response.edit_message(
-            content=self.parent_view.format_prompt(),
-            view=self.parent_view,
-            allowed_mentions=agent_session_allowed_mentions(),
-        )
+        await self.parent_view.edit_answer(interaction, self.question.id, value)
 
 
 class RequestUserInputAnswerModal(discord.ui.Modal):
@@ -188,14 +183,7 @@ class RequestUserInputAnswerModal(discord.ui.Modal):
         self.add_item(self.answer)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        if not await self.parent_view.interaction_check(interaction):
-            return
-        self.parent_view.set_answer(self.question.id, self.answer.value.strip())
-        await interaction.response.edit_message(
-            content=self.parent_view.format_prompt(),
-            view=self.parent_view,
-            allowed_mentions=agent_session_allowed_mentions(),
-        )
+        await self.parent_view.edit_answer(interaction, self.question.id, self.answer.value.strip())
 
 
 class RequestUserInputAnswerButton(discord.ui.Button[discord.ui.View]):
@@ -268,6 +256,28 @@ class RequestUserInputView(discord.ui.View):
             )
             is not None
         )
+
+    async def edit_answer(self, interaction: discord.Interaction, question_id: str, answer: str) -> None:
+        context = await self.bridge.user_input_context(
+            cast(discord.Interaction[BlueBot], interaction),
+            self.session_id,
+            self.request.session_epoch,
+            self.request.call_id,
+            self.request.turn_id,
+            self.message_id,
+        )
+        if context is None:
+            return
+        _, pending = context
+        async with pending.ui_lock:
+            if not await self.interaction_check(interaction):
+                return
+            self.set_answer(question_id, answer)
+            await interaction.response.edit_message(
+                content=self.format_prompt(),
+                view=self,
+                allowed_mentions=agent_session_allowed_mentions(),
+            )
 
     def set_answer(self, question_id: str, answer: str) -> None:
         self.answers[question_id] = answer
@@ -923,6 +933,8 @@ class AgentSessionBridge:
                                 **({"capabilities": sorted(hello.capabilities)} if hello.capabilities is not None else {}),
                             }
                         )
+                elif message_type in {"approval_resolved", "request_user_input_resolved"}:
+                    await self.handle_prompt_resolved(message_type, payload)
                 elif message_type == "heartbeat" and session is not None:
                     session.touch()
                 elif message_type == "user_message":
@@ -1630,6 +1642,12 @@ class AgentSessionBridge:
         command: PendingRemoteCommand,
         reaction: str,
     ) -> None:
+        if command.input_prompt is not None:
+            async with command.input_prompt.ui_lock:
+                if command.input_prompt.retired:
+                    return
+                await self.set_message_reaction(command.thread_id, command.input_prompt.message_id, reaction)
+            return
         if command.message_id is None:
             return
         if command.message_id == session.control_message_id:
@@ -1750,6 +1768,7 @@ class AgentSessionBridge:
             or getattr(interaction.channel, "id", None) != pending.thread_id
             or (interaction.message is not None and interaction.message.id != message_id)
             or pending.submitted
+            or pending.retired
         ):
             await interaction.response.send_message(
                 "This prompt is no longer active.",
@@ -1786,6 +1805,7 @@ class AgentSessionBridge:
             thread_id=pending.thread_id,
             message_id=pending.message_id,
             kind="request_user_input_response",
+            input_prompt=pending,
         )
         command = RemoteCommand(
             command_id=command_id,
@@ -1800,16 +1820,21 @@ class AgentSessionBridge:
         if error := await self.dispatch_command(session, command, pending_command, input_pending=pending):
             await interaction.response.send_message(error, ephemeral=True)
             return
-        if self.sessions.get(session_id) is not session or session.pending_user_inputs.get(call_id) is not pending:
-            await interaction.response.send_message(
-                "Answer sent; this prompt is no longer active. Check the native TUI for its outcome.", ephemeral=True
+        async with pending.ui_lock:
+            if (
+                pending.retired
+                or self.sessions.get(session_id) is not session
+                or session.pending_user_inputs.get(call_id) is not pending
+            ):
+                await interaction.response.send_message(
+                    "Answer sent; this prompt is no longer active. Check the native TUI for its outcome.", ephemeral=True
+                )
+                return
+            await interaction.response.edit_message(
+                content=self.format_request_user_input_pending(interaction.user, cancelled=cancelled),
+                view=None,
+                allowed_mentions=agent_session_allowed_mentions(),
             )
-            return
-        await interaction.response.edit_message(
-            content=self.format_request_user_input_pending(interaction.user, cancelled=cancelled),
-            view=None,
-            allowed_mentions=agent_session_allowed_mentions(),
-        )
 
     async def handle_approval_interaction(
         self,
@@ -1856,11 +1881,17 @@ class AgentSessionBridge:
         if error := await self.dispatch_approval(session, pending, approval_id, decision, interaction.user.id):
             await interaction.response.send_message(error, ephemeral=True)
             return
-        await interaction.response.edit_message(
-            content=self.format_approval_pending(decision, interaction.user),
-            view=None,
-            allowed_mentions=agent_session_allowed_mentions(),
-        )
+        async with pending.ui_lock:
+            if pending.retired or self.sessions.get(session_id) is not session:
+                await interaction.response.send_message(
+                    "Decision sent; this approval is no longer active. Check the native TUI for its outcome.", ephemeral=True
+                )
+                return
+            await interaction.response.edit_message(
+                content=self.format_approval_pending(decision, interaction.user),
+                view=None,
+                allowed_mentions=agent_session_allowed_mentions(),
+            )
 
     async def handle_thread_reaction(
         self,
@@ -2036,6 +2067,7 @@ class AgentSessionBridge:
         await self.edit_approval_message(
             pending,
             self.format_approval_pending(decision, user),
+            only_active=True,
         )
         return True
 
@@ -2048,6 +2080,7 @@ class AgentSessionBridge:
         pending = session.pending_approvals.pop(approval_id, None)
         if pending is None:
             return
+        pending.retired = True
         await self.edit_approval_message(
             pending,
             self.format_approval_finished(pending.decision, pending.decided_by),
@@ -2063,21 +2096,25 @@ class AgentSessionBridge:
         pending = session.pending_approvals.pop(approval_id, None)
         if pending is None:
             return
+        pending.retired = True
         await self.edit_approval_message(pending, f"**Approval expired**\n{reason}")
 
-    async def edit_approval_message(self, pending: PendingRemoteApproval, content: str) -> None:
-        channel = self.bot.get_channel(pending.thread_id)
-        if not isinstance(channel, discord.Thread):
-            return
-        try:
-            message = await channel.fetch_message(pending.message_id)
-            await edit_agent_session_message(
-                message,
-                content=content[:DISCORD_MESSAGE_LIMIT],
-            )
-            await self.clear_message_reactions(message)
-        except discord.DiscordException:
-            logger.warning("Unable to edit Agent session approval message %s", pending.message_id)
+    async def edit_approval_message(self, pending: PendingRemoteApproval, content: str, *, only_active: bool = False) -> None:
+        async with pending.ui_lock:
+            if only_active and pending.retired:
+                return
+            channel = self.bot.get_channel(pending.thread_id)
+            if not isinstance(channel, discord.Thread):
+                return
+            try:
+                message = await channel.fetch_message(pending.message_id)
+                await edit_agent_session_message(
+                    message,
+                    content=content[:DISCORD_MESSAGE_LIMIT],
+                )
+                await self.clear_message_reactions(message)
+            except discord.DiscordException:
+                logger.warning("Unable to edit Agent session approval message %s", pending.message_id)
 
     async def handle_session_status(self, message_type: str, status: SessionStatus) -> None:
         session = self.sessions.get(status.session_id)
@@ -2307,31 +2344,57 @@ class AgentSessionBridge:
         )
         session.control_message_id = message.id
 
-    async def clear_pending_user_inputs(
-        self,
-        session: AgentSession,
-        content: str,
-    ) -> None:
-        if not session.pending_user_inputs:
-            return
+    async def retire_user_input(self, session: AgentSession, pending: PendingRemoteUserInput, content: str) -> None:
+        pending.retired = True
+        for command_id, command in list(session.pending_commands.items()):
+            if command.input_prompt is pending:
+                session.pending_commands.pop(command_id, None)
+                if session.active_command_id == command_id:
+                    session.active_command_id = None
+        async with pending.ui_lock:
+            channel = self.bot.get_channel(pending.thread_id)
+            if not isinstance(channel, discord.Thread):
+                return
+            try:
+                message = await channel.fetch_message(pending.message_id)
+                await edit_agent_session_message(message, content=content[:DISCORD_MESSAGE_LIMIT])
+                await self.clear_message_reactions(message)
+            except discord.DiscordException:
+                logger.warning("Unable to retire Agent session input message %s", pending.message_id)
 
+    async def clear_pending_user_inputs(self, session: AgentSession, content: str) -> None:
         pending_items = list(session.pending_user_inputs.values())
         session.pending_user_inputs.clear()
         for pending in pending_items:
-            channel = self.bot.get_channel(pending.thread_id)
-            if not isinstance(channel, discord.Thread):
-                continue
-            try:
-                message = await channel.fetch_message(pending.message_id)
-                await edit_agent_session_message(
-                    message,
-                    content=content[:DISCORD_MESSAGE_LIMIT],
-                )
-            except discord.DiscordException:
-                logger.warning(
-                    "Unable to clear Agent session request_user_input message %s",
-                    pending.message_id,
-                )
+            await self.retire_user_input(session, pending, content)
+
+    async def handle_prompt_resolved(self, message_type: str, payload: dict[str, object]) -> None:
+        session_id, epoch = payload.get("session_id"), payload.get("session_epoch")
+        if not isinstance(session_id, str) or not isinstance(epoch, str):
+            return
+        session = self.sessions.get(session_id)
+        if session is None or session.session_epoch != epoch:
+            return
+        # The websocket event loop awaits each handler. Requests finish registration
+        # before their following resolution event; do not dispatch frames as tasks.
+        if message_type == "approval_resolved":
+            approval_id = payload.get("approval_id")
+            if not isinstance(approval_id, str) or not approval_id:
+                return
+            approval = session.pending_approvals.pop(approval_id, None)
+            if approval is None:
+                return
+            approval.retired = True
+            await self.edit_approval_message(approval, "**Resolved**")
+        elif message_type == "request_user_input_resolved":
+            call_id, turn_id = payload.get("call_id"), payload.get("turn_id")
+            if not isinstance(call_id, str) or not call_id or not isinstance(turn_id, str):
+                return
+            pending = session.pending_user_inputs.get(call_id)
+            if pending is None or pending.turn_id != turn_id:
+                return
+            session.pending_user_inputs.pop(call_id)
+            await self.retire_user_input(session, pending, "**Resolved**")
 
     async def clear_session_controls(self, session: AgentSession) -> None:
         if session.thread_id is None or session.control_message_id is None:
@@ -2798,7 +2861,7 @@ class AgentSessionBridge:
 
     @staticmethod
     def format_approval_finished(decision: str | None, decided_by: int | None) -> str:
-        label = "Approved" if decision == "approved" else "Denied"
+        label = f"Submitted: {decision}" if decision in {"approved", "denied"} else "Decision acknowledged"
         by = f"\nby: `{decided_by}`" if decided_by is not None else ""
         return f"**{label}**{by}"
 

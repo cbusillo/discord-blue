@@ -133,9 +133,21 @@ an ID or epoch that differs from the connection's current session.
 | `command_ack` | `command_id`: accepted for execution, not proof of completion. |
 | `command_reject` | `command_id`, `reason`: command could not be accepted. |
 | `approval_request` | `approval_id`, `call_id`, `turn_id`, `command` (argv list), `cwd`, optional `reason`. |
-| `approval_decision_ack` | `approval_id`: decision accepted by the agent. |
+| `approval_decision_ack` | `approval_id`: decision submission acknowledged; Discord does not assert the winning outcome. |
+| `approval_resolved` | `approval_id`: retire matching approval with neutral Resolved text. |
+| `request_user_input_resolved` | `call_id`, `turn_id`: retire the exact matching input prompt with neutral Resolved text. |
 | `approval_decision_reject` | `approval_id`, `reason`: decision expired or rejected. |
 | `request_user_input` | `call_id`, `turn_id`, `questions`: question objects described below. |
+
+Resolution events are additive: clients may send them when another subscriber
+answers a shared request. No outcome or actor is inferred. Matching requires the
+current session epoch and request identity; unknown IDs, stale epochs and duplicate
+resolution events are no-ops. Request IDs must be unique within a session epoch;
+a replacement prompt uses a new call/approval ID. The server processes inbound
+frames serially so request registration precedes its following resolution event.
+Prompt UI edits serialize with retirement, and retired input commands cannot
+repaint newer prompts when delayed acknowledgements arrive. Capability names
+continue to describe accepted outbound actions, not incoming event support.
 
 Question objects carry `id`, `header`, `question`, `isOther`, `isSecret`, and
 `options` (objects with `label` and `description`). Do not send secrets through

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Literal
@@ -15,6 +16,7 @@ class PendingRemoteCommand:
     message_id: int | None
     kind: str
     reject_notice: str | None = None
+    input_prompt: PendingRemoteUserInput | None = None
 
 
 @dataclass(slots=True)
@@ -29,6 +31,8 @@ class PendingRemoteApproval:
     message_id: int
     decision: str | None = None
     decided_by: int | None = None
+    retired: bool = False
+    ui_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 @dataclass(slots=True)
@@ -38,6 +42,8 @@ class PendingRemoteUserInput:
     turn_id: str
     call_id: str
     submitted: bool = False
+    retired: bool = False
+    ui_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 @dataclass(slots=True)
