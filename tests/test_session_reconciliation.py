@@ -4,7 +4,7 @@ import asyncio
 import unittest
 from collections.abc import AsyncIterator
 from contextlib import suppress
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from discord_blue.doodads.agent_session import bridge as bridge_module
 from tests.fakes_agent_session import FakeReplyMessage, FakeTextChannel, FakeThread, add_bot_message
@@ -68,6 +68,37 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(pending[0].pending_steps, {"members", "archive", "leave"})
             self.assertFalse(thread.archived)
             await asyncio.wait_for(bridge.cleanup_stale_session_threads(), timeout=0.1)
+        self.assertEqual(thread.sent_messages, ["Agent session disconnected"])
+
+    async def test_orphan_scan_preserves_unregistered_session_still_finalizing(self) -> None:
+        bridge = make_bridge()
+        thread = FakeThread(501)
+        channel = FakeTextChannel(321, [thread])
+        add_bot_message(thread, 1, "Agent session connected")
+        session = register_stale(bridge, "disconnecting")
+        bridge.sessions.bind_thread(session.session_id, thread.id)
+        closing = asyncio.Event()
+        release = asyncio.Event()
+
+        async def close_socket(*_args: object, **_kwargs: object) -> None:
+            closing.set()
+            await release.wait()
+
+        with (
+            patch.object(bridge_module, "get_agent_session_channel", return_value=channel),
+            patch.object(bridge, "get_thread_for_cleanup", new=AsyncMock(return_value=(thread, True))),
+            patch.object(bridge, "close_session_websocket", new=close_socket),
+        ):
+            task = asyncio.create_task(bridge.finalize_session(session))
+            try:
+                await asyncio.wait_for(closing.wait(), timeout=1)
+                self.assertIsNone(bridge.sessions.get(session.session_id))
+                await bridge.cleanup_stale_session_threads()
+                self.assertEqual(thread.sent_messages, [])
+                self.assertFalse(thread.archived)
+            finally:
+                release.set()
+                await task
         self.assertEqual(thread.sent_messages, ["Agent session disconnected"])
 
     async def test_history_scan_does_not_hold_global_attach_lock(self) -> None:

@@ -307,6 +307,7 @@ class AgentSessionBridge:
         # As above, lock creation is synchronous within one event loop turn.
         self._thread_lifecycle_locks: weakref.WeakValueDictionary[int, asyncio.Lock] = weakref.WeakValueDictionary()
         self._pending_cleanups: dict[tuple[str, str, int | None], PendingSessionCleanup] = {}
+        self._finalizing_cleanups: set[tuple[str, str, int | None]] = set()
         self._monitor_started_at = time.monotonic()
         self._monitor_last_progress = self._monitor_started_at
         self._monitor_has_run = False
@@ -498,6 +499,7 @@ class AgentSessionBridge:
                 return False
 
             fallback_cleanup = self.pending_cleanup_for_session(removed)
+            self._finalizing_cleanups.add(fallback_cleanup.key)
             try:
                 websocket_timeout = SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS if shutdown else SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
                 if not removed.websocket.closed:
@@ -520,15 +522,17 @@ class AgentSessionBridge:
                         " during shutdown" if shutdown else "",
                     )
                     residual = fallback_cleanup
+                if residual is not None:
+                    self.remember_pending_cleanup(residual)
+                return True
             except asyncio.CancelledError:
                 self.remember_pending_cleanup(fallback_cleanup)
                 raise
             except Exception:
                 self.remember_pending_cleanup(fallback_cleanup)
                 raise
-            if residual is not None:
-                self.remember_pending_cleanup(residual)
-            return True
+            finally:
+                self._finalizing_cleanups.discard(fallback_cleanup.key)
 
     @staticmethod
     async def close_session_websocket(
@@ -756,7 +760,11 @@ class AgentSessionBridge:
             if lock.locked():
                 continue
             async with lock:
-                if thread.id in self.sessions.by_thread or self._session_attach_lock.locked():
+                if (
+                    thread.id in self.sessions.by_thread
+                    or self._session_attach_lock.locked()
+                    or self.has_pending_cleanup_for_thread(thread.id)
+                ):
                     # Creation may have published a marker before binding its
                     # thread. Defer rather than racing an in-flight attachment.
                     continue
@@ -2268,6 +2276,8 @@ class AgentSessionBridge:
         self._pending_cleanups[cleanup.key] = cleanup
 
     def has_pending_cleanup_for_thread(self, thread_id: int) -> bool:
+        if any(key[2] == thread_id for key in self._finalizing_cleanups):
+            return True
         thread_steps = {"disconnect_notice", "members", "archive", "leave"}
         return any(
             cleanup.thread_id == thread_id and bool(cleanup.pending_steps & thread_steps)
