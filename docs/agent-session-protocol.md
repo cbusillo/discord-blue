@@ -55,6 +55,40 @@ An attachment waiting on the same session's cleanup closes after ten seconds.
 Heartbeat sweeps skip sessions whose lifecycle lock is busy and try them again on
 the next sweep, allowing other stale sessions to be cleaned up.
 
+### Disconnect cleanup and recovery
+
+The connection handler unregisters its session in a finalization path, including
+when a late `hello_ack` or event handler fails. Registry removal checks the actual
+connection object, so an older connection cannot unregister its replacement.
+Closed WebSockets disappear from `/code active` and the health endpoint's
+active-session count while cleanup finishes.
+
+WebSocket close, notification cleanup, and thread cleanup have independent time
+budgets: one second for the socket, two seconds for notification cleanup, and
+six seconds for thread cleanup. Thread cleanup reserves time for archiving and leaving even if
+posting the notice or removing members fails. The total nine-second cleanup
+budget stays below the ten-second reconnect lock wait. A failed notification
+operation does not prevent thread cleanup, and a
+failed or slow session does not terminate the heartbeat monitor. Cleanup retains
+the session lifecycle lock until its bounded operations have completed or been
+cancelled; reconnect cannot race a detached archive operation.
+
+Failed Discord cleanup is retained for periodic retry in a bounded, deduplicated
+in-memory queue (256 records, up to five retry attempts). Maintenance runs every
+five minutes after the startup reconnect grace. Successful steps are removed
+from the shared retry record immediately, so cancellation retains only unfinished
+work. Busy attachments defer retries without consuming their attempt budget;
+discovery leaves archived, locked threads alone. Queue overflow and exhausted
+retries produce warnings; periodic
+orphan discovery provides recovery after records are dropped or the service
+restarts. Reconciliation checks
+current session/thread ownership before modifying an artifact, preserving threads
+adopted by a reconnect. Periodic discovery also recovers orphaned bot-authored
+session notifications and threads after a restart; this does not broaden the
+reconnect metadata-matching rules or delete conversation history. Background
+progress and pending cleanup state are visible in `/health`, with warnings for
+failed operations. A dead or stalled monitor is reported as unhealthy.
+
 Reconnect with the same session identity and metadata. Thread recovery matches
 persisted session markers; a changed PID can be tolerated only for one matching
 stable session ID. The optional assistant snapshot backfills a thread only when

@@ -151,7 +151,10 @@ curl http://127.0.0.1:8787/health
 `GET /health` returns JSON after the bot has reached Discord readiness and the
 bridge listener has started. The payload includes the `discord-blue` service
 name, package version, top-level status, Discord readiness component state, and
-informational agent-session bridge state. The preferred protected WebSocket route
+agent-session bridge state. The bridge reports heartbeat/reconciliation progress
+and pending cleanup work. Closed WebSockets are excluded from the active-session
+count. A failed or stalled monitor makes the enabled bridge unhealthy; Discord
+readiness alone is not sufficient for a healthy response. The preferred protected WebSocket route
 is `/agent-session/connect` and requires the configured bearer token; `/health`
 does not. The retired `/every-code/connect` route is no longer registered.
 
