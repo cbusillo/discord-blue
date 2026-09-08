@@ -21,14 +21,17 @@ class CleanupProgressTests(unittest.IsolatedAsyncioTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_stale_duplicate_record_cannot_resurrect_completed_steps(self) -> None:
+    def test_new_teardown_replaces_old_residual_for_same_session_epoch_thread(self) -> None:
         bridge = cleanup_tests.SessionCleanupTests.make_bridge()
         residual = cleanup_tests.SessionCleanupTests.cleanup_record(555, "leave")
+        residual.notification_message_id = 101
         bridge.remember_pending_cleanup(residual)
-        stale = cleanup_tests.SessionCleanupTests.cleanup_record(555, "disconnect_notice", "members", "archive", "leave")
-        bridge.remember_pending_cleanup(stale)
-        self.assertIs(bridge._pending_cleanups[residual.key], residual)
-        self.assertEqual(residual.pending_steps, {"leave"})
+        newer = cleanup_tests.SessionCleanupTests.cleanup_record(555, "notification", "members", "archive", "leave")
+        newer.notification_message_id = 202
+        bridge.remember_pending_cleanup(newer)
+        self.assertIs(bridge._pending_cleanups[residual.key], newer)
+        self.assertEqual(newer.pending_steps, {"notification", "members", "archive", "leave"})
+        self.assertEqual(newer.notification_message_id, 202)
 
     async def test_maintenance_continues_after_failed_iteration(self) -> None:
         bridge = cleanup_tests.SessionCleanupTests.make_bridge()

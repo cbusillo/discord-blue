@@ -2255,14 +2255,11 @@ class AgentSessionBridge:
         if existing is not None:
             if existing is cleanup:
                 return
-            # A key represents one teardown. Preserve only work that both
-            # observations still consider pending so a stale fallback cannot
-            # resurrect a step that the authoritative attempt completed.
-            existing.pending_steps.intersection_update(cleanup.pending_steps)
-            if existing.notification_message_id is None:
-                existing.notification_message_id = cleanup.notification_message_id
-            if not existing.pending_steps:
-                self._pending_cleanups.pop(cleanup.key, None)
+            # Reconnect preserves session/epoch/thread identity, but a later
+            # teardown has new work and possibly a new notification. Callers
+            # share their live residual record even on timeout/cancellation;
+            # a distinct record is the newer authoritative observation.
+            self._pending_cleanups[cleanup.key] = cleanup
             return
         if len(self._pending_cleanups) >= PENDING_CLEANUP_LIMIT:
             logger.warning(
@@ -2411,6 +2408,11 @@ class AgentSessionBridge:
         thread: discord.Thread,
         pending_steps: set[CleanupStep] | None = None,
     ) -> set[CleanupStep]:
+        """Mutate the supplied residual set in place after each successful step.
+
+        The caller retains this same set if cancellation interrupts cleanup.
+        The return value is that set, including any rearchive work added here.
+        """
         steps: set[CleanupStep] = (
             pending_steps if pending_steps is not None else {"disconnect_notice", "members", "archive", "leave"}
         )
