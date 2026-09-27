@@ -9,8 +9,7 @@
     "dockerignore": ".dockerignore",
     "compose": "docker-compose.yml",
     "systemdService": "discord-blue.service",
-    "agentSessionProtocol": "docs/agent-session-protocol.md",
-    "codexLabDevAdapter": "docs/codex-lab-dev-adapter.md"
+    "agentSessionProtocol": "docs/agent-session-protocol.md"
   },
   "qualityGate": {
     "setup": {

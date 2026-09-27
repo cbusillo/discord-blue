@@ -9,7 +9,6 @@ execution. The bridge does not launch processes or inspect agent rollout files.
 Connect to `/agent-session/connect` using a WebSocket with
 `Authorization: Bearer <configured token>`. Empty server tokens deny access.
 Use TLS or a trusted private transport for deployment. `/health` needs no token.
-The retired `/every-code/connect` endpoint is absent.
 
 The client sends JSON text messages. Start each connection with:
 
@@ -201,8 +200,3 @@ Use a real Codex Lab session to verify hello acknowledgement, mirrored output,
 reply, pause, new/end session, status, approvals, user input, and reconnect
 without duplicate threads or command execution. Unit/transport tests in this
 repository validate the server; they do not prove a Codex Lab client is shipped.
-
-The opt-in [Codex Lab development adapter](codex-lab-dev-adapter.md) connects an
-existing daemon-backed native TUI conversation for chat, output, status, and
-pause testing. Approvals/input stay local and unsupported controls are explicitly
-rejected; this is a partial development integration, not full DUI acceptance.
