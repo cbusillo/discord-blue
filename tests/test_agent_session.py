@@ -153,31 +153,6 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("[agent_session]", saved)
         self.assertIn('token = "shared-secret"', saved)
 
-    def test_retired_config_is_migrated_and_saved_without_aliases(self) -> None:
-        write_default_config()
-        legacy = _CONFIG_PATH.read_text().replace("[agent_session]", "[every_code]")
-        legacy = legacy.replace("enabled = false", "enabled = true")
-        legacy = legacy.replace('token = ""', 'token = "migration-token"')
-        legacy = legacy.replace("loaded_doodads = []", 'loaded_doodads = ["every_code_doodad", "agent_session_doodad"]')
-        _CONFIG_PATH.write_text(legacy)
-
-        config = Config()
-
-        self.assertTrue(config.agent_session.enabled)
-        self.assertEqual(config.agent_session.token, "migration-token")
-        self.assertEqual(config.discord.loaded_doodads, ["agent_session_doodad"])
-        self.assertNotIn("every_code", _CONFIG_PATH.read_text())
-        self.assertEqual(Config().agent_session.token, "migration-token")
-
-    def test_current_config_wins_over_retired_config(self) -> None:
-        write_default_config()
-        with _CONFIG_PATH.open("a") as output:
-            output.write('\n[every_code]\nenabled = true\ntoken = "old-token"\n')
-        config = Config()
-        self.assertFalse(config.agent_session.enabled)
-        self.assertEqual(config.agent_session.token, "")
-        self.assertNotIn("every_code", _CONFIG_PATH.read_text())
-
 
 class SessionRegistryTests(unittest.TestCase):
     def test_session_registration_binds_thread_mapping(self) -> None:
@@ -223,7 +198,7 @@ class ProtocolTests(unittest.TestCase):
                 "assistant_message": "Last completed answer",
                 "origin": {
                     "kind": "launchplane",
-                    "request_id": "every-code-cbusillo-syo-67",
+                    "request_id": "agent-cbusillo-syo-67",
                     "repository": "cbusillo/sellyouroutboard",
                     "issue_number": 67,
                     "issue_url": "https://github.com/cbusillo/sellyouroutboard/issues/67",
@@ -517,11 +492,11 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
             session_epoch="epoch-1",
             host_label="Mac Studio",
             cwd="/tmp/worktree",
-            branch="every-code/cbusillo-syo-67",
+            branch="agent/cbusillo-syo-67",
             pid=42,
             origin=SessionOrigin(
                 kind="launchplane",
-                request_id="every-code-cbusillo-syo-67",
+                request_id="agent-cbusillo-syo-67",
                 repository="cbusillo/sellyouroutboard",
                 issue_number=67,
                 issue_url="https://github.com/cbusillo/sellyouroutboard/issues/67",
@@ -535,13 +510,13 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             session_notification_message(hello, thread),
-            "Automated agent session connected for `cbusillo/sellyouroutboard#67` on `every-code/cbusillo-syo-67`: <#555>",
+            "Automated agent session connected for `cbusillo/sellyouroutboard#67` on `agent/cbusillo-syo-67`: <#555>",
         )
         start_message = session_start_message(hello)
         self.assertIn("origin: `Launchplane automation`", start_message)
         self.assertIn("source: `cbusillo/sellyouroutboard#67`", start_message)
         self.assertIn("issue: https://github.com/cbusillo/sellyouroutboard/issues/67", start_message)
-        self.assertIn("request: `every-code-cbusillo-syo-67`", start_message)
+        self.assertIn("request: `agent-cbusillo-syo-67`", start_message)
 
     def test_session_thread_name_caps_human_branch_length(self) -> None:
         hello = SessionHello(
@@ -1054,7 +1029,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(bridge._authorized(SimpleNamespace(headers={"Authorization": "Bearer wrong"})))
         self.assertTrue(bridge._authorized(SimpleNamespace(headers={"Authorization": "Bearer shared-secret"})))
 
-    async def test_register_routes_retires_legacy_connect_path(self) -> None:
+    async def test_register_routes_exposes_health_and_connect(self) -> None:
         bridge = AgentSessionBridge(FakeBot(Config()))
         app = web.Application()
 
@@ -1064,7 +1039,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         resource_paths = set(resources)
         self.assertIn("/health", resource_paths)
         self.assertIn("/agent-session/connect", resource_paths)
-        self.assertNotIn("/every-code/connect", resource_paths)
         agent_session_route = next(iter(resources["/agent-session/connect"]))
         self.assertEqual(agent_session_route.handler, bridge.handle_connect)
 
@@ -1081,8 +1055,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             async with TestClient(TestServer(app)) as client:
                 unauthorized = await client.get("/agent-session/connect")
                 self.assertEqual(unauthorized.status, 401)
-                retired = await client.get("/every-code/connect")
-                self.assertEqual(retired.status, 404)
                 async with client.ws_connect(
                     "/agent-session/connect", headers={"Authorization": "Bearer transport-test-token"}
                 ) as websocket:
@@ -2942,7 +2914,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             pid=42,
             origin=SessionOrigin(
                 kind="launchplane",
-                request_id="every-code-cbusillo-syo-67",
+                request_id="agent-cbusillo-syo-67",
                 repository="cbusillo/sellyouroutboard",
                 issue_number=67,
                 issue_url="https://github.com/cbusillo/sellyouroutboard/issues/67",
@@ -3015,7 +2987,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             pid=42,
             origin=SessionOrigin(
                 kind="launchplane",
-                request_id="every-code-cbusillo-syo-67",
+                request_id="agent-cbusillo-syo-67",
                 repository="cbusillo/sellyouroutboard",
                 issue_number=67,
                 issue_url="https://github.com/cbusillo/sellyouroutboard/issues/67",

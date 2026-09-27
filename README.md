@@ -154,22 +154,13 @@ name, package version, top-level status, Discord readiness component state, and
 agent-session bridge state. The bridge reports heartbeat/reconciliation progress
 and pending cleanup work. Closed WebSockets are excluded from the active-session
 count. A failed or stalled monitor makes the enabled bridge unhealthy; Discord
-readiness alone is not sufficient for a healthy response. The preferred protected WebSocket route
+readiness alone is not sufficient for a healthy response. The protected WebSocket route
 is `/agent-session/connect` and requires the configured bearer token; `/health`
-does not. The retired `/every-code/connect` route is no longer registered.
-
-On startup, saved `[every_code]` settings and the `every_code_doodad` extension
-name are migrated to `[agent_session]` and `agent_session_doodad`. An existing
-`[agent_session]` section takes precedence. Saves retain only current names.
-The health component is now `agent_session`.
+does not. The health component is `agent_session`.
 
 See [the remote session contract](docs/agent-session-protocol.md) for client
 integration. Discord Blue does not launch the agent or read local rollout files;
 the client provides session events and optional reconnect history.
-
-For opt-in Codex Lab testing, the [development adapter](docs/codex-lab-dev-adapter.md)
-connects Discord chat, output, status, and pause to an existing daemon-backed
-native TUI conversation. Approval and input decisions remain in the TUI.
 
 Launchplane may provide deployment identity through
 `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`. When set to a JSON object, Discord Blue
