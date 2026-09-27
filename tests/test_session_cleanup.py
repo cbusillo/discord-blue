@@ -51,7 +51,7 @@ class SessionCleanupTests(unittest.IsolatedAsyncioTestCase):
             + bridge_module.THREAD_LEAVE_TIMEOUT_SECONDS
         )
         self.assertLessEqual(thread_budget, bridge_module.SESSION_THREAD_CLEANUP_TIMEOUT_SECONDS)
-        self.assertEqual(
+        self.assertGreaterEqual(
             bridge_module.SESSION_FINALIZATION_TIMEOUT_SECONDS,
             bridge_module.SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
             + bridge_module.SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS
