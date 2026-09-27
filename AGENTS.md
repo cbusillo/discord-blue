@@ -26,3 +26,16 @@ workflows, and cleanup policy.
 * Future agent session control affordances such as status, summary, tail, or
   active-session lookup should be slash/app commands unless there is a product
   reason to make them normal thread replies.
+
+## Tests
+
+* A test must fail when product behaviour breaks and pass when someone makes an
+  intended change. Do not write tests that restate the implementation.
+* Do not assert a literal that is defined elsewhere (versions, toolchain,
+  timeouts, hashes). Import the source of truth, or assert the invariant that
+  relates the values (for example, "the finalization budget covers its steps").
+* Do not assert workflow or config text. The workflow enforces itself when it
+  runs: `ci-gate` fails unless `validate` and `image` pass. Use `actionlint`
+  for workflow syntax.
+* Verification and loading code must not depend on working-tree state. Tests
+  use temporary homes and fakes, never real Discord or production.
