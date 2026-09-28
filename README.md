@@ -211,6 +211,9 @@ yourself. Behaviour and limits:
   outside the daemon, so the bridge cannot see them.
 - If the daemon connection drops, every session closes. When it reconnects, each
   session starts again with a new epoch, so old Discord controls are rejected.
+- Run the stock end-to-end test with
+  `CODEX_BIN=/path/to/codex uv run python -m unittest tests.test_codex_bridge_stock`.
+  It uses a disposable app-server, synthetic auth and a fake model.
 
 ## Launchplane/Dokploy migration target
 
