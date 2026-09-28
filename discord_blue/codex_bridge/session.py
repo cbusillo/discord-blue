@@ -4,6 +4,11 @@ Events from the app-server daemon are queued and delivered over the session's
 WebSocket; Discord controls are translated into app-server calls. The bridge
 answers a Codex request only after an explicit Discord decision; the first
 response wins in stock, so the local TUI can still answer instead.
+
+The Discord session lives as long as the Codex thread stays loaded, but the bridge
+subscribes to the thread only while a turn runs, a prompt is pending, or Discord
+acts. Unsubscribed, it still sees the broadcast status changes that say a turn
+started, and stock can unload the thread once its TUI closes.
 """
 
 from __future__ import annotations
@@ -12,7 +17,6 @@ import asyncio
 import json
 import logging
 import shlex
-import time
 import uuid
 from collections import OrderedDict, deque
 from typing import Any, Protocol
@@ -58,6 +62,7 @@ COMMAND_MEMORY = 1024
 TEXT_LIMIT = 32_000
 REPLY_LIMIT = 16_000
 TITLE_LIMIT = 80
+SEEN_LIMIT = 256
 TURN_DONE = "Turn complete. Replies here will start the next turn."
 LOST_CODEX = "Lost the Codex connection, so delivery is uncertain. Check the Codex TUI before retrying."
 
@@ -98,10 +103,18 @@ def discord_command(params: Json) -> list[str] | None:
     return argv if len(shown) <= APPROVAL_COMMAND_DISPLAY_LIMIT and "```" not in shown else None
 
 
+def is_answer(item: Json) -> bool:
+    return item.get("type") == "agentMessage" and isinstance(item.get("text"), str)
+
+
 def final_answer(parts: list[tuple[object, str]]) -> str | None:
     finals = [text for phase, text in parts if phase == "final_answer"] or [text for _phase, text in parts[-1:]]
     text = "\n\n".join(finals)
     return text[:TEXT_LIMIT] + "\n[Truncated; see the Codex TUI.]" if len(text) > TEXT_LIMIT else text or None
+
+
+def latest_turn(page: Json) -> Json:
+    return (page.get("data") or [{}])[0]
 
 
 def user_text(item: Json) -> str:
@@ -109,16 +122,24 @@ def user_text(item: Json) -> str:
 
 
 class ThreadSession:
-    def __init__(self, config: BridgeConfig, rpc: Rpc, thread: Json, *, active_turn_id: str | None, last_answer: str | None) -> None:
+    def __init__(self, config: BridgeConfig, rpc: Rpc, thread: Json, latest: Json) -> None:
         self.config, self.rpc = config, rpc
         self.thread_id: str = thread["id"]
         self.epoch = uuid.uuid4().hex
         self.cwd = str(thread.get("cwd") or "")
         self.branch = (thread.get("gitInfo") or {}).get("branch")
         self.title = thread_title(thread)
-        self.backfill = last_answer
-        self.active_turn_id = active_turn_id
-        self.idle_since: float | None = None if active_turn_id else time.monotonic()
+        self.active_turn_id: str | None = None
+        self.subscribed = False
+        self.membership = asyncio.Lock()
+        # Turns and items already mirrored, so catching up after a join never repeats them.
+        self.reported_turns: deque[str] = deque(maxlen=SEEN_LIMIT)
+        self.seen_items: deque[str] = deque(maxlen=SEEN_LIMIT)
+        self.backfill: str | None = None
+        if latest.get("id") and latest.get("status") != "inProgress":
+            self.reported_turns.append(str(latest["id"]))
+            self.seen_items.extend(str(i["id"]) for i in latest.get("items") or [] if i.get("id"))
+            self.backfill = final_answer([(i.get("phase"), i["text"]) for i in latest.get("items") or [] if is_answer(i)])
         self.outbox: deque[Json] = deque()
         self.wakeup = asyncio.Event()
         self.stopped = asyncio.Event()
@@ -151,21 +172,39 @@ class ThreadSession:
         self.wakeup.set()
 
     def on_turn_started(self, turn_id: str) -> None:
-        self.active_turn_id, self.idle_since = turn_id, None
+        if turn_id == self.active_turn_id or turn_id in self.reported_turns:
+            return
+        self.active_turn_id = turn_id
         self.publish("status_changed", message="Turn started")
 
     def on_item_completed(self, turn_id: str, item: Json) -> None:
+        if item_id := item.get("id"):
+            if str(item_id) in self.seen_items:
+                return
+            self.seen_items.append(str(item_id))
         if item.get("type") == "userMessage":
             if item.get("clientId") in self.echo_ids:
                 return
             if text := user_text(item).strip():
                 self.publish("user_message", message=text)
-        elif item.get("type") == "agentMessage" and isinstance(item.get("text"), str) and len(self.answers) < 64:
+        elif is_answer(item) and len(self.answers) < 64:
             self.answers.setdefault(turn_id, []).append((item.get("phase"), item["text"]))
 
     def on_turn_completed(self, turn: Json) -> None:
-        parts = self.answers.pop(str(turn.get("id")), [])
-        self.active_turn_id, self.idle_since = None, time.monotonic()
+        turn_id = str(turn.get("id"))
+        if turn_id in self.reported_turns:
+            return
+        # The completed turn carries its summary items; they fill in anything missed before a join.
+        for item in turn.get("items") or []:
+            self.on_item_completed(turn_id, item)
+        self.reported_turns.append(turn_id)
+        parts = self.answers.pop(turn_id, [])
+        if self.active_turn_id == turn_id:
+            self.active_turn_id = None
+        # A finished turn's requests can no longer be answered.
+        for request_id, prompt in list(self.prompts.items()):
+            if prompt["turn_id"] == turn_id:
+                self.on_resolved(request_id)
         status = turn.get("status")
         if status == "completed":
             self.publish("turn_complete", message=TURN_DONE, assistant_message=final_answer(parts))
@@ -178,7 +217,47 @@ class ThreadSession:
         if status.get("type") == "systemError":
             self.publish("error", message="Codex reported a system error; check the Codex TUI.")
 
+    def catch_up(self, turn: Json) -> None:
+        """Mirror the latest turn's progress from before this connection joined."""
+        turn_id = str(turn.get("id") or "")
+        if not turn_id:
+            return
+        if turn.get("status") == "inProgress":
+            self.on_turn_started(turn_id)
+            for item in turn.get("items") or []:
+                self.on_item_completed(turn_id, item)
+        else:
+            self.on_turn_completed(turn)
+
+    async def subscribe(self) -> None:
+        """Join the thread so its turn events and pending requests reach this connection."""
+        async with self.membership:
+            if self.subscribed:
+                return
+            thread = (await self.rpc.request("thread/read", {"threadId": self.thread_id}))["thread"]
+            # thread/resume would load a closed thread from disk; never do that.
+            if (thread.get("status") or {}).get("type") == "notLoaded":
+                raise Rejected("This Codex thread has closed; reopen it in the Codex TUI.")
+            # No config overrides: they can restart an idle thread cold. Stock replays pending requests.
+            await self.rpc.request("thread/resume", {"threadId": self.thread_id, "excludeTurns": True})
+            self.subscribed = True
+            page = await self.rpc.request("thread/turns/list", {"threadId": self.thread_id, "limit": 1, "itemsView": "summary"})
+        self.catch_up(latest_turn(page))
+
+    async def release(self) -> None:
+        """Leave the thread once nothing needs this connection, so it can unload when its TUI closes."""
+        async with self.membership:
+            if not self.subscribed or self.active_turn_id is not None or self.prompts:
+                return
+            self.subscribed = False
+            try:
+                await self.rpc.request("thread/unsubscribe", {"threadId": self.thread_id})
+            except RpcError as exc:
+                logger.warning("Could not unsubscribe from Codex thread %s: %s", self.thread_id, exc)
+
     def on_request(self, request_id: RequestId, method: str, params: Json) -> None:
+        if request_id in self.prompts:
+            return  # Stock replays pending requests when this connection rejoins.
         turn_id = str(params.get("turnId") or "")
         if method == COMMAND_APPROVAL and (argv := discord_command(params)) is not None:
             approval_id = str(params.get("approvalId") or params.get("itemId") or request_id)
@@ -257,9 +336,14 @@ class ThreadSession:
                 raise Rejected(f"Replies must contain 1 to {REPLY_LIMIT} characters.")
             client_id = f"discord-blue-{uuid.uuid4().hex}"
             self.echo_ids.append(client_id)
+            await self.subscribe()
             # Stock turn/start steers the active turn or starts a new one.
             params = {"threadId": self.thread_id, "input": [{"type": "text", "text": text}], "clientUserMessageId": client_id}
-            await self.rpc.request("turn/start", params)
+            try:
+                await self.rpc.request("turn/start", params)
+            except RpcError:
+                await self.release()
+                raise
         elif kind == "pause_current_turn":
             if self.active_turn_id is None:
                 raise Rejected("There is no running turn to pause.")
