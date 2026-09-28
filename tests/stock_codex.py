@@ -23,6 +23,7 @@ SANDBOX_POLICY = (
     "(version 1) (allow default) (deny network-outbound) "
     '(allow network-outbound (remote ip "localhost:*")) (allow network-outbound (remote unix-socket))'
 )
+UNLOAD_DELAY_SECONDS = 1
 ASK_QUESTIONS = [
     {
         "id": "pick",
@@ -152,6 +153,8 @@ class StockCodex:
         self.work.mkdir()
         (self.home / "token.py").write_text(f"print({token!r})\n")
         (self.home / "config.toml").write_text(
+            # Unload a thread soon after its last client leaves, so closing the TUI is quick to observe.
+            f"thread_unload_delay_secs = {UNLOAD_DELAY_SECONDS}\n"
             f'model = "gpt-5.4"\nchatgpt_base_url = "{backend}/backend-api"\ncli_auth_credentials_store = "file"\n'
             'approval_policy = "on-request"\nsandbox_mode = "read-only"\nmodel_provider = "fake"\n'
             f'[model_providers.fake]\nname = "OpenAI"\nbase_url = "{backend}/backend-api/codex"\n'

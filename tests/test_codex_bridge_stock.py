@@ -10,6 +10,7 @@ import asyncio
 import os
 import sys
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,8 @@ from aiohttp.test_utils import TestServer
 from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.codex_bridge.rpc import AppServerClient
-from tests.stock_codex import ASK_QUESTIONS, StockCodex
+from discord_blue.codex_bridge.session import ThreadSession
+from tests.stock_codex import ASK_QUESTIONS, UNLOAD_DELAY_SECONDS, StockCodex
 from tests.test_codex_bridge import TOKEN, FakeDiscordBlue
 
 Json = dict[str, Any]
@@ -57,6 +59,25 @@ class TuiStandIn:
                 await asyncio.sleep(0.05)
 
 
+class GatedBridge(CodexBridge):
+    """The real bridge, with a gate that can hold back joins so a request is raised while it is away."""
+
+    def __init__(self, config: BridgeConfig) -> None:
+        super().__init__(config)
+        self.gate = asyncio.Event()
+        self.gate.set()
+
+    async def subscribe(self, session: ThreadSession) -> None:
+        await self.gate.wait()
+        await super().subscribe(session)
+
+
+async def eventually(condition: Callable[[], bool], seconds: float = 30) -> None:
+    async with asyncio.timeout(seconds):
+        while not condition():
+            await asyncio.sleep(0.05)
+
+
 @unittest.skipUnless(CODEX_BIN and sys.platform == "darwin", "set CODEX_BIN to a stock codex binary (macOS sandbox-exec)")
 class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_bridge_mirrors_and_drives_a_thread_owned_by_another_client(self) -> None:
@@ -72,24 +93,36 @@ class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
 
             url = f"ws://127.0.0.1:{server.port}/agent-session/connect"
             config = BridgeConfig(server_url=url, token=TOKEN, socket_path=codex.socket_path, host_label="Codex on test")
-            mark = len(tui.notes)
-            bridge = asyncio.create_task(CodexBridge(config).run())
+            bridge = GatedBridge(config)
+            running = asyncio.create_task(bridge.run())
             try:
                 hello = await discord.next("hello")
                 self.assertEqual((hello["session_id"], hello["title"]), (thread_id, "hello"))
                 self.assertIn("hello", hello["assistant_message"])
-                # Joining replays a read-only goal snapshot; it must not clear the owner's goal.
-                await tui.wait_for("thread/goal/updated", mark)
-                self.assertNotIn("thread/goal/cleared", [n.get("method") for n in tui.notes[mark:]])
-                self.assertEqual(await tui.rpc.request("thread/goal/get", {"threadId": thread_id}), goal)
+                session = bridge.sessions[thread_id]
+                # An idle thread is mirrored without joining it.
+                self.assertFalse(session.subscribed)
 
+                # A Discord reply to the idle thread joins it, then runs the turn.
+                mark = len(tui.notes)
                 ids = {"session_id": thread_id, "session_epoch": hello["session_epoch"]}
                 reply = {"type": "command", "command_id": "c1", "kind": "reply", "text": "reply from phone", **ids}
                 self.assertEqual((await discord.control(reply))["type"], "command_ack")
                 done = await discord.next("turn_complete", "user_message")
                 self.assertIn("reply from phone", done["assistant_message"])
+                await eventually(lambda: not session.subscribed)
+                # Joining replays a read-only goal snapshot; it must not clear the owner's goal.
+                await tui.wait_for("thread/goal/updated", mark)
+                self.assertNotIn("thread/goal/cleared", [n.get("method") for n in tui.notes[mark:]])
+                self.assertEqual(await tui.rpc.request("thread/goal/get", {"threadId": thread_id}), goal)
 
+                # An approval raised while the bridge is away is replayed to it when it joins.
+                bridge.gate.clear()
+                mark = len(tui.notes)
                 turn = asyncio.create_task(tui.turn(thread_id, "RUN the command"))
+                await tui.wait_for("item/commandExecution/requestApproval", mark)
+                self.assertFalse(session.subscribed)
+                bridge.gate.set()
                 approval = await discord.next("approval_request")
                 # Stock sends one shell string; its argv is the shell wrapper the command runs under.
                 self.assertEqual(approval["command"][-1], "touch approved.txt")
@@ -117,9 +150,17 @@ class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await discord.control(pause))["type"], "command_ack")
                 self.assertEqual((await discord.next("status_changed", "turn_complete"))["message"], "Turn aborted")
                 await turn
+
+                # Closing the TUI lets stock unload the thread, and the bridge ends the Discord session.
+                await eventually(lambda: not session.subscribed)
+                if tui.drainer is not None:
+                    tui.drainer.cancel()
+                await tui.rpc.close()
+                await eventually(lambda: discord.sockets[-1].closed, UNLOAD_DELAY_SECONDS + 15)
+                self.assertEqual(bridge.sessions, {})
             finally:
-                bridge.cancel()
-                await asyncio.gather(bridge, return_exceptions=True)
+                running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
                 if tui.drainer is not None:
                     tui.drainer.cancel()
                 await tui.rpc.close()
