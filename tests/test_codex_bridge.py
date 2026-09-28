@@ -314,6 +314,18 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((replayed["type"], replayed["command"]), ("approval_request", ["make", "test"]))
         self.assertTrue(discord.received.empty())
 
+    async def test_pending_prompts_are_sent_after_queued_status_so_the_server_keeps_them(self) -> None:
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            # Both events queue before the session connects, as they do across a Discord reconnect.
+            params = {"threadId": "root", "turnId": "t1", "itemId": "call-1", "questions": [{"id": "q", "question": "?"}]}
+            await bridge.dispatch({"method": "turn/started", "params": {"threadId": "root", "turn": {"id": "t1"}}})
+            await bridge.dispatch({"id": "req-1", "method": "item/tool/requestUserInput", "params": params})
+            await discord.next("hello")
+            events = [await discord.next() for _ in range(2)]
+
+        self.assertEqual([e["type"] for e in events], ["status_changed", "request_user_input"])
+
     async def test_long_idle_threads_are_released_until_active_again(self) -> None:
         rpc = FakeRpc(thread("root"))
         async with running_bridge(rpc) as (bridge, discord):
@@ -349,6 +361,18 @@ class ConfigTests(unittest.TestCase):
             'server_url = "wss://user:pw@bridge.example/agent-session/connect"',
         ):
             with self.subTest(body=body), self.assertRaises(ValueError):
+                self.load(body)
+
+    def test_values_must_have_their_toml_type(self) -> None:
+        url = 'server_url = "ws://discord-blue:8787/agent-session/connect"'
+        for body, error in (
+            (f'{url}\nallow_insecure_ws = "false"', "allow_insecure_ws must be true or false"),
+            (f"{url}\nallow_insecure_ws = 1", "allow_insecure_ws must be true or false"),
+            ("server_url = 5", "server_url must be a string"),
+            (f"{url}\nallow_insecure_ws = true\nhost_label = true", "host_label must be a string"),
+            (f"{url}\nallow_insecure_wss = true", "unknown config keys: allow_insecure_wss"),
+        ):
+            with self.subTest(body=body), self.assertRaisesRegex(ValueError, error):
                 self.load(body)
 
     def test_token_must_be_present_and_private(self) -> None:

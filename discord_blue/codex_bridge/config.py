@@ -12,6 +12,16 @@ from urllib.parse import urlsplit
 DEFAULT_CONFIG_PATH = Path("~/.config/discord-blue/codex-bridge.toml")
 DEFAULT_SOCKET_PATH = Path("~/.codex/app-server-control/app-server-control.sock")
 TOKEN_ENV = "AGENT_SESSION_TOKEN"
+# Each key's TOML type. A quoted "false" is a string, not a boolean, so it is rejected, not truthy.
+FIELD_TYPES: dict[str, tuple[type, ...]] = {
+    "server_url": (str,),
+    "token_file": (str,),
+    "socket_path": (str,),
+    "host_label": (str,),
+    "allow_insecure_ws": (bool,),
+    "idle_release_hours": (int, float),
+}
+TYPE_NAMES = {str: "a string", bool: "true or false", int: "a number", float: "a number"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,10 +61,21 @@ def read_token(token_file: str | None) -> str:
     return path.read_text().strip()
 
 
+def check_types(raw: dict[str, object]) -> None:
+    if unknown := sorted(set(raw) - set(FIELD_TYPES)):
+        raise ValueError(f"unknown config keys: {', '.join(unknown)}")
+    for key, value in raw.items():
+        expected = FIELD_TYPES[key]
+        # bool is an int subclass; only a key that expects a boolean accepts one.
+        if not isinstance(value, expected) or (isinstance(value, bool) and bool not in expected):
+            raise ValueError(f"{key} must be {TYPE_NAMES[expected[0]]}, not {type(value).__name__}")
+
+
 def load_config(path: Path) -> BridgeConfig:
     raw = tomllib.loads(path.expanduser().read_text())
+    check_types(raw)
     server_url = str(raw.get("server_url") or "")
-    validate_server_url(server_url, allow_insecure_ws=bool(raw.get("allow_insecure_ws", False)))
+    validate_server_url(server_url, allow_insecure_ws=raw.get("allow_insecure_ws", False) is True)
     token = read_token(raw.get("token_file"))
     if not token:
         raise ValueError(f"set token_file or {TOKEN_ENV} to the Discord Blue agent-session token")
