@@ -68,11 +68,12 @@ class FakeClaudeCode:
     async def notification(self, method: str) -> Json:
         return (await self.take(lambda message: message.get("method") == method))["params"]
 
-    async def initialize(self, protocol_version: str = "2025-06-18") -> Json:
+    async def initialize(self) -> Json:
+        # The initialize request Claude Code 2.1.284 sent in the live check, without its description fields.
         params = {
-            "protocolVersion": protocol_version,
-            "capabilities": {},
-            "clientInfo": {"name": "claude-code", "version": "2.1.284"},
+            "protocolVersion": "2025-11-25",
+            "capabilities": {"roots": {"listChanged": True}, "elicitation": {"form": {}, "url": {}}},
+            "clientInfo": {"name": "claude-code", "title": "Claude Code", "version": "2.1.284"},
         }
         response = await self.request("initialize", params)
         self.send({"method": "notifications/initialized"})
@@ -123,7 +124,7 @@ class ClaudeChannelTests(unittest.IsolatedAsyncioTestCase):
 
         result = initialized["result"]
         self.assertEqual(result["capabilities"], {"experimental": {"claude/channel": {}, "claude/channel/permission": {}}})
-        self.assertEqual(result["protocolVersion"], "2025-06-18")
+        self.assertEqual(result["protocolVersion"], "2025-11-25")
         # Claude Code registers no channel that negotiated the 2026-07-28 revision.
         self.assertIn(newest, PROTOCOL_VERSIONS)
         self.assertLess(newest, "2026-07-28")
