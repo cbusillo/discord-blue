@@ -3,8 +3,9 @@
 The channel server runs inside the session's own process tree, so every event it
 sees belongs to this session. A Discord reply becomes a channel notification,
 which Claude Code queues as the next prompt. A tool permission prompt is relayed
-to Discord only when Discord can show the whole request; Claude Code keeps the
-terminal dialog open as well, and the first answer wins.
+to Discord only when this server knows the exact tool call, the directory it
+runs in, and that Discord can show both in full. Claude Code keeps the terminal
+dialog open as well, and the first answer wins.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import socket
 import subprocess
 from collections.abc import Awaitable, Callable
@@ -28,8 +30,6 @@ CAPABILITIES = ["approval_decision", "reply", "status_request"]
 CHANNEL = "notifications/claude/channel"
 PERMISSION = "notifications/claude/channel/permission"
 PERMISSION_REQUEST = "notifications/claude/channel/permission_request"
-# Claude Code shortens a long preview field around this marker, or replaces an unserializable one.
-PREVIEW_CUTS = ("code points elided", "(value unserializable)")
 # Bash arguments that change nothing an approval grants; any other field keeps the full preview shown.
 BASH_DISPLAY_FIELDS = frozenset({"command", "description", "timeout"})
 WAITING_LOCALLY = "Waiting on a permission decision in the Claude Code terminal"
@@ -69,19 +69,26 @@ def host_label() -> str:
     return f"Claude Code on {socket.gethostname().split('.')[0]}"
 
 
-def approval_command(tool_name: str, preview: str) -> list[str] | None:
-    """The approval as Discord shows it, or None when Discord cannot show the whole request."""
-    if not tool_name or any(cut in preview for cut in PREVIEW_CUTS):
-        return None
-    argv = [tool_name, preview]
-    if tool_name == "Bash":
-        try:
-            fields = json.loads(preview)
-        except ValueError:
-            fields = None
-        if isinstance(fields, dict) and isinstance(fields.get("command"), str) and set(fields) <= BASH_DISPLAY_FIELDS:
-            argv = command_argv(fields["command"])
-    return argv if approval_fits_discord(argv) else None
+@dataclass(frozen=True, slots=True)
+class ToolCall:
+    """A tool call as the hooks reported it: exactly what will run, and where."""
+
+    tool_use_id: str
+    tool_name: str
+    tool_input: Json
+    cwd: str
+
+
+def approval_command(tool_name: str, tool_input: Json) -> list[str] | None:
+    """The argv Discord shows for this call, rendered shell-joined, or None when that would misstate it."""
+    command = tool_input.get("command")
+    if tool_name == "Bash" and isinstance(command, str) and set(tool_input) <= BASH_DISPLAY_FIELDS:
+        argv = command_argv(command)
+        # Re-quoting can change what the shell does ("$(...)" would show as a literal), so show a
+        # command only when Discord's rendering of it is its exact source.
+        return argv if shlex.join(argv) == command else None
+    # Anything else is shown as data: the tool name and its complete JSON input.
+    return [tool_name, json.dumps(tool_input, ensure_ascii=False)] if tool_name else None
 
 
 class ClaudeSession(AgentSessionClient):
@@ -112,8 +119,9 @@ class ClaudeSession(AgentSessionClient):
         if not request_id or request_id in self.prompts:
             return
         tool_name, preview = str(params.get("tool_name") or ""), str(params.get("input_preview") or "")
-        command = approval_command(tool_name, preview)
-        if command is None:
+        call = self.tool_call_for(request_id, tool_name, preview)
+        command = approval_command(tool_name, call.tool_input) if call is not None else None
+        if call is None or command is None or not approval_fits_discord(command, call.cwd):
             self.publish("status_changed", message=WAITING_LOCALLY)
             return
         description = str(params.get("description") or "")
@@ -123,10 +131,18 @@ class ClaudeSession(AgentSessionClient):
             call_id=request_id,
             turn_id="",
             command=command,
-            cwd=self.identity.cwd,
+            cwd=call.cwd,
             reason=f"{tool_name}: {description}" if description else tool_name,
         )
         self.enqueue(self.prompts[request_id])
+
+    def tool_call_for(self, request_id: str, tool_name: str, preview: str) -> ToolCall | None:
+        """The one tool call this permission request is for, or None when that is not certain.
+
+        The request carries only a display preview, and Claude Code keeps a `cd` between Bash calls, so
+        the command and its directory must come from hooks. Without them every request stays local.
+        """
+        return None
 
     # Discord -> Claude Code
 
