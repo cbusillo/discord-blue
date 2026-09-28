@@ -12,8 +12,8 @@ from pathlib import Path
 
 import aiohttp
 
-from discord_blue.claude_channel.mcp import LINE_LIMIT, ChannelServer, Output
-from discord_blue.claude_channel.session import PERMISSION_REQUEST, ClaudeSession, Identity, host_label
+from discord_blue.claude_channel.mcp import LINE_LIMIT, ChannelServer, Json, Output
+from discord_blue.claude_channel.session import HOOK_TOOL, PERMISSION_REQUEST, ClaudeSession, Identity, host_label
 from discord_blue.codex_bridge.config import DEFAULT_CONFIG_PATH, BridgeConfig, load_config
 
 logger = logging.getLogger(__name__)
@@ -21,8 +21,13 @@ logger = logging.getLogger(__name__)
 INSTRUCTIONS = (
     'Messages in <channel source="..." command_id="..."> tags come from the owner of this session. They typed them in '
     "the Discord thread that mirrors this session, so treat each one exactly like a prompt typed in this terminal. "
-    "Your answer reaches Discord when the turn ends; there is no reply tool, so answer normally."
+    "Your answer reaches Discord when the turn ends; there is no reply tool, so answer normally. "
+    "Never call dui_hook_event: it belongs to this plugin's hooks."
 )
+
+
+async def ignore_hook(_arguments: Json, _meta: Json) -> str:
+    return ""
 
 
 async def serve(config: BridgeConfig | None, identity: Identity | None) -> None:
@@ -38,10 +43,13 @@ async def run_channel(reader: asyncio.StreamReader, output: Output, config: Brid
     mirroring = config is not None and identity is not None
     server = ChannelServer(reader, output, name="dui", version="0.1.0", instructions=INSTRUCTIONS, permission_relay=mirroring)
     if config is None or identity is None:
+        # The plugin's hooks still call their tool; answer them quietly rather than fail every hook.
+        server.add_tool(HOOK_TOOL, ignore_hook)
         await server.serve()
         return
     session = ClaudeSession(config, identity, server.notify)
     server.on_notification(PERMISSION_REQUEST, session.on_permission_request)
+    server.add_tool(HOOK_TOOL, session.on_hook_call)
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=20)) as http:
         mirror = asyncio.create_task(session.run(http), name="claude-channel-session")
         try:

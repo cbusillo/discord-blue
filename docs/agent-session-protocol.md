@@ -139,8 +139,10 @@ an ID or epoch that differs from the connection's current session.
 | `request_user_input_resolved` | `call_id`, `turn_id`: retire the exact matching input prompt with neutral Resolved text. |
 | `approval_decision_reject` | `approval_id`, `reason`: decision expired or rejected. |
 | `request_user_input` | `call_id`, `turn_id`, `questions`: question objects described below. |
+| `title_changed` | `title`: a title learned after `hello`, such as the first prompt; the thread is renamed. Discord allows two renames per thread in ten minutes. |
+| `notice` | `message`: plain text posted in the thread, such as why controls are unavailable. |
 
-Older bridges ignore these unknown resolution events.
+Older bridges ignore these unknown resolution, title and notice events.
 
 Resolution events are additive: clients may send them when another subscriber
 answers a shared request. No outcome or actor is inferred. Matching requires the

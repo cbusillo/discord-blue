@@ -628,6 +628,23 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             )
             await asyncio.wait_for(handled.wait(), timeout=2)
 
+    async def test_title_and_notice_events_rename_the_thread_and_post_once(self) -> None:
+        async with self.transport() as (bridge, thread, client):
+            websocket = await self.connect_transport(client)
+            payloads: list[dict[str, object]] = [
+                {"type": "title_changed", "title": "Fix the login bug"},
+                {"type": "title_changed", "title": "Fix the login bug"},
+                {"type": "title_changed", "title": "  "},
+                {"type": "notice", "message": "Replies are off for this session."},
+                {"type": "notice", "message": ""},
+            ]
+            for payload in payloads:
+                await self.send_transport_event(bridge, websocket, payload)
+
+        self.assertEqual([edit for edit in thread.edits if "name" in edit], [{"name": thread.name}])
+        self.assertIn("Fix the login bug", thread.name or "")
+        self.assertEqual(thread.sent_messages.count("Replies are off for this session."), 1)
+
     async def test_websocket_reply_ack_and_reject_update_discord_message(self) -> None:
         async with self.transport() as (bridge, thread, client):
             websocket = await self.connect_transport(client)

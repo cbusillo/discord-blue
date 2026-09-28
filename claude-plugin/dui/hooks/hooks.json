@@ -1,0 +1,104 @@
+{
+  "description": "Mirror this Claude Code session into its Discord Blue thread through the dui channel server.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "clear|compact",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "SessionStart",
+              "session_id": "${session_id}",
+              "session_title": "${session_title}"
+            }
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "UserPromptSubmit",
+              "session_id": "${session_id}",
+              "session_title": "${session_title}",
+              "prompt": "${prompt}"
+            }
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "PostToolUse",
+              "session_id": "${session_id}",
+              "tool_name": "${tool_name}",
+              "command": "${tool_input.command}"
+            }
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "PostToolUseFailure",
+              "session_id": "${session_id}",
+              "tool_name": "${tool_name}",
+              "command": "${tool_input.command}"
+            }
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "Stop",
+              "session_id": "${session_id}",
+              "last_assistant_message": "${last_assistant_message}"
+            }
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "StopFailure",
+              "session_id": "${session_id}"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

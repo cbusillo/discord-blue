@@ -956,6 +956,11 @@ class AgentSessionBridge:
                 elif message_type == "approval_decision_reject":
                     logger.warning("Agent session approval decision reject: %s", payload)
                     await self.handle_approval_decision_reject(payload)
+                elif message_type == "title_changed" and session is not None:
+                    await self.handle_title_changed(session, payload.get("title"))
+                elif message_type == "notice" and session is not None and session.thread_id is not None:
+                    if isinstance(notice := payload.get("message"), str) and notice.strip():
+                        await self.post_thread_notice(session.thread_id, notice)
                 elif message_type == "command_ack":
                     logger.info("Agent session command ack: %s", payload.get("command_id"))
                     await self.handle_command_ack(payload)
@@ -2481,6 +2486,21 @@ class AgentSessionBridge:
         for command in session.pending_commands.values():
             if command.message_id == old_message_id:
                 command.message_id = new_message_id
+
+    async def handle_title_changed(self, session: AgentSession, title: object) -> None:
+        """Rename the session thread for a title the client learned after hello, such as its first prompt."""
+        if not isinstance(title, str) or not title.strip() or session.thread_id is None:
+            return
+        session.hello.title = title.strip()
+        channel = self.bot.get_channel(session.thread_id)
+        name = session_thread_name(session.hello)
+        if not isinstance(channel, discord.Thread) or channel.name == name:
+            return
+        try:
+            # Discord allows two renames per thread in ten minutes; never hold this connection for a rate limit.
+            await asyncio.wait_for(channel.edit(name=name), timeout=5)
+        except (discord.DiscordException, TimeoutError):
+            logger.warning("Could not rename Agent session thread %s", session.thread_id)
 
     async def post_thread_notice(self, thread_id: int, text: str) -> None:
         channel = self.bot.get_channel(thread_id)

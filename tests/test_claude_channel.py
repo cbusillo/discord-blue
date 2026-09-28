@@ -86,7 +86,9 @@ class FakeClaudeCode:
 
 
 @asynccontextmanager
-async def running_channel(*, configured: bool = True) -> AsyncIterator[tuple[FakeClaudeCode, FakeDiscordBlue]]:
+async def running_channel(
+    *, configured: bool = True, identity: Identity = IDENTITY
+) -> AsyncIterator[tuple[FakeClaudeCode, FakeDiscordBlue]]:
     discord = FakeDiscordBlue()
     app = web.Application()
     app.router.add_get("/agent-session/connect", discord.connect)
@@ -96,7 +98,7 @@ async def running_channel(*, configured: bool = True) -> AsyncIterator[tuple[Fak
             server_url=url, token=TOKEN, socket_path=Path("/unused"), host_label="Claude Code on test", reconnect_seconds=0.05
         )
         claude = FakeClaudeCode()
-        channel = asyncio.create_task(run_channel(claude.stdin, claude, config if configured else None, IDENTITY))
+        channel = asyncio.create_task(run_channel(claude.stdin, claude, config if configured else None, identity))
         try:
             yield claude, discord
         finally:
@@ -123,7 +125,8 @@ class ClaudeChannelTests(unittest.IsolatedAsyncioTestCase):
             unknown = await claude.request("resources/list")
 
         result = initialized["result"]
-        self.assertEqual(result["capabilities"], {"experimental": {"claude/channel": {}, "claude/channel/permission": {}}})
+        channel: Json = {"claude/channel": {}, "claude/channel/permission": {}}
+        self.assertEqual(result["capabilities"], {"experimental": channel, "tools": {}})
         self.assertEqual(result["protocolVersion"], "2025-11-25")
         # Claude Code registers no channel that negotiated the 2026-07-28 revision.
         self.assertIn(newest, PROTOCOL_VERSIONS)
@@ -217,5 +220,5 @@ class ClaudeChannelTests(unittest.IsolatedAsyncioTestCase):
         async with running_channel(configured=False) as (claude, discord):
             result = (await claude.initialize())["result"]
 
-        self.assertEqual(result["capabilities"], {"experimental": {"claude/channel": {}}})
+        self.assertEqual(result["capabilities"], {"experimental": {"claude/channel": {}}, "tools": {}})
         self.assertEqual(discord.sockets, [])

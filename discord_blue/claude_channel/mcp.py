@@ -2,8 +2,8 @@
 
 Claude Code starts one per session and speaks newline-delimited JSON-RPC 2.0 on
 stdin/stdout. Only what a channel needs is implemented: ``initialize``,
-``ping``, incoming notifications, and outgoing
-notifications. The channel methods (``notifications/claude/channel*``) are
+``ping``, ``tools/list`` and ``tools/call``, and notifications both ways. The
+channel methods (``notifications/claude/channel*``) are
 Claude Code extensions described in its channels reference.
 """
 
@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 LINE_LIMIT = 16 * 1024 * 1024
 METHOD_NOT_FOUND = -32601
+INVALID_PARAMS = -32602
 
 
 class Output(Protocol):
@@ -32,6 +33,8 @@ class Output(Protocol):
 
 
 NotificationHandler = Callable[[Json], Awaitable[None]]
+# Called with the tool arguments and the request's `_meta`; returns the text result.
+ToolHandler = Callable[[Json, Json], Awaitable[str]]
 
 
 class RpcFailure(Exception):
@@ -55,10 +58,14 @@ class ChannelServer:
         self.name, self.version, self.instructions = name, version, instructions
         self.permission_relay = permission_relay
         self.notification_handlers: dict[str, NotificationHandler] = {}
+        self.tools: dict[str, tuple[Json, ToolHandler]] = {}
         self.write_lock = asyncio.Lock()
 
     def on_notification(self, method: str, handler: NotificationHandler) -> None:
         self.notification_handlers[method] = handler
+
+    def add_tool(self, spec: Json, handler: ToolHandler) -> None:
+        self.tools[spec["name"]] = (spec, handler)
 
     async def notify(self, method: str, params: Json) -> None:
         await self.write({"jsonrpc": "2.0", "method": method, "params": params})
@@ -105,10 +112,20 @@ class ChannelServer:
                 experimental["claude/channel/permission"] = {}
             return {
                 "protocolVersion": requested if requested in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0],
-                "capabilities": {"experimental": experimental},
+                "capabilities": {"experimental": experimental, **({"tools": {}} if self.tools else {})},
                 "serverInfo": {"name": self.name, "version": self.version},
                 "instructions": self.instructions,
             }
         if method == "ping":
             return {}
+        if method == "tools/list":
+            return {"tools": [spec for spec, _handler in self.tools.values()]}
+        if method == "tools/call":
+            name, arguments, meta = params.get("name"), params.get("arguments"), params.get("_meta")
+            if not isinstance(name, str) or name not in self.tools:
+                raise RpcFailure(INVALID_PARAMS, f"Unknown tool: {name}")
+            text = await self.tools[name][1](
+                arguments if isinstance(arguments, dict) else {}, meta if isinstance(meta, dict) else {}
+            )
+            return {"content": [{"type": "text", "text": text}]}
         raise RpcFailure(METHOD_NOT_FOUND, f"Method not found: {method}")
