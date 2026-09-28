@@ -258,11 +258,16 @@ Behaviour and limits:
   still mirrored, but Claude Code drops channel messages, so the thread offers
   no replies or approvals and says how to resume with the flag.
 - Discord cannot pause, interrupt or end a Claude Code turn, and cannot answer
-  Claude's multiple-choice questions. A reply sent while Claude is busy waits
-  for the next turn; its acknowledgement means Claude Code received it.
+  Claude's multiple-choice questions. A reply sent while a turn runs is held
+  until the turn ends (or, after an interrupt, until Claude Code reports it is
+  idle); it is acknowledged when it reaches Claude Code. Held replies are dropped,
+  with a notice, if `/clear` or `/resume` switches conversations first.
 - A permission request stays in the terminal unless it is the only unfinished
   call to that tool that the hooks reported, with its input and working
-  directory (which follows a `cd`), and its preview matches that input. It also stays there when Discord cannot show it exactly: a Bash
+  directory (which follows a `cd`); its preview equals that input exactly; and
+  the PermissionRequest hook confirms that no other hook rewrote the input.
+  Input with repeated spaces, tabs, newlines or non-ASCII characters stays local,
+  because Claude Code's preview may hide those. It also stays there when Discord cannot show it exactly: a Bash
   command whose quoting Discord would change (pipes, double quotes, repeated
   spaces), anything longer than 1,600 characters, a preview that Claude Code
   shortened or masked, or a code fence.

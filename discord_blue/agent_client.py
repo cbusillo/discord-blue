@@ -42,6 +42,9 @@ class ConnectionConfig(Protocol):
     def hello_timeout_seconds(self) -> float: ...
 
 
+DEFERRED = object()
+
+
 class Rejected(Exception):
     """A control that was not executed, with a reason safe to show in Discord."""
 
@@ -101,21 +104,31 @@ class AgentSessionClient:
             return self.commands[command_id]
         self.commands[command_id] = self.event("command_reject", command_id=command_id, reason="Command already in progress.")
         try:
-            await self.run_command(message)
+            if await self.run_command(message) is DEFERRED:
+                return None  # The subclass answers later with finish_command.
             response = self.event("command_ack", command_id=command_id)
         except Rejected as exc:
             response = self.event("command_reject", command_id=command_id, reason=str(exc))
         except self.command_errors as exc:
             response = self.event("command_reject", command_id=command_id, reason=self.failure_reason(exc))
+        self.remember(command_id, response)
+        return response
+
+    def remember(self, command_id: str, response: Json) -> None:
         self.commands[command_id] = response
         while len(self.commands) > COMMAND_MEMORY:
             self.commands.popitem(last=False)
-        return response
+
+    def finish_command(self, command_id: str, response: Json) -> None:
+        """Answer a command whose run_command returned DEFERRED."""
+        self.remember(command_id, response)
+        self.enqueue(response)
 
     def is_current(self, message: Json) -> bool:
         return message.get("session_id") == self.session_id and message.get("session_epoch") == self.epoch
 
-    async def run_command(self, message: Json) -> None:
+    async def run_command(self, message: Json) -> object:
+        """Execute a command; return DEFERRED to acknowledge or reject it later with finish_command."""
         raise NotImplementedError
 
     def failure_reason(self, exc: Exception) -> str:

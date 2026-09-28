@@ -70,6 +70,23 @@
         ]
       }
     ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "PermissionRequest",
+              "session_id": "${session_id}",
+              "tool_name": "${tool_name}",
+              "tool_input": "${tool_input}"
+            }
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "hooks": [
@@ -97,6 +114,22 @@
               "event": "PostToolUseFailure",
               "session_id": "${session_id}",
               "tool_use_id": "${tool_use_id}"
+            }
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "idle_prompt",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "Notification",
+              "session_id": "${session_id}"
             }
           }
         ]

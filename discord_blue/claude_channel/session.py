@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import shlex
 import socket
 import subprocess
@@ -31,7 +30,7 @@ from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from discord_blue.agent_client import PROMPT_EVENTS, AgentSessionClient, Json, Rejected
+from discord_blue.agent_client import DEFERRED, PROMPT_EVENTS, AgentSessionClient, Json, Rejected
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.claude_channel.launch import ancestry, loaded_as_channel
 from discord_blue.codex_bridge.session import REPLY_LIMIT, TEXT_LIMIT, TURN_DONE, command_argv, thread_title
@@ -123,15 +122,19 @@ def approval_command(tool_name: str, tool_input: Json) -> list[str] | None:
     return [tool_name, json.dumps(tool_input, ensure_ascii=False)] if tool_name else None
 
 
-def folded(value: object) -> object:
-    """The value as a permission preview shows it: Claude Code folds each run of whitespace to one space."""
+def sanitizer_proof(value: object) -> bool:
+    """Whether Claude Code's preview sanitizer leaves this value unchanged, so an equal preview proves it.
+
+    The sanitizer folds whitespace runs and neutralizes invisible, direction-override and lookalike
+    characters; plain printable ASCII with single spaces is the text it provably keeps.
+    """
     if isinstance(value, str):
-        return re.sub(r"\s+", " ", value)
+        return all(" " <= char <= "~" for char in value) and "  " not in value
     if isinstance(value, list):
-        return [folded(item) for item in value]
+        return all(sanitizer_proof(item) for item in value)
     if isinstance(value, dict):
-        return {key: folded(item) for key, item in value.items()}
-    return value
+        return all(sanitizer_proof(key) and sanitizer_proof(item) for key, item in value.items())
+    return value is None or isinstance(value, bool | int | float)
 
 
 def unflagged_notice(session_id: str) -> str:
@@ -160,6 +163,13 @@ class ClaudeSession(AgentSessionClient):
         self.approval_calls: dict[str, str] = {}
         # Tool calls reported by PreToolUse that have not finished, by tool_use_id.
         self.tool_calls: OrderedDict[str, ToolCall] = OrderedDict()
+        # Matched permission requests waiting for the PermissionRequest hook, and final inputs it reported.
+        self.awaiting: dict[str, tuple[ToolCall, list[str], Json]] = {}
+        self.final_inputs: dict[str, object] = {}
+        # Discord replies held while a turn runs: Claude Code queues channel messages and would deliver
+        # them even after /clear or /resume switched conversations.
+        self.turn_running = False
+        self.held: list[tuple[str, str]] = []
         # Replies this server injected; their prompts are already in Discord.
         self.injected: deque[str] = deque(maxlen=64)
         if not identity.channel:
@@ -180,7 +190,7 @@ class ClaudeSession(AgentSessionClient):
 
     async def on_permission_request(self, params: Json) -> None:
         request_id = str(params.get("request_id") or "")
-        if not request_id or request_id in self.prompts:
+        if not request_id or request_id in self.prompts or request_id in self.awaiting:
             return
         tool_name, preview = str(params.get("tool_name") or ""), str(params.get("input_preview") or "")
         call = self.tool_call_for(request_id, tool_name, preview)
@@ -188,6 +198,25 @@ class ClaudeSession(AgentSessionClient):
         if call is None or command is None or not approval_fits_discord(command, call.cwd):
             self.publish("status_changed", message=WAITING_LOCALLY)
             return
+        # Another PreToolUse hook may have rewritten the input; wait for PermissionRequest to report the final one.
+        self.awaiting[request_id] = (call, command, params)
+        self.confirm_final_input(tool_name)
+
+    def confirm_final_input(self, tool_name: str) -> None:
+        """Relay a matched request once the PermissionRequest hook shows its final input is the one reported."""
+        waiting = [request_id for request_id, (call, _, _) in self.awaiting.items() if call.tool_name == tool_name]
+        if not waiting or tool_name not in self.final_inputs:
+            return
+        final = self.final_inputs.pop(tool_name)
+        for request_id in waiting:
+            call, command, params = self.awaiting.pop(request_id)
+            if final == call.tool_input:
+                self.relay(request_id, call, command, params)
+            else:
+                self.publish("status_changed", message=WAITING_LOCALLY)
+
+    def relay(self, request_id: str, call: ToolCall, command: list[str], params: Json) -> None:
+        tool_name = call.tool_name
         description = str(params.get("description") or "")
         self.approval_calls[request_id] = call.tool_use_id
         self.prompts[request_id] = self.event(
@@ -206,8 +235,9 @@ class ClaudeSession(AgentSessionClient):
 
         The request carries only a display preview, and Claude Code's preview is lossy: it masks credentials,
         shortens long fields, folds whitespace and neutralizes lookalike characters. So a preview carrying a
-        masking or shortening marker never matches, and any other unfinished call to the same tool could
-        have produced the same preview, so the request is relayed only when exactly one exists.
+        masking or shortening marker never matches; the preview must equal the reported input exactly, and
+        that input must be one the sanitizer cannot have changed; and any other unfinished call to the same
+        tool could have produced the same preview, so the request is relayed only when exactly one exists.
         """
         if any(marker in preview for marker in LOSSY_PREVIEW_MARKERS):
             return None
@@ -216,9 +246,9 @@ class ClaudeSession(AgentSessionClient):
         except ValueError:
             return None
         calls = [call for call in self.tool_calls.values() if call.tool_name == tool_name]
-        if len(calls) != 1 or calls[0].tool_use_id in self.approval_calls.values() or folded(calls[0].tool_input) != shown:
+        if len(calls) != 1 or calls[0].tool_use_id in self.approval_calls.values():
             return None
-        return calls[0]
+        return calls[0] if calls[0].tool_input == shown and sanitizer_proof(shown) else None
 
     def retire_approvals(self, tool_use_id: str | None = None) -> None:
         """Retire relayed prompts the terminal may have answered: all of them, or the one for a finished call."""
@@ -254,19 +284,34 @@ class ClaudeSession(AgentSessionClient):
         if event in TURN_EVENTS:
             self.retire_approvals()
         if event == "UserPromptSubmit":
+            # A new turn: calls from an interrupted one (no PostToolUse or Stop) can no longer run.
+            self.forget_calls()
+            self.turn_running = True
             prompt = fields.get("prompt", "")
             echo = prompt.lstrip().startswith("<channel") and any(f'command_id="{c}"' in prompt for c in self.injected)
             self.retitle(fields.get("session_title") or self.title or ("" if echo else prompt))
             if prompt.strip() and not echo:
                 self.publish("user_message", message=clip(prompt))
         elif event == "Stop":
-            self.tool_calls.clear()
+            self.forget_calls()
             self.publish(
                 "turn_complete", message=TURN_DONE, assistant_message=clip(fields.get("last_assistant_message", "")) or None
             )
+            await self.release_held()
         elif event == "StopFailure":
-            self.tool_calls.clear()
+            self.forget_calls()
             self.publish("error", message="Claude Code ended the turn with an error; check the terminal.")
+            await self.release_held()
+        elif event == "Notification":
+            # idle_prompt: Claude Code is waiting for input, which also covers a turn interrupted without Stop.
+            self.forget_calls()
+            await self.release_held()
+        elif event == "PermissionRequest":
+            try:
+                self.final_inputs[fields.get("tool_name", "")] = json.loads(fields.get("tool_input", ""))
+            except ValueError:
+                return
+            self.confirm_final_input(fields.get("tool_name", ""))
         elif event == "PreToolUse":
             self.on_tool_call(fields)
         elif event in TOOL_EVENTS:
@@ -276,6 +321,11 @@ class ClaudeSession(AgentSessionClient):
                 self.retire_approvals(tool_use_id)
         elif event == "SessionStart":
             self.retitle(fields.get("session_title") or "")
+
+    def forget_calls(self) -> None:
+        self.tool_calls.clear()
+        self.awaiting.clear()
+        self.final_inputs.clear()
 
     def on_tool_call(self, fields: dict[str, str]) -> None:
         try:
@@ -295,7 +345,8 @@ class ClaudeSession(AgentSessionClient):
         self.commands.clear()
         self.prompts.clear()
         self.approval_calls.clear()
-        self.tool_calls.clear()
+        self.forget_calls()
+        dropped, self.held, self.turn_running = len(self.held), [], False
         self.conversation_id, self.title = conversation, None
         if self.websocket is not None:
             # Reconnect so Discord Blue binds the thread to the new epoch; nothing more goes out on this socket.
@@ -304,6 +355,9 @@ class ClaudeSession(AgentSessionClient):
         self.outbox = deque({**event, "session_epoch": self.epoch} for event in self.outbox if event["type"] not in PROMPT_EVENTS)
         ended = "The Claude Code conversation in this thread ended (/clear or /resume)"
         self.publish("notice", message=f"{ended}; earlier replies and approvals from Discord are no longer accepted.")
+        if dropped:
+            waiting = f"{dropped} Discord {'reply was' if dropped == 1 else 'replies were'} waiting for the turn to end"
+            self.publish("notice", message=f"{waiting} and not delivered. Send again if still needed.")
 
     def retitle(self, text: str) -> None:
         title = thread_title({"name": text})
@@ -313,19 +367,40 @@ class ClaudeSession(AgentSessionClient):
 
     # Discord -> Claude Code
 
-    async def run_command(self, message: Json) -> None:
+    async def inject(self, command_id: str, text: str) -> None:
+        self.injected.append(command_id)
+        # The injected message starts a turn; later replies wait for it to end.
+        self.turn_running = True
+        await self.notify(CHANNEL, {"content": text, "meta": {"command_id": command_id}})
+
+    async def release_held(self) -> None:
+        """Deliver replies held during the turn that just ended."""
+        self.turn_running = False
+        held, self.held = self.held, []
+        for command_id, text in held:
+            try:
+                await self.inject(command_id, text)
+            except OSError:
+                self.finish_command(command_id, self.event("command_reject", command_id=command_id, reason=LOST_CLAUDE))
+            else:
+                self.finish_command(command_id, self.event("command_ack", command_id=command_id))
+
+    async def run_command(self, message: Json) -> object:
         kind = message.get("kind")
         if kind == "reply":
             text = message.get("text")
             if not isinstance(text, str) or not text.strip() or len(text) > REPLY_LIMIT:
                 raise Rejected(f"Replies must contain 1 to {REPLY_LIMIT} characters.")
             command_id = str(message["command_id"])
-            self.injected.append(command_id)
-            await self.notify(CHANNEL, {"content": text, "meta": {"command_id": command_id}})
+            if self.turn_running:
+                self.held.append((command_id, text))
+                return DEFERRED
+            await self.inject(command_id, text)
         elif kind == "status_request":
             self.enqueue(self.status_snapshot())
         else:
             raise Rejected("Claude Code channels cannot do this; use the Claude Code terminal.")
+        return None
 
     def failure_reason(self, exc: Exception) -> str:
         return LOST_CLAUDE

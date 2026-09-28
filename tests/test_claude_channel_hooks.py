@@ -135,6 +135,50 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class HeldReplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_replies_wait_for_the_turn_to_end_and_are_dropped_when_the_conversation_changes(self) -> None:
+        async with running_channel() as (claude, discord):
+            await claude.initialize()
+            hello = await discord.next("hello")
+            await hook(claude, "UserPromptSubmit", prompt="Long task")
+            # Claude Code would queue a message sent now and deliver it even after /clear, so it waits here.
+            await discord.sockets[-1].send_json(command(hello, "cmd-1", "reply", text="then do this"))
+            await discord.control(command(hello, "barrier-1", "status_request"))  # Controls run in order.
+            self.assertEqual(await claude.settle(), [])
+            await hook(claude, "Stop", last_assistant_message="Done.")
+            delivered = await claude.notification(CHANNEL)
+            acked = await discord.next("command_ack")  # Held, so acknowledged only once delivered.
+
+            echo = '<channel source="plugin:dui:dui" command_id="cmd-1">\nthen do this\n</channel>'
+            await hook(claude, "UserPromptSubmit", prompt=echo)
+            await discord.sockets[-1].send_json(command(hello, "cmd-2", "reply", text="and this, later"))
+            await discord.control(command(hello, "barrier-2", "status_request"))
+            await hook(claude, "SessionEnd")
+            after = await discord.next("hello")
+            dropped = [(await discord.next("notice"))["message"] for _ in range(2)][1]
+            now_idle = await discord.control(command(after, "cmd-3", "reply", text="for the new conversation"))
+            injected = await claude.notification(CHANNEL)
+            leftover = await claude.settle()
+
+        self.assertEqual((delivered["content"], acked["command_id"]), ("then do this", "cmd-1"))
+        self.assertIn("1 Discord reply was waiting for the turn to end and not delivered", dropped)
+        self.assertEqual((now_idle["type"], injected["content"]), ("command_ack", "for the new conversation"))
+        self.assertEqual(leftover, [])
+
+    async def test_an_idle_prompt_releases_replies_held_by_an_interrupted_turn(self) -> None:
+        async with running_channel() as (claude, discord):
+            await claude.initialize()
+            hello = await discord.next("hello")
+            await hook(claude, "UserPromptSubmit", prompt="Task the owner interrupts; Stop does not run")
+            await discord.sockets[-1].send_json(command(hello, "cmd-1", "reply", text="try another way"))
+            await discord.control(command(hello, "barrier", "status_request"))
+            self.assertEqual(await claude.settle(), [])
+            await hook(claude, "Notification")
+            delivered = await claude.notification(CHANNEL)
+
+        self.assertEqual(delivered["content"], "try another way")
+
+
 class LaunchTests(unittest.TestCase):
     def test_the_nearest_claude_command_line_decides_whether_the_channel_loaded(self) -> None:
         own = "/Users/me/.local/share/uv/tools/discord-blue/bin/python /Users/me/.local/bin/discord-blue-claude-channel"
