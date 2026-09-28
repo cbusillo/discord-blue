@@ -1,15 +1,18 @@
 """Attach to the stock Codex app-server daemon as one extra client and mirror its live threads.
 
-Joining uses ``thread/resume`` with no config overrides: overrides can shut an idle
-thread down and resume it cold. On a loaded thread, resume only adds this
-connection as a subscriber and replays a read-only goal snapshot.
+Each loaded root thread gets a Discord session. The bridge subscribes with
+``thread/resume`` (no config overrides, which can restart an idle thread cold)
+only while a turn runs or a prompt is pending, and unsubscribes afterwards.
+Stock broadcasts ``thread/status/changed`` to every client, so the bridge rejoins
+when a turn starts, and stock replays pending requests on the join. Once the TUI
+closes and nobody is subscribed, stock unloads the thread and reports
+``notLoaded``; the bridge then ends the Discord session, which archives its thread.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from collections.abc import Callable
 from typing import Any
 
@@ -17,13 +20,12 @@ import aiohttp
 
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.codex_bridge.rpc import AppServerClient, RpcError, TransportError
-from discord_blue.codex_bridge.session import Rpc, ThreadSession, final_answer
+from discord_blue.codex_bridge.session import Rejected, Rpc, ThreadSession, latest_turn
 
 Json = dict[str, Any]
 logger = logging.getLogger(__name__)
 
 CLIENT_INFO = {"name": "discord_blue_codex_bridge", "title": "Discord Blue Codex bridge", "version": "0.1.0"}
-SWEEP_SECONDS = 60.0
 # Streaming deltas are never mirrored; opting out keeps the bounded receive queue small.
 QUIET_NOTIFICATIONS = [
     "item/agentMessage/delta",
@@ -54,8 +56,6 @@ class CodexBridge:
         self.http: aiohttp.ClientSession | None = None
         self.sessions: dict[str, ThreadSession] = {}
         self.tasks: dict[str, asyncio.Task[None]] = {}
-        # Threads released after a long idle stay detached until they become active again.
-        self.released: set[str] = set()
 
     async def run(self) -> None:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=20)) as http:
@@ -84,17 +84,8 @@ class CodexBridge:
                 return
 
     async def pump(self, rpc: AppServerClient) -> None:
-        last_sweep = time.monotonic()
         while True:
-            try:
-                message = await asyncio.wait_for(rpc.receive(), SWEEP_SECONDS)
-            except TimeoutError:
-                message = None
-            if message is not None:
-                await self.dispatch(message)
-            if time.monotonic() - last_sweep >= SWEEP_SECONDS:
-                last_sweep = time.monotonic()
-                await self.release_idle()
+            await self.dispatch(await rpc.receive())
 
     async def dispatch(self, message: Json) -> None:
         method = str(message.get("method"))
@@ -107,16 +98,22 @@ class CodexBridge:
                 session.on_request(message["id"], method, params)
             return
         if method == "thread/started":
-            started = str((params.get("thread") or {}).get("id") or "")
-            self.released.discard(started)
-            await self.join(started)
+            await self.join(str((params.get("thread") or {}).get("id") or ""))
         elif method == "thread/status/changed":
-            if session is not None:
-                session.on_status(params.get("status") or {})
-                return
-            if (params.get("status") or {}).get("type") == "active":
-                self.released.discard(thread_id)
-            await self.join(thread_id)
+            status = params.get("status") or {}
+            if session is None:
+                await self.join(thread_id)
+            elif status.get("type") == "notLoaded":
+                # Stock unloads a thread once no client is subscribed: its TUI has closed.
+                await self.detach(thread_id)
+            else:
+                session.on_status(status)
+                if status.get("type") == "active":
+                    await self.subscribe(session)
+                elif status.get("type") == "idle":
+                    # Covers a turn that finished before the join landed, which sends no turn/completed here.
+                    # Stock reports idle before turn/completed; a turn still being tracked holds the join.
+                    await session.release()
         elif session is None:
             return
         elif method == "thread/closed":
@@ -129,11 +126,14 @@ class CodexBridge:
             session.on_item_completed(str(params.get("turnId")), params.get("item") or {})
         elif method == "turn/completed":
             session.on_turn_completed(params.get("turn") or {})
+            await session.release()
         elif method == "serverRequest/resolved":
             session.on_resolved(params.get("requestId"))  # type: ignore[arg-type]
+            await session.release()
 
     async def join(self, thread_id: str) -> None:
-        if not thread_id or thread_id in self.sessions or thread_id in self.released or self.rpc is None:
+        """Open a Discord session for a loaded root thread; subscribe only if it is busy."""
+        if not thread_id or thread_id in self.sessions or self.rpc is None:
             return
         try:
             thread = (await self.rpc.request("thread/read", {"threadId": thread_id}))["thread"]
@@ -142,25 +142,23 @@ class CodexBridge:
                 return
             if not (thread.get("name") or thread.get("preview")):
                 return
-            await self.rpc.request("thread/resume", {"threadId": thread_id, "excludeTurns": True})
             page = await self.rpc.request("thread/turns/list", {"threadId": thread_id, "limit": 1, "itemsView": "summary"})
         except RpcError as exc:
             logger.info("Not joining Codex thread %s: %s", thread_id, exc)
             return
-        latest = (page.get("data") or [{}])[0]
-        items = [
-            (i.get("phase"), i["text"])
-            for i in latest.get("items") or []
-            if i.get("type") == "agentMessage" and isinstance(i.get("text"), str)
-        ]
-        active = latest.get("id") if latest.get("status") == "inProgress" else None
-        session = ThreadSession(
-            self.config, self.rpc, thread, active_turn_id=active, last_answer=None if active else final_answer(items)
-        )
+        session = ThreadSession(self.config, self.rpc, thread, latest_turn(page))
         assert self.http is not None
         self.sessions[thread_id] = session
         self.tasks[thread_id] = asyncio.create_task(session.run(self.http), name=f"codex-bridge-{thread_id}")
         logger.info("Mirroring Codex thread %s (%s)", thread_id, session.title)
+        if (thread.get("status") or {}).get("type") == "active":
+            await self.subscribe(session)
+
+    async def subscribe(self, session: ThreadSession) -> None:
+        try:
+            await session.subscribe()
+        except (Rejected, RpcError) as exc:
+            logger.info("Not subscribing to Codex thread %s: %s", session.thread_id, exc)
 
     async def detach(self, thread_id: str) -> None:
         session, task = self.sessions.pop(thread_id, None), self.tasks.pop(thread_id, None)
@@ -173,16 +171,4 @@ class CodexBridge:
     async def detach_all(self) -> None:
         for thread_id in list(self.sessions):
             await self.detach(thread_id)
-        self.released.clear()
         self.rpc = None
-
-    async def release_idle(self) -> None:
-        """Unsubscribe from long-idle threads so a closed TUI's thread can unload."""
-        now = time.monotonic()
-        for thread_id, session in list(self.sessions.items()):
-            if session.idle_since is None or session.prompts or now - session.idle_since < self.config.idle_release_seconds:
-                continue
-            await self.detach(thread_id)
-            self.released.add(thread_id)
-            if self.rpc is not None:
-                await self.rpc.request("thread/unsubscribe", {"threadId": thread_id})

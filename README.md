@@ -191,7 +191,6 @@ server_url = "wss://BRIDGE_HOST/agent-session/connect"
 token_file = "~/.config/discord-blue/codex-bridge.token"  # mode 600; or set AGENT_SESSION_TOKEN
 # socket_path = "~/.codex/app-server-control/app-server-control.sock"
 # host_label = "Codex on Chris-Studio"
-# idle_release_hours = 12
 # allow_insecure_ws = false  # true permits ws:// to a trusted private host
 ```
 
@@ -199,14 +198,19 @@ Run it with `uv run discord-blue-codex-bridge`, or install
 [the launchd template](docs/launchd/com.shinycomputers.discord-blue-codex-bridge.plist)
 yourself. Behaviour and limits:
 
-- It joins loaded root threads with `thread/resume` and sends no config
-  overrides, because overrides can restart an idle thread cold. Joining does not
-  clear a thread's goal. The owner receives a read-only goal snapshot:
-  `thread/goal/updated`, or `thread/goal/cleared` when the thread has no goal.
-- A joined thread stays loaded while the bridge is subscribed. After
-  `idle_release_hours` without activity or pending prompts, the bridge
-  unsubscribes so that a thread whose TUI has closed can unload. It rejoins when
-  the thread becomes active again.
+- Every loaded root thread gets a Discord thread, which stays open for as long as
+  the Codex thread stays loaded, even if it sits idle for days.
+- The bridge subscribes to a thread (`thread/resume`, no config overrides, which
+  can restart an idle thread cold) only while a turn runs, a prompt is pending,
+  or a Discord reply arrives. It unsubscribes when the turn ends. Stock
+  broadcasts status changes to every client, so the bridge rejoins when a turn
+  starts, and stock replays pending approvals and questions on the join.
+- When the TUI closes and no other client is subscribed, stock unloads the
+  thread (after `thread_unload_delay_secs`, default 60) and reports `notLoaded`.
+  The bridge then ends the Discord session and Discord Blue archives its thread.
+- Joining does not clear a thread's goal. Each join sends the owner a read-only
+  goal snapshot: `thread/goal/updated`, or `thread/goal/cleared` when the thread
+  has no goal.
 - Threads started with `--no-daemon`, `--profile` or most `-c` overrides run
   outside the daemon, so the bridge cannot see them.
 - If the daemon connection drops, every session closes. When it reconnects, each

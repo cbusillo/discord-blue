@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
+# Discord shows at most this many characters of an approval's shell-joined command.
+# Clients must not offer a Discord approval for a command longer than this.
+APPROVAL_COMMAND_DISPLAY_LIMIT = 1600
+
 # Actions a client can accept; omitted capabilities retain the legacy contract.
 REMOTE_ACTIONS = frozenset(
     {

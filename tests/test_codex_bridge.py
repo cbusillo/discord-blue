@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
-import time
 import unittest
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -17,11 +16,15 @@ from aiohttp.test_utils import TestServer
 from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.config import BridgeConfig, load_config
 from discord_blue.codex_bridge.session import CAPABILITIES, TURN_DONE, ThreadSession
-from discord_blue.doodads.agent_session.protocol import REMOTE_ACTIONS, SessionHello
+from discord_blue.doodads.agent_session.protocol import APPROVAL_COMMAND_DISPLAY_LIMIT, REMOTE_ACTIONS, SessionHello
 
 Json = dict[str, Any]
 TOKEN = "test-token"
 RESPONSES = ("command_ack", "command_reject", "approval_decision_ack", "approval_decision_reject")
+
+
+def status(thread_id: str, kind: str) -> Json:
+    return {"method": "thread/status/changed", "params": {"threadId": thread_id, "status": {"type": kind}}}
 
 
 def thread(thread_id: str, **fields: object) -> Json:
@@ -120,7 +123,7 @@ def command(session: ThreadSession, command_id: str, kind: str, **fields: object
 
 
 class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_joins_only_live_root_threads_without_config_overrides(self) -> None:
+    async def test_opens_sessions_for_live_root_threads_and_joins_only_busy_ones(self) -> None:
         answered = {
             "id": "turn-0",
             "status": "completed",
@@ -131,13 +134,15 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
             thread("child", parentThreadId="root"),
             thread("untitled", preview=""),
             thread("unloaded", status={"type": "notLoaded"}),
+            thread("busy", status={"type": "active", "activeFlags": []}),
             latest_turn=answered,
         )
         async with running_bridge(rpc) as (_bridge, discord):
-            hello = await discord.next("hello")
+            hellos = {h["session_id"]: h for h in [await discord.next("hello") for _ in range(2)]}
 
-        self.assertEqual(rpc.called("thread/resume"), [{"threadId": "root", "excludeTurns": True}])
-        parsed = SessionHello.from_payload(hello)
+        # Joining sends no config overrides; an idle thread is mirrored without subscribing.
+        self.assertEqual(rpc.called("thread/resume"), [{"threadId": "busy", "excludeTurns": True}])
+        parsed = SessionHello.from_payload(hellos["root"])
         self.assertEqual(
             (parsed.session_id, parsed.title, parsed.cwd, parsed.branch, parsed.assistant_message, parsed.capabilities),
             ("root", "Fix the login bug", "/work/project", "fix/login", "Done.", frozenset(CAPABILITIES)),
@@ -187,6 +192,31 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
             await bridge.dispatch({"method": "serverRequest/resolved", "params": {"threadId": "root", "requestId": 7}})
 
         self.assertEqual(rpc.responses, [(7, {"decision": "accept"})])
+
+    async def test_approvals_discord_cannot_fully_show_stay_in_the_tui(self) -> None:
+        base = {"threadId": "root", "turnId": "t1", "itemId": "item-1", "cwd": "/work"}
+        fits = "x" * APPROVAL_COMMAND_DISPLAY_LIMIT
+        tui_only = {
+            "longer than Discord shows": {**base, "command": fits + "y"},
+            "breaks out of the code fence": {**base, "command": "echo '```' [ls](https://x)"},
+            "asks for more permissions": {**base, "command": "ls", "additionalPermissions": {"network": {"enabled": True}}},
+            "asks for network access": {**base, "networkApprovalContext": {"host": "example.com", "protocol": "https"}},
+            "carries an unknown field": {**base, "command": "ls", "sandboxOverride": "danger-full-access"},
+            "writes to stdin": {**base, "command": "ls", "kind": "writeStdin"},
+        }
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            for request_id, (case, params) in enumerate(tui_only.items()):
+                with self.subTest(case):
+                    await bridge.dispatch({"id": request_id, "method": "item/commandExecution/requestApproval", "params": params})
+                    event = await discord.next()
+                    self.assertEqual((event["type"], event["message"]), ("status_changed", "Waiting on a decision in the Codex TUI"))
+            await bridge.dispatch({"id": 99, "method": "item/commandExecution/requestApproval", "params": {**base, "command": fits}})
+            self.assertEqual((await discord.next())["command"], [fits])
+
+        self.assertEqual(bridge.sessions, {})
+        self.assertEqual(rpc.responses, [])
 
     async def test_prompt_answered_in_the_tui_is_retired_and_cannot_be_answered(self) -> None:
         rpc = FakeRpc(thread("root"))
@@ -289,18 +319,109 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((replayed["type"], replayed["command"]), ("approval_request", ["make", "test"]))
         self.assertTrue(discord.received.empty())
 
-    async def test_long_idle_threads_are_released_until_active_again(self) -> None:
+    async def test_pending_prompts_are_sent_after_queued_status_so_the_server_keeps_them(self) -> None:
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            # Both events queue before the session connects, as they do across a Discord reconnect.
+            params = {"threadId": "root", "turnId": "t1", "itemId": "call-1", "questions": [{"id": "q", "question": "?"}]}
+            await bridge.dispatch({"method": "turn/started", "params": {"threadId": "root", "turn": {"id": "t1"}}})
+            await bridge.dispatch({"id": "req-1", "method": "item/tool/requestUserInput", "params": params})
+            await discord.next("hello")
+            events = [await discord.next() for _ in range(2)]
+
+        self.assertEqual([e["type"] for e in events], ["status_changed", "request_user_input"])
+
+    async def test_bridge_joins_while_a_turn_runs_and_catches_up_on_what_it_missed(self) -> None:
         rpc = FakeRpc(thread("root"))
         async with running_bridge(rpc) as (bridge, discord):
             await discord.next("hello")
-            bridge.sessions["root"].idle_since = time.monotonic() - bridge.config.idle_release_seconds - 1
-            await bridge.release_idle()
-            self.assertEqual((list(bridge.sessions), rpc.called("thread/unsubscribe")), ([], [{"threadId": "root"}]))
+            typed = {"type": "userMessage", "id": "u1", "clientId": None, "content": [{"type": "text", "text": "typed in the TUI"}]}
+            rpc.latest_turn = {"id": "t1", "status": "inProgress", "items": [typed]}
+            await bridge.dispatch(status("root", "active"))
+            # Notifications that also arrive after the join are not mirrored twice.
+            await bridge.dispatch({"method": "turn/started", "params": {"threadId": "root", "turn": {"id": "t1"}}})
+            await bridge.dispatch({"method": "item/completed", "params": {"threadId": "root", "turnId": "t1", "item": typed}})
+            answer = {"type": "agentMessage", "id": "a1", "phase": "final_answer", "text": "Fixed it."}
+            done = {"threadId": "root", "turn": {"id": "t1", "status": "completed", "items": [answer]}}
+            await bridge.dispatch({"method": "turn/completed", "params": done})
+            await bridge.dispatch({"method": "turn/completed", "params": done})
+            events = [await discord.next() for _ in range(3)]
+            self.assertTrue(discord.received.empty())
 
-            await bridge.dispatch({"method": "thread/status/changed", "params": {"threadId": "root", "status": {"type": "idle"}}})
-            self.assertEqual(list(bridge.sessions), [])
-            await bridge.dispatch({"method": "thread/status/changed", "params": {"threadId": "root", "status": {"type": "active"}}})
-            self.assertEqual(list(bridge.sessions), ["root"])
+            await bridge.dispatch(status("root", "idle"))
+            await bridge.dispatch(status("root", "active"))
+
+        self.assertEqual(
+            [(e["type"], e["message"], e.get("assistant_message")) for e in events],
+            [
+                ("status_changed", "Turn started", None),
+                ("user_message", "typed in the TUI", None),
+                ("turn_complete", TURN_DONE, "Fixed it."),
+            ],
+        )
+        membership = [name for name, _ in rpc.calls if name in ("thread/resume", "thread/unsubscribe")]
+        self.assertEqual(membership, ["thread/resume", "thread/unsubscribe", "thread/resume"])
+
+    async def test_a_turn_that_finished_before_the_join_is_still_reported(self) -> None:
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            answer = {"type": "agentMessage", "id": "a1", "phase": "final_answer", "text": "Quick one."}
+            rpc.latest_turn = {"id": "t1", "status": "completed", "items": [answer]}
+            await bridge.dispatch(status("root", "active"))
+            await bridge.dispatch(status("root", "idle"))
+            done = await discord.next("turn_complete")
+
+        self.assertEqual(done["assistant_message"], "Quick one.")
+        # No turn/completed will follow, so the bridge must not stay joined and keep the thread loaded.
+        self.assertEqual(rpc.called("thread/unsubscribe"), [{"threadId": "root"}])
+
+    async def test_a_pending_prompt_keeps_the_bridge_joined_and_a_replay_is_not_repeated(self) -> None:
+        rpc = FakeRpc(thread("root", status={"type": "active", "activeFlags": []}))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            params = {"threadId": "root", "turnId": "t1", "itemId": "item-1", "command": "make test"}
+            await bridge.dispatch({"method": "turn/started", "params": {"threadId": "root", "turn": {"id": "t1"}}})
+            await discord.next("status_changed")
+            await bridge.dispatch({"id": 7, "method": "item/commandExecution/requestApproval", "params": params})
+            await bridge.dispatch({"id": 7, "method": "item/commandExecution/requestApproval", "params": params})
+            await bridge.sessions["root"].release()
+            self.assertEqual(rpc.called("thread/unsubscribe"), [])
+
+            done = {"threadId": "root", "turn": {"id": "t1", "status": "interrupted"}}
+            await bridge.dispatch({"method": "turn/completed", "params": done})
+            events = [await discord.next() for _ in range(3)]
+
+        self.assertEqual([e["type"] for e in events], ["approval_request", "approval_resolved", "status_changed"])
+        self.assertEqual(rpc.called("thread/unsubscribe"), [{"threadId": "root"}])
+
+    async def test_discord_reply_to_an_idle_thread_joins_before_starting_the_turn(self) -> None:
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            session = bridge.sessions["root"]
+            self.assertEqual((await discord.control(command(session, "c1", "reply", text="go on")))["type"], "command_ack")
+
+            rpc.threads["root"]["status"] = {"type": "notLoaded"}
+            await session.release()
+            rejected = await discord.control(command(session, "c2", "reply", text="again"))
+
+        self.assertEqual(rejected["reason"], "This Codex thread has closed; reopen it in the Codex TUI.")
+        calls = [name for name, _ in rpc.calls if name != "thread/loaded/list"]
+        self.assertEqual(
+            calls[calls.index("thread/resume") - 1 :],
+            ["thread/read", "thread/resume", "thread/turns/list", "turn/start", "thread/unsubscribe", "thread/read"],
+        )
+
+    async def test_the_discord_session_ends_when_stock_unloads_the_thread(self) -> None:
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            await bridge.dispatch(status("root", "notLoaded"))
+            self.assertEqual(bridge.sessions, {})
+            async with asyncio.timeout(5):
+                while not discord.sockets[-1].closed:
+                    await asyncio.sleep(0.01)
 
 
 class ConfigTests(unittest.TestCase):
@@ -324,6 +445,18 @@ class ConfigTests(unittest.TestCase):
             'server_url = "wss://user:pw@bridge.example/agent-session/connect"',
         ):
             with self.subTest(body=body), self.assertRaises(ValueError):
+                self.load(body)
+
+    def test_values_must_have_their_toml_type(self) -> None:
+        url = 'server_url = "ws://discord-blue:8787/agent-session/connect"'
+        for body, error in (
+            (f'{url}\nallow_insecure_ws = "false"', "allow_insecure_ws must be true or false"),
+            (f"{url}\nallow_insecure_ws = 1", "allow_insecure_ws must be true or false"),
+            ("server_url = 5", "server_url must be a string"),
+            (f"{url}\nallow_insecure_ws = true\nhost_label = true", "host_label must be a string"),
+            (f"{url}\nallow_insecure_wss = true", "unknown config keys: allow_insecure_wss"),
+        ):
+            with self.subTest(body=body), self.assertRaisesRegex(ValueError, error):
                 self.load(body)
 
     def test_token_must_be_present_and_private(self) -> None:
