@@ -1,0 +1,13 @@
+{
+  "name": "dui",
+  "description": "Mirror each Claude Code session into its own Discord Blue thread, with replies and permission approvals. Load it as a channel with --dangerously-load-development-channels plugin:dui@discord-blue.",
+  "version": "0.1.0",
+  "keywords": [
+    "discord",
+    "channel",
+    "mcp"
+  ],
+  "author": {
+    "name": "Chris Busillo"
+  }
+}

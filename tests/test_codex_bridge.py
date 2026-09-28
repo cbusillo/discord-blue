@@ -17,10 +17,9 @@ from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.config import BridgeConfig, load_config
 from discord_blue.codex_bridge.session import CAPABILITIES, TURN_DONE, ThreadSession
 from discord_blue.doodads.agent_session.protocol import APPROVAL_COMMAND_DISPLAY_LIMIT, REMOTE_ACTIONS, SessionHello
+from tests.fakes_discord_blue import TOKEN, FakeDiscordBlue
 
 Json = dict[str, Any]
-TOKEN = "test-token"
-RESPONSES = ("command_ack", "command_reject", "approval_decision_ack", "approval_decision_reject")
 
 
 def status(thread_id: str, kind: str) -> Json:
@@ -54,42 +53,6 @@ class FakeRpc:
 
     def called(self, method: str) -> list[Json | None]:
         return [params for name, params in self.calls if name == method]
-
-
-class FakeDiscordBlue:
-    """Stands in for the deployed agent-session server: acks hello and records events."""
-
-    def __init__(self) -> None:
-        self.received: asyncio.Queue[Json] = asyncio.Queue()
-        self.sockets: list[web.WebSocketResponse] = []
-
-    async def connect(self, request: web.Request) -> web.WebSocketResponse:
-        if request.headers.get("Authorization") != f"Bearer {TOKEN}":
-            raise web.HTTPUnauthorized()
-        websocket = web.WebSocketResponse()
-        await websocket.prepare(request)
-        self.sockets.append(websocket)
-        async for frame in websocket:
-            message = frame.json()
-            if message["type"] == "hello":
-                await websocket.send_json({"type": "hello_ack", "thread_id": 1})
-            if message["type"] != "heartbeat":
-                await self.received.put(message)
-        return websocket
-
-    async def close(self) -> None:
-        for websocket in self.sockets:
-            await websocket.close()
-
-    async def next(self, *kinds: str) -> Json:
-        while True:
-            message = await asyncio.wait_for(self.received.get(), timeout=5)
-            if not kinds or message["type"] in kinds:
-                return message
-
-    async def control(self, message: Json) -> Json:
-        await self.sockets[-1].send_json(message)
-        return await self.next(*RESPONSES)
 
 
 @asynccontextmanager

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -7,6 +8,14 @@ from typing import Any, Literal
 # Discord shows at most this many characters of an approval's shell-joined command.
 # Clients must not offer a Discord approval for a command longer than this.
 APPROVAL_COMMAND_DISPLAY_LIMIT = 1600
+
+
+def approval_fits_discord(argv: list[str]) -> bool:
+    """Whether Discord shows this approval's command in full; clients keep any other approval local."""
+    shown = shlex.join(argv)
+    # Discord shows the joined argv in a code fence; a fence inside it would end the block early.
+    return len(shown) <= APPROVAL_COMMAND_DISPLAY_LIMIT and "```" not in shown
+
 
 # Actions a client can accept; omitted capabilities retain the legacy contract.
 REMOTE_ACTIONS = frozenset(
