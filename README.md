@@ -228,8 +228,8 @@ session as a [channel](https://code.claude.com/docs/en/channels-reference).
 The thread is named after the session name (`-n` or `/rename`) or the first typed
 prompt. It mirrors typed prompts and each turn's final answer. A Discord reply
 becomes the session's next prompt. A tool permission prompt shows in Discord
-with approve and deny when Discord can show the whole request; the terminal
-dialog stays open too, and the first answer wins. The thread archives when the
+with approve and deny, with the directory it runs in, when Discord can show the
+exact request; the terminal dialog stays open too, and the first answer wins. The thread archives when the
 session exits.
 
 One-time setup on the Mac:
@@ -260,12 +260,18 @@ Behaviour and limits:
 - Discord cannot pause, interrupt or end a Claude Code turn, and cannot answer
   Claude's multiple-choice questions. A reply sent while Claude is busy waits
   for the next turn; its acknowledgement means Claude Code received it.
-- Approvals that Discord cannot show in full stay in the terminal: longer than
-  1,600 characters, shortened by Claude Code, or containing a code fence.
+- A permission request stays in the terminal unless the hooks reported exactly
+  one matching tool call, with its input and working directory (it follows a
+  `cd`). It also stays there when Discord cannot show it exactly: a Bash
+  command whose quoting Discord would change (pipes, double quotes, repeated
+  spaces), anything longer than 1,600 characters, a preview that Claude Code
+  shortened or masked, or a code fence.
 - Claude Code does not report when the terminal answered a relayed prompt. The
-  Discord prompt retires when that tool call finishes, the next prompt arrives,
-  or the turn ends.
-- `/clear` or `/resume` inside a session keeps its thread and posts a notice.
+  Discord prompt retires when that tool call (matched by `tool_use_id`)
+  finishes, the next prompt arrives, or the turn ends.
+- `/clear` or `/resume` inside a session keeps its thread but reconnects under a
+  new epoch, so replies and approvals sent for the previous conversation are
+  rejected. The thread gets a notice for each.
 - Hooks reach the channel through an MCP tool, `dui_hook_event`, which the model
   can also see. Its description says never to call it, and calls that carry a
   model tool-use ID are ignored.

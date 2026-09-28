@@ -168,7 +168,8 @@ class AgentSessionClient:
             while True:
                 await self.wakeup.wait()
                 self.wakeup.clear()
-                while self.outbox:
+                # A closed socket would lose the event; it stays queued for the next connection.
+                while self.outbox and not websocket.closed:
                     await self.send(websocket, self.outbox.popleft())
 
         async def heartbeat() -> None:

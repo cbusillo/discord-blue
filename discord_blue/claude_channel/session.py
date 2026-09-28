@@ -8,9 +8,13 @@ runs in, and that Discord can show both in full. Claude Code keeps the terminal
 dialog open as well, and the first answer wins.
 
 The plugin's hooks call ``dui_hook_event`` on this server to mirror typed
-prompts, final answers and titles. Claude Code never says when the terminal
-answered a relayed prompt, so a prompt is retired from Discord when the tool
-runs, the next prompt arrives, or the turn ends.
+prompts, final answers and titles, and to report each tool call before it runs
+(its exact input, ``tool_use_id`` and working directory). A permission request
+is matched to exactly one such call or stays local. Claude Code never says when
+the terminal answered a relayed prompt, so a prompt is retired from Discord when
+its tool call finishes, the next prompt arrives, or the turn ends. When the
+conversation ends or changes (``/clear``, ``/resume``), the session takes a new
+epoch, so Discord controls meant for the old conversation are rejected.
 """
 
 from __future__ import annotations
@@ -18,14 +22,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import socket
 import subprocess
-from collections import deque
+import uuid
+from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from discord_blue.agent_client import AgentSessionClient, Json, Rejected
+from discord_blue.agent_client import PROMPT_EVENTS, AgentSessionClient, Json, Rejected
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.claude_channel.launch import ancestry, loaded_as_channel
 from discord_blue.codex_bridge.session import REPLY_LIMIT, TEXT_LIMIT, TURN_DONE, command_argv, thread_title
@@ -50,6 +56,8 @@ HOOK_TOOL = {
     "inputSchema": {"type": "object", "properties": {"event": {"type": "string"}}, "required": ["event"]},
 }
 TOOL_EVENTS = {"PostToolUse", "PostToolUseFailure"}
+TURN_EVENTS = {"UserPromptSubmit", "Stop", "StopFailure"}
+TOOL_CALL_MEMORY = 64
 # The `_meta` key Claude Code sets on a model's tool call; hook calls carry no tool use.
 MODEL_CALL = "claudecode/toolUseId"
 
@@ -112,16 +120,15 @@ def approval_command(tool_name: str, tool_input: Json) -> list[str] | None:
     return [tool_name, json.dumps(tool_input, ensure_ascii=False)] if tool_name else None
 
 
-def preview_command(tool_name: str, preview: str) -> str | None:
-    """The shell command a Bash preview carries, to match against the tool call that later runs."""
-    if tool_name != "Bash":
-        return None
-    try:
-        fields = json.loads(preview)
-    except ValueError:
-        return None
-    command = fields.get("command") if isinstance(fields, dict) else None
-    return " ".join(command.split()) if isinstance(command, str) else None
+def folded(value: object) -> object:
+    """The value as a permission preview shows it: Claude Code folds each run of whitespace to one space."""
+    if isinstance(value, str):
+        return re.sub(r"\s+", " ", value)
+    if isinstance(value, list):
+        return [folded(item) for item in value]
+    if isinstance(value, dict):
+        return {key: folded(item) for key, item in value.items()}
+    return value
 
 
 def unflagged_notice(session_id: str) -> str:
@@ -144,10 +151,12 @@ class ClaudeSession(AgentSessionClient):
         self.identity = identity
         self.notify = notify
         self.title: str | None = None
-        self.conversation_id = identity.session_id
+        self.conversation_id: str | None = identity.session_id
         self.controls = CAPABILITIES if identity.channel else ["status_request"]
         # What each relayed prompt asked for, so the tool call that answers it can retire it.
-        self.approval_calls: dict[str, tuple[str, str | None]] = {}
+        self.approval_calls: dict[str, str] = {}
+        # Tool calls reported by PreToolUse that have not finished, by tool_use_id.
+        self.tool_calls: OrderedDict[str, ToolCall] = OrderedDict()
         # Replies this server injected; their prompts are already in Discord.
         self.injected: deque[str] = deque(maxlen=64)
         if not identity.channel:
@@ -177,7 +186,7 @@ class ClaudeSession(AgentSessionClient):
             self.publish("status_changed", message=WAITING_LOCALLY)
             return
         description = str(params.get("description") or "")
-        self.approval_calls[request_id] = (tool_name, preview_command(tool_name, preview))
+        self.approval_calls[request_id] = call.tool_use_id
         self.prompts[request_id] = self.event(
             "approval_request",
             approval_id=request_id,
@@ -190,17 +199,27 @@ class ClaudeSession(AgentSessionClient):
         self.enqueue(self.prompts[request_id])
 
     def tool_call_for(self, request_id: str, tool_name: str, preview: str) -> ToolCall | None:
-        """The one tool call this permission request is for, or None when that is not certain.
+        """The one unfinished tool call this permission request is for, or None when that is not certain.
 
-        The request carries only a display preview, and Claude Code keeps a `cd` between Bash calls, so
-        the command and its directory must come from hooks. Without them every request stays local.
+        The request carries only a display preview, so it is matched against the calls PreToolUse reported.
+        A preview Claude Code shortened or masked matches nothing, and identical pending calls are ambiguous.
         """
-        return None
+        try:
+            shown = json.loads(preview)
+        except ValueError:
+            return None
+        bound = set(self.approval_calls.values())
+        matches = [
+            call
+            for call in self.tool_calls.values()
+            if call.tool_name == tool_name and call.tool_use_id not in bound and folded(call.tool_input) == shown
+        ]
+        return matches[0] if len(matches) == 1 else None
 
-    def retire_approvals(self, tool_name: str | None = None, command: str | None = None) -> None:
-        """Retire relayed prompts the terminal may have answered: all of them, or those for one tool call."""
-        for request_id, (asked_tool, asked_command) in list(self.approval_calls.items()):
-            if tool_name is not None and (tool_name != asked_tool or asked_command not in (None, command)):
+    def retire_approvals(self, tool_use_id: str | None = None) -> None:
+        """Retire relayed prompts the terminal may have answered: all of them, or the one for a finished call."""
+        for request_id, asked in list(self.approval_calls.items()):
+            if tool_use_id is not None and asked != tool_use_id:
                 continue
             del self.approval_calls[request_id]
             if self.prompts.pop(request_id, None) is not None:
@@ -211,36 +230,76 @@ class ClaudeSession(AgentSessionClient):
             return "Ignored: this tool is internal to the dui plugin's hooks."
         # A field the hook input lacks may arrive as its unsubstituted placeholder.
         fields = {key: value for key, value in arguments.items() if isinstance(value, str) and not value.startswith("${")}
-        self.on_hook(fields)
+        await self.on_hook(fields)
         # Hook output text becomes context for the model, so always return none.
         return ""
 
-    def on_hook(self, fields: dict[str, str]) -> None:
+    async def on_hook(self, fields: dict[str, str]) -> None:
         event = fields.get("event")
-        if (conversation := fields.get("session_id")) and conversation != self.conversation_id:
-            # /clear or /resume switched conversations inside this process, which keeps its channel and thread.
-            self.conversation_id, self.title = conversation, None
-            self.publish("notice", message=f"This Claude Code session switched to conversation `{conversation}`.")
-        if event == "UserPromptSubmit":
+        conversation = fields.get("session_id") or None
+        if event == "SessionEnd":
+            # /clear or /resume ends this conversation; the next hook names the one that follows.
+            await self.switch_conversation(None)
+            return
+        if conversation and conversation != self.conversation_id:
+            if self.conversation_id is None:
+                self.conversation_id, self.title = conversation, None
+                self.publish("notice", message=f"This Claude Code session is now on conversation `{conversation}`.")
+            else:
+                await self.switch_conversation(conversation)
+        if event in TURN_EVENTS:
             self.retire_approvals()
+        if event == "UserPromptSubmit":
             prompt = fields.get("prompt", "")
             echo = prompt.lstrip().startswith("<channel") and any(f'command_id="{c}"' in prompt for c in self.injected)
             self.retitle(fields.get("session_title") or self.title or ("" if echo else prompt))
             if prompt.strip() and not echo:
                 self.publish("user_message", message=clip(prompt))
         elif event == "Stop":
-            self.retire_approvals()
+            self.tool_calls.clear()
             self.publish(
                 "turn_complete", message=TURN_DONE, assistant_message=clip(fields.get("last_assistant_message", "")) or None
             )
         elif event == "StopFailure":
-            self.retire_approvals()
+            self.tool_calls.clear()
             self.publish("error", message="Claude Code ended the turn with an error; check the terminal.")
+        elif event == "PreToolUse":
+            self.on_tool_call(fields)
         elif event in TOOL_EVENTS:
-            command = fields.get("command")
-            self.retire_approvals(fields.get("tool_name", ""), " ".join(command.split()) if command else None)
+            tool_use_id = fields.get("tool_use_id", "")
+            self.tool_calls.pop(tool_use_id, None)
+            if tool_use_id:
+                self.retire_approvals(tool_use_id)
         elif event == "SessionStart":
             self.retitle(fields.get("session_title") or "")
+
+    def on_tool_call(self, fields: dict[str, str]) -> None:
+        try:
+            tool_input = json.loads(fields.get("tool_input", ""))
+        except ValueError:
+            return
+        tool_use_id, tool_name, cwd = fields.get("tool_use_id"), fields.get("tool_name"), fields.get("cwd")
+        if not (tool_use_id and tool_name and cwd and isinstance(tool_input, dict)):
+            return
+        self.tool_calls[tool_use_id] = ToolCall(tool_use_id, tool_name, tool_input, cwd)
+        while len(self.tool_calls) > TOOL_CALL_MEMORY:
+            self.tool_calls.popitem(last=False)
+
+    async def switch_conversation(self, conversation: str | None) -> None:
+        """Start a new epoch so Discord controls meant for the previous conversation are rejected."""
+        self.epoch = uuid.uuid4().hex
+        self.commands.clear()
+        self.prompts.clear()
+        self.approval_calls.clear()
+        self.tool_calls.clear()
+        self.conversation_id, self.title = conversation, None
+        if self.websocket is not None:
+            # Reconnect so Discord Blue binds the thread to the new epoch; nothing more goes out on this socket.
+            await self.websocket.close()
+        # Mirrored events still queued belong in the thread; prompts for the old conversation do not.
+        self.outbox = deque({**event, "session_epoch": self.epoch} for event in self.outbox if event["type"] not in PROMPT_EVENTS)
+        ended = "The Claude Code conversation in this thread ended (/clear or /resume)"
+        self.publish("notice", message=f"{ended}; earlier replies and approvals from Discord are no longer accepted.")
 
     def retitle(self, text: str) -> None:
         title = thread_title({"name": text})

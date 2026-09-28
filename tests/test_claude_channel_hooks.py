@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import dataclasses
-import json
 import unittest
 from typing import Any
 
 from discord_blue.claude_channel.launch import loaded_as_channel
-from discord_blue.claude_channel.session import HOOK_TOOL, MODEL_CALL, PERMISSION_REQUEST
+from discord_blue.claude_channel.session import CHANNEL, HOOK_TOOL, MODEL_CALL
 from discord_blue.doodads.agent_session.protocol import SessionHello
 from tests.fakes_discord_blue import FakeDiscordBlue
-from tests.test_claude_channel import IDENTITY, FakeClaudeCode, command, decision, running_channel
+from tests.test_claude_channel import IDENTITY, FakeClaudeCode, command, running_channel
 
 Json = dict[str, Any]
+SWITCHED = (
+    "The Claude Code conversation in this thread ended (/clear or /resume); "
+    "earlier replies and approvals from Discord are no longer accepted."
+)
 MIRRORED = ("user_message", "title_changed", "turn_complete", "approval_resolved", "notice")
 
 
@@ -34,11 +37,6 @@ async def mirrored(
         keys = ("assistant_message", "message", "title", "approval_id")
         events.append((event["type"], next(event[key] for key in keys if event.get(key))))
     return events
-
-
-def bash(request_id: str, command_line: str) -> Json:
-    preview = json.dumps({"command": command_line, "description": "Touch a file"})
-    return {"request_id": request_id, "tool_name": "Bash", "description": "Touch a file", "input_preview": preview}
 
 
 class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
@@ -83,25 +81,6 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
             [("title_changed", "Fix the login bug"), ("title_changed", "Renamed")],
         )
 
-    async def test_relayed_prompts_are_retired_once_the_terminal_answers_them(self) -> None:
-        async with running_channel() as (claude, discord):
-            await claude.initialize()
-            hello = await discord.next("hello")
-            for request_id, command_line in (("aaaaa", "touch a.txt"), ("bbbbb", "touch   b.txt")):
-                claude.send({"method": PERMISSION_REQUEST, "params": bash(request_id, command_line)})
-                await discord.next("approval_request")
-            # Another Bash call finishing does not answer a prompt; the one it asked about does.
-            await hook(claude, "PostToolUse", tool_name="Bash", command="ls")
-            await hook(claude, "PostToolUse", tool_name="Bash", command="touch b.txt")
-            resolved = await discord.next("approval_resolved")
-            late = await discord.control(decision(hello, "bbbbb", "approved"))
-            events = await mirrored(claude, discord)
-
-        self.assertEqual(late["type"], "approval_decision_reject")
-        self.assertEqual(resolved["approval_id"], "bbbbb")
-        # The turn ending retires the rest.
-        self.assertEqual(events, [("approval_resolved", "aaaaa")])
-
     async def test_the_model_cannot_post_through_the_hook_tool(self) -> None:
         async with running_channel() as (claude, discord):
             await claude.initialize()
@@ -123,23 +102,35 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hello.capabilities, frozenset({"status_request"}))
         self.assertIn(f"claude --resume {IDENTITY.session_id} --dangerously-load-development-channels", notice["message"])
 
-    async def test_a_cleared_conversation_is_announced_and_retitled(self) -> None:
+    async def test_a_conversation_switch_rejects_controls_meant_for_the_old_one(self) -> None:
         async with running_channel() as (claude, discord):
             await claude.initialize()
-            await discord.next("hello")
+            before = await discord.next("hello")
             await hook(claude, "UserPromptSubmit", prompt="First task")
+            await hook(claude, "SessionEnd")
+            # The session reconnects under a new epoch; a reply sent for the old conversation arrives late.
+            after = await discord.next("hello")
+            switched = await discord.next("notice")
+            stale = await discord.control(command(before, "cmd-old", "reply", text="meant for the first task"))
+            current = await discord.control(command(after, "cmd-new", "reply", text="for whatever runs now"))
+            injected = await claude.notification(CHANNEL)
             await hook(claude, "SessionStart", session_id="new-conversation")
             await hook(claude, "UserPromptSubmit", session_id="new-conversation", prompt="Second task")
             events = await mirrored(claude, discord, session_id="new-conversation")
+            leftover = await claude.settle()
 
         self.assertEqual(
-            events,
+            (before["session_id"], stale["type"], current["type"]), (after["session_id"], "command_reject", "command_ack")
+        )
+        self.assertNotEqual(before["session_epoch"], after["session_epoch"])
+        self.assertEqual(injected["content"], "for whatever runs now")
+        self.assertEqual(leftover, [])
+        self.assertEqual((switched["message"], switched["session_epoch"]), (SWITCHED, after["session_epoch"]))
+        self.assertEqual(
+            [event for event in events if event[0] in ("title_changed", "notice")],
             [
-                ("title_changed", "First task"),
-                ("user_message", "First task"),
-                ("notice", "This Claude Code session switched to conversation `new-conversation`."),
+                ("notice", "This Claude Code session is now on conversation `new-conversation`."),
                 ("title_changed", "Second task"),
-                ("user_message", "Second task"),
             ],
         )
 

@@ -18,6 +18,22 @@
         ]
       }
     ],
+    "SessionEnd": [
+      {
+        "matcher": "clear|resume",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "SessionEnd",
+              "session_id": "${session_id}"
+            }
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
@@ -35,6 +51,25 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "PreToolUse",
+              "session_id": "${session_id}",
+              "tool_name": "${tool_name}",
+              "tool_use_id": "${tool_use_id}",
+              "cwd": "${cwd}",
+              "tool_input": "${tool_input}"
+            }
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "hooks": [
@@ -45,8 +80,7 @@
             "input": {
               "event": "PostToolUse",
               "session_id": "${session_id}",
-              "tool_name": "${tool_name}",
-              "command": "${tool_input.command}"
+              "tool_use_id": "${tool_use_id}"
             }
           }
         ]
@@ -62,8 +96,7 @@
             "input": {
               "event": "PostToolUseFailure",
               "session_id": "${session_id}",
-              "tool_name": "${tool_name}",
-              "command": "${tool_input.command}"
+              "tool_use_id": "${tool_use_id}"
             }
           }
         ]
