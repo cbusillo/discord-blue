@@ -171,6 +171,54 @@ objects so the response remains parseable and non-secret. Optional
 `LAUNCHPLANE_SOURCE_GIT_REF` and `LAUNCHPLANE_IMAGE_REFERENCE` values are also
 echoed when present.
 
+## Codex bridge (runs on the Mac next to Codex)
+
+`discord-blue-codex-bridge` attaches to the stock Codex app-server daemon as one
+extra client and opens one agent session per live Codex thread. It needs no Codex
+patch. Each Discord thread is named after the Codex thread's name or first
+prompt. The bridge mirrors user messages, turn starts, completed turns with the
+final answer, interrupts and errors. From Discord you can reply (stock starts a
+turn or steers the running one), pause, ask for status, answer command approvals,
+and answer `request_user_input` prompts. The bridge answers a Codex request only
+after an explicit Discord decision. The first answer wins, so the TUI can still
+answer. File-change, permission and other requests stay in the TUI. Continue,
+new session and end session are not advertised.
+
+Configure `~/.config/discord-blue/codex-bridge.toml`:
+
+```toml
+server_url = "wss://BRIDGE_HOST/agent-session/connect"
+token_file = "~/.config/discord-blue/codex-bridge.token"  # mode 600; or set AGENT_SESSION_TOKEN
+# socket_path = "~/.codex/app-server-control/app-server-control.sock"
+# host_label = "Codex on Chris-Studio"
+# allow_insecure_ws = false  # true permits ws:// to a trusted private host
+```
+
+Run it with `uv run discord-blue-codex-bridge`, or install
+[the launchd template](docs/launchd/com.shinycomputers.discord-blue-codex-bridge.plist)
+yourself. Behaviour and limits:
+
+- Every loaded root thread gets a Discord thread, which stays open for as long as
+  the Codex thread stays loaded, even if it sits idle for days.
+- The bridge subscribes to a thread (`thread/resume`, no config overrides, which
+  can restart an idle thread cold) only while a turn runs, a prompt is pending,
+  or a Discord reply arrives. It unsubscribes when the turn ends. Stock
+  broadcasts status changes to every client, so the bridge rejoins when a turn
+  starts, and stock replays pending approvals and questions on the join.
+- When the TUI closes and no other client is subscribed, stock unloads the
+  thread (after `thread_unload_delay_secs`, default 60) and reports `notLoaded`.
+  The bridge then ends the Discord session and Discord Blue archives its thread.
+- Joining does not clear a thread's goal. Each join sends the owner a read-only
+  goal snapshot: `thread/goal/updated`, or `thread/goal/cleared` when the thread
+  has no goal.
+- Threads started with `--no-daemon`, `--profile` or most `-c` overrides run
+  outside the daemon, so the bridge cannot see them.
+- If the daemon connection drops, every session closes. When it reconnects, each
+  session starts again with a new epoch, so old Discord controls are rejected.
+- Run the stock end-to-end test with
+  `CODEX_BIN=/path/to/codex uv run python -m unittest tests.test_codex_bridge_stock`.
+  It uses a disposable app-server, synthetic auth and a fake model.
+
 ## Launchplane/Dokploy migration target
 
 Production deploys run through Launchplane and Dokploy. The product workflow

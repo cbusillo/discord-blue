@@ -486,6 +486,15 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
                 "Agent session connected for `project`: <#555>",
             )
 
+    def test_session_title_names_thread_without_changing_reconnect_identity(self) -> None:
+        untitled = make_hello()
+        untitled.branch = "code/project-task"
+        payload = {**asdict(untitled), "title": "Fix the login bug", "capabilities": []}
+        titled = SessionHello.from_payload(payload)
+
+        self.assertEqual(session_thread_name(titled), "project · Fix the login bug")
+        self.assertEqual(session_start_message(titled), session_start_message(untitled))
+
     def test_session_thread_text_marks_agent_session_origin(self) -> None:
         hello = SessionHello(
             session_id="session-1",

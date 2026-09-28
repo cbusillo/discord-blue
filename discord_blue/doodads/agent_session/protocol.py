@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
+# Discord shows at most this many characters of an approval's shell-joined command.
+# Clients must not offer a Discord approval for a command longer than this.
+APPROVAL_COMMAND_DISPLAY_LIMIT = 1600
+
 # Actions a client can accept; omitted capabilities retain the legacy contract.
 REMOTE_ACTIONS = frozenset(
     {
@@ -65,6 +69,7 @@ class SessionHello:
     origin: SessionOrigin | None = None
     assistant_message: str | None = None
     capabilities: frozenset[str] | None = None
+    title: str | None = None
 
     def supports(self, action: str) -> bool:
         return action in REMOTE_ACTIONS and (self.capabilities is None or action in self.capabilities)
@@ -83,6 +88,7 @@ class SessionHello:
             capabilities=parse_capabilities(payload),
             origin=origin,
             assistant_message=str(payload["assistant_message"]) if payload.get("assistant_message") else None,
+            title=str(payload["title"]) if payload.get("title") else None,
         )
 
 

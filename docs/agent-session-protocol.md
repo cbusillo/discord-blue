@@ -32,7 +32,9 @@ The client sends JSON text messages. Start each connection with:
 }
 ```
 
-`origin` and `assistant_message` are optional. Omit `origin` for an interactive
+`origin`, `assistant_message`, and `title` are optional. `title` is a short
+human-readable task name used in the Discord thread name. It is not part of
+reconnect matching. Omit `origin` for an interactive
 session without an automation request. `session_id` must be stable across
 reconnections; `session_epoch` identifies the current running session instance.
 The server responds with `{"type":"hello_ack","thread_id":12345}` after
