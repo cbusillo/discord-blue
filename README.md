@@ -260,9 +260,9 @@ Behaviour and limits:
 - Discord cannot pause, interrupt or end a Claude Code turn, and cannot answer
   Claude's multiple-choice questions. A reply sent while Claude is busy waits
   for the next turn; its acknowledgement means Claude Code received it.
-- A permission request stays in the terminal unless the hooks reported exactly
-  one matching tool call, with its input and working directory (it follows a
-  `cd`). It also stays there when Discord cannot show it exactly: a Bash
+- A permission request stays in the terminal unless it is the only unfinished
+  call to that tool that the hooks reported, with its input and working
+  directory (which follows a `cd`), and its preview matches that input. It also stays there when Discord cannot show it exactly: a Bash
   command whose quoting Discord would change (pipes, double quotes, repeated
   spaces), anything longer than 1,600 characters, a preview that Claude Code
   shortened or masked, or a code fence.
@@ -271,7 +271,8 @@ Behaviour and limits:
   finishes, the next prompt arrives, or the turn ends.
 - `/clear` or `/resume` inside a session keeps its thread but reconnects under a
   new epoch, so replies and approvals sent for the previous conversation are
-  rejected. The thread gets a notice for each.
+  rejected. Discord Blue also refuses a reply written before the session last
+  reconnected, and says so. The thread gets a notice for each switch.
 - Hooks reach the channel through an MCP tool, `dui_hook_event`, which the model
   can also see. Its description says never to call it, and calls that carry a
   model tool-use ID are ignored.

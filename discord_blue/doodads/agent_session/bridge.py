@@ -53,6 +53,10 @@ from discord_blue.health import health_payload
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
+REPLY_BEFORE_RECONNECT = (
+    "This reply was written before the agent session reconnected (for example after `/clear` or `/resume`), "
+    "so it was not delivered. Send it again if it still applies."
+)
 SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS = 10
 
 DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
@@ -1362,6 +1366,10 @@ class AgentSessionBridge:
         text = message.content.strip()
         if not text or text.startswith("!"):
             return False
+        if message.created_at < session.attached_at:
+            # The client reconnected since (for Claude Code, after /clear or /resume); never deliver it to the new epoch.
+            await message.reply(REPLY_BEFORE_RECONNECT, mention_author=False)
+            return True
 
         command = RemoteCommand(
             command_id=str(uuid.uuid4()),

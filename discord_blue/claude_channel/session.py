@@ -58,6 +58,9 @@ HOOK_TOOL = {
 TOOL_EVENTS = {"PostToolUse", "PostToolUseFailure"}
 TURN_EVENTS = {"UserPromptSubmit", "Stop", "StopFailure"}
 TOOL_CALL_MEMORY = 64
+# What Claude Code puts in a permission preview in place of a masked credential, a shortened field, or a
+# value it cannot serialize (channels reference, "Permission request fields").
+LOSSY_PREVIEW_MARKERS = ("[REDACTED]", "code points elided", "(value unserializable)")
 # The `_meta` key Claude Code sets on a model's tool call; hook calls carry no tool use.
 MODEL_CALL = "claudecode/toolUseId"
 
@@ -201,20 +204,21 @@ class ClaudeSession(AgentSessionClient):
     def tool_call_for(self, request_id: str, tool_name: str, preview: str) -> ToolCall | None:
         """The one unfinished tool call this permission request is for, or None when that is not certain.
 
-        The request carries only a display preview, so it is matched against the calls PreToolUse reported.
-        A preview Claude Code shortened or masked matches nothing, and identical pending calls are ambiguous.
+        The request carries only a display preview, and Claude Code's preview is lossy: it masks credentials,
+        shortens long fields, folds whitespace and neutralizes lookalike characters. So a preview carrying a
+        masking or shortening marker never matches, and any other unfinished call to the same tool could
+        have produced the same preview, so the request is relayed only when exactly one exists.
         """
+        if any(marker in preview for marker in LOSSY_PREVIEW_MARKERS):
+            return None
         try:
             shown = json.loads(preview)
         except ValueError:
             return None
-        bound = set(self.approval_calls.values())
-        matches = [
-            call
-            for call in self.tool_calls.values()
-            if call.tool_name == tool_name and call.tool_use_id not in bound and folded(call.tool_input) == shown
-        ]
-        return matches[0] if len(matches) == 1 else None
+        calls = [call for call in self.tool_calls.values() if call.tool_name == tool_name]
+        if len(calls) != 1 or calls[0].tool_use_id in self.approval_calls.values() or folded(calls[0].tool_input) != shown:
+            return None
+        return calls[0]
 
     def retire_approvals(self, tool_use_id: str | None = None) -> None:
         """Retire relayed prompts the terminal may have answered: all of them, or the one for a finished call."""
@@ -336,7 +340,10 @@ class ClaudeSession(AgentSessionClient):
             return {**reject, "reason": "This approval is no longer pending."}
         # Claude Code never says whether the terminal answered first, so the request is forgotten here.
         del self.prompts[approval_id]
-        self.approval_calls.pop(approval_id, None)
+        tool_use_id = self.approval_calls.pop(approval_id, None)
+        if behavior == "deny" and tool_use_id is not None:
+            # A denied call never runs, so no PostToolUse would forget it.
+            self.tool_calls.pop(tool_use_id, None)
         try:
             await self.notify(PERMISSION, {"request_id": approval_id, "behavior": behavior})
         except OSError:

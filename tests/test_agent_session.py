@@ -27,6 +27,11 @@ from tests.fakes_agent_session import FakeThread
 from tests.fakes_agent_session import FakeWebSocket
 from tests.fakes_agent_session import add_bot_message
 from tests.fakes_agent_session import make_hello
+from tests.test_claude_channel import IDENTITY as CLAUDE_IDENTITY
+from tests.test_claude_channel import FakeClaudeCode
+
+from discord_blue.claude_channel.__main__ import run_channel
+from discord_blue.codex_bridge.config import BridgeConfig
 
 from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 
@@ -644,6 +649,51 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([edit for edit in thread.edits if "name" in edit], [{"name": thread.name}])
         self.assertIn("Fix the login bug", thread.name or "")
         self.assertEqual(thread.sent_messages.count("Replies are off for this session."), 1)
+
+    async def test_a_reply_written_before_a_claude_conversation_switch_never_reaches_the_next_one(self) -> None:
+        async with self.transport() as (bridge, thread, client):
+            config = BridgeConfig(
+                server_url=str(client.make_url("/agent-session/connect")),
+                token="transport-test-token",
+                socket_path=Path("/unused"),
+                host_label="Claude Code on test",
+                reconnect_seconds=0.01,
+            )
+            claude = FakeClaudeCode()
+            channel = asyncio.create_task(run_channel(claude.stdin, claude, config, CLAUDE_IDENTITY))
+            try:
+                await claude.initialize()
+                first = await self.wait_for_session(bridge, CLAUDE_IDENTITY.session_id)
+                written_before = FakeReplyMessage(201, thread, "meant for the first conversation")
+                thread.add_message(written_before)
+                await claude.request(
+                    "tools/call",
+                    {"name": "dui_hook_event", "arguments": {"event": "SessionEnd", "session_id": CLAUDE_IDENTITY.session_id}},
+                )
+                second = await self.wait_for_session(bridge, CLAUDE_IDENTITY.session_id, not_epoch=first.session_epoch)
+                # Discord delivers the old message only now, after the reconnect.
+                self.assertTrue(await bridge.send_thread_reply(written_before))
+                written_after = FakeReplyMessage(202, thread, "for the second conversation")
+                thread.add_message(written_after)
+                self.assertTrue(await bridge.send_thread_reply(written_after))
+                injected = await claude.notification("notifications/claude/channel")
+                leftover = await claude.settle()
+            finally:
+                claude.stdin.feed_eof()
+                await asyncio.wait_for(channel, 5)
+
+        self.assertNotEqual(first.session_epoch, second.session_epoch)
+        self.assertEqual(written_before.replies, [bridge_module.REPLY_BEFORE_RECONNECT])
+        self.assertEqual(injected["content"], "for the second conversation")
+        self.assertEqual(leftover, [])
+
+    async def wait_for_session(self, bridge: SessionBridge, session_id: str, *, not_epoch: str | None = None) -> AgentSessionType:
+        async with asyncio.timeout(5):
+            while True:
+                session = bridge.sessions.get(session_id)
+                if session is not None and session.thread_id is not None and session.session_epoch != not_epoch:
+                    return session
+                await asyncio.sleep(0.01)
 
     async def test_websocket_reply_ack_and_reject_update_discord_message(self) -> None:
         async with self.transport() as (bridge, thread, client):

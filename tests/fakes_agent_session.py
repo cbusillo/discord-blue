@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Protocol, TYPE_CHECKING
 
@@ -39,8 +40,10 @@ class FakeReplyMessage:
         content: str = "",
         *,
         author_id: int = 123,
+        created_at: datetime | None = None,
     ) -> None:
         self.id = message_id
+        self.created_at = created_at or datetime.now(UTC)
         self.channel = channel
         self.content = content
         self.author = SimpleNamespace(id=author_id)

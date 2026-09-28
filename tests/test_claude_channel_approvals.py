@@ -64,24 +64,33 @@ class ClaudeChannelApprovalTests(unittest.IsolatedAsyncioTestCase):
                 [("toolu_c", {"command": "deploy --token sk-live-secret"})],
                 permission_request("ccccc", "Bash", {"command": "deploy --token [REDACTED]"}),
             ),
-            "preview shortened by Claude Code": (
-                [("toolu_d", {"command": long_command})],
-                permission_request("ddddd", "Bash", '{ "command": "echo aaa ⋯ 3990 code points elided ⋯ aaa" }'),
+            # The reviewer's case: the masked production preview equals the staging call's literal input.
+            "masked preview equal to another call's input": (
+                [
+                    ("toolu_prod", {"command": "deploy --token sk-live-secret"}),
+                    ("toolu_stg", {"command": "deploy --token [REDACTED]"}),
+                ],
+                permission_request("ddddd", "Bash", {"command": "deploy --token [REDACTED]"}),
             ),
-            "two identical calls": (
-                [("toolu_e1", {"command": "touch e.txt"}), ("toolu_e2", {"command": "touch e.txt"})],
-                permission_request("eeeee", "Bash", {"command": "touch e.txt"}),
+            "preview shortened by Claude Code": (
+                [("toolu_e", {"command": long_command})],
+                permission_request("eeeee", "Bash", '{ "command": "echo aaa ⋯ 3990 code points elided ⋯ aaa" }'),
+            ),
+            # Claude Code's sanitizing is lossy, so another unfinished Bash call could have produced any preview.
+            "another unfinished call to the same tool": (
+                [("toolu_f1", {"command": "touch f.txt"}), ("toolu_f2", {"command": "touch g.txt"})],
+                permission_request("fffff", "Bash", {"command": "touch f.txt"}),
             ),
         }
-        async with running_channel() as (claude, discord):
-            await claude.initialize()
-            await discord.next("hello")
-            for case, (calls, request) in cases.items():
-                with self.subTest(case):
+        for case, (calls, request) in cases.items():
+            with self.subTest(case):
+                async with running_channel() as (claude, discord):
+                    await claude.initialize()
+                    await discord.next("hello")
                     for tool_use_id, tool_input in calls:
                         await pre_tool_use(claude, tool_use_id, "Bash", tool_input)
                     event = await relay(claude, discord, request)
-                    self.assertEqual((event["type"], event.get("message")), ("status_changed", WAITING_LOCALLY))
+                self.assertEqual((event["type"], event.get("message")), ("status_changed", WAITING_LOCALLY))
 
     async def test_a_finished_call_retires_only_the_prompt_for_that_call(self) -> None:
         async with running_channel() as (claude, discord):
@@ -93,6 +102,7 @@ class ClaudeChannelApprovalTests(unittest.IsolatedAsyncioTestCase):
             await pre_tool_use(claude, "toolu_sub", "Read", {"file_path": "/w/b.txt"}, agent_id="agent-1")
             await hook(claude, "PostToolUse", tool_use_id="toolu_sub", agent_id="agent-1")
             still_pending = await discord.control(decision(hello, "aaaaa", "approved"))
+            await hook(claude, "PostToolUse", tool_use_id="toolu_main")
 
             await pre_tool_use(claude, "toolu_next", "Read", {"file_path": "/w/c.txt"})
             await relay(claude, discord, permission_request("ccccc", "Read", {"file_path": "/w/c.txt"}))
