@@ -21,6 +21,7 @@ import aiohttp
 
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.codex_bridge.rpc import RequestId, RpcError, TransportError
+from discord_blue.doodads.agent_session.protocol import APPROVAL_COMMAND_DISPLAY_LIMIT
 
 Json = dict[str, Any]
 logger = logging.getLogger(__name__)
@@ -29,6 +30,27 @@ CAPABILITIES = ["approval_decision", "pause_current_turn", "reply", "request_use
 COMMAND_APPROVAL = "item/commandExecution/requestApproval"
 USER_INPUT = "item/tool/requestUserInput"
 LOCAL_DECISIONS = {"item/fileChange/requestApproval", "item/permissions/requestApproval", "mcpServer/elicitation/request"}
+# Command-approval fields Discord may leave unshown: routing, display hints, and amendments that a
+# plain `accept` never applies. Any other field set (additionalPermissions, networkApprovalContext,
+# or one added later) can widen what `accept` grants, so that request stays in the TUI.
+DISCORD_APPROVABLE_FIELDS = frozenset(
+    {
+        "kind",
+        "threadId",
+        "turnId",
+        "itemId",
+        "startedAtMs",
+        "approvalId",
+        "environmentId",
+        "reason",
+        "command",
+        "cwd",
+        "commandActions",
+        "proposedExecpolicyAmendment",
+        "proposedNetworkPolicyAmendments",
+        "availableDecisions",
+    }
+)
 PROMPT_EVENTS = {"approval_request", "request_user_input"}
 STATUS_EVENTS = {"status_changed", "turn_complete", "error"}
 OUTBOX_LIMIT = 256
@@ -61,6 +83,19 @@ def command_argv(command: str) -> list[str]:
         return shlex.split(command)
     except ValueError:
         return [command]
+
+
+def discord_command(params: Json) -> list[str] | None:
+    """The argv of a plain command approval that Discord can show in full, or None to keep it in the TUI."""
+    command = params.get("command")
+    if params.get("kind", "command") != "command" or not isinstance(command, str):
+        return None
+    if any(value is not None for key, value in params.items() if key not in DISCORD_APPROVABLE_FIELDS):
+        return None
+    argv = command_argv(command)
+    # Discord shows the joined argv in a code fence, truncated; a fence inside it would end the block early.
+    shown = shlex.join(argv)
+    return argv if len(shown) <= APPROVAL_COMMAND_DISPLAY_LIMIT and "```" not in shown else None
 
 
 def final_answer(parts: list[tuple[object, str]]) -> str | None:
@@ -144,8 +179,8 @@ class ThreadSession:
             self.publish("error", message="Codex reported a system error; check the Codex TUI.")
 
     def on_request(self, request_id: RequestId, method: str, params: Json) -> None:
-        command, turn_id = params.get("command"), str(params.get("turnId") or "")
-        if method == COMMAND_APPROVAL and params.get("kind", "command") == "command" and isinstance(command, str):
+        turn_id = str(params.get("turnId") or "")
+        if method == COMMAND_APPROVAL and (argv := discord_command(params)) is not None:
             approval_id = str(params.get("approvalId") or params.get("itemId") or request_id)
             self.approvals[approval_id] = request_id
             self.prompts[request_id] = self.event(
@@ -153,7 +188,7 @@ class ThreadSession:
                 approval_id=approval_id,
                 call_id=str(params.get("itemId") or ""),
                 turn_id=turn_id,
-                command=command_argv(command),
+                command=argv,
                 cwd=str(params.get("cwd") or self.cwd),
                 reason=params.get("reason"),
             )
@@ -165,7 +200,8 @@ class ThreadSession:
             ]
             self.prompts[request_id] = self.event("request_user_input", call_id=call_id, turn_id=turn_id, questions=questions)
         else:
-            # File-change, permissions, elicitation and all other requests stay local; never answer them here.
+            # File-change, permissions, elicitation, scope-widening or undisplayable commands and all
+            # other requests stay local; never answer them here.
             if method in LOCAL_DECISIONS or method == COMMAND_APPROVAL:
                 self.publish("status_changed", message="Waiting on a decision in the Codex TUI")
             return
@@ -289,8 +325,9 @@ class ThreadSession:
                     if not isinstance(ack, dict) or ack.get("type") != "hello_ack":
                         raise ValueError("Discord Blue did not acknowledge the session")
                     first = False
-                    # Prompts retire on disconnect; send each still-pending prompt once.
-                    self.outbox = deque([*self.prompts.values(), *(e for e in self.outbox if e["type"] not in PROMPT_EVENTS)])
+                    # Prompts retire on disconnect and on every status event, so replay queued history
+                    # first and then each still-pending prompt once.
+                    self.outbox = deque([*(e for e in self.outbox if e["type"] not in PROMPT_EVENTS), *self.prompts.values()])
                     self.wakeup.set()
                     await self.serve(websocket)
             except aiohttp.WSServerHandshakeError as exc:

@@ -20,6 +20,7 @@ from discord_blue.doodads.agent_session.messages import edit_agent_session_messa
 from discord_blue.doodads.agent_session.messages import agent_session_allowed_mentions
 from discord_blue.doodads.agent_session.messages import send_agent_session_message
 from discord_blue.doodads.agent_session.protocol import (
+    APPROVAL_COMMAND_DISPLAY_LIMIT,
     RequestUserInputQuestion,
     RemoteApprovalDecision,
     RemoteApprovalRequest,
@@ -2843,7 +2844,7 @@ class AgentSessionBridge:
             "**Approval requested**",
             "Quick review: `✅` approve · `✖️` deny",
             "",
-            f"```sh\n{command[:1600]}\n```",
+            f"```sh\n{command[:APPROVAL_COMMAND_DISPLAY_LIMIT]}\n```",
         ]
         if approval.cwd:
             parts.append(f"cwd: `{approval.cwd}`")

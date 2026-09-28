@@ -17,7 +17,7 @@ from aiohttp.test_utils import TestServer
 from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.config import BridgeConfig, load_config
 from discord_blue.codex_bridge.session import CAPABILITIES, TURN_DONE, ThreadSession
-from discord_blue.doodads.agent_session.protocol import REMOTE_ACTIONS, SessionHello
+from discord_blue.doodads.agent_session.protocol import APPROVAL_COMMAND_DISPLAY_LIMIT, REMOTE_ACTIONS, SessionHello
 
 Json = dict[str, Any]
 TOKEN = "test-token"
@@ -187,6 +187,31 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
             await bridge.dispatch({"method": "serverRequest/resolved", "params": {"threadId": "root", "requestId": 7}})
 
         self.assertEqual(rpc.responses, [(7, {"decision": "accept"})])
+
+    async def test_approvals_discord_cannot_fully_show_stay_in_the_tui(self) -> None:
+        base = {"threadId": "root", "turnId": "t1", "itemId": "item-1", "cwd": "/work"}
+        fits = "x" * APPROVAL_COMMAND_DISPLAY_LIMIT
+        tui_only = {
+            "longer than Discord shows": {**base, "command": fits + "y"},
+            "breaks out of the code fence": {**base, "command": "echo '```' [ls](https://x)"},
+            "asks for more permissions": {**base, "command": "ls", "additionalPermissions": {"network": {"enabled": True}}},
+            "asks for network access": {**base, "networkApprovalContext": {"host": "example.com", "protocol": "https"}},
+            "carries an unknown field": {**base, "command": "ls", "sandboxOverride": "danger-full-access"},
+            "writes to stdin": {**base, "command": "ls", "kind": "writeStdin"},
+        }
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            for request_id, (case, params) in enumerate(tui_only.items()):
+                with self.subTest(case):
+                    await bridge.dispatch({"id": request_id, "method": "item/commandExecution/requestApproval", "params": params})
+                    event = await discord.next()
+                    self.assertEqual((event["type"], event["message"]), ("status_changed", "Waiting on a decision in the Codex TUI"))
+            await bridge.dispatch({"id": 99, "method": "item/commandExecution/requestApproval", "params": {**base, "command": fits}})
+            self.assertEqual((await discord.next())["command"], [fits])
+
+        self.assertEqual(bridge.sessions, {})
+        self.assertEqual(rpc.responses, [])
 
     async def test_prompt_answered_in_the_tui_is_retired_and_cannot_be_answered(self) -> None:
         rpc = FakeRpc(thread("root"))
