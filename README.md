@@ -171,6 +171,47 @@ objects so the response remains parseable and non-secret. Optional
 `LAUNCHPLANE_SOURCE_GIT_REF` and `LAUNCHPLANE_IMAGE_REFERENCE` values are also
 echoed when present.
 
+## Codex bridge (runs on the Mac next to Codex)
+
+`discord-blue-codex-bridge` attaches to the stock Codex app-server daemon as one
+extra client and opens one agent session per live Codex thread. It needs no Codex
+patch. Each Discord thread is named after the Codex thread's name or first
+prompt. The bridge mirrors user messages, turn starts, completed turns with the
+final answer, interrupts and errors. From Discord you can reply (stock starts a
+turn or steers the running one), pause, ask for status, answer command approvals,
+and answer `request_user_input` prompts. The bridge answers a Codex request only
+after an explicit Discord decision. The first answer wins, so the TUI can still
+answer. File-change, permission and other requests stay in the TUI. Continue,
+new session and end session are not advertised.
+
+Configure `~/.config/discord-blue/codex-bridge.toml`:
+
+```toml
+server_url = "wss://BRIDGE_HOST/agent-session/connect"
+token_file = "~/.config/discord-blue/codex-bridge.token"  # mode 600; or set AGENT_SESSION_TOKEN
+# socket_path = "~/.codex/app-server-control/app-server-control.sock"
+# host_label = "Codex on Chris-Studio"
+# idle_release_hours = 12
+# allow_insecure_ws = false  # true permits ws:// to a trusted private host
+```
+
+Run it with `uv run discord-blue-codex-bridge`, or install
+[the launchd template](docs/launchd/com.shinycomputers.discord-blue-codex-bridge.plist)
+yourself. Behaviour and limits:
+
+- It joins loaded root threads with `thread/resume` and sends no config
+  overrides, because overrides can restart an idle thread cold. Joining does not
+  clear a thread's goal. The owner receives a read-only goal snapshot:
+  `thread/goal/updated`, or `thread/goal/cleared` when the thread has no goal.
+- A joined thread stays loaded while the bridge is subscribed. After
+  `idle_release_hours` without activity or pending prompts, the bridge
+  unsubscribes so that a thread whose TUI has closed can unload. It rejoins when
+  the thread becomes active again.
+- Threads started with `--no-daemon`, `--profile` or most `-c` overrides run
+  outside the daemon, so the bridge cannot see them.
+- If the daemon connection drops, every session closes. When it reconnects, each
+  session starts again with a new epoch, so old Discord controls are rejected.
+
 ## Launchplane/Dokploy migration target
 
 Production deploys run through Launchplane and Dokploy. The product workflow

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template only. Replace REPO_DIR and HOME_DIR, then load it with launchctl yourself. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.shinycomputers.discord-blue-codex-bridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>REPO_DIR/.venv/bin/discord-blue-codex-bridge</string>
+    <string>--config</string>
+    <string>HOME_DIR/.config/discord-blue/codex-bridge.toml</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>REPO_DIR</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>HOME_DIR/Library/Logs/discord-blue-codex-bridge.log</string>
+  <key>StandardErrorPath</key>
+  <string>HOME_DIR/Library/Logs/discord-blue-codex-bridge.log</string>
+</dict>
+</plist>

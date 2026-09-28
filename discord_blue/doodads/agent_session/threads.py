@@ -25,6 +25,8 @@ def session_thread_name(hello: SessionHello) -> str:
     repo = session_display_name(hello)
     if hello.origin and hello.origin.kind in {"launchplane", "agent_session"}:
         return _truncate_thread_name(repo)
+    if hello.title:
+        return _truncate_thread_name(f"{repo} · {hello.title}")
     branch = f" · {hello.branch}" if session_branch_is_title_worthy(hello.branch) else ""
     return _truncate_thread_name(f"{repo}{branch}")
 
