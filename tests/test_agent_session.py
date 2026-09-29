@@ -21,6 +21,7 @@ from aiohttp import ClientWebSocketResponse, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
 
 from tests.fakes_agent_session import FakeBot
+from tests.test_session_cleanup_progress import wait_until
 from tests.fakes_agent_session import FakeInteraction
 from tests.fakes_agent_session import FakeReplyMessage
 from tests.fakes_agent_session import FakeTextChannel
@@ -667,7 +668,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             hello = {"type": "hello", "session_id": "s", "session_epoch": "e", "cwd": "/w/odoo-tenant-opw", "harness": "codex"}
             await websocket.send_json(hello)
             ack = await websocket.receive_json(timeout=2)
-            await asyncio.wait_for(asyncio.gather(*list(bridge.renamer.tasks.values())), timeout=2)
+            await asyncio.wait_for(asyncio.gather(*[w.task for w in bridge.threads.workers.values() if w.task]), timeout=2)
 
         self.assertEqual(ack["type"], "hello_ack")
         self.assertEqual(thread.name, f"{threads_module.HARNESS_ICONS['codex']} odoo-tenant-opw")
@@ -697,7 +698,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             for payload in payloads:
                 await self.send_transport_event(bridge, websocket, payload)
             # Renames run in the background, coalesced; wait for this thread's to finish.
-            await asyncio.wait_for(asyncio.gather(*list(bridge.renamer.tasks.values())), timeout=2)
+            await asyncio.wait_for(asyncio.gather(*[w.task for w in bridge.threads.workers.values() if w.task]), timeout=2)
 
         # hello names the (unnamed) thread, then the title renames it.
         self.assertEqual([edit["name"] for edit in thread.edits if "name" in edit], ["example", "example · Fix the login bug"])
@@ -892,18 +893,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     "session_epoch": "epoch-2",
                 }
             )
-            removed = asyncio.Event()
-            remove_if_current = bridge.sessions.remove_if_current
-
-            def observe_removal(candidate: object) -> object:
-                result = remove_if_current(candidate)
-                if candidate is retired_session:
-                    removed.set()
-                return result
-
-            with patch.object(bridge.sessions, "remove_if_current", new=observe_removal):
-                await old.close()
-                await asyncio.wait_for(removed.wait(), timeout=2)
+            await old.close()
+            self.assertTrue(await wait_until(lambda: retired_session.websocket.closed))
+            await asyncio.sleep(0.05)  # Room for the old connection's teardown to run.
+            self.assertIsNot(bridge.sessions.get("transport-session"), retired_session)
             self.assertEqual(reply.reactions, [bridge_module.REACTION_QUEUED])
             self.assertFalse(thread.archived)
             await self.send_transport_event(
@@ -1122,7 +1115,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(bridge.sessions.get(hello.session_id))
         self.assertEqual(len(channel._threads), 1)
 
-    async def test_hello_closes_when_same_session_cleanup_lock_times_out(self) -> None:
+    async def test_hello_waits_for_the_same_sessions_cleanup_then_attaches(self) -> None:
         async with self.transport() as (bridge, _, client):
             existing_hello = SessionHello.from_payload(
                 {
@@ -1141,20 +1134,25 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 headers={"Authorization": "Bearer transport-test-token"},
             )
             try:
-                with patch.object(bridge_module, "SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS", 0.01):
-                    await websocket.send_json(
-                        {
-                            "type": "hello",
-                            "session_id": "transport-session",
-                            "session_epoch": "epoch-2",
-                            "cwd": "/workspace/example",
-                        }
-                    )
-                    message = await websocket.receive(timeout=2)
-                self.assertIn(message.type, {WSMsgType.CLOSE, WSMsgType.CLOSED})
-                self.assertIs(bridge.sessions.get("transport-session"), existing)
+                await websocket.send_json(
+                    {
+                        "type": "hello",
+                        "session_id": "transport-session",
+                        "session_epoch": "epoch-2",
+                        "cwd": "/workspace/example",
+                    }
+                )
+                # The old connection's cleanup still holds the session: nothing is answered yet, nor refused.
+                with self.assertRaises(TimeoutError):
+                    await websocket.receive(timeout=0.2)
             finally:
                 lifecycle_lock.release()
+            ack = await websocket.receive_json(timeout=2)
+
+        self.assertEqual(ack["type"], "hello_ack")
+        current = bridge.sessions.get("transport-session")
+        self.assertIsNotNone(current)
+        self.assertIsNot(current, existing)
 
     async def test_websocket_auth_rejects_missing_or_wrong_token(self) -> None:
         config = Config()

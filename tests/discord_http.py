@@ -22,6 +22,7 @@ import discord
 from aiohttp.test_utils import TestServer
 from discord.http import HTTPClient, Route, handle_message_parameters
 
+from discord_blue.plugs.discord_plug import MAX_RATELIMIT_SLEEP_SECONDS
 from tests.fake_discord import PARENT_ID, FakeDiscord, FakeThreadState
 from tests.fakes_agent_session import FakeBot, FakeReplyMessage, FakeTextChannel, FakeThread, UserLike
 
@@ -216,7 +217,7 @@ async def discord_bot(fake: FakeDiscord, config: object) -> AsyncIterator[HttpBo
     """An HttpBot whose real discord.py HTTP client talks to `fake`."""
     async with TestServer(fake.app(), host="127.0.0.1") as server:
         with patch.object(Route, "BASE", f"http://127.0.0.1:{server.port}/api/v10"):
-            http = HTTPClient(asyncio.get_running_loop())
+            http = HTTPClient(asyncio.get_running_loop(), max_ratelimit_timeout=MAX_RATELIMIT_SLEEP_SECONDS)
             await http.static_login("fake-token")
             try:
                 yield HttpBot(config, http, fake)
