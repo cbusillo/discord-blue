@@ -54,6 +54,8 @@ class AgentSession:
     notification_message_id: int | None = None
     control_message_id: int | None = None
     last_seen: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # The thread name last asked for, so other live sessions can be told apart from it.
+    thread_name: str | None = None
     # When this connection said hello; a Discord message written earlier was meant for what ran before.
     attached_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     pending_commands: dict[str, PendingRemoteCommand] = field(default_factory=dict)

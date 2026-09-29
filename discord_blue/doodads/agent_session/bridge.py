@@ -49,6 +49,7 @@ from discord_blue.doodads.agent_session.threads import auto_join_configured_user
 from discord_blue.doodads.agent_session.threads import create_session_thread
 from discord_blue.doodads.agent_session.threads import get_agent_session_channel
 from discord_blue.doodads.agent_session.threads import session_notification_message
+from discord_blue.doodads.agent_session.threads import distinct_thread_name
 from discord_blue.doodads.agent_session.threads import session_thread_name
 from discord_blue.doodads.agent_session.threads import session_start_message
 from discord_blue.health import health_payload
@@ -913,8 +914,13 @@ class AgentSessionBridge:
                                 self.sessions.register(session)
                                 try:
                                     session_thread = await self.find_or_create_session_thread(hello)
-                                except (discord.DiscordException, ValueError):
-                                    logger.warning("Unable to attach Discord thread for Agent session %s", hello.session_id)
+                                except (discord.DiscordException, ValueError) as exc:
+                                    logger.warning(
+                                        "Unable to attach Discord thread for Agent session %s: %s",
+                                        hello.session_id,
+                                        type(exc).__name__,
+                                        exc_info=True,
+                                    )
                                     self.sessions.remove_if_current(session)
                                     session = None
                                     attachment_failed = True
@@ -945,6 +951,10 @@ class AgentSessionBridge:
                                 **({"capabilities": sorted(hello.capabilities)} if hello.capabilities is not None else {}),
                             }
                         )
+                        # Attached, acknowledged and outside every lock: bring the thread's name up to date in
+                        # the background. The renamer coalesces and rate-limits; nothing here waits on Discord.
+                        if session is not None:
+                            self.request_thread_name(session)
                 elif message_type in {"approval_resolved", "request_user_input_resolved"}:
                     await self.handle_prompt_resolved(message_type, payload)
                 elif message_type == "heartbeat" and session is not None:
@@ -2515,8 +2525,22 @@ class AgentSessionBridge:
         if not isinstance(title, str) or not title.strip() or session.thread_id is None:
             return
         session.hello.title = title.strip()
-        # Renames run in the background, coalesced and within Discord's rate limit.
-        self.renamer.request(session.thread_id, session_thread_name(session.hello), session.session_epoch)
+        self.request_thread_name(session)
+
+    def thread_name_for(self, hello: SessionHello) -> str:
+        taken = {
+            other.thread_name
+            for other in self.sessions.live_sessions()
+            if other.session_id != hello.session_id and other.thread_name is not None
+        }
+        return distinct_thread_name(hello, taken)
+
+    def request_thread_name(self, session: AgentSession) -> None:
+        """Schedule a rename to the session's current, distinct name; never waits on Discord."""
+        if session.thread_id is None:
+            return
+        session.thread_name = self.thread_name_for(session.hello)
+        self.renamer.request(session.thread_id, session.thread_name, session.session_epoch)
 
     def rename_target(self, thread_id: int, epoch: str) -> discord.Thread | None:
         """The thread to rename, only while the session epoch that asked still owns it."""
