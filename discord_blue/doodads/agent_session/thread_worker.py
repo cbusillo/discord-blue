@@ -35,6 +35,9 @@ THREAD_CLOSE_STEPS: frozenset[CleanupStep] = frozenset({"disconnect_notice", "me
 CONCURRENT_THREAD_REQUESTS = 4
 RENAME_WINDOW_SECONDS = 600.0
 RENAMES_PER_WINDOW = 2
+# A rename that failed for a reason that may pass (a 5xx that outlasted discord.py's own retries, a network error)
+# is tried again after these waits; a refusal (403, 404) is not.
+RENAME_RETRY_DELAYS_SECONDS = (60.0, 300.0, 900.0)
 CLOSE_STEP_ACTIONS = {
     "unarchive": "reopen (to close)",
     "disconnect_notice": "post the close notice in",
@@ -95,6 +98,7 @@ class ThreadWorker:
         self.applied_name: str | None = None
         self.renames: deque[float] = deque(maxlen=RENAMES_PER_WINDOW)
         self.rename_not_before = 0.0
+        self.rename_failures = 0
         self.in_flight = False
         self.task: asyncio.Task[None] | None = None
         self.wake = asyncio.Event()
@@ -328,12 +332,22 @@ class ThreadWorker:
             self.rename_not_before = self.pool.clock() + exc.retry_after
             if self.name is None:
                 self.name = (name, epoch)
+        except (discord.Forbidden, discord.NotFound):
+            logger.warning("Could not rename Agent session thread %s: Discord refused", self.thread_id, exc_info=True)
         except Exception:
             # Any failure, not just Discord's: an exception escaping here would end the worker with work pending.
             logger.warning("Could not rename Agent session thread %s", self.thread_id, exc_info=True)
+            if self.rename_failures < len(RENAME_RETRY_DELAYS_SECONDS):
+                # The name may still carry its creation token, so it is worth trying again, unless a newer one was
+                # asked for meanwhile.
+                self.rename_not_before = self.pool.clock() + RENAME_RETRY_DELAYS_SECONDS[self.rename_failures]
+                self.rename_failures += 1
+                if self.name is None:
+                    self.name = (name, epoch)
         else:
             self.renames.append(self.pool.clock())
             self.applied_name = name
+            self.rename_failures = 0
 
     # Settling waiters.
 

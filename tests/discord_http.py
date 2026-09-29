@@ -57,6 +57,8 @@ class HttpThread(FakeThread):
         self.name = str(data.get("name"))
         self.parent = bot.parent
         self.parent_id = int(data.get("parent_id") or PARENT_ID)
+        self.owner_id = int(data["owner_id"]) if data.get("owner_id") else None
+        self.message_count = int(data.get("message_count") or 0)
         self.guild = bot.guild  # type: ignore[assignment]
 
     def refresh(self, data: Json) -> None:

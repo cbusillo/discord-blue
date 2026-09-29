@@ -8,7 +8,11 @@ from collections.abc import Callable
 
 import discord
 
-from discord_blue.doodads.agent_session.thread_worker import RENAME_WINDOW_SECONDS, ThreadWorkers
+from discord_blue.doodads.agent_session.thread_worker import (
+    RENAME_RETRY_DELAYS_SECONDS,
+    RENAME_WINDOW_SECONDS,
+    ThreadWorkers,
+)
 from discord_blue.doodads.agent_session.threads import (
     DISCORD_THREAD_NAME_LIMIT,
     HARNESS_ICONS,
@@ -206,10 +210,14 @@ class FakeThread:
         self.name = name
         self.edits: list[str] = []
         self.rate_limited_for = 0.0
+        self.fail_once: Exception | None = None
         # discord.py returns the edited thread; the cached object's name updates only when the gateway says so.
         self.cache_updates = cache_updates
 
     async def edit(self, *, name: str) -> None:
+        if self.fail_once is not None:
+            failure, self.fail_once = self.fail_once, None
+            raise failure
         if self.rate_limited_for:
             retry_after, self.rate_limited_for = self.rate_limited_for, 0.0
             raise discord.RateLimited(retry_after)  # Longer than discord.py will sleep through (max_ratelimit_timeout).
@@ -310,6 +318,16 @@ class ThreadRenameTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         await self.pass_time(workers, clock, 45.0)
         self.assertEqual(thread.edits, ["B", "A"])
+
+    async def test_a_rename_that_failed_for_a_passing_reason_is_retried(self) -> None:
+        thread, clock = FakeThread("name [abcdef]"), FakeClock()
+        workers = self.workers(lambda _thread_id, _epoch: thread, clock)
+        thread.fail_once = OSError("connection reset")
+        workers.rename(1, "name", "epoch-1")
+        await self.settle()
+        self.assertEqual(thread.edits, [])
+        await self.pass_time(workers, clock, RENAME_RETRY_DELAYS_SECONDS[0])
+        self.assertEqual(thread.edits, ["name"])
 
     async def test_a_thread_without_a_live_session_is_not_renamed(self) -> None:
         workers = self.workers(lambda _thread_id, _epoch: None, FakeClock())
