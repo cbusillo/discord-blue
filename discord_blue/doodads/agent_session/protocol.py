@@ -9,6 +9,11 @@ from typing import Any, Literal
 APPROVAL_COMMAND_DISPLAY_LIMIT = 1600
 
 
+# What this server supports beyond the base protocol, listed in hello_ack as `features`. A client must not
+# rely on a feature the server did not list: an older server ignores it.
+SERVER_FEATURES = frozenset({"command_text"})
+
+
 def command_text_displayable(text: str) -> bool:
     """Whether Discord can show this raw shell command verbatim and whole inside a code fence."""
     return bool(text) and len(text) <= APPROVAL_COMMAND_DISPLAY_LIMIT and "```" not in text

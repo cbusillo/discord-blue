@@ -599,7 +599,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await websocket.send_json(
             {"type": "hello", "session_id": "transport-session", "session_epoch": epoch, "cwd": "/workspace/example"}
         )
-        self.assertEqual(await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555})
+        self.assertEqual(
+            await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555, "features": ["command_text"]}
+        )
         return websocket
 
     async def send_transport_event(
@@ -1077,7 +1079,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                             "assistant_message": "Last answer",
                         }
                     )
-                    self.assertEqual(await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555})
+                    self.assertEqual(
+                        await websocket.receive_json(timeout=2),
+                        {"type": "hello_ack", "thread_id": 555, "features": ["command_text"]},
+                    )
                     self.assertEqual(thread.sent_messages, ["**Assistant**\nLast answer"])
                     await bridge.send_pause_current_turn(thread, FakeInteraction(thread).user)
                     command = await websocket.receive_json(timeout=2)

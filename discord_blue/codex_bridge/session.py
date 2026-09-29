@@ -149,6 +149,8 @@ class ThreadSession:
         self.answers: dict[str, list[tuple[object, str]]] = {}
         self.commands: OrderedDict[str, Json] = OrderedDict()
         self.last_status: Json | None = None
+        # Features the connected Discord Blue listed in hello_ack; None until one answers.
+        self.server_features: frozenset[str] | None = None
 
     # Codex -> Discord
 
@@ -256,7 +258,9 @@ class ThreadSession:
         if request_id in self.prompts:
             return  # Stock replays pending requests when this connection rejoins.
         turn_id = str(params.get("turnId") or "")
-        if method == COMMAND_APPROVAL and (command := discord_command(params)) is not None:
+        # A server that did not list command_text would show the re-quoted argv, not Codex's command.
+        shows_command_text = self.server_features is None or "command_text" in self.server_features
+        if method == COMMAND_APPROVAL and shows_command_text and (command := discord_command(params)) is not None:
             approval_id = str(params.get("approvalId") or params.get("itemId") or request_id)
             self.approvals[approval_id] = request_id
             self.prompts[request_id] = self.event(
@@ -284,6 +288,14 @@ class ThreadSession:
                 self.publish("status_changed", message="Waiting on a decision in the Codex TUI")
             return
         self.enqueue(self.prompts[request_id])
+
+    def keep_approvals_local(self) -> None:
+        """Take pending approvals back from a server that would show the re-quoted argv; the TUI still has them."""
+        for request_id, prompt in list(self.prompts.items()):
+            if prompt["type"] == "approval_request":
+                del self.prompts[request_id]
+                self.approvals.pop(str(prompt["approval_id"]), None)
+                self.publish("status_changed", message="Waiting on a decision in the Codex TUI")
 
     def on_resolved(self, request_id: RequestId) -> None:
         prompt = self.prompts.pop(request_id, None)
@@ -407,6 +419,12 @@ class ThreadSession:
                         ack = await websocket.receive_json()
                     if not isinstance(ack, dict) or ack.get("type") != "hello_ack":
                         raise ValueError("Discord Blue did not acknowledge the session")
+                    features = ack.get("features")
+                    self.server_features = (
+                        frozenset(f for f in features if isinstance(f, str)) if isinstance(features, list) else frozenset()
+                    )
+                    if "command_text" not in self.server_features:
+                        self.keep_approvals_local()
                     first = False
                     # Prompts retire on disconnect and on every status event, so replay queued history
                     # first and then each still-pending prompt once.

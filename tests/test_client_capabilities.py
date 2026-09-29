@@ -313,7 +313,9 @@ class CapabilityTransportTests(unittest.IsolatedAsyncioTestCase):
                 bridge_module.AGENT_SESSION_CONNECT_PATH, headers={"Authorization": "Bearer cleanup-transport-test"}
             )
             await websocket.send_json(transport_tests.CleanupTransportTests.hello())
-            self.assertEqual(await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555})
+            self.assertEqual(
+                await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555, "features": ["command_text"]}
+            )
             await websocket.close()
 
     async def test_ack_echoes_only_negotiated_capabilities(self) -> None:
@@ -325,7 +327,8 @@ class CapabilityTransportTests(unittest.IsolatedAsyncioTestCase):
                 {**transport_tests.CleanupTransportTests.hello(), "capabilities": ["reply", "unknown", "reply"]}
             )
             self.assertEqual(
-                await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555, "capabilities": ["reply"]}
+                await websocket.receive_json(timeout=2),
+                {"type": "hello_ack", "thread_id": 555, "features": ["command_text"], "capabilities": ["reply"]},
             )
             self.assertEqual(bridge.sessions.get("cleanup-session").hello.capabilities, frozenset({"reply"}))  # type: ignore[union-attr]
             await websocket.close()

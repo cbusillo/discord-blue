@@ -20,6 +20,7 @@ from discord_blue.codex_bridge.session import CAPABILITIES, TURN_DONE, ThreadSes
 from discord_blue.doodads.agent_session.protocol import (
     APPROVAL_COMMAND_DISPLAY_LIMIT,
     REMOTE_ACTIONS,
+    SERVER_FEATURES,
     RemoteApprovalRequest,
     SessionHello,
 )
@@ -36,6 +37,9 @@ def status(thread_id: str, kind: str) -> Json:
 def thread(thread_id: str, **fields: object) -> Json:
     base: Json = {"id": thread_id, "cwd": "/work/project", "gitInfo": {"branch": "fix/login"}, "preview": "Fix the login bug"}
     return {**base, "status": {"type": "idle"}, **fields}
+
+
+CURRENT_FEATURES = sorted(SERVER_FEATURES)
 
 
 class FakeRpc:
@@ -65,7 +69,9 @@ class FakeRpc:
 class FakeDiscordBlue:
     """Stands in for the deployed agent-session server: acks hello and records events."""
 
-    def __init__(self) -> None:
+    def __init__(self, features: list[str] | None = None) -> None:
+        # None acknowledges like a server that predates hello_ack features.
+        self.features = features
         self.received: asyncio.Queue[Json] = asyncio.Queue()
         self.sockets: list[web.WebSocketResponse] = []
 
@@ -78,7 +84,8 @@ class FakeDiscordBlue:
         async for frame in websocket:
             message = frame.json()
             if message["type"] == "hello":
-                await websocket.send_json({"type": "hello_ack", "thread_id": 1})
+                ack: Json = {"type": "hello_ack", "thread_id": 1}
+                await websocket.send_json(ack if self.features is None else {**ack, "features": self.features})
             if message["type"] != "heartbeat":
                 await self.received.put(message)
         return websocket
@@ -99,8 +106,10 @@ class FakeDiscordBlue:
 
 
 @asynccontextmanager
-async def running_bridge(rpc: FakeRpc) -> AsyncIterator[tuple[CodexBridge, FakeDiscordBlue]]:
-    discord = FakeDiscordBlue()
+async def running_bridge(
+    rpc: FakeRpc, features: list[str] | None = CURRENT_FEATURES
+) -> AsyncIterator[tuple[CodexBridge, FakeDiscordBlue]]:
+    discord = FakeDiscordBlue(features)
     app = web.Application()
     app.router.add_get("/agent-session/connect", discord.connect)
     async with TestServer(app, host="127.0.0.1") as server, aiohttp.ClientSession() as http:
@@ -210,6 +219,22 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
 
         # Discord shows command_text; servers that predate it still get an argv.
         self.assertEqual((approval.command_text, approval.command), (command_line, shlex.split(command_line)))
+
+    async def test_a_server_that_does_not_list_command_text_gets_no_approvals(self) -> None:
+        # An older server would show shlex.join of the argv: longer, re-quoted, possibly with a fence.
+        rpc = FakeRpc(thread("root"))
+        params = {"threadId": "root", "turnId": "t1", "itemId": "item-1", "command": "git status", "cwd": "/work"}
+        async with running_bridge(rpc, features=None) as (bridge, discord):
+            # Raised before the server answered hello, then after.
+            await bridge.dispatch({"id": 7, "method": "item/commandExecution/requestApproval", "params": params})
+            await discord.next("hello")
+            await bridge.dispatch({"id": 8, "method": "item/commandExecution/requestApproval", "params": params})
+            events = [await discord.next() for _ in range(2)]
+            self.assertTrue(discord.received.empty())
+
+        waiting = ("status_changed", "Waiting on a decision in the Codex TUI")
+        self.assertEqual([(event["type"], event["message"]) for event in events], [waiting, waiting])
+        self.assertEqual(rpc.responses, [])
 
     async def test_approvals_discord_cannot_fully_show_stay_in_the_tui(self) -> None:
         base = {"threadId": "root", "turnId": "t1", "itemId": "item-1", "cwd": "/work"}

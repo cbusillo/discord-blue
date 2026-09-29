@@ -22,6 +22,7 @@ from discord_blue.doodads.agent_session.messages import agent_session_allowed_me
 from discord_blue.doodads.agent_session.messages import send_agent_session_message
 from discord_blue.doodads.agent_session.protocol import (
     APPROVAL_COMMAND_DISPLAY_LIMIT,
+    SERVER_FEATURES,
     command_text_displayable,
     RequestUserInputQuestion,
     RemoteApprovalDecision,
@@ -932,6 +933,7 @@ class AgentSessionBridge:
                         await websocket.send_json(
                             {
                                 "type": "hello_ack",
+                                "features": sorted(SERVER_FEATURES),
                                 "thread_id": session_thread.thread.id,
                                 **({"capabilities": sorted(hello.capabilities)} if hello.capabilities is not None else {}),
                             }
