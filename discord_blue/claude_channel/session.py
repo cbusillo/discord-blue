@@ -50,6 +50,8 @@ HOOK_TOOL = {
     ),
     "inputSchema": {"type": "object", "properties": {"event": {"type": "string"}}, "required": ["event"]},
 }
+# Hooks that only fire while Claude is working. Another plugin's Stop hook can keep a turn going after Stop.
+RUNNING_EVENTS = {"UserPromptSubmit", "PreToolUse", "PostToolUse"}
 # The `_meta` key Claude Code sets on a model's tool call; hook calls carry no tool use.
 MODEL_CALL = "claudecode/toolUseId"
 
@@ -174,8 +176,9 @@ class ClaudeSession(AgentSessionClient):
                 self.publish("notice", message=f"This Claude Code session is now on conversation `{conversation}`.")
             else:
                 await self.switch_conversation(conversation)
-        if event == "UserPromptSubmit":
+        if event in RUNNING_EVENTS:
             self.turn_running = True
+        if event == "UserPromptSubmit":
             prompt = fields.get("prompt", "")
             echo = prompt.lstrip().startswith("<channel") and any(f'command_id="{c}"' in prompt for c in self.injected)
             self.retitle(fields.get("session_title") or self.title or ("" if echo else prompt))
@@ -228,16 +231,21 @@ class ClaudeSession(AgentSessionClient):
         await self.notify(CHANNEL, {"content": text, "meta": {"command_id": command_id}})
 
     async def release_held(self) -> None:
-        """Deliver replies held during the turn that just ended."""
+        """Claude Code is idle: deliver the oldest held reply, which starts a turn; the rest wait for its end.
+
+        Delivering more at once would leave them in Claude Code's own queue, where /clear or /resume
+        could carry them into the next conversation.
+        """
         self.turn_running = False
-        held, self.held = self.held, []
-        for command_id, text in held:
-            try:
-                await self.inject(command_id, text)
-            except OSError:
-                self.finish_command(command_id, self.event("command_reject", command_id=command_id, reason=LOST_CLAUDE))
-            else:
-                self.finish_command(command_id, self.event("command_ack", command_id=command_id))
+        if not self.held:
+            return
+        command_id, text = self.held.pop(0)
+        try:
+            await self.inject(command_id, text)
+        except OSError:
+            self.finish_command(command_id, self.event("command_reject", command_id=command_id, reason=LOST_CLAUDE))
+        else:
+            self.finish_command(command_id, self.event("command_ack", command_id=command_id))
 
     async def run_command(self, message: Json) -> object:
         kind = message.get("kind")

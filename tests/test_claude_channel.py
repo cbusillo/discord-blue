@@ -82,7 +82,7 @@ class FakeClaudeCode:
     async def settle(self) -> list[Json]:
         """Everything the server wrote before it answered a ping sent now."""
         await self.request("ping")
-        return self.received
+        return list(self.received)
 
 
 @asynccontextmanager

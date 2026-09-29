@@ -227,10 +227,9 @@ Codex sessions. Claude Code starts `discord-blue-claude-channel` once per
 session as a [channel](https://code.claude.com/docs/en/channels-reference).
 The thread is named after the session name (`-n` or `/rename`) or the first typed
 prompt. It mirrors typed prompts and each turn's final answer. A Discord reply
-becomes the session's next prompt. A tool permission prompt shows in Discord
-with approve and deny, with the directory it runs in, when Discord can show the
-exact request; the terminal dialog stays open too, and the first answer wins. The thread archives when the
-session exits.
+becomes the session's next prompt. When Claude asks for a tool permission, the
+thread says so and shows Claude Code's preview of the request; approve or deny
+it in the terminal. The thread archives when the session exits.
 
 One-time setup on the Mac:
 
@@ -256,27 +255,21 @@ Behaviour and limits:
   warning appears on every launch, and the flag and protocol may change.
 - The plugin loads in every session. A session started without the flag is
   still mirrored, but Claude Code drops channel messages, so the thread offers
-  no replies or approvals and says how to resume with the flag.
+  no replies and says how to resume with the flag.
 - Discord cannot pause, interrupt or end a Claude Code turn, and cannot answer
-  Claude's multiple-choice questions. A reply sent while a turn runs is held
-  until the turn ends (or, after an interrupt, until Claude Code reports it is
-  idle); it is acknowledged when it reaches Claude Code. Held replies are dropped,
-  with a notice, if `/clear` or `/resume` switches conversations first.
-- A permission request stays in the terminal unless it is the only unfinished
-  call to that tool that the hooks reported, with its input and working
-  directory (which follows a `cd`); its preview equals that input exactly; and
-  the PermissionRequest hook confirms that no other hook rewrote the input.
-  Input with repeated spaces, tabs, newlines or non-ASCII characters stays local,
-  because Claude Code's preview may hide those. It also stays there when Discord cannot show it exactly: a Bash
-  command whose quoting Discord would change (pipes, double quotes, repeated
-  spaces), anything longer than 1,600 characters, a preview that Claude Code
-  shortened or masked, or a code fence.
-- Claude Code does not report when the terminal answered a relayed prompt. The
-  Discord prompt retires when that tool call (matched by `tool_use_id`)
-  finishes, the next prompt arrives, or the turn ends.
+  Claude's multiple-choice questions. A reply sent while a turn runs is held,
+  because Claude Code would otherwise queue it and could deliver it after
+  `/clear` or `/resume`. Each time the turn ends (or, after an interrupt, Claude
+  Code reports it is idle) the oldest held reply is delivered and acknowledged;
+  the rest wait for the turn it starts. Held replies are dropped, with a notice,
+  if the conversation switches first.
+- Discord cannot approve or deny Claude Code's permission prompts. Claude
+  Code's channel permission request carries only a display preview, with
+  credentials masked and long fields shortened, and no tool-call ID, so a
+  Discord decision could not be tied reliably to the call it would allow. The
+  notice shows that preview, marked as a preview.
 - `/clear` or `/resume` inside a session keeps its thread but reconnects under a
-  new epoch, so replies and approvals sent for the previous conversation are
-  rejected. Discord Blue also refuses a reply written before the session last
+  new epoch, so replies sent for the previous conversation are rejected. Discord Blue also refuses a reply written before the session last
   reconnected, and says so. The thread gets a notice for each switch.
 - Hooks reach the channel through an MCP tool, `dui_hook_event`, which the model
   can also see. Its description says never to call it, and calls that carry a
