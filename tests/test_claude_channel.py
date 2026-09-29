@@ -13,23 +13,9 @@ from aiohttp.test_utils import TestServer
 
 from discord_blue.claude_channel.__main__ import run_channel
 from discord_blue.claude_channel.mcp import METHOD_NOT_FOUND, PROTOCOL_VERSIONS
-from discord_blue.claude_channel.session import (
-    CAPABILITIES,
-    CHANNEL,
-    PERMISSION_REQUEST,
-    WAITING_LOCALLY,
-    Identity,
-    approval_command,
-)
+from discord_blue.claude_channel.session import CAPABILITIES, CHANNEL, PERMISSION_REQUEST, WAITING_LOCALLY, Identity
 from discord_blue.codex_bridge.config import BridgeConfig
-from discord_blue.doodads.agent_session.protocol import (
-    APPROVAL_COMMAND_DISPLAY_LIMIT,
-    DISCORD_MESSAGE_LIMIT,
-    REMOTE_ACTIONS,
-    SessionHello,
-    approval_fits_discord,
-    approval_text,
-)
+from discord_blue.doodads.agent_session.protocol import REMOTE_ACTIONS, SessionHello
 from tests.fakes_discord_blue import TOKEN, FakeDiscordBlue
 
 Json = dict[str, Any]
@@ -172,7 +158,7 @@ class ClaudeChannelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(injected, {"content": "try again", "meta": {"command_id": "cmd-1"}})
         self.assertEqual(leftover, [])
 
-    async def test_without_hooks_a_permission_prompt_stays_in_the_terminal(self) -> None:
+    async def test_a_permission_prompt_is_announced_but_only_the_terminal_can_answer_it(self) -> None:
         async with running_channel() as (claude, discord):
             await claude.initialize()
             hello = await discord.next("hello")
@@ -181,9 +167,10 @@ class ClaudeChannelTests(unittest.IsolatedAsyncioTestCase):
             refused = await discord.control(decision(hello, "poeyw", "approved"))
             leftover = await claude.settle()
 
-        # Nothing says where the command would run, so Discord must not offer to approve it.
-        self.assertEqual((waiting["type"], waiting["message"]), ("status_changed", WAITING_LOCALLY))
+        self.assertEqual((waiting["type"], waiting["message"]), ("status_changed", f"{WAITING_LOCALLY} (Bash)"))
+        self.assertNotIn("approval_decision", CAPABILITIES)
         self.assertEqual(refused["type"], "approval_decision_reject")
+        # No permission verdict ever goes back to Claude Code.
         self.assertEqual(leftover, [])
 
     async def test_ending_the_claude_session_closes_the_discord_session(self) -> None:
@@ -201,38 +188,3 @@ class ClaudeChannelTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["capabilities"], {"experimental": {"claude/channel": {}}, "tools": {}})
         self.assertEqual(discord.sockets, [])
-
-
-class ApprovalDisplayTests(unittest.TestCase):
-    def test_discord_shows_a_command_only_as_the_shell_would_run_it(self) -> None:
-        cases: dict[str, tuple[str, Json, list[str] | None]] = {
-            "plain command": ("Bash", {"command": "touch relay-test.txt", "description": "d"}, ["touch", "relay-test.txt"]),
-            # shlex would show '$(touch /tmp/x)', a literal, while the shell runs the substitution.
-            "substitution in double quotes": ("Bash", {"command": 'echo "$(touch /tmp/x)"'}, None),
-            "pipeline": ("Bash", {"command": "ls | wc -l"}, None),
-            "argument that changes the grant": (
-                "Bash",
-                {"command": "ls", "dangerouslyDisableSandbox": True},
-                ["Bash", '{"command": "ls", "dangerouslyDisableSandbox": true}'],
-            ),
-            "other tool": (
-                "Write",
-                {"file_path": "/w/a.txt", "content": "hi"},
-                ["Write", '{"file_path": "/w/a.txt", "content": "hi"}'],
-            ),
-        }
-        for case, (tool, tool_input, expected) in cases.items():
-            with self.subTest(case):
-                self.assertEqual(approval_command(tool, tool_input), expected)
-
-    def test_discord_offers_an_approval_only_when_the_whole_request_fits(self) -> None:
-        room = DISCORD_MESSAGE_LIMIT - len(approval_text(["x"], "/", None))
-        self.assertTrue(approval_fits_discord(["x" * APPROVAL_COMMAND_DISPLAY_LIMIT], "/w"))
-        for case, argv, cwd in (
-            ("longer than Discord shows", ["x" * (APPROVAL_COMMAND_DISPLAY_LIMIT + 1)], "/w"),
-            ("breaks out of the code fence", ["echo", "```"], "/w"),
-            ("breaks out of the directory's backticks", ["ls"], "/w/`x`"),
-            ("directory pushes the message past Discord's limit", ["x"], "/" + "d" * (room + 1)),
-        ):
-            with self.subTest(case):
-                self.assertFalse(approval_fits_discord(argv, cwd))

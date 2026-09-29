@@ -21,7 +21,6 @@ from discord_blue.doodads.agent_session.messages import agent_session_allowed_me
 from discord_blue.doodads.agent_session.messages import send_agent_session_message
 from discord_blue.doodads.agent_session.protocol import (
     APPROVAL_COMMAND_DISPLAY_LIMIT,
-    DISCORD_MESSAGE_LIMIT,
     RequestUserInputQuestion,
     RemoteApprovalDecision,
     RemoteApprovalRequest,
@@ -30,7 +29,6 @@ from discord_blue.doodads.agent_session.protocol import (
     SessionHello,
     SessionStatus,
     UserMessage,
-    approval_text,
 )
 from discord_blue.doodads.agent_session.sessions import (
     AgentSession,
@@ -59,6 +57,7 @@ REPLY_BEFORE_RECONNECT = (
 )
 SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS = 10
 
+DISCORD_MESSAGE_LIMIT = 2000
 DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
 DISCORD_CODE_FENCE_WRAP_RESERVE = 80
 STARTUP_RECONNECT_GRACE_SECONDS = 20
@@ -2868,11 +2867,18 @@ class AgentSessionBridge:
 
     @staticmethod
     def format_approval_request(approval: RemoteApprovalRequest) -> str:
-        command = approval.command
-        if len(shlex.join(command)) > APPROVAL_COMMAND_DISPLAY_LIMIT:
-            # Clients should keep such a request local; show only its start rather than overflow the message.
-            command = [shlex.join(command)[:APPROVAL_COMMAND_DISPLAY_LIMIT]]
-        return approval_text(command, approval.cwd, approval.reason)[:DISCORD_MESSAGE_LIMIT]
+        command = shlex.join(approval.command) if approval.command else ""
+        parts = [
+            "**Approval requested**",
+            "Quick review: `✅` approve · `✖️` deny",
+            "",
+            f"```sh\n{command[:APPROVAL_COMMAND_DISPLAY_LIMIT]}\n```",
+        ]
+        if approval.cwd:
+            parts.append(f"cwd: `{approval.cwd}`")
+        if approval.reason:
+            parts.extend(["", approval.reason[:500]])
+        return "\n".join(parts)[:DISCORD_MESSAGE_LIMIT]
 
     @staticmethod
     def format_approval_pending(

@@ -12,8 +12,7 @@ from tests.test_claude_channel import IDENTITY, FakeClaudeCode, command, running
 
 Json = dict[str, Any]
 SWITCHED = (
-    "The Claude Code conversation in this thread ended (/clear or /resume); "
-    "earlier replies and approvals from Discord are no longer accepted."
+    "The Claude Code conversation in this thread ended (/clear or /resume); earlier replies from Discord are no longer accepted."
 )
 MIRRORED = ("user_message", "title_changed", "turn_complete", "approval_resolved", "notice")
 
