@@ -7,20 +7,22 @@ import stat
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 from urllib.parse import urlsplit
 
 DEFAULT_CONFIG_PATH = Path("~/.config/discord-blue/codex-bridge.toml")
 DEFAULT_SOCKET_PATH = Path("~/.codex/app-server-control/app-server-control.sock")
 TOKEN_ENV = "AGENT_SESSION_TOKEN"
 # Each key's TOML type. A quoted "false" is a string, not a boolean, so it is rejected, not truthy.
-FIELD_TYPES: dict[str, type] = {
-    "server_url": str,
-    "token_file": str,
-    "socket_path": str,
-    "host_label": str,
-    "allow_insecure_ws": bool,
+FIELD_TYPES: dict[str, tuple[type, ...]] = {
+    "server_url": (str,),
+    "token_file": (str,),
+    "socket_path": (str,),
+    "host_label": (str,),
+    "allow_insecure_ws": (bool,),
+    "hello_timeout_seconds": (int, float),
 }
-TYPE_NAMES = {str: "a string", bool: "true or false"}
+TYPE_NAMES = {(str,): "a string", (bool,): "true or false", (int, float): "a number"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +33,9 @@ class BridgeConfig:
     host_label: str
     heartbeat_seconds: float = 30
     reconnect_seconds: float = 5
-    hello_timeout_seconds: float = 90
+    # How long to wait for hello_ack. Attaching after a Discord Blue restart can take minutes while every session
+    # reattaches at once; giving up early only queues another attach behind the ones still running.
+    hello_timeout_seconds: float = 300
 
 
 def validate_server_url(url: str, *, allow_insecure_ws: bool) -> None:
@@ -63,8 +67,10 @@ def check_types(raw: dict[str, object]) -> None:
     if unknown := sorted(set(raw) - set(FIELD_TYPES)):
         raise ValueError(f"unknown config keys: {', '.join(unknown)}")
     for key, value in raw.items():
-        if type(value) is not (expected := FIELD_TYPES[key]):
+        if type(value) not in (expected := FIELD_TYPES[key]):
             raise ValueError(f"{key} must be {TYPE_NAMES[expected]}, not {type(value).__name__}")
+    if "hello_timeout_seconds" in raw and not cast(float, raw["hello_timeout_seconds"]) > 0:
+        raise ValueError("hello_timeout_seconds must be positive")
 
 
 def load_config(path: Path) -> BridgeConfig:
@@ -80,4 +86,5 @@ def load_config(path: Path) -> BridgeConfig:
         token=token,
         socket_path=Path(str(raw.get("socket_path") or DEFAULT_SOCKET_PATH)).expanduser(),
         host_label=str(raw.get("host_label") or f"Codex on {socket.gethostname().split('.')[0]}"),
+        **({"hello_timeout_seconds": float(cast(float, raw["hello_timeout_seconds"]))} if "hello_timeout_seconds" in raw else {}),
     )

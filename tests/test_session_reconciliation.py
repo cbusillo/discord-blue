@@ -68,7 +68,7 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(pending[0].pending_steps, {"members", "archive", "leave"})
             self.assertFalse(thread.archived)
             await asyncio.wait_for(bridge.cleanup_stale_session_threads(), timeout=0.1)
-        self.assertEqual(thread.sent_messages, ["Agent session disconnected"])
+        self.assertEqual(thread.sent_messages, [bridge_module.SESSION_ENDED_NOTICE])
 
     async def test_orphan_scan_preserves_unregistered_session_still_finalizing(self) -> None:
         bridge = make_bridge()
@@ -99,7 +99,7 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 release.set()
                 await task
-        self.assertEqual(thread.sent_messages, ["Agent session disconnected"])
+        self.assertEqual(thread.sent_messages, [bridge_module.SESSION_ENDED_NOTICE])
 
     async def test_history_scan_does_not_hold_global_attach_lock(self) -> None:
         bridge = make_bridge()

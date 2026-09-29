@@ -179,8 +179,10 @@ class ClaudeChannelTests(unittest.IsolatedAsyncioTestCase):
     async def test_ending_the_claude_session_closes_the_discord_session(self) -> None:
         async with running_channel() as (claude, discord):
             await claude.initialize()
-            await discord.next("hello")
+            hello = await discord.next("hello")
             claude.stdin.feed_eof()
+            ended = await discord.next("session_end")  # /exit ends the session, so its thread closes now.
+            self.assertEqual(ended["session_epoch"], hello["session_epoch"])
             async with asyncio.timeout(5):
                 while not discord.sockets[-1].closed:
                     await asyncio.sleep(0.01)

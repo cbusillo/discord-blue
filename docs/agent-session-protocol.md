@@ -48,7 +48,15 @@ after attaching the Discord thread. `features` lists what the server supports
 beyond the base protocol; a client must not rely on a feature the server did not
 list, since an older server ignores it and omits `features`. Wait for this acknowledgement before publishing
 other events. Send `heartbeat` at an interval shorter than the configured timeout
-(default 120 seconds). On disconnect or timeout the bridge archives the thread.
+(default 120 seconds); the timeout counts from `hello_ack`, so a slow attach is
+never dropped as silent. A disconnect, a heartbeat timeout or a `hello_ack` the
+client stopped waiting for starts a five-minute grace period: the thread is left
+exactly as it is (no archive, member change or notice), and a reconnect with the
+same `session_id` inside it resumes the thread directly. When the grace period
+expires, the bridge posts one "Session ended" line and archives and locks the
+thread. A client whose session is really over sends
+`{"type":"session_end","session_id":...,"session_epoch":...}` before closing, and
+the thread closes the same way at once. Older servers ignore `session_end`.
 Reconnect discovery includes archived private threads that the bot has left,
 and reattachment restores its membership. The bot needs Discord’s
 `Manage Threads` and `Read Message History` permissions for private-thread

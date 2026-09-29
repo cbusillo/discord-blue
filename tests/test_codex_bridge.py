@@ -436,9 +436,23 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
             await discord.next("hello")
             await bridge.dispatch(status("root", "notLoaded"))
             self.assertEqual(bridge.sessions, {})
+            await discord.next("session_end")  # So Discord Blue closes the thread now, not after a grace period.
             async with asyncio.timeout(5):
                 while not discord.sockets[-1].closed:
                     await asyncio.sleep(0.01)
+
+    async def test_a_daemon_drop_does_not_end_the_discord_session(self) -> None:
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            await bridge.detach_all()
+            async with asyncio.timeout(5):
+                while not discord.sockets[-1].closed:
+                    await asyncio.sleep(0.01)
+            received = [discord.received.get_nowait()["type"] for _ in range(discord.received.qsize())]
+
+        # Without session_end, Discord Blue keeps the thread through its grace period for the reconnect.
+        self.assertNotIn("session_end", received)
 
 
 class ConfigTests(unittest.TestCase):
@@ -472,9 +486,18 @@ class ConfigTests(unittest.TestCase):
             ("server_url = 5", "server_url must be a string"),
             (f"{url}\nallow_insecure_ws = true\nhost_label = true", "host_label must be a string"),
             (f"{url}\nallow_insecure_wss = true", "unknown config keys: allow_insecure_wss"),
+            (f"{url}\nallow_insecure_ws = true\nhello_timeout_seconds = true", "hello_timeout_seconds must be a number"),
+            (f"{url}\nallow_insecure_ws = true\nhello_timeout_seconds = 0", "hello_timeout_seconds must be positive"),
         ):
             with self.subTest(body=body), self.assertRaisesRegex(ValueError, error):
                 self.load(body)
+
+    def test_hello_timeout_is_configurable(self) -> None:
+        url = 'server_url = "wss://bridge.example/agent-session/connect"'
+        default = self.load(url).hello_timeout_seconds
+        self.assertEqual(self.load(f"{url}\nhello_timeout_seconds = 45").hello_timeout_seconds, 45)
+        self.assertEqual(self.load(f"{url}\nhello_timeout_seconds = 12.5").hello_timeout_seconds, 12.5)
+        self.assertGreaterEqual(default, 300)  # Outlasts a restart's attach queue (#148).
 
     def test_token_must_be_present_and_private(self) -> None:
         url = 'server_url = "wss://bridge.example/agent-session/connect"'

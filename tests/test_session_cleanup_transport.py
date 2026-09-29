@@ -46,17 +46,31 @@ class CleanupTransportTests(unittest.IsolatedAsyncioTestCase):
         app.router.add_get(bridge_module.AGENT_SESSION_CONNECT_PATH, connect)
         attachment = bridge_module.SessionThread(thread=cast(Any, thread), notification_message_id=None)
         with (
+            # Long enough to observe the grace period, short enough to wait out.
+            patch.object(bridge_module, "SESSION_DISCONNECT_GRACE_SECONDS", 0.2),
             patch.object(bridge_module.discord, "Thread", FakeThread),
             patch.object(bridge, "find_or_create_session_thread", new=AsyncMock(return_value=attachment)),
         ):
             async with TestClient(ProductionCleanupTestServer(app)) as client:
                 yield bridge, thread, client, finished
 
+    def assert_in_grace(self, bridge: AgentSessionBridge, thread: FakeThread) -> None:
+        session = bridge.sessions.get("cleanup-session")
+        assert session is not None
+        self.assertIsNotNone(session.grace_task)
+        self.assertEqual(bridge.sessions.by_thread, {thread.id: "cleanup-session"})
+        self.assertFalse(thread.archived)
+        self.assertEqual(thread.sent_messages, [])
+
+    @staticmethod
+    async def grace_expired(bridge: AgentSessionBridge) -> None:
+        await asyncio.wait_for(asyncio.gather(*bridge._grace_tasks), timeout=2)
+
     @staticmethod
     def hello() -> dict[str, str]:
         return {"type": "hello", "session_id": "cleanup-session", "session_epoch": "epoch-1", "cwd": "/test/project"}
 
-    async def test_late_hello_ack_failure_unregisters_and_archives(self) -> None:
+    async def test_late_hello_ack_failure_archives_after_grace(self) -> None:
         async with self.transport() as (bridge, thread, client, finished):
 
             async def failed_ack(_websocket: web.WebSocketResponse, _payload: object, **_kwargs: object) -> None:
@@ -74,6 +88,8 @@ class CleanupTransportTests(unittest.IsolatedAsyncioTestCase):
                 await websocket.receive(timeout=2)
                 await websocket.close()
                 await asyncio.wait_for(finished.wait(), timeout=2)
+                self.assert_in_grace(bridge, thread)
+                await self.grace_expired(bridge)
                 self.assertIsNone(bridge.sessions.get("cleanup-session"))
                 self.assertEqual(bridge.sessions.by_thread, {})
                 self.assertTrue(thread.archived)
@@ -81,7 +97,7 @@ class CleanupTransportTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(thread.left)
                 await websocket.close()
 
-    async def test_event_handler_failure_unregisters_and_archives(self) -> None:
+    async def test_event_handler_failure_archives_after_grace(self) -> None:
         async with self.transport() as (bridge, thread, client, finished):
             websocket = await client.ws_connect(
                 bridge_module.AGENT_SESSION_CONNECT_PATH,
@@ -96,6 +112,8 @@ class CleanupTransportTests(unittest.IsolatedAsyncioTestCase):
                 await websocket.receive(timeout=2)
                 await websocket.close()
                 await asyncio.wait_for(finished.wait(), timeout=2)
+            self.assert_in_grace(bridge, thread)
+            await self.grace_expired(bridge)
             self.assertIsNone(bridge.sessions.get("cleanup-session"))
             self.assertEqual(bridge.sessions.by_thread, {})
             self.assertTrue(thread.archived)
@@ -127,6 +145,8 @@ class CleanupTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(thread.archived)
             await websocket.close()
             await asyncio.wait_for(finished.wait(), timeout=2)
+            self.assert_in_grace(bridge, thread)
+            await self.grace_expired(bridge)
             self.assertIsNone(bridge.sessions.get("cleanup-session"))
             self.assertTrue(thread.archived)
 
@@ -143,6 +163,8 @@ class CleanupTransportTests(unittest.IsolatedAsyncioTestCase):
             await websocket.receive(timeout=2)
             await websocket.close()
             await asyncio.wait_for(finished.wait(), timeout=2)
+            self.assert_in_grace(bridge, thread)
+            await self.grace_expired(bridge)
             self.assertEqual(bridge.sessions.by_session, {})
             self.assertEqual(bridge.sessions.by_thread, {})
             self.assertTrue(thread.archived)

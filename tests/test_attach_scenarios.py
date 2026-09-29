@@ -98,6 +98,8 @@ async def scenario(fake: FakeDiscord, **agent_session: object) -> AsyncIterator[
             try:
                 yield Scenario(fake, bot, bridge, f"ws://127.0.0.1:{runner.addresses[0][1]}/agent-session/connect")
             finally:
+                for grace in list(bridge._grace_tasks):
+                    grace.cancel()
                 await bridge.renamer.close()
                 await runner.cleanup()
 
@@ -160,7 +162,6 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(attached, "not every session attached after the restart")
 
-    @fails_on_main
     async def test_a_failed_ack_does_not_archive_a_live_sessions_thread(self) -> None:
         """Main treats a hello_ack written to a closed socket as the end of the session: its teardown archives and
         locks the thread, even though the client is already reconnecting (the 2026-09-29 16:55 and 17:00 incidents)."""
@@ -181,7 +182,6 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ack["type"], "hello_ack")
         self.assertNotIn(thread.id, running.archived, "a live session's thread was archived after a failed ack")
 
-    @fails_on_main
     async def test_a_slow_ack_is_not_dropped_by_the_heartbeat_watchdog(self) -> None:
         """Main's watchdog counts from registration. When an attach takes longer than the heartbeat timeout, the
         next sweep after hello_ack closes the connection before the client's first heartbeat."""
@@ -215,7 +215,6 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ack["type"], "hello_ack")
         self.assertFalse(closed, "the watchdog dropped a connection that had just been acknowledged")
 
-    @fails_on_main
     async def test_a_late_archive_does_not_close_the_thread_of_the_next_attach(self) -> None:
         """Main's teardown bounds the archive edit with wait_for. Cancelling the wait does not stop the request:
         Discord applies it later, after the reconnected session has attached, and closes its thread."""

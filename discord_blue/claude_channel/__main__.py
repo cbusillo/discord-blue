@@ -53,10 +53,10 @@ async def run_channel(reader: asyncio.StreamReader, output: Output, config: Brid
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=20)) as http:
         mirror = asyncio.create_task(session.run(http), name="claude-channel-session")
         try:
-            # Claude Code closes stdin when the session ends; closing the socket archives the thread.
+            # Claude Code closes stdin when the session ends (/exit); session_end closes the thread now.
             await server.serve()
         finally:
-            await session.stop()
+            await session.end()
             mirror.cancel()
             await asyncio.gather(mirror, return_exceptions=True)
 

@@ -32,6 +32,7 @@ def register_stale(bridge: AgentSessionBridge, session_id: str, *, closed: bool 
     hello.session_id = session_id
     session = AgentSession(hello=hello, websocket=cast(web.WebSocketResponse, FakeWebSocket(closed=closed)))
     session.last_seen -= timedelta(seconds=2)
+    session.acknowledged = True
     bridge.sessions.register(session)
     return session
 
@@ -50,9 +51,16 @@ class CleanupFailureTests(unittest.IsolatedAsyncioTestCase):
             if session is first:
                 raise RuntimeError("Discord cleanup failed")
 
-        with patch.object(bridge, "close_session_thread", new=cleanup), self.assertLogs(bridge_module.logger, level="WARNING"):
+        with (
+            patch.object(bridge_module, "SESSION_DISCONNECT_GRACE_SECONDS", 0),
+            patch.object(bridge, "close_session_thread", new=cleanup),
+            self.assertLogs(bridge_module.logger, level="WARNING"),
+        ):
+            # The threadless session closes at once; the one with a thread closes when its grace period expires.
             await bridge.close_timed_out_sessions()
-        self.assertEqual(calls, ["first", "second"])
+            self.assertIsNotNone(first.grace_task)
+            await asyncio.gather(*bridge._grace_tasks)
+        self.assertEqual(calls, ["second", "first"])
         self.assertEqual(bridge.sessions.by_session, {})
         self.assertTrue(first.websocket.closed)
         self.assertTrue(second.websocket.closed)

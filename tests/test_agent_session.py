@@ -963,6 +963,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     await original_close(session, cleanup)
 
                 with patch.object(bridge, "close_session_thread", side_effect=paused_close):
+                    # A clean end closes the thread at once; a bare drop would wait out the grace period instead.
+                    await old.send_json(
+                        {"type": "session_end", "session_id": hello.session_id, "session_epoch": hello.session_epoch}
+                    )
                     await old.close()
                     await asyncio.wait_for(cleanup_started.wait(), timeout=2)
                     current = await connect(client, hello)
@@ -994,13 +998,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge = AgentSessionBridge(FakeBot(config))
         old_session = AgentSession(hello=make_hello(), websocket=FakeWebSocket())
         old_session.last_seen -= timedelta(seconds=2)
+        old_session.acknowledged = True
         bridge.sessions.register(old_session)
         lifecycle_lock = bridge.session_lifecycle_lock(old_session.session_id)
         await lifecycle_lock.acquire()
         timeout_task = asyncio.create_task(bridge.close_timed_out_sessions())
         await asyncio.sleep(0)
 
-        new_session = AgentSession(hello=make_hello(), websocket=FakeWebSocket())
+        new_session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), acknowledged=True)
         bridge.sessions.register(new_session)
         lifecycle_lock.release()
         await timeout_task
@@ -1018,8 +1023,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         second_hello.session_id = "session-2"
         first = AgentSession(hello=first_hello, websocket=FakeWebSocket())
         second = AgentSession(hello=second_hello, websocket=FakeWebSocket())
-        first.last_seen -= timedelta(seconds=2)
-        second.last_seen -= timedelta(seconds=2)
+        for session in (first, second):
+            session.last_seen -= timedelta(seconds=2)
+            session.acknowledged = True
         bridge.sessions.register(first)
         bridge.sessions.register(second)
         first_lock = bridge.session_lifecycle_lock(first.session_id)
@@ -1048,6 +1054,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         replacement = AgentSession(hello=second_hello, websocket=FakeWebSocket())
         for session in (first, second, replacement):
             session.last_seen -= timedelta(seconds=2)
+            session.acknowledged = True
         bridge.sessions.register(first)
         bridge.sessions.register(second)
 

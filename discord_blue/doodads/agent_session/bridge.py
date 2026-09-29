@@ -61,6 +61,10 @@ REPLY_BEFORE_RECONNECT = (
     "so it was not delivered. Send it again if it still applies."
 )
 SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS = 10
+# A connection that drops without a clean session_end (including a failed hello_ack) keeps its thread untouched
+# this long, so a reconnect resumes it without an archive, member changes or notices.
+SESSION_DISCONNECT_GRACE_SECONDS = 300
+SESSION_ENDED_NOTICE = "Session ended"
 
 DISCORD_MESSAGE_LIMIT = 2000
 DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
@@ -342,6 +346,7 @@ class AgentSessionBridge:
         self._cleanup_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._session_attach_lock = asyncio.Lock()
+        self._grace_tasks: set[asyncio.Task[None]] = set()
         self.renamer = ThreadRenamer(self.rename_target)
         # No await occurs while resolving the entry, so one event loop turn
         # cannot create two locks for the same session ID.
@@ -488,6 +493,8 @@ class AgentSessionBridge:
         if self._runner is None:
             return
         self._stopping = True
+        for task in list(self._grace_tasks):
+            task.cancel()
         await self.renamer.close()
         await self.stop_background_task("maintenance", self._cleanup_task)
         self._cleanup_task = None
@@ -646,22 +653,22 @@ class AgentSessionBridge:
         timeout = timedelta(seconds=self.bot.config.agent_session.heartbeat_timeout_seconds)
         now = datetime.now(UTC)
         for session_id, session in list(self.sessions.by_session.items()):
+            if session.grace_task is not None or not session.acknowledged:
+                continue  # In grace (its timer ends it) or still attaching (heartbeats start at the ack).
             if not session.websocket.closed and now - session.last_seen <= timeout:
                 continue
             lifecycle_lock = self.session_lifecycle_lock(session_id)
             if lifecycle_lock.locked():
                 continue
             try:
-                if session.websocket.closed:
-                    close_message = b"session disconnected"
-                else:
-                    close_message = b"heartbeat timeout"
+                if not session.websocket.closed:
                     logger.warning(
                         "Agent session %s timed out after %s seconds without heartbeat",
                         session_id,
                         self.bot.config.agent_session.heartbeat_timeout_seconds,
                     )
-                await self.finalize_session(session, close_message=close_message)
+                # A silent or closed connection is a drop, not an end: close it and start the grace period.
+                await self.end_connection(session)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -910,10 +917,13 @@ class AgentSessionBridge:
                             if self._stopping:
                                 rejecting_stopping_session = True
                             else:
+                                previous = self.sessions.get(hello.session_id)
                                 session = AgentSession(hello=hello, websocket=websocket)
                                 self.sessions.register(session)
                                 try:
-                                    session_thread = await self.find_or_create_session_thread(hello)
+                                    session_thread = await self.resume_thread_in_grace(
+                                        previous, hello
+                                    ) or await self.find_or_create_session_thread(hello)
                                 except (discord.DiscordException, ValueError) as exc:
                                     logger.warning(
                                         "Unable to attach Discord thread for Agent session %s: %s",
@@ -943,14 +953,23 @@ class AgentSessionBridge:
                         await websocket.close(message=b"bridge shutdown", drain=False)
                         break
                     if session_thread is not None:
-                        await websocket.send_json(
-                            {
-                                "type": "hello_ack",
-                                "features": sorted(SERVER_FEATURES),
-                                "thread_id": session_thread.thread.id,
-                                **({"capabilities": sorted(hello.capabilities)} if hello.capabilities is not None else {}),
-                            }
-                        )
+                        try:
+                            await websocket.send_json(
+                                {
+                                    "type": "hello_ack",
+                                    "features": sorted(SERVER_FEATURES),
+                                    "thread_id": session_thread.thread.id,
+                                    **({"capabilities": sorted(hello.capabilities)} if hello.capabilities is not None else {}),
+                                }
+                            )
+                        except ConnectionError:
+                            # The client stopped waiting; it will reconnect, so this starts a grace period below.
+                            logger.info("Agent session %s left before its hello was acknowledged", hello.session_id)
+                            break
+                        if session is not None:
+                            # Heartbeats start after the ack, so the watchdog's clock starts here too.
+                            session.acknowledged = True
+                            session.touch()
                         # Attached, acknowledged and outside every lock: bring the thread's name up to date in
                         # the background. The renamer coalesces and rate-limits; nothing here waits on Discord.
                         if session is not None:
@@ -977,6 +996,10 @@ class AgentSessionBridge:
                 elif message_type == "approval_decision_reject":
                     logger.warning("Agent session approval decision reject: %s", payload)
                     await self.handle_approval_decision_reject(payload)
+                elif message_type == "session_end" and session is not None:
+                    # A clean end: close the thread now instead of waiting out a grace period.
+                    session.ended = True
+                    break
                 elif message_type == "title_changed" and session is not None:
                     await self.handle_title_changed(session, payload.get("title"))
                 elif message_type == "notice" and session is not None and session.thread_id is not None:
@@ -990,9 +1013,46 @@ class AgentSessionBridge:
                     await self.handle_command_reject(payload)
         finally:
             if session is not None:
-                await self.finalize_session(session)
+                await self.end_connection(session)
 
         return websocket
+
+    async def end_connection(self, session: AgentSession) -> None:
+        """A connection closed: a clean end closes the thread now; any other drop waits out a grace period."""
+        if session.ended or session.thread_id is None or self.sessions.get(session.session_id) is not session:
+            await self.finalize_session(session)
+            return
+        if not session.websocket.closed:
+            with suppress(Exception):
+                await asyncio.wait_for(session.websocket.close(), timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS)
+        if session.grace_task is None:
+            session.grace_task = asyncio.create_task(self.expire_grace(session), name=f"agent-session-grace-{session.session_id}")
+            self._grace_tasks.add(session.grace_task)
+            session.grace_task.add_done_callback(self._grace_tasks.discard)
+
+    async def expire_grace(self, session: AgentSession) -> None:
+        await asyncio.sleep(SESSION_DISCONNECT_GRACE_SECONDS)
+        # A reconnect replaced this session in the registry; the thread belongs to it now.
+        if self.sessions.get(session.session_id) is not session:
+            return
+        try:
+            await self.finalize_session(session, close_message=b"disconnect grace expired")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # finalize_session kept a pending cleanup, so the maintenance sweep retries the thread.
+            logger.warning("Unable to close Agent session %s after its grace period", session.session_id, exc_info=True)
+
+    async def resume_thread_in_grace(self, previous: AgentSession | None, hello: SessionHello) -> SessionThread | None:
+        """A reconnect within grace takes its thread back as it is: no discovery, unarchive, joins or notices."""
+        if previous is None or previous.grace_task is None or previous.thread_id is None:
+            return None
+        previous.grace_task.cancel()
+        thread = await self.get_thread(previous.thread_id)
+        if thread is None or thread.archived or thread.locked:
+            return None
+        self.sessions.bind_thread(hello.session_id, thread.id, previous.notification_message_id)
+        return SessionThread(thread=thread, notification_message_id=previous.notification_message_id)
 
     async def find_or_create_session_thread(self, hello: SessionHello) -> SessionThread:
         thread = await self.find_existing_session_thread(hello)
@@ -2759,7 +2819,7 @@ class AgentSessionBridge:
         if "disconnect_notice" in steps:
             try:
                 await asyncio.wait_for(
-                    send_agent_session_message(thread, "Agent session disconnected"),
+                    send_agent_session_message(thread, SESSION_ENDED_NOTICE),
                     timeout=THREAD_DISCONNECT_NOTICE_TIMEOUT_SECONDS,
                 )
             except Exception:
