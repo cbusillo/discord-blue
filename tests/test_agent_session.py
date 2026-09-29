@@ -667,7 +667,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             hello = {"type": "hello", "session_id": "s", "session_epoch": "e", "cwd": "/w/odoo-tenant-opw", "harness": "codex"}
             await websocket.send_json(hello)
             ack = await websocket.receive_json(timeout=2)
-            await asyncio.wait_for(asyncio.gather(*list(bridge.renamer.tasks.values())), timeout=2)
+            await asyncio.wait_for(asyncio.gather(*[w.task for w in bridge.threads.workers.values() if w.task]), timeout=2)
 
         self.assertEqual(ack["type"], "hello_ack")
         self.assertEqual(thread.name, f"{threads_module.HARNESS_ICONS['codex']} odoo-tenant-opw")
@@ -697,7 +697,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             for payload in payloads:
                 await self.send_transport_event(bridge, websocket, payload)
             # Renames run in the background, coalesced; wait for this thread's to finish.
-            await asyncio.wait_for(asyncio.gather(*list(bridge.renamer.tasks.values())), timeout=2)
+            await asyncio.wait_for(asyncio.gather(*[w.task for w in bridge.threads.workers.values() if w.task]), timeout=2)
 
         # hello names the (unnamed) thread, then the title renames it.
         self.assertEqual([edit["name"] for edit in thread.edits if "name" in edit], ["example", "example · Fix the login bug"])

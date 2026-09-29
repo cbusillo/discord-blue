@@ -10,6 +10,9 @@ from discord_blue.config import Config
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=discord.Guild | discord.TextChannel)
+# discord.py's floor. A longer rate limit raises discord.RateLimited instead of sleeping inside the request, so callers
+# (the agent-session thread workers) reschedule rather than hold their place for minutes.
+MAX_RATELIMIT_SLEEP_SECONDS = 30.0
 
 
 class BlueBot(commands.Bot):
@@ -23,6 +26,7 @@ class BlueBot(commands.Bot):
         super().__init__(
             command_prefix="!",
             intents=intents,
+            max_ratelimit_timeout=MAX_RATELIMIT_SLEEP_SECONDS,
         )
 
     async def setup_hook(self) -> None:

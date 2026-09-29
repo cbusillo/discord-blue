@@ -100,7 +100,7 @@ async def scenario(fake: FakeDiscord, **agent_session: object) -> AsyncIterator[
             finally:
                 for grace in list(bridge._grace_tasks):
                     grace.cancel()
-                await bridge.renamer.close()
+                await bridge.threads.close_all()
                 await runner.cleanup()
 
 
@@ -238,6 +238,35 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(ack["type"], "hello_ack")
         self.assertTrue(still_open, "an archive from the earlier session closed the reconnected session's thread")
+
+    async def test_a_teardown_that_stops_waiting_in_a_global_rate_limit_leaves_discord_usable(self) -> None:
+        """Cancelling a discord.py 2.7.1 request while it sleeps out a global 429 leaves its global-limit event
+        cleared, so every later request waits forever (the #147 review). Teardown's wait for its archive ends while
+        discord.py is in that sleep; the next session must still attach."""
+        fake = FakeDiscord(latency=0.002)
+        ending, arriving = hello_for("ending"), hello_for("arriving")
+        fake.add_thread("ending", marker=marker(ending), members={BOT_ID})
+        fake.add_thread("arriving", marker=marker(arriving), archived=True, locked=True)
+        with (
+            patch.object(bridge_module, "SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS", 0.2),
+            patch.object(bridge_module, "THREAD_CLOSE_WAIT_SECONDS", 0.1),
+        ):
+            async with scenario(fake) as running, aiohttp.ClientSession() as http:
+                first = await running.connect(http)
+                await first.send_json(ending)
+                await first.receive_json(timeout=10)
+                # The close notice meets a global rate limit: 100 s, scaled to 1 s, far longer than teardown waits.
+                fake.faults.append(Fault("POST", "/channels/{channel}/messages", status=429, retry_after=100, is_global=True))
+                await first.send_json({"type": "session_end", "session_id": "ending", "session_epoch": "e1"})
+                await first.close()
+                self.assertTrue(await until(lambda: not fake.faults, timeout=5), "the close notice was never sent")
+                await asyncio.sleep(0.3)  # Teardown has stopped waiting; discord.py is still in the global sleep.
+                second = await running.connect(http)
+                await second.send_json(arriving)
+                ack = await second.receive_json(timeout=10)
+                await second.close()
+
+        self.assertEqual(ack["type"], "hello_ack")
 
     @fails_on_main
     async def test_an_event_sent_right_after_the_ack_is_delivered(self) -> None:

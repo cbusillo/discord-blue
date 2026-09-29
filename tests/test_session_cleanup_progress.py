@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import cast
 from unittest.mock import AsyncMock, patch
@@ -13,6 +14,16 @@ from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.sessions import AgentSession
 from tests.fakes_agent_session import FakeReplyMessage, FakeThread, FakeWebSocket, UserLike, make_hello
 from tests import test_session_cleanup as cleanup_tests
+
+
+async def wait_until(predicate: Callable[[], bool], timeout: float = 1) -> bool:
+    try:
+        async with asyncio.timeout(timeout):
+            while not predicate():
+                await asyncio.sleep(0.01)
+    except TimeoutError:
+        return False
+    return True
 
 
 class CleanupProgressTests(unittest.IsolatedAsyncioTestCase):
@@ -62,7 +73,7 @@ class CleanupProgressTests(unittest.IsolatedAsyncioTestCase):
                 with suppress(asyncio.CancelledError):
                     await task
 
-    async def test_finalizer_interruption_preserves_completed_steps(self) -> None:
+    async def test_an_interrupted_finalizer_leaves_its_request_running_and_its_record_current(self) -> None:
         for interruption in ("cancel", "timeout"):
             with self.subTest(interruption=interruption):
                 thread = FakeThread(555, members=[111])
@@ -74,14 +85,20 @@ class CleanupProgressTests(unittest.IsolatedAsyncioTestCase):
                     notification_message_id=101,
                 )
                 bridge.sessions.register(session)
-                leaving = asyncio.Event()
+                leaving, release = asyncio.Event(), asyncio.Event()
+                original_leave = thread.leave
 
-                async def blocked_leave(_leaving: asyncio.Event = leaving) -> None:
+                async def slow_leave(
+                    _leaving: asyncio.Event = leaving,
+                    _release: asyncio.Event = release,
+                    _leave: Callable[[], Awaitable[None]] = original_leave,
+                ) -> None:
                     _leaving.set()
-                    await asyncio.Event().wait()
+                    await _release.wait()
+                    await _leave()
 
                 with (
-                    patch.object(thread, "leave", new=blocked_leave),
+                    patch.object(thread, "leave", new=slow_leave),
                     patch.object(bridge, "delete_session_notification", new=AsyncMock(return_value=True)) as delete,
                     patch.object(bridge_module, "SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS", 0.05),
                 ):
@@ -92,33 +109,55 @@ class CleanupProgressTests(unittest.IsolatedAsyncioTestCase):
                     with suppress(asyncio.CancelledError):
                         await task
                     delete.assert_awaited_once_with(101)
-                self.assertIsNone(bridge.sessions.get(session.session_id))
-                self.assertTrue(thread.archived)
-                pending = list(bridge._pending_cleanups.values())
-                self.assertEqual(len(pending), 1)
-                self.assertEqual(pending[0].pending_steps, {"leave"})
-                notices = list(thread.sent_messages)
-                edits = list(thread.edits)
-                await bridge.retry_pending_cleanups()
+                    self.assertIsNone(bridge.sessions.get(session.session_id))
+                    self.assertTrue(thread.archived)
+                    pending = list(bridge._pending_cleanups.values())
+                    self.assertEqual([record.pending_steps for record in pending], [{"leave"}])
+                    notices, edits = list(thread.sent_messages), list(thread.edits)
+                    # The leave was never cancelled: a retry now would repeat it, so the retry waits for it.
+                    await bridge.retry_pending_cleanups()
+                    self.assertEqual(pending[0].attempts, 0)
+                    release.set()
+                    self.assertTrue(await wait_until(lambda: thread.left))  # noqa: B023 - awaited within this iteration
+                    self.assertEqual(pending[0].pending_steps, set())
+                    await bridge.retry_pending_cleanups()
                 self.assertEqual(bridge._pending_cleanups, {})
-                self.assertTrue(thread.left)
                 self.assertEqual(thread.sent_messages, notices)
                 self.assertEqual(thread.edits, edits)
 
     async def test_retry_defers_busy_attachment_without_spending_attempt(self) -> None:
-        for lock_kind in ("attach", "thread"):
-            with self.subTest(lock_kind=lock_kind):
-                thread = FakeThread(555)
+        for busy_with in ("attach", "reopen"):
+            with self.subTest(busy_with=busy_with):
+                thread = FakeThread(555, archived=True)
                 bridge = cleanup_tests.SessionCleanupTests.make_bridge(thread)
                 cleanup = cleanup_tests.SessionCleanupTests.cleanup_record(555, "archive", "leave")
                 bridge.remember_pending_cleanup(cleanup)
-                lock = bridge._session_attach_lock if lock_kind == "attach" else bridge.thread_lifecycle_lock(555)
-                async with lock:
+                release = asyncio.Event()
+                original_edit = thread.edit
+
+                async def slow_edit(
+                    _release: asyncio.Event = release, _edit: Callable[..., Awaitable[None]] = original_edit, **kwargs: object
+                ) -> None:
+                    await _release.wait()
+                    await _edit(**kwargs)
+
+                with patch.object(thread, "edit", new=slow_edit):
+                    if busy_with == "attach":
+                        await bridge._session_attach_lock.acquire()
+                        release.set()
+                    else:
+                        # An attach is reopening the thread through its worker.
+                        reopen = asyncio.create_task(bridge.threads.open(cast(discord.Thread, thread)))
+                        await asyncio.sleep(0)
                     await asyncio.wait_for(bridge.retry_pending_cleanups(), timeout=0.1)
                     self.assertEqual(cleanup.attempts, 0)
-                    self.assertFalse(thread.archived)
                     self.assertFalse(thread.left)
-                await bridge.retry_pending_cleanups()
+                    if busy_with == "attach":
+                        bridge._session_attach_lock.release()
+                    else:
+                        release.set()
+                        await asyncio.wait_for(reopen, timeout=1)
+                    await bridge.retry_pending_cleanups()
                 self.assertEqual(bridge._pending_cleanups, {})
                 self.assertTrue(thread.archived)
                 self.assertTrue(thread.left)

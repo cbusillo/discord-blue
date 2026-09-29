@@ -4,7 +4,10 @@ import asyncio
 import unittest
 from collections.abc import AsyncIterator
 from contextlib import suppress
+from typing import cast
 from unittest.mock import AsyncMock, patch
+
+import discord
 
 from discord_blue.doodads.agent_session import bridge as bridge_module
 from tests.fakes_agent_session import FakeReplyMessage, FakeTextChannel, FakeThread, add_bot_message
@@ -146,9 +149,10 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
             self.assertLogs(bridge_module.logger, level="WARNING"),
         ):
             await bridge.cleanup_stale_session_notifications()
-        self.assertTrue(cancelled.is_set())
+        self.assertFalse(cancelled.is_set(), "the blocked delete was cancelled instead of left to finish")
         self.assertTrue(later.deleted)
         self.assertTrue(bridge._pending_cleanups)
+        await bridge.threads.close_all()
 
     async def test_notice_changed_during_discovery_is_not_overwritten(self) -> None:
         bridge = make_bridge()
@@ -174,8 +178,7 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
             scan = asyncio.create_task(bridge.cleanup_stale_session_notifications())
             try:
                 await asyncio.wait_for(scanned_first.wait(), timeout=1)
-                async with bridge.thread_lifecycle_lock(501):
-                    session.notification_message_id = new_notice.id
+                session.notification_message_id = new_notice.id
             finally:
                 release.set()
                 await scan
@@ -186,20 +189,29 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_orphan_scan_skips_thread_being_attached(self) -> None:
         bridge = make_bridge()
-        thread = FakeThread(501)
+        thread = FakeThread(501, joined=False)
         channel = FakeTextChannel(321, [thread])
         add_bot_message(thread, 1, "Agent session connected")
-        lock = bridge.thread_lifecycle_lock(thread.id)
-        await lock.acquire()
-        try:
+        joining, release = asyncio.Event(), asyncio.Event()
+        original_join = thread.join
+
+        async def slow_join() -> None:
+            joining.set()
+            await release.wait()
+            await original_join()
+
+        with patch.object(thread, "join", new=slow_join):
+            # An attach is reopening the thread through its worker, not yet bound to its session.
+            reopen = asyncio.create_task(bridge.threads.open(cast(discord.Thread, thread)))
+            await asyncio.wait_for(joining.wait(), timeout=1)
             with patch.object(bridge_module, "get_agent_session_channel", return_value=channel):
                 await bridge.cleanup_stale_session_threads()
             self.assertFalse(thread.archived)
             self.assertFalse(thread.left)
+            release.set()
+            await asyncio.wait_for(reopen, timeout=1)
             session = register_stale(bridge, "connecting")
             bridge.sessions.bind_thread(session.session_id, thread.id)
-        finally:
-            lock.release()
         with patch.object(bridge_module, "get_agent_session_channel", return_value=channel):
             await bridge.cleanup_stale_session_threads()
         self.assertFalse(thread.archived)

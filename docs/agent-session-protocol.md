@@ -80,21 +80,35 @@ connection object, so an older connection cannot unregister its replacement.
 Closed WebSockets disappear from `/code active` and the health endpoint's
 active-session count while cleanup finishes.
 
-WebSocket close, notification cleanup, and thread cleanup have independent time
+Every change to a session thread (reopen, join, member changes, the "Session
+ended" notice, archive, leave and rename) goes through that thread's worker. It
+sends one request at a time and never cancels one: Discord applies a request
+whether or not the bridge is still waiting, and cancelling a discord.py request
+during a global rate limit leaves every later request waiting forever. Callers
+say whether they want the thread open or closed; after each request the worker
+checks again, so a reattach that asks for the thread open while its old archive
+is still in flight gets it reopened once that archive lands. Opening comes before
+closing, and a rename is sent only when nothing else is pending. A rate limit
+longer than 30 seconds is not slept through inside discord.py: the rename is
+tried again once Discord allows it. At most four thread requests run at once
+across all threads.
+
+WebSocket close, notification cleanup, and thread cleanup have independent wait
 budgets: one second for the socket, two seconds for notification cleanup, and
-six seconds for thread cleanup. Thread cleanup reserves time for archiving and leaving even if
-posting the notice or removing members fails. The total nine-second cleanup
-budget stays below the ten-second reconnect lock wait. A failed notification
-operation does not prevent thread cleanup, and a
-failed or slow session does not terminate the heartbeat monitor. Cleanup retains
-the session lifecycle lock until its bounded operations have completed or been
-cancelled; reconnect cannot race a detached archive operation.
+six seconds for thread cleanup. These bound how long teardown waits, not the
+requests themselves. A request still running when a wait ends finishes later,
+and the shared retry record drops each step as it lands, so a retry never repeats
+one. A failed notice or member removal does not stop the archive and leave. The
+total nine-second cleanup budget stays below the ten-second reconnect lock wait.
+A failed notification operation does not prevent thread cleanup, and a failed
+or slow session does not terminate the heartbeat monitor.
 
 Failed Discord cleanup is retained for periodic retry in a bounded, deduplicated
 in-memory queue (256 records, up to five retry attempts). Maintenance runs every
 five minutes after the startup reconnect grace. Successful steps are removed
 from the shared retry record immediately, so cancellation retains only unfinished
-work. Busy attachments defer retries without consuming their attempt budget;
+work. Busy attachments, and threads whose worker is still sending a request, defer
+retries without consuming their attempt budget;
 discovery leaves archived, locked threads alone. Queue overflow and exhausted
 retries produce warnings; periodic
 orphan discovery provides recovery after records are dropped or the service
