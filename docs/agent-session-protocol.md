@@ -133,7 +133,7 @@ an ID or epoch that differs from the connection's current session.
 | `error` | `message`: user-visible error. |
 | `command_ack` | `command_id`: accepted for execution, not proof of completion. |
 | `command_reject` | `command_id`, `reason`: command could not be accepted. |
-| `approval_request` | `approval_id`, `call_id`, `turn_id`, `command` (argv list), `cwd`, optional `reason`. |
+| `approval_request` | `approval_id`, `call_id`, `turn_id`, `command` (argv list), `cwd`, optional `reason`, optional `command_text`: the command exactly as the shell runs it. Discord shows `command_text` verbatim instead of the re-quoted argv, and keeps the request in the native TUI when it is longer than 1,600 characters, contains a code fence, or does not fit one message with its directory. |
 | `approval_decision_ack` | `approval_id`: decision submission acknowledged; Discord does not assert the winning outcome. |
 | `approval_resolved` | `approval_id`: retire matching approval with neutral Resolved text. |
 | `request_user_input_resolved` | `call_id`, `turn_id`: retire the exact matching input prompt with neutral Resolved text. |

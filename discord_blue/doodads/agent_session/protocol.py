@@ -8,6 +8,12 @@ from typing import Any, Literal
 # Clients must not offer a Discord approval for a command longer than this.
 APPROVAL_COMMAND_DISPLAY_LIMIT = 1600
 
+
+def command_text_displayable(text: str) -> bool:
+    """Whether Discord can show this raw shell command verbatim and whole inside a code fence."""
+    return bool(text) and len(text) <= APPROVAL_COMMAND_DISPLAY_LIMIT and "```" not in text
+
+
 # Actions a client can accept; omitted capabilities retain the legacy contract.
 REMOTE_ACTIONS = frozenset(
     {
@@ -197,6 +203,9 @@ class RemoteApprovalRequest:
     command: list[str]
     cwd: str
     reason: str | None
+    # The command exactly as the shell will run it. Shown instead of the argv when present, because
+    # re-quoting an argv can change what the shell does.
+    command_text: str | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "RemoteApprovalRequest":
@@ -212,6 +221,7 @@ class RemoteApprovalRequest:
             command=[str(part) for part in command],
             cwd=str(payload.get("cwd") or ""),
             reason=str(payload["reason"]) if payload.get("reason") is not None else None,
+            command_text=payload["command_text"] if isinstance(payload.get("command_text"), str) else None,
         )
 
 

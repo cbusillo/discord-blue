@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import tempfile
 import unittest
 from collections.abc import AsyncIterator
@@ -16,7 +17,12 @@ from aiohttp.test_utils import TestServer
 from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.config import BridgeConfig, load_config
 from discord_blue.codex_bridge.session import CAPABILITIES, TURN_DONE, ThreadSession
-from discord_blue.doodads.agent_session.protocol import APPROVAL_COMMAND_DISPLAY_LIMIT, REMOTE_ACTIONS, SessionHello
+from discord_blue.doodads.agent_session.protocol import (
+    APPROVAL_COMMAND_DISPLAY_LIMIT,
+    REMOTE_ACTIONS,
+    RemoteApprovalRequest,
+    SessionHello,
+)
 
 Json = dict[str, Any]
 TOKEN = "test-token"
@@ -192,6 +198,18 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
             await bridge.dispatch({"method": "serverRequest/resolved", "params": {"threadId": "root", "requestId": 7}})
 
         self.assertEqual(rpc.responses, [(7, {"decision": "accept"})])
+
+    async def test_an_approval_carries_codex_command_exactly_as_the_shell_runs_it(self) -> None:
+        command_line = 'echo "$(git rev-parse HEAD)" | tee head.txt'
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            params = {"threadId": "root", "turnId": "t1", "itemId": "item-1", "command": command_line, "cwd": "/work"}
+            await bridge.dispatch({"id": 7, "method": "item/commandExecution/requestApproval", "params": params})
+            approval = RemoteApprovalRequest.from_payload(await discord.next("approval_request"))
+
+        # Discord shows command_text; servers that predate it still get an argv.
+        self.assertEqual((approval.command_text, approval.command), (command_line, shlex.split(command_line)))
 
     async def test_approvals_discord_cannot_fully_show_stay_in_the_tui(self) -> None:
         base = {"threadId": "root", "turnId": "t1", "itemId": "item-1", "cwd": "/work"}

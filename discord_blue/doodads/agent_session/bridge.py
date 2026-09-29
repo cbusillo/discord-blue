@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import re
@@ -21,6 +22,7 @@ from discord_blue.doodads.agent_session.messages import agent_session_allowed_me
 from discord_blue.doodads.agent_session.messages import send_agent_session_message
 from discord_blue.doodads.agent_session.protocol import (
     APPROVAL_COMMAND_DISPLAY_LIMIT,
+    command_text_displayable,
     RequestUserInputQuestion,
     RemoteApprovalDecision,
     RemoteApprovalRequest,
@@ -1676,15 +1678,23 @@ class AgentSessionBridge:
                 session.thread_id, "Action required in the native TUI; this client does not support answering from Discord."
             )
             return
+        content = self.format_approval_request(approval)
+        if approval.command_text is not None and (
+            not command_text_displayable(approval.command_text)
+            # The reason may be cut short; the command and directory may not.
+            or len(self.format_approval_request(dataclasses.replace(approval, reason=None))) > DISCORD_MESSAGE_LIMIT
+        ):
+            # Never offer to approve a command Discord cannot show exactly and whole.
+            await self.post_thread_notice(
+                session.thread_id, "Action required in the native TUI; Discord cannot show this command in full."
+            )
+            return
 
         channel = self.bot.get_channel(session.thread_id)
         if not isinstance(channel, discord.Thread):
             return
 
-        message = await send_agent_session_message(
-            channel,
-            self.format_approval_request(approval),
-        )
+        message = await send_agent_session_message(channel, content[:DISCORD_MESSAGE_LIMIT])
         await self.add_message_reactions(
             message,
             [REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY],
@@ -2839,7 +2849,11 @@ class AgentSessionBridge:
 
     @staticmethod
     def format_approval_request(approval: RemoteApprovalRequest) -> str:
-        command = shlex.join(approval.command) if approval.command else ""
+        """The approval message, untruncated; a raw command_text is shown verbatim instead of the re-quoted argv."""
+        if approval.command_text is not None:
+            command = approval.command_text
+        else:
+            command = shlex.join(approval.command) if approval.command else ""
         parts = [
             "**Approval requested**",
             "Quick review: `✅` approve · `✖️` deny",
@@ -2850,7 +2864,7 @@ class AgentSessionBridge:
             parts.append(f"cwd: `{approval.cwd}`")
         if approval.reason:
             parts.extend(["", approval.reason[:500]])
-        return "\n".join(parts)[:DISCORD_MESSAGE_LIMIT]
+        return "\n".join(parts)
 
     @staticmethod
     def format_approval_pending(
