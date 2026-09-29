@@ -111,6 +111,23 @@ class SessionLabelTests(unittest.TestCase):
                 self.assertLessEqual(len(shown), LABEL_LIMIT)
                 self.assertFalse(shown.endswith("…"))
 
+    def test_tag_stripping_takes_linear_time_on_a_huge_paste(self) -> None:
+        pastes = {
+            "void tags": "<br>" * 1_000_000 + " Fix the flaky login test",
+            "unclosed tags": "<div><span>" * 500_000 + " Fix the flaky login test",
+        }
+        for case, paste in pastes.items():
+            with self.subTest(case):
+                started = time.process_time()
+                substantial(paste)
+                # A rescan per unmatched tag took seconds on 64 KB; one bounded pass takes milliseconds.
+                self.assertLess(time.process_time() - started, 0.5)
+
+    def test_an_unclosed_system_wrapper_hides_the_rest_but_other_tags_do_not(self) -> None:
+        self.assertIsNone(substantial("<system-reminder>Follow these rules before you answer the user"))
+        self.assertEqual(substantial('<pasted_content id="fc27"> Summarize this incident report'), "Summarize this incident report")
+        self.assertEqual(substantial("Fix the <b>bold</b> header <br> spacing today please"), "Fix the header spacing today please")
+
     def test_precedence_is_name_then_auto_title_then_first_substantial_prompt(self) -> None:
         label = SessionLabel(name="Continue", prompt="Continue")
         # Codex names a thread "Continue" by itself; that is not a name.

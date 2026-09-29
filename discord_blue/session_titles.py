@@ -18,20 +18,68 @@ import re
 LABEL_LIMIT = 45
 MIN_WORDS = 4
 GO_AHEAD = re.compile(r"(?:(?:continue|go|go on|go ahead|yes|y|ok|okay|sure|proceed|next|keep going|do it)\W*)+", re.IGNORECASE)
-TAG_NAME = r"[a-zA-Z][\w-]*"
-# A wrapper element and everything inside it, such as <system-reminder>...</system-reminder>.
-TAG_BLOCK = re.compile(rf"<({TAG_NAME})\b[^<>]*>.*?</\1\s*>", re.DOTALL)
-# What is left: an opening, closing or self-closing tag such as <pasted_content id="fc27">.
-TAG = re.compile(rf"</?{TAG_NAME}\b[^<>]*/?>")
+# Only a short label is needed; bounding the input bounds the work on a huge paste.
+INPUT_LIMIT = 64 * 1024
+# One tag: opening, closing or self-closing, such as <pasted_content id="fc27">. [^<>] keeps matches from overlapping.
+TAG = re.compile(r"<(/?)([a-zA-Z][\w-]*)\b[^<>]*?(/?)>")
+# System text Claude Code wraps a prompt in; an unclosed one hides the rest of the prompt.
+WRAPPERS = frozenset(
+    {
+        "system-reminder",
+        "local-command-stdout",
+        "local-command-stderr",
+        "command-name",
+        "command-message",
+        "command-args",
+        "channel",
+        "bash-input",
+        "bash-stdout",
+        "bash-stderr",
+    }
+)
 URL = re.compile(r"\b(?:https?|ftp)://\S+|\bwww\.\S+", re.IGNORECASE)
 QUOTES = str.maketrans("", "", "\"'`" + "\u2018\u2019\u201c\u201d")
 TRAILING = ",;:-([{" + "\u2013\u2014"
 
 
+def strip_tags(text: str) -> str:
+    """Remove every tag and whatever a closed tag pair wraps, in one pass over the (bounded) text."""
+    text = text[:INPUT_LIMIT]
+    removed: list[tuple[int, int]] = []
+    open_tags: list[tuple[str, int]] = []
+    open_counts: dict[str, int] = {}
+    for tag in TAG.finditer(text):
+        closing, name, self_closing = tag.group(1) == "/", tag.group(2).lower(), tag.group(3) == "/"
+        removed.append(tag.span())
+        if self_closing:
+            continue
+        if not closing:
+            open_tags.append((name, tag.start()))
+            open_counts[name] = open_counts.get(name, 0) + 1
+        elif open_counts.get(name):
+            # Close the nearest matching open tag; unclosed tags inside it (such as <br>) go with it.
+            while open_tags:
+                opened, start = open_tags.pop()
+                open_counts[opened] -= 1
+                if opened == name:
+                    removed.append((start, tag.end()))
+                    break
+    for name, start in open_tags:
+        if name in WRAPPERS:
+            removed.append((start, len(text)))
+            break
+    kept, position = [], 0
+    for start, end in sorted(removed):
+        if start > position:
+            kept.append(text[position:start])
+        position = max(position, end)
+    kept.append(text[position:])
+    return " ".join(kept)
+
+
 def clean(text: str) -> str:
     """One line of plain words: tags, URLs and quotes removed."""
-    text = TAG.sub(" ", TAG_BLOCK.sub(" ", text))
-    return " ".join(URL.sub(" ", text).translate(QUOTES).split())
+    return " ".join(URL.sub(" ", strip_tags(text)).translate(QUOTES).split())
 
 
 def shorten(text: str) -> str:

@@ -196,6 +196,12 @@ class FakeThread:
         return self._private
 
     async def join(self) -> None:
+        if self.archived:
+            # Discord refuses to join an archived thread.
+            raise discord.HTTPException(
+                response=SimpleNamespace(status=400, reason="Bad Request"),  # type: ignore[arg-type]
+                message=f"Thread {self.id} is archived",
+            )
         if self.join_raises:
             raise discord.Forbidden(
                 response=SimpleNamespace(status=403, reason="Forbidden"),

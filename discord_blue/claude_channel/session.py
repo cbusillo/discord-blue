@@ -183,7 +183,7 @@ class ClaudeSession(AgentSessionClient):
         if event == "UserPromptSubmit":
             prompt = fields.get("prompt", "")
             echo = prompt.lstrip().startswith("<channel") and any(f'command_id="{c}"' in prompt for c in self.injected)
-            self.retitle(fields, prompt=None if echo else prompt)
+            await self.retitle(fields, prompt=None if echo else prompt)
             if prompt.strip() and not echo:
                 self.publish("user_message", message=clip(prompt))
         elif event == "Stop":
@@ -191,7 +191,7 @@ class ClaudeSession(AgentSessionClient):
                 "turn_complete", message=TURN_DONE, assistant_message=clip(fields.get("last_assistant_message", "")) or None
             )
             # Claude Code writes its own title for the session as it answers.
-            self.retitle(fields)
+            await self.retitle(fields)
             # Not idle yet: another plugin's Stop hook may still keep Claude working.
         elif event == "StopFailure":
             self.publish("error", message="Claude Code ended the turn with an error; check the terminal.")
@@ -199,7 +199,7 @@ class ClaudeSession(AgentSessionClient):
             # idle_prompt: Claude Code has been waiting for input for about a minute, the only confirmed idle signal.
             await self.release_held()
         elif event == "SessionStart":
-            self.retitle(fields)
+            await self.retitle(fields)
 
     async def switch_conversation(self, conversation: str | None) -> None:
         """Start a new epoch so Discord controls meant for the previous conversation are rejected."""
@@ -221,9 +221,9 @@ class ClaudeSession(AgentSessionClient):
                 "notice", message=f"{waiting} and {'was' if dropped == 1 else 'were'} not delivered. Send again if still needed."
             )
 
-    def retitle(self, fields: dict[str, str], prompt: str | None = None) -> None:
+    async def retitle(self, fields: dict[str, str], prompt: str | None = None) -> None:
         """Name first (hook session_title, else the transcript's custom title), then Claude's aiTitle, then the prompt."""
-        titles = self.transcript.read(fields.get("transcript_path", ""))
+        titles = await self.transcript.read(fields.get("transcript_path", ""))
         name = fields.get("session_title") or titles.custom
         if (title := self.label.update(name=name, auto=titles.ai, prompt=prompt)) is not None:
             self.publish("title_changed", title=title)

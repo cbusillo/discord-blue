@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import timedelta
@@ -690,24 +690,90 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             await second.send_json({"type": "hello", "session_id": "s", "session_epoch": "e2", "cwd": "/w/repo"})
             self.assertEqual((await second.receive_json(timeout=2))["type"], "hello_ack")
 
-    async def test_reopening_a_rate_limited_thread_does_not_block_the_attach(self) -> None:
+    async def test_a_thread_that_cannot_be_reopened_yet_attaches_and_is_joined_once_reopened(self) -> None:
         config = Config()
-        thread = FakeThread(555, archived=True)
+        thread = FakeThread(555, archived=True, joined=False)
         bridge = AgentSessionBridge(FakeBot(config, thread))
-        stuck = asyncio.Event()
+        bridge.sessions.register(AgentSession(hello=make_hello(), websocket=FakeWebSocket()))
+        rate_limited = asyncio.Event()
+        original_edit = thread.edit
 
-        async def rate_limited_edit(**_kwargs: object) -> None:
-            await stuck.wait()
+        async def edit(**kwargs: object) -> None:
+            if not rate_limited.is_set():
+                rate_limited.set()
+                await asyncio.Event().wait()  # discord.py sleeping behind a rate limit
+            await original_edit(**kwargs)
 
-        thread.edit = rate_limited_edit  # type: ignore[method-assign]
+        thread.edit = edit  # type: ignore[method-assign]
         with (
             patch.object(bridge_module, "THREAD_REOPEN_TIMEOUT_SECONDS", 0.05),
+            patch.object(bridge_module, "THREAD_REOPEN_RETRY_SECONDS", (0,)),
             patch.object(bridge, "find_existing_session_thread", new=AsyncMock(return_value=thread)),
             patch.object(bridge, "ensure_session_notification", new=AsyncMock(return_value=None)),
         ):
+            # Joining an archived thread fails (the fake refuses it, as Discord does), so the attach must not try.
             attached = await asyncio.wait_for(bridge.find_or_create_session_thread(make_hello()), timeout=2)
+            self.assertEqual((attached.thread, thread.archived, thread.joined), (thread, True, False))
+            await asyncio.wait_for(asyncio.gather(*list(bridge._reopen_tasks)), timeout=2)
 
-        self.assertIs(attached.thread, thread)
+        self.assertEqual((thread.archived, thread.joined), (False, True))
+
+    async def test_an_attach_cut_short_after_creating_a_thread_leaves_cleanup_for_it(self) -> None:
+        async with self.transport() as (bridge, _thread, client):
+            created = FakeThread(777)
+
+            async def create_then_stall(
+                _hello: object, name: object = None, on_created: Callable[[object], None] | None = None
+            ) -> object:
+                assert on_created is not None
+                on_created(created)
+                await asyncio.Event().wait()  # The notification post stalls behind a rate limit.
+                raise AssertionError("unreachable")
+
+            with (
+                patch.object(bridge_module, "SESSION_ATTACH_TIMEOUT_SECONDS", 0.05),
+                patch.object(bridge, "find_or_create_session_thread", new=create_then_stall),
+            ):
+                websocket = await client.ws_connect(
+                    "/agent-session/connect", headers={"Authorization": "Bearer transport-test-token"}
+                )
+                await websocket.send_json({"type": "hello", "session_id": "s", "session_epoch": "e", "cwd": "/w/repo"})
+                self.assertEqual((await websocket.receive(timeout=2)).type, WSMsgType.CLOSE)
+
+            self.assertTrue(bridge.has_pending_cleanup_for_thread(777))
+            self.assertEqual((bridge.sessions.get("s"), bridge.sessions.by_thread), (None, {}))
+
+    async def test_the_attach_deadline_includes_waiting_for_other_attaches(self) -> None:
+        async with self.transport() as (bridge, _thread, client):
+            await bridge._session_attach_lock.acquire()  # Another session's slow attach.
+            try:
+                with patch.object(bridge_module, "SESSION_ATTACH_TIMEOUT_SECONDS", 0.05):
+                    websocket = await client.ws_connect(
+                        "/agent-session/connect", headers={"Authorization": "Bearer transport-test-token"}
+                    )
+                    await websocket.send_json({"type": "hello", "session_id": "s", "session_epoch": "e", "cwd": "/w/repo"})
+                    closed = await websocket.receive(timeout=2)
+            finally:
+                bridge._session_attach_lock.release()
+
+            self.assertEqual(closed.type, WSMsgType.CLOSE)
+            self.assertFalse(bridge.session_lifecycle_lock("s").locked())
+
+    async def test_a_new_thread_is_marked_as_a_session_thread_before_its_notification_is_posted(self) -> None:
+        config = Config()
+        channel = FakeTextChannel(config.agent_session.channel_id or config.discord.bot_channel_id, [])
+        bot = FakeBot(config, None, channel=channel)
+
+        async def stalled_send(*_args: object, **_kwargs: object) -> object:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        channel.send = stalled_send  # type: ignore[method-assign,assignment]
+        with self.assertRaises(TimeoutError):
+            await asyncio.wait_for(threads_module.create_session_thread(bot, make_hello()), timeout=0.05)
+
+        [thread] = channel.threads
+        self.assertTrue(thread.sent_messages[0].startswith(bridge_module.SESSION_START_PREFIX))
 
     async def test_a_client_gone_before_hello_ack_is_not_an_unhandled_error(self) -> None:
         async with self.transport() as (bridge, _thread, client):

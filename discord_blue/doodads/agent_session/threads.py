@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -133,14 +134,22 @@ async def get_agent_session_channel(bot: BlueBot) -> discord.TextChannel:
     raise ValueError(f"Agent session channel {channel_id} is not available")
 
 
-async def create_session_thread(bot: BlueBot, hello: SessionHello, name: str | None = None) -> SessionThread:
+async def create_session_thread(
+    bot: BlueBot,
+    hello: SessionHello,
+    name: str | None = None,
+    on_created: Callable[[discord.Thread], None] | None = None,
+) -> SessionThread:
     channel = await get_agent_session_channel(bot)
     thread = await channel.create_thread(
         name=name or session_thread_name(hello),
         auto_archive_duration=1440,
     )
-    notification = await send_agent_session_message(channel, session_notification_message(hello, thread))
+    if on_created is not None:
+        on_created(thread)
+    # The start message marks the thread as a session thread, so post it first: the stale-thread sweep finds it.
     await send_agent_session_message(thread, session_start_message(hello))
+    notification = await send_agent_session_message(channel, session_notification_message(hello, thread))
     await auto_join_configured_users(bot, thread)
     return SessionThread(thread=thread, notification_message_id=notification.id)
 

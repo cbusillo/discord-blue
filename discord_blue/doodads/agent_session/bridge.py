@@ -64,6 +64,8 @@ SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS = 10
 # Attaching a thread holds the session lifecycle lock, so it must finish well inside a reconnect's wait for it.
 SESSION_ATTACH_TIMEOUT_SECONDS = 8
 THREAD_REOPEN_TIMEOUT_SECONDS = 3
+# Retry a reopen that hit a rate limit; Discord's rename window is ten minutes.
+THREAD_REOPEN_RETRY_SECONDS = (30, 60, 120, 300, 600)
 
 DISCORD_MESSAGE_LIMIT = 2000
 DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
@@ -346,6 +348,7 @@ class AgentSessionBridge:
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._session_attach_lock = asyncio.Lock()
         self.renamer = ThreadRenamer(self.rename_target)
+        self._reopen_tasks: set[asyncio.Task[None]] = set()
         # No await occurs while resolving the entry, so one event loop turn
         # cannot create two locks for the same session ID.
         self._session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
@@ -492,6 +495,9 @@ class AgentSessionBridge:
             return
         self._stopping = True
         await self.renamer.close()
+        for task in list(self._reopen_tasks):
+            task.cancel()
+        await asyncio.gather(*self._reopen_tasks, return_exceptions=True)
         await self.stop_background_task("maintenance", self._cleanup_task)
         self._cleanup_task = None
         await self.stop_background_task("heartbeat", self._heartbeat_task)
@@ -909,23 +915,24 @@ class AgentSessionBridge:
                         await websocket.close(message=b"session cleanup still in progress", drain=False)
                         break
                     try:
-                        async with self._session_attach_lock:
-                            if self._stopping:
-                                rejecting_stopping_session = True
-                            else:
-                                session = AgentSession(hello=hello, websocket=websocket)
-                                self.sessions.register(session)
-                                try:
-                                    # Discord can hold a request for minutes behind a rate limit; the lifecycle
-                                    # lock must be released well before a reconnect gives up waiting for it.
-                                    session_thread = await asyncio.wait_for(
-                                        self.attach_session_thread(session), timeout=SESSION_ATTACH_TIMEOUT_SECONDS
-                                    )
-                                except (discord.DiscordException, ValueError, TimeoutError):
-                                    logger.warning("Unable to attach Discord thread for Agent session %s", hello.session_id)
-                                    self.sessions.remove_if_current(session)
-                                    session = None
-                                    attachment_failed = True
+                        # Discord can hold a request for minutes behind a rate limit. One deadline covers waiting
+                        # for the global attach lock and the attach itself, so the lifecycle lock is released
+                        # well before a reconnect gives up waiting for it.
+                        async with asyncio.timeout(SESSION_ATTACH_TIMEOUT_SECONDS):
+                            async with self._session_attach_lock:
+                                if self._stopping:
+                                    rejecting_stopping_session = True
+                                else:
+                                    session = AgentSession(hello=hello, websocket=websocket)
+                                    self.sessions.register(session)
+                                    session_thread = await self.attach_session_thread(session)
+                    except (discord.DiscordException, ValueError, TimeoutError):
+                        logger.warning("Unable to attach Discord thread for Agent session %s", hello.session_id)
+                        if session is not None:
+                            self.abandon_attach(session)
+                        session = None
+                        session_thread = None
+                        attachment_failed = True
                     finally:
                         lifecycle_lock.release()
                     if attachment_failed:
@@ -990,10 +997,33 @@ class AgentSessionBridge:
 
     async def attach_session_thread(self, session: AgentSession) -> SessionThread:
         session.thread_name = self.thread_name_for(session.hello)
-        session_thread = await self.find_or_create_session_thread(session.hello, name=session.thread_name)
+
+        def created(thread: discord.Thread) -> None:
+            # Known at once, so an attach cut short can still clean up the thread it made.
+            session.created_thread_id = thread.id
+
+        session_thread = await self.find_or_create_session_thread(session.hello, name=session.thread_name, on_created=created)
         self.sessions.bind_thread(session.session_id, session_thread.thread.id, session_thread.notification_message_id)
         await self.backfill_latest_assistant_message(session_thread.thread, session.hello)
         return session_thread
+
+    def abandon_attach(self, session: AgentSession) -> None:
+        """Undo an attach that failed or ran out of time: forget its maps and clean up a thread it created."""
+        self.sessions.remove_if_current(session)
+        for thread_id, session_id in list(self.sessions.by_thread.items()):
+            if session_id == session.session_id and self.sessions.get(session_id) is None:
+                self.sessions.by_thread.pop(thread_id, None)
+        if session.created_thread_id is not None:
+            # Maintenance retries recorded cleanup, even for a thread that never got its session marker.
+            self.remember_pending_cleanup(
+                PendingSessionCleanup(
+                    session_id=session.session_id,
+                    session_epoch=session.session_epoch,
+                    thread_id=session.created_thread_id,
+                    notification_message_id=None,
+                    pending_steps={"notification", "disconnect_notice", "members", "archive", "leave"},
+                )
+            )
 
     def thread_name_for(self, hello: SessionHello) -> str:
         taken = {
@@ -1010,10 +1040,15 @@ class AgentSessionBridge:
         # Renames run in the background, coalesced and within Discord's rate limit.
         self.renamer.request(session.thread_id, session.thread_name, session.session_epoch)
 
-    async def find_or_create_session_thread(self, hello: SessionHello, name: str | None = None) -> SessionThread:
+    async def find_or_create_session_thread(
+        self,
+        hello: SessionHello,
+        name: str | None = None,
+        on_created: Callable[[discord.Thread], None] | None = None,
+    ) -> SessionThread:
         thread = await self.find_existing_session_thread(hello)
         if thread is None:
-            session_thread = await create_session_thread(self.bot, hello, name)
+            session_thread = await create_session_thread(self.bot, hello, name, on_created)
             thread_lock = self.thread_lifecycle_lock(session_thread.thread.id)
             async with thread_lock:
                 self.sessions.bind_thread(
@@ -1028,21 +1063,52 @@ class AgentSessionBridge:
             mapped_session_id = self.sessions.by_thread.get(thread.id)
             if mapped_session_id is not None and mapped_session_id != hello.session_id:
                 raise ValueError(f"Agent session thread {thread.id} is already attached")
-            if thread.archived or thread.locked:
-                try:
-                    # A rename can leave this thread's edits rate-limited for minutes; never wait that long here.
-                    await asyncio.wait_for(
-                        thread.edit(archived=False, locked=False, reason="Reattaching live Agent session after bridge restart"),
-                        timeout=THREAD_REOPEN_TIMEOUT_SECONDS,
-                    )
-                except (TimeoutError, discord.DiscordException):
-                    logger.warning("Could not reopen Agent session thread %s now; the next message reopens it", thread.id)
-            if thread.is_private():
-                await thread.join()
-            await auto_join_configured_users(self.bot, thread)
+            if await self.reopen_thread(thread):
+                if thread.is_private():
+                    await thread.join()
+                await auto_join_configured_users(self.bot, thread)
+            else:
+                # Discord refuses joins on an archived thread; reopen and join later instead of failing the attach.
+                self.reopen_later(thread, hello.session_id)
             notification_message_id = await self.ensure_session_notification(hello, thread)
             self.sessions.bind_thread(hello.session_id, thread.id, notification_message_id)
             return SessionThread(thread=thread, notification_message_id=notification_message_id)
+
+    async def reopen_thread(self, thread: discord.Thread) -> bool:
+        """Unarchive and unlock a thread within a short bound; False if it is still closed."""
+        if not (thread.archived or thread.locked):
+            return True
+        try:
+            # A rename can leave this thread's edits rate-limited for minutes; never wait that long here.
+            await asyncio.wait_for(
+                thread.edit(archived=False, locked=False, reason="Reattaching live Agent session after bridge restart"),
+                timeout=THREAD_REOPEN_TIMEOUT_SECONDS,
+            )
+        except (TimeoutError, discord.DiscordException):
+            logger.warning("Could not reopen Agent session thread %s yet; retrying in the background", thread.id)
+            return False
+        return True
+
+    def reopen_later(self, thread: discord.Thread, session_id: str) -> None:
+        task = asyncio.create_task(self.retry_reopen(thread, session_id), name=f"agent-session-reopen-{thread.id}")
+        self._reopen_tasks.add(task)
+        task.add_done_callback(self._reopen_tasks.discard)
+
+    async def retry_reopen(self, thread: discord.Thread, session_id: str) -> None:
+        for delay in THREAD_REOPEN_RETRY_SECONDS:
+            await asyncio.sleep(delay)
+            if self.sessions.by_thread.get(thread.id) != session_id:
+                return  # The session ended or moved; nothing to reopen for.
+            if not await self.reopen_thread(thread):
+                continue
+            try:
+                if thread.is_private():
+                    await asyncio.wait_for(thread.join(), timeout=THREAD_REOPEN_TIMEOUT_SECONDS)
+                await auto_join_configured_users(self.bot, thread)
+            except (TimeoutError, discord.DiscordException):
+                logger.warning("Could not rejoin Agent session thread %s yet", thread.id)
+                continue
+            return
 
     async def ensure_session_notification(self, hello: SessionHello, thread: discord.Thread) -> int | None:
         existing_message_id = await self.find_session_notification_for_thread(thread.id)
