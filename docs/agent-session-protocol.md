@@ -48,7 +48,15 @@ after attaching the Discord thread. `features` lists what the server supports
 beyond the base protocol; a client must not rely on a feature the server did not
 list, since an older server ignores it and omits `features`. Wait for this acknowledgement before publishing
 other events. Send `heartbeat` at an interval shorter than the configured timeout
-(default 120 seconds). On disconnect or timeout the bridge archives the thread.
+(default 120 seconds); the timeout counts from `hello_ack`, so a slow attach is
+never dropped as silent. A disconnect, a heartbeat timeout or a `hello_ack` the
+client stopped waiting for starts a five-minute grace period: the thread is left
+exactly as it is (no archive, member change or notice), and a reconnect with the
+same `session_id` inside it resumes the thread directly. When the grace period
+expires, the bridge posts one "Session ended" line and archives and locks the
+thread. A client whose session is really over sends
+`{"type":"session_end","session_id":...,"session_epoch":...}` before closing, and
+the thread closes the same way at once. Older servers ignore `session_end`.
 Reconnect discovery includes archived private threads that the bot has left,
 and reattachment restores its membership. The bot needs Discord’s
 `Manage Threads` and `Read Message History` permissions for private-thread
@@ -101,7 +109,11 @@ failed operations. A dead or stalled monitor is reported as unhealthy.
 Reconnect with the same session identity and metadata. Thread recovery matches
 persisted session markers; a changed PID can be tolerated only for one matching
 stable session ID. The optional assistant snapshot backfills a thread only when
-it has no assistant message. It is not a transcript replay protocol. A new chat
+it has no assistant message. The server recognises its own assistant messages by
+an invisible trailing marker, which it removes from every other message it
+posts, or by the `**Assistant**` label older messages carry. It converts
+Markdown tables outside code fences into bullet lists unless that would make
+them much longer, and posts at most ten messages per answer. It is not a transcript replay protocol. A new chat
 gets a new session ID. The client must reject controls for stale epochs and avoid
 executing a repeated command ID twice.
 

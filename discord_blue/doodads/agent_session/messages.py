@@ -5,6 +5,8 @@ import logging
 
 import discord
 
+from discord_blue.doodads.agent_session.formatting import strip_assistant_markers
+
 logger = logging.getLogger(__name__)
 MISSING_MANAGE_MESSAGES_DESTINATIONS: set[int] = set()
 MISSING_MANAGE_MESSAGES_NOTICE_LOCK = asyncio.Lock()
@@ -29,6 +31,21 @@ async def send_agent_session_message(
     content: str | None = None,
     *,
     view: discord.ui.View | None = None,
+) -> discord.Message:
+    """Post a bot message that is not an assistant answer; any assistant marker in its text is removed."""
+    return await _send(destination, None if content is None else strip_assistant_markers(content), view=view)
+
+
+async def send_assistant_message(destination: discord.abc.Messageable, message: str) -> discord.Message:
+    """Post one message from `chunks.format_assistant_messages`, which already fits and carries its marker."""
+    return await _send(destination, message, view=None)
+
+
+async def _send(
+    destination: discord.abc.Messageable,
+    content: str | None,
+    *,
+    view: discord.ui.View | None,
 ) -> discord.Message:
     if can_suppress_embeds(destination):
         try:
@@ -81,4 +98,4 @@ async def notify_missing_manage_messages(destination: discord.abc.Messageable) -
 
 
 async def edit_agent_session_message(message: discord.Message, *, content: str) -> discord.Message:
-    return await message.edit(content=content, allowed_mentions=agent_session_allowed_mentions(), view=None)
+    return await message.edit(content=strip_assistant_markers(content), allowed_mentions=agent_session_allowed_mentions(), view=None)

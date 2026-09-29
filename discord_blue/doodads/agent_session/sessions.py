@@ -54,6 +54,12 @@ class AgentSession:
     notification_message_id: int | None = None
     control_message_id: int | None = None
     last_seen: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # False until hello_ack is sent: the heartbeat watchdog leaves an attaching connection alone.
+    acknowledged: bool = False
+    # The client said the session ended (session_end), so its thread closes without a grace period.
+    ended: bool = False
+    # Set while a dropped connection's grace period runs; its thread is left untouched meanwhile.
+    grace_task: asyncio.Task[None] | None = None
     # The thread name last asked for, so other live sessions can be told apart from it.
     thread_name: str | None = None
     # When this connection said hello; a Discord message written earlier was meant for what ran before.

@@ -34,6 +34,11 @@ from tests.test_claude_channel import FakeClaudeCode
 from discord_blue.claude_channel.__main__ import run_channel
 from discord_blue.codex_bridge.config import BridgeConfig
 
+from discord_blue.doodads.agent_session.formatting import LEGACY_ASSISTANT_LABEL
+from discord_blue.doodads.agent_session.formatting import WAITING_FOR_DIRECTION
+from discord_blue.doodads.agent_session.formatting import format_user_message
+from discord_blue.doodads.agent_session.formatting import is_assistant_message
+from discord_blue.doodads.agent_session.formatting import mark_assistant_message
 from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 
 if TYPE_CHECKING:
@@ -963,6 +968,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     await original_close(session, cleanup)
 
                 with patch.object(bridge, "close_session_thread", side_effect=paused_close):
+                    # A clean end closes the thread at once; a bare drop would wait out the grace period instead.
+                    await old.send_json(
+                        {"type": "session_end", "session_id": hello.session_id, "session_epoch": hello.session_epoch}
+                    )
                     await old.close()
                     await asyncio.wait_for(cleanup_started.wait(), timeout=2)
                     current = await connect(client, hello)
@@ -994,13 +1003,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge = AgentSessionBridge(FakeBot(config))
         old_session = AgentSession(hello=make_hello(), websocket=FakeWebSocket())
         old_session.last_seen -= timedelta(seconds=2)
+        old_session.acknowledged = True
         bridge.sessions.register(old_session)
         lifecycle_lock = bridge.session_lifecycle_lock(old_session.session_id)
         await lifecycle_lock.acquire()
         timeout_task = asyncio.create_task(bridge.close_timed_out_sessions())
         await asyncio.sleep(0)
 
-        new_session = AgentSession(hello=make_hello(), websocket=FakeWebSocket())
+        new_session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), acknowledged=True)
         bridge.sessions.register(new_session)
         lifecycle_lock.release()
         await timeout_task
@@ -1018,8 +1028,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         second_hello.session_id = "session-2"
         first = AgentSession(hello=first_hello, websocket=FakeWebSocket())
         second = AgentSession(hello=second_hello, websocket=FakeWebSocket())
-        first.last_seen -= timedelta(seconds=2)
-        second.last_seen -= timedelta(seconds=2)
+        for session in (first, second):
+            session.last_seen -= timedelta(seconds=2)
+            session.acknowledged = True
         bridge.sessions.register(first)
         bridge.sessions.register(second)
         first_lock = bridge.session_lifecycle_lock(first.session_id)
@@ -1048,6 +1059,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         replacement = AgentSession(hello=second_hello, websocket=FakeWebSocket())
         for session in (first, second, replacement):
             session.last_seen -= timedelta(seconds=2)
+            session.acknowledged = True
         bridge.sessions.register(first)
         bridge.sessions.register(second)
 
@@ -1196,7 +1208,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                         await websocket.receive_json(timeout=2),
                         {"type": "hello_ack", "thread_id": 555, "features": ["command_text"]},
                     )
-                    self.assertEqual(thread.sent_messages, ["**Assistant**\nLast answer"])
+                    self.assertEqual(thread.sent_messages, [mark_assistant_message("Last answer")])
                     await bridge.send_pause_current_turn(thread, FakeInteraction(thread).user)
                     command = await websocket.receive_json(timeout=2)
                     self.assertEqual(command["kind"], "pause_current_turn")
@@ -1937,7 +1949,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
-        control_message = FakeReplyMessage(910, thread, "\u200b")
+        control_message = FakeReplyMessage(910, thread, WAITING_FOR_DIRECTION)
         thread.add_message(control_message)
 
         await bridge.handle_user_message(
@@ -1952,8 +1964,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             thread.sent_messages,
             [
-                "**You**\n>>> Run the quick path",
-                "\u200b",
+                format_user_message("Run the quick path"),
+                WAITING_FOR_DIRECTION,
             ],
         )
         self.assertEqual(session.control_message_id, 902)
@@ -1985,8 +1997,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             thread.sent_messages,
             [
-                "**Assistant**\nDone.",
-                "\u200b",
+                mark_assistant_message("Done."),
+                WAITING_FOR_DIRECTION,
             ],
         )
         self.assertIsNone(thread.sent_views[0])
@@ -2018,12 +2030,48 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        assistant_messages = [message for message in thread.sent_messages if message.startswith("**Assistant**\n")]
+        assistant_messages = [message for message in thread.sent_messages if is_assistant_message(message)]
         self.assertGreater(len(assistant_messages), 1)
         for message in assistant_messages:
-            body = message.removeprefix("**Assistant**\n")
+            self.assertLessEqual(len(message), bridge_module.DISCORD_MESSAGE_LIMIT)
+            body = message.removesuffix(mark_assistant_message(""))
             self.assertTrue(body.startswith("```python\n"))
             self.assertTrue(body.endswith("```"))
+
+    async def test_turn_complete_posts_tables_as_bullets_within_discord_limits(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        session = AgentSession(
+            hello=make_hello(),
+            websocket=FakeWebSocket(),
+            thread_id=555,
+        )
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+        rows = [f"| `field_{index}` | {'verdict ' * 12}| {'action ' * 12}|" for index in range(60)]
+        fenced = "```\n| kept | as |\n|---|---|\n| raw | table |\n```"
+        assistant_message = "\n".join(["| Field | Verdict | Action |", "|---|---|---|", *rows, "", fenced])
+
+        await bridge.handle_session_status(
+            "turn_complete",
+            SessionStatus(
+                session_id="session-1",
+                session_epoch="epoch-1",
+                message="Waiting for direction",
+                assistant_message=assistant_message,
+            ),
+        )
+
+        assistant_messages = [message for message in thread.sent_messages if is_assistant_message(message)]
+        self.assertGreater(len(assistant_messages), 1)
+        for message in assistant_messages:
+            self.assertLessEqual(len(message), bridge_module.DISCORD_MESSAGE_LIMIT)
+            self.assertNotIn("Assistant", message)
+        posted = "\n".join(assistant_messages)
+        self.assertEqual(posted.count("- **`field_"), len(rows))
+        self.assertNotIn("| `field_", posted)
+        self.assertIn(fenced, posted)
 
     async def test_approval_request_posts_compact_reactions(self) -> None:
         config = Config()
@@ -2137,7 +2185,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        control_message = add_bot_message(thread, 801, "\u200b")
+        control_message = add_bot_message(thread, 801, WAITING_FOR_DIRECTION)
         control_message.reactions = ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"]
         session = AgentSession(
             hello=make_hello(),
@@ -2172,7 +2220,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        control_message = add_bot_message(thread, 801, "\u200b")
+        control_message = add_bot_message(thread, 801, WAITING_FOR_DIRECTION)
         control_message.reactions = ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"]
         session = AgentSession(
             hello=make_hello(),
@@ -2207,7 +2255,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        control_message = add_bot_message(thread, 801, "\u200b")
+        control_message = add_bot_message(thread, 801, WAITING_FOR_DIRECTION)
         control_message.reactions = ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"]
         session = AgentSession(
             hello=make_hello(),
@@ -2239,8 +2287,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             thread.sent_messages,
             [
-                "**Assistant**\nDone.",
-                "\u200b",
+                mark_assistant_message("Done."),
+                WAITING_FOR_DIRECTION,
             ],
         )
         new_control_message = await thread.fetch_message(902)
@@ -2254,7 +2302,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        control_message = add_bot_message(thread, 801, "\u200b")
+        control_message = add_bot_message(thread, 801, WAITING_FOR_DIRECTION)
         control_message.reactions = ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"]
         session = AgentSession(
             hello=make_hello(),
@@ -2291,7 +2339,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
-        control_message = add_bot_message(thread, 801, "\u200b")
+        control_message = add_bot_message(thread, 801, WAITING_FOR_DIRECTION)
         control_message.reactions = [bridge_module.REACTION_REJECTED]
         control_message.delete_raises = True
         session = AgentSession(
@@ -2327,7 +2375,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        control_message = add_bot_message(thread, 901, "\u200b")
+        control_message = add_bot_message(thread, 901, WAITING_FOR_DIRECTION)
         control_message.reactions = [bridge_module.REACTION_IN_PROGRESS]
         session = AgentSession(
             hello=make_hello(),
@@ -2363,7 +2411,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        control_message = add_bot_message(thread, 901, "\u200b")
+        control_message = add_bot_message(thread, 901, WAITING_FOR_DIRECTION)
         control_message.reactions = [bridge_module.REACTION_QUEUED]
         session = AgentSession(
             hello=make_hello(),
@@ -2980,8 +3028,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             thread.sent_messages,
             [
-                "**You**\n>>> Run the quick path",
-                "\u200b",
+                format_user_message("Run the quick path"),
+                WAITING_FOR_DIRECTION,
             ],
         )
         control_message = await thread.fetch_message(902)
@@ -3031,10 +3079,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             thread.sent_messages,
             [
-                "**You**\n>>> Run the quick path",
-                "\u200b",
-                "**Assistant**\nDone.",
-                "\u200b",
+                format_user_message("Run the quick path"),
+                WAITING_FOR_DIRECTION,
+                mark_assistant_message("Done."),
+                WAITING_FOR_DIRECTION,
             ],
         )
         control_message = await thread.fetch_message(904)
@@ -3188,7 +3236,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         add_bot_message(empty_reconnect_thread, 1, session_start_message(hello))
         original_thread = FakeThread(555, archived=True, locked=True)
         add_bot_message(original_thread, 2, session_start_message(hello))
-        add_bot_message(original_thread, 3, "**Assistant**\nLast useful answer")
+        add_bot_message(original_thread, 3, mark_assistant_message("Last useful answer"))
         channel = FakeTextChannel(321, [empty_reconnect_thread, original_thread])
         bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
@@ -3388,7 +3436,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         hello = make_hello()
         original_thread = FakeThread(555)
         add_bot_message(original_thread, 1, session_start_message(hello))
-        add_bot_message(original_thread, 2, "**Assistant**\nLast useful answer")
+        add_bot_message(original_thread, 2, f"{LEGACY_ASSISTANT_LABEL}\nLast useful answer")
         channel = FakeTextChannel(321, [original_thread])
         bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
@@ -3441,20 +3489,79 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         await bridge.backfill_latest_assistant_message(thread, hello)
 
-        self.assertEqual(thread.sent_messages, ["**Assistant**\nRecovered answer"])
+        self.assertEqual(thread.sent_messages, [mark_assistant_message("Recovered answer")])
         self.assertTrue(thread.sent_kwargs[0]["suppress_embeds"])
 
     async def test_backfill_skips_thread_with_existing_assistant(self) -> None:
+        for existing in (mark_assistant_message("Already present"), f"{LEGACY_ASSISTANT_LABEL}\nAlready present"):
+            with self.subTest(existing=existing):
+                config = Config()
+                thread = FakeThread(555)
+                add_bot_message(thread, 1, existing)
+                bridge = AgentSessionBridge(FakeBot(config, thread))
+                hello = make_hello()
+                hello.assistant_message = "Recovered answer"
+
+                await bridge.backfill_latest_assistant_message(thread, hello)
+
+                self.assertEqual(thread.sent_messages, [])
+
+    async def test_pasted_assistant_marker_does_not_suppress_backfill(self) -> None:
         config = Config()
         thread = FakeThread(555)
-        add_bot_message(thread, 1, "**Assistant**\nAlready present")
+        pasted = f"Please redo this: {mark_assistant_message('Old answer')}"
+        thread.add_message(FakeReplyMessage(1, thread, pasted))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+        await bridge.handle_user_message(
+            protocol_module.UserMessage(session_id="session-1", session_epoch="epoch-1", message=pasted)
+        )
+        await bridge.post_thread_notice(555, pasted)
+        sent_before_backfill = len(thread.sent_messages)
+        hello = make_hello()
+        hello.assistant_message = "Recovered answer"
+
+        await bridge.backfill_latest_assistant_message(thread, hello)
+
+        self.assertEqual(thread.sent_messages[sent_before_backfill:], [mark_assistant_message("Recovered answer")])
+
+    async def test_long_fences_keep_every_assistant_message_marked_and_within_limit(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        fence = "`" * 300
+        answer = f"{fence}text\n" + "\n".join(f"line {index:04d} " + "x" * 30 for index in range(70)) + f"\n{fence}"
+
+        await bridge.post_assistant_message(555, answer)
+
+        posted = list(thread.sent_messages)
+        self.assertGreater(len(posted), 1)
+        for message in posted:
+            self.assertLessEqual(len(message), bridge_module.DISCORD_MESSAGE_LIMIT)
+            self.assertTrue(is_assistant_message(message))
+            self.assertTrue(message.removesuffix(mark_assistant_message("")).endswith(fence))
+        hello = make_hello()
+        hello.assistant_message = answer
+
+        await bridge.backfill_latest_assistant_message(thread, hello)
+
+        self.assertEqual(thread.sent_messages, posted)
+
+    async def test_backfill_ignores_bot_notices_that_are_not_assistant_answers(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        add_bot_message(thread, 1, format_user_message("Run the quick path"))
+        add_bot_message(thread, 2, WAITING_FOR_DIRECTION)
+        add_bot_message(thread, 3, "\u200b")
         bridge = AgentSessionBridge(FakeBot(config, thread))
         hello = make_hello()
         hello.assistant_message = "Recovered answer"
 
         await bridge.backfill_latest_assistant_message(thread, hello)
 
-        self.assertEqual(thread.sent_messages, [])
+        self.assertEqual(thread.sent_messages, [mark_assistant_message("Recovered answer")])
 
 
 if __name__ == "__main__":

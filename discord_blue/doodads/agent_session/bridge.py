@@ -11,15 +11,22 @@ import uuid
 import weakref
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from functools import partial
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
 import discord
 from aiohttp import WSMsgType, web
 
+from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
+from discord_blue.doodads.agent_session.chunks import format_assistant_messages
+from discord_blue.doodads.agent_session.formatting import WAITING_FOR_DIRECTION
+from discord_blue.doodads.agent_session.formatting import format_user_message
+from discord_blue.doodads.agent_session.formatting import is_assistant_message
 from discord_blue.doodads.agent_session.messages import edit_agent_session_message
 from discord_blue.doodads.agent_session.messages import agent_session_allowed_mentions
 from discord_blue.doodads.agent_session.messages import send_agent_session_message
+from discord_blue.doodads.agent_session.messages import send_assistant_message
 from discord_blue.doodads.agent_session.protocol import (
     APPROVAL_COMMAND_DISPLAY_LIMIT,
     SERVER_FEATURES,
@@ -61,10 +68,11 @@ REPLY_BEFORE_RECONNECT = (
     "so it was not delivered. Send it again if it still applies."
 )
 SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS = 10
+# A connection that drops without a clean session_end (including a failed hello_ack) keeps its thread untouched
+# this long, so a reconnect resumes it without an archive, member changes or notices.
+SESSION_DISCONNECT_GRACE_SECONDS = 300
+SESSION_ENDED_NOTICE = "Session ended"
 
-DISCORD_MESSAGE_LIMIT = 2000
-DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
-DISCORD_CODE_FENCE_WRAP_RESERVE = 80
 STARTUP_RECONNECT_GRACE_SECONDS = 20
 SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 1
 SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS = 2
@@ -104,7 +112,6 @@ SESSION_NOTIFICATION_PREFIXES = (
 CONTINUE_AUTONOMOUSLY_DELIVERED = "Asked the agent session to go ahead until it needs you."
 PAUSE_CURRENT_TURN_DELIVERED = "Asked the agent session to pause what it is doing now."
 SESSION_NOTIFICATION_THREAD_RE = re.compile(r"<#(?P<thread_id>\d+)>")
-MARKDOWN_CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})(?P<info>[^`~\n]*)$")
 REACTION_QUEUED = "⏳"
 REACTION_DELIVERED = "📬"
 REACTION_IN_PROGRESS = "🔄"
@@ -342,6 +349,9 @@ class AgentSessionBridge:
         self._cleanup_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._session_attach_lock = asyncio.Lock()
+        self._grace_tasks: set[asyncio.Task[None]] = set()
+        # Archive edits that outlived close_thread's wait, by thread ID; an attach waits for them (settle_archive).
+        self._archives_in_flight: dict[int, asyncio.Future[discord.Thread]] = {}
         self.renamer = ThreadRenamer(self.rename_target)
         # No await occurs while resolving the entry, so one event loop turn
         # cannot create two locks for the same session ID.
@@ -488,6 +498,8 @@ class AgentSessionBridge:
         if self._runner is None:
             return
         self._stopping = True
+        for task in list(self._grace_tasks):
+            task.cancel()
         await self.renamer.close()
         await self.stop_background_task("maintenance", self._cleanup_task)
         self._cleanup_task = None
@@ -646,22 +658,22 @@ class AgentSessionBridge:
         timeout = timedelta(seconds=self.bot.config.agent_session.heartbeat_timeout_seconds)
         now = datetime.now(UTC)
         for session_id, session in list(self.sessions.by_session.items()):
+            if session.grace_task is not None or not session.acknowledged:
+                continue  # In grace (its timer ends it) or still attaching (heartbeats start at the ack).
             if not session.websocket.closed and now - session.last_seen <= timeout:
                 continue
             lifecycle_lock = self.session_lifecycle_lock(session_id)
             if lifecycle_lock.locked():
                 continue
             try:
-                if session.websocket.closed:
-                    close_message = b"session disconnected"
-                else:
-                    close_message = b"heartbeat timeout"
+                if not session.websocket.closed:
                     logger.warning(
                         "Agent session %s timed out after %s seconds without heartbeat",
                         session_id,
                         self.bot.config.agent_session.heartbeat_timeout_seconds,
                     )
-                await self.finalize_session(session, close_message=close_message)
+                # A silent or closed connection is a drop, not an end: close it and start the grace period.
+                await self.end_connection(session)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -910,10 +922,13 @@ class AgentSessionBridge:
                             if self._stopping:
                                 rejecting_stopping_session = True
                             else:
+                                previous = self.sessions.get(hello.session_id)
                                 session = AgentSession(hello=hello, websocket=websocket)
                                 self.sessions.register(session)
                                 try:
-                                    session_thread = await self.find_or_create_session_thread(hello)
+                                    session_thread = await self.resume_thread_in_grace(
+                                        previous, hello
+                                    ) or await self.find_or_create_session_thread(hello)
                                 except (discord.DiscordException, ValueError) as exc:
                                     logger.warning(
                                         "Unable to attach Discord thread for Agent session %s: %s",
@@ -922,9 +937,13 @@ class AgentSessionBridge:
                                         exc_info=True,
                                     )
                                     self.sessions.remove_if_current(session)
+                                    self.restore_grace(previous)
                                     session = None
                                     attachment_failed = True
                                 else:
+                                    if previous is not None and previous.grace_task is not None:
+                                        # Only now: had the attach failed, the old session's timer still closes its thread.
+                                        previous.grace_task.cancel()
                                     self.sessions.bind_thread(
                                         hello.session_id,
                                         session_thread.thread.id,
@@ -943,14 +962,23 @@ class AgentSessionBridge:
                         await websocket.close(message=b"bridge shutdown", drain=False)
                         break
                     if session_thread is not None:
-                        await websocket.send_json(
-                            {
-                                "type": "hello_ack",
-                                "features": sorted(SERVER_FEATURES),
-                                "thread_id": session_thread.thread.id,
-                                **({"capabilities": sorted(hello.capabilities)} if hello.capabilities is not None else {}),
-                            }
-                        )
+                        try:
+                            await websocket.send_json(
+                                {
+                                    "type": "hello_ack",
+                                    "features": sorted(SERVER_FEATURES),
+                                    "thread_id": session_thread.thread.id,
+                                    **({"capabilities": sorted(hello.capabilities)} if hello.capabilities is not None else {}),
+                                }
+                            )
+                        except ConnectionError:
+                            # The client stopped waiting; it will reconnect, so this starts a grace period below.
+                            logger.info("Agent session %s left before its hello was acknowledged", hello.session_id)
+                            break
+                        if session is not None:
+                            # Heartbeats start after the ack, so the watchdog's clock starts here too.
+                            session.acknowledged = True
+                            session.touch()
                         # Attached, acknowledged and outside every lock: bring the thread's name up to date in
                         # the background. The renamer coalesces and rate-limits; nothing here waits on Discord.
                         if session is not None:
@@ -977,6 +1005,10 @@ class AgentSessionBridge:
                 elif message_type == "approval_decision_reject":
                     logger.warning("Agent session approval decision reject: %s", payload)
                     await self.handle_approval_decision_reject(payload)
+                elif message_type == "session_end" and session is not None:
+                    # A clean end: close the thread now instead of waiting out a grace period.
+                    session.ended = True
+                    break
                 elif message_type == "title_changed" and session is not None:
                     await self.handle_title_changed(session, payload.get("title"))
                 elif message_type == "notice" and session is not None and session.thread_id is not None:
@@ -990,9 +1022,75 @@ class AgentSessionBridge:
                     await self.handle_command_reject(payload)
         finally:
             if session is not None:
-                await self.finalize_session(session)
+                await self.end_connection(session)
 
         return websocket
+
+    async def end_connection(self, session: AgentSession) -> None:
+        """A connection closed: a clean end closes the thread now; any other drop waits out a grace period."""
+        if session.ended or session.thread_id is None or self.sessions.get(session.session_id) is not session:
+            await self.finalize_session(session)
+            return
+        if not session.websocket.closed:
+            with suppress(Exception):
+                await asyncio.wait_for(session.websocket.close(), timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS)
+        if session.grace_task is None:
+            session.grace_task = asyncio.create_task(self.expire_grace(session), name=f"agent-session-grace-{session.session_id}")
+            self._grace_tasks.add(session.grace_task)
+            session.grace_task.add_done_callback(self._grace_tasks.discard)
+
+    async def expire_grace(self, session: AgentSession) -> None:
+        await asyncio.sleep(SESSION_DISCONNECT_GRACE_SECONDS)
+        # A reconnect replaced this session in the registry; the thread belongs to it now.
+        if self.sessions.get(session.session_id) is not session:
+            return
+        try:
+            await self.finalize_session(session, close_message=b"disconnect grace expired")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # finalize_session kept a pending cleanup, so the maintenance sweep retries the thread.
+            logger.warning("Unable to close Agent session %s after its grace period", session.session_id, exc_info=True)
+
+    def restore_grace(self, previous: AgentSession | None) -> None:
+        """A reconnect failed to attach: the session it replaced goes back in grace, so its timer still ends it."""
+        if previous is None or previous.grace_task is None or previous.grace_task.done():
+            return
+        if self.sessions.get(previous.session_id) is None:
+            self.sessions.register(previous)
+
+    async def resume_thread_in_grace(self, previous: AgentSession | None, hello: SessionHello) -> SessionThread | None:
+        """A reconnect within grace takes its thread back as it is: no discovery, unarchive, joins or notices.
+
+        Returns None, for a normal attach, when the thread changed during grace or cannot be confirmed.
+        """
+        if previous is None or previous.grace_task is None or previous.thread_id is None:
+            return None
+        await self.settle_archive(previous.thread_id)
+        try:
+            # Ask Discord, not the cache: a thread deleted during grace can still be cached.
+            thread = await self.bot.fetch_channel(previous.thread_id)
+        except discord.DiscordException:
+            return None
+        if not isinstance(thread, discord.Thread) or thread.archived or thread.locked:
+            return None
+        cached = self.bot.get_channel(thread.id)
+        thread = cached if isinstance(cached, discord.Thread) else thread
+        self.sessions.bind_thread(hello.session_id, thread.id, previous.notification_message_id)
+        return SessionThread(thread=thread, notification_message_id=previous.notification_message_id)
+
+    async def settle_archive(self, thread_id: int) -> bool:
+        """Wait for an end-of-session archive of this thread that is still in flight; True if there was one.
+
+        The archive's own timeout only stops waiting for it; Discord can still apply it later, so an attach waits for
+        it to finish (shielded, never cancelled) before reopening the thread.
+        """
+        archive = self._archives_in_flight.get(thread_id)
+        if archive is None:
+            return False
+        with suppress(Exception):
+            await asyncio.shield(archive)
+        return True
 
     async def find_or_create_session_thread(self, hello: SessionHello) -> SessionThread:
         thread = await self.find_existing_session_thread(hello)
@@ -1012,7 +1110,8 @@ class AgentSessionBridge:
             mapped_session_id = self.sessions.by_thread.get(thread.id)
             if mapped_session_id is not None and mapped_session_id != hello.session_id:
                 raise ValueError(f"Agent session thread {thread.id} is already attached")
-            if thread.archived or thread.locked:
+            # An archive from this thread's last session may still be in flight; reopen after it lands, not before.
+            if await self.settle_archive(thread.id) or thread.archived or thread.locked:
                 await thread.edit(
                     archived=False,
                     locked=False,
@@ -1247,14 +1346,13 @@ class AgentSessionBridge:
             logger.warning("Unable to inspect Agent session thread %s", thread.id)
         return False
 
-    @staticmethod
-    async def score_session_thread(thread: discord.Thread) -> tuple[int, int, int]:
+    async def score_session_thread(self, thread: discord.Thread) -> tuple[int, int, int]:
         assistant_messages = 0
         messages = 0
         try:
             async for message in thread.history(limit=50):
                 messages += 1
-                if message.content.startswith("**Assistant**"):
+                if self.is_bot_assistant_message(message):
                     assistant_messages += 1
         except discord.DiscordException:
             logger.warning("Unable to score Agent session thread %s", thread.id)
@@ -1270,17 +1368,17 @@ class AgentSessionBridge:
         assistant_message = hello.assistant_message
         if assistant_message is None:
             return
-        for message in self.format_assistant_messages(assistant_message):
-            await send_agent_session_message(
-                thread,
-                message[:DISCORD_MESSAGE_LIMIT],
-            )
+        for message in format_assistant_messages(assistant_message):
+            await send_assistant_message(thread, message)
 
-    @staticmethod
-    async def thread_has_assistant_message(thread: discord.Thread) -> bool:
+    def is_bot_assistant_message(self, message: discord.Message) -> bool:
+        bot_user = self.bot.user
+        return bot_user is not None and message.author.id == bot_user.id and is_assistant_message(message.content)
+
+    async def thread_has_assistant_message(self, thread: discord.Thread) -> bool:
         try:
             async for message in thread.history(limit=50):
-                if message.content.startswith("**Assistant**"):
+                if self.is_bot_assistant_message(message):
                     return True
         except discord.DiscordException:
             logger.warning("Unable to inspect Agent session assistant history %s", thread.id)
@@ -2347,12 +2445,11 @@ class AgentSessionBridge:
                 await message.remove_reaction(existing, bot_user)
 
     async def post_assistant_message(self, thread_id: int, text: str) -> None:
-        for message in self.format_assistant_messages(text):
-            await self.post_thread_notice(thread_id, message)
-
-    @classmethod
-    def format_assistant_messages(cls, text: str) -> list[str]:
-        return [f"**Assistant**\n{chunk}" for chunk in cls._split_discord_message(text, DISCORD_ASSISTANT_CHUNK_LIMIT)]
+        channel = self.bot.get_channel(thread_id)
+        if not isinstance(channel, discord.Thread):
+            return
+        for message in format_assistant_messages(text):
+            await send_assistant_message(channel, message)
 
     async def post_session_controls(self, session: AgentSession) -> None:
         if session.thread_id is None:
@@ -2759,7 +2856,7 @@ class AgentSessionBridge:
         if "disconnect_notice" in steps:
             try:
                 await asyncio.wait_for(
-                    send_agent_session_message(thread, "Agent session disconnected"),
+                    send_agent_session_message(thread, SESSION_ENDED_NOTICE),
                     timeout=THREAD_DISCONNECT_NOTICE_TIMEOUT_SECONDS,
                 )
             except Exception:
@@ -2778,15 +2875,11 @@ class AgentSessionBridge:
             if members_removed:
                 steps.discard("members")
         if "archive" in steps:
+            archive = asyncio.ensure_future(thread.edit(archived=True, locked=True, reason="Agent session ended"))
+            self._archives_in_flight[thread.id] = archive
+            archive.add_done_callback(partial(self.archive_landed, thread.id))
             try:
-                await asyncio.wait_for(
-                    thread.edit(
-                        archived=True,
-                        locked=True,
-                        reason="Agent session disconnected",
-                    ),
-                    timeout=THREAD_ARCHIVE_TIMEOUT_SECONDS,
-                )
+                await asyncio.wait_for(asyncio.shield(archive), timeout=THREAD_ARCHIVE_TIMEOUT_SECONDS)
             except Exception:
                 logger.warning("Unable to archive Agent session thread %s", thread.id, exc_info=True)
             else:
@@ -2800,6 +2893,12 @@ class AgentSessionBridge:
                 else:
                     steps.discard("leave")
         return steps
+
+    def archive_landed(self, thread_id: int, archive: asyncio.Future[discord.Thread]) -> None:
+        if self._archives_in_flight.get(thread_id) is archive:
+            del self._archives_in_flight[thread_id]
+        if not archive.cancelled():
+            archive.exception()  # Retrieved here; close_thread or settle_archive reports it.
 
     async def delete_session_notification(self, message_id: int) -> bool:
         try:
@@ -2977,11 +3076,11 @@ class AgentSessionBridge:
 
     @staticmethod
     def format_user_message_notice(message: str) -> str:
-        return f"**You**\n>>> {message.strip()}"
+        return format_user_message(message)
 
     @staticmethod
     def format_waiting_for_direction(_session: AgentSession) -> str:
-        return "\u200b"
+        return WAITING_FOR_DIRECTION
 
     @staticmethod
     def session_control_reactions(session: AgentSession) -> list[str]:
@@ -3099,71 +3198,3 @@ class AgentSessionBridge:
         except discord.DiscordException:
             logger.warning("Unable to replace Agent session reactions on %s", message_id)
             return False
-
-    @staticmethod
-    def _split_discord_message(text: str, limit: int) -> list[str]:
-        normalized = text.strip()
-        if not normalized:
-            return []
-
-        plain_limit = max(1, limit - DISCORD_CODE_FENCE_WRAP_RESERVE)
-        chunks = AgentSessionBridge._split_discord_message_plain(normalized, plain_limit)
-        return AgentSessionBridge._wrap_split_code_fences(chunks)
-
-    @staticmethod
-    def _split_discord_message_plain(text: str, limit: int) -> list[str]:
-        chunks: list[str] = []
-        remaining = text
-        while len(remaining) > limit:
-            split_at = remaining.rfind("\n", 0, limit)
-            if split_at < limit // 2:
-                split_at = remaining.rfind(" ", 0, limit)
-            if split_at < limit // 2:
-                split_at = limit
-            chunks.append(remaining[:split_at].rstrip())
-            remaining = remaining[split_at:].lstrip()
-        if remaining:
-            chunks.append(remaining)
-        return chunks
-
-    @staticmethod
-    def _wrap_split_code_fences(chunks: list[str]) -> list[str]:
-        wrapped: list[str] = []
-        fence_state: tuple[str, int, str] | None = None
-        for chunk in chunks:
-            prefix = AgentSessionBridge._opening_code_fence(fence_state)
-            next_fence_state = AgentSessionBridge._scan_code_fence_state(chunk, fence_state)
-            suffix = AgentSessionBridge._closing_code_fence(next_fence_state)
-            wrapped.append(f"{prefix}{chunk}{suffix}")
-            fence_state = next_fence_state
-        return wrapped
-
-    @staticmethod
-    def _scan_code_fence_state(text: str, state: tuple[str, int, str] | None) -> tuple[str, int, str] | None:
-        for line in text.splitlines():
-            match = MARKDOWN_CODE_FENCE_RE.match(line.rstrip())
-            if match is None:
-                continue
-            fence = match.group("fence")
-            fence_char = fence[0]
-            fence_length = len(fence)
-            if state is None:
-                info = match.group("info").strip()
-                state = (fence_char, fence_length, info)
-            elif fence_char == state[0] and fence_length >= state[1]:
-                state = None
-        return state
-
-    @staticmethod
-    def _opening_code_fence(state: tuple[str, int, str] | None) -> str:
-        if state is None:
-            return ""
-        fence_char, fence_length, info = state
-        return f"{fence_char * fence_length}{info}\n"
-
-    @staticmethod
-    def _closing_code_fence(state: tuple[str, int, str] | None) -> str:
-        if state is None:
-            return ""
-        fence_char, fence_length, _info = state
-        return f"\n{fence_char * fence_length}"

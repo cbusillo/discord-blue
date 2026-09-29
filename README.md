@@ -197,6 +197,7 @@ token_file = "~/.config/discord-blue/codex-bridge.token"  # mode 600; or set AGE
 # socket_path = "~/.codex/app-server-control/app-server-control.sock"
 # host_label = "Codex on Chris-Studio"
 # allow_insecure_ws = false  # true permits ws:// to a trusted private host
+# hello_timeout_seconds = 300  # how long to wait for Discord Blue to attach the thread
 ```
 
 Run it with `uv run discord-blue-codex-bridge`, or install
@@ -212,14 +213,17 @@ yourself. Behaviour and limits:
   starts, and stock replays pending approvals and questions on the join.
 - When the TUI closes and no other client is subscribed, stock unloads the
   thread (after `thread_unload_delay_secs`, default 60) and reports `notLoaded`.
-  The bridge then ends the Discord session and Discord Blue archives its thread.
+  The bridge then ends the Discord session and Discord Blue archives its thread
+  with one "Session ended" line.
 - Joining does not clear a thread's goal. Each join sends the owner a read-only
   goal snapshot: `thread/goal/updated`, or `thread/goal/cleared` when the thread
   has no goal.
 - Threads started with `--no-daemon`, `--profile` or most `-c` overrides run
   outside the daemon, so the bridge cannot see them.
-- If the daemon connection drops, every session closes. When it reconnects, each
-  session starts again with a new epoch, so old Discord controls are rejected.
+- If the daemon connection drops, every session disconnects. Discord Blue keeps
+  their threads open for five minutes; a session that reconnects within that time
+  continues in the same thread, with a new epoch, so old Discord controls are
+  rejected.
 - Run the stock end-to-end test with
   `CODEX_BIN=/path/to/codex uv run python -m unittest tests.test_codex_bridge_stock`.
   It uses a disposable app-server, synthetic auth and a fake model.
@@ -250,7 +254,7 @@ alias claude='claude --allow-dangerously-skip-permissions --dangerously-load-dev
 ```
 
 The channel reads the Codex bridge's `~/.config/discord-blue/codex-bridge.toml`
-(`server_url`, `token_file`, `allow_insecure_ws`); its host label is always
+(`server_url`, `token_file`, `allow_insecure_ws`, `hello_timeout_seconds`); its host label is always
 `Claude Code on <host>`. Each launch shows Claude Code's "Loading development
 channels" warning; press Enter. A session that is already running cannot load
 the channel: `/exit`, then `claude --resume <session id>` through the alias. It

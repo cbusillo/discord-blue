@@ -14,6 +14,7 @@ import json
 import logging
 import uuid
 from collections import OrderedDict, deque
+from contextlib import suppress
 from typing import Any, ClassVar, Protocol
 
 import aiohttp
@@ -25,6 +26,8 @@ PROMPT_EVENTS = {"approval_request", "request_user_input"}
 STATUS_EVENTS = {"status_changed", "turn_complete", "error"}
 OUTBOX_LIMIT = 256
 COMMAND_MEMORY = 1024
+# Exiting should not hang on an unreachable server; without session_end the thread closes after its grace period.
+SESSION_END_TIMEOUT_SECONDS = 2
 
 
 class ConnectionConfig(Protocol):
@@ -225,3 +228,12 @@ class AgentSessionClient:
         self.stopped.set()
         if self.websocket is not None:
             await self.websocket.close()
+
+    async def end(self) -> None:
+        """The session itself is over, not just this connection: Discord Blue closes its thread now, not after a grace period."""
+        websocket = self.websocket
+        if websocket is not None and not websocket.closed:
+            with suppress(Exception):
+                async with asyncio.timeout(SESSION_END_TIMEOUT_SECONDS):
+                    await websocket.send_json(self.event("session_end"))
+        await self.stop()

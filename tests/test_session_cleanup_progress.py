@@ -163,7 +163,7 @@ class CleanupProgressTests(unittest.IsolatedAsyncioTestCase):
             residual = await bridge.cleanup_session_artifacts(cleanup)
         self.assertIsNone(residual)
         self.assertEqual(thread.removed_user_ids, [111, 222])
-        self.assertEqual(thread.sent_messages, ["Agent session disconnected"])
+        self.assertEqual(thread.sent_messages, [bridge_module.SESSION_ENDED_NOTICE])
         self.assertTrue(thread.archived)
         self.assertTrue(thread.locked)
         self.assertTrue(thread.left)

@@ -105,7 +105,7 @@ class CodexBridge:
                 await self.join(thread_id)
             elif status.get("type") == "notLoaded":
                 # Stock unloads a thread once no client is subscribed: its TUI has closed.
-                await self.detach(thread_id)
+                await self.detach(thread_id, ended=True)
             else:
                 session.on_status(status)
                 if status.get("type") == "active":
@@ -117,7 +117,7 @@ class CodexBridge:
         elif session is None:
             return
         elif method == "thread/closed":
-            await self.detach(thread_id)
+            await self.detach(thread_id, ended=True)
         elif method == "thread/name/updated":
             session.rename(params.get("threadName"))
         elif method == "turn/started":
@@ -160,10 +160,12 @@ class CodexBridge:
         except (Rejected, RpcError) as exc:
             logger.info("Not subscribing to Codex thread %s: %s", session.thread_id, exc)
 
-    async def detach(self, thread_id: str) -> None:
+    async def detach(self, thread_id: str, *, ended: bool = False) -> None:
+        """Stop mirroring a thread. An ended thread closes in Discord now; otherwise (the daemon went away) it waits
+        out Discord Blue's grace period for this bridge to reconnect."""
         session, task = self.sessions.pop(thread_id, None), self.tasks.pop(thread_id, None)
         if session is not None:
-            await session.stop()
+            await (session.end() if ended else session.stop())
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
