@@ -72,9 +72,6 @@ class HttpThread(FakeThread):
         self.edits.append(kwargs)
         self.refresh(as_json(await self.http.edit_channel(self.id, reason=reason if isinstance(reason, str) else None, **options)))
 
-    async def delete(self, *, reason: str | None = None) -> None:
-        await self.http.delete_channel(self.id, reason=reason)
-
     async def join(self) -> None:
         await self.http.join_thread(self.id)
         self.joined, self.left = True, False

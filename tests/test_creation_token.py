@@ -39,8 +39,8 @@ class CreationTokenTests(unittest.IsolatedAsyncioTestCase):
             ack = await websocket.receive_json(timeout=15)
             await websocket.close()
 
-        self.assertIn(other.id, fake.threads, "a thread carrying another creation's token was deleted")
-        self.assertEqual(sorted(fake.threads), sorted([other.id, ack["thread_id"]]))
+        self.assertFalse(fake.threads[other.id].archived, "a thread carrying another creation's token was closed")
+        self.assertEqual(sorted(t.id for t in fake.threads.values() if not t.archived), sorted([other.id, ack["thread_id"]]))
 
     async def test_a_thread_with_messages_is_never_deleted_even_with_the_token_in_its_name(self) -> None:
         fake = FakeDiscord(latency=0.002)
@@ -53,7 +53,7 @@ class CreationTokenTests(unittest.IsolatedAsyncioTestCase):
                 ack = await websocket.receive_json(timeout=15)
                 await websocket.close()
 
-        self.assertEqual(sorted(fake.threads), sorted([copied.id, ack["thread_id"]]))
+        self.assertEqual(sorted(t.id for t in fake.threads.values() if not t.archived), sorted([copied.id, ack["thread_id"]]))
 
     async def test_a_duplicate_check_that_failed_is_retried_by_maintenance(self) -> None:
         fake = FakeDiscord(latency=0.002)
@@ -69,7 +69,28 @@ class CreationTokenTests(unittest.IsolatedAsyncioTestCase):
             await websocket.close()
 
         self.assertEqual(len(before), 2, "the test needs the duplicate to survive the first check")
-        self.assertEqual(sorted(fake.threads), [ack["thread_id"]])
+        self.assertEqual([t.id for t in fake.threads.values() if not t.archived], [ack["thread_id"]])
+
+    async def test_a_transport_error_during_the_check_leaves_it_for_maintenance(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        fake.faults.append(Fault("POST", "/channels/{channel}/threads", status=502, applied=True))
+        async with scenario(fake) as running, aiohttp.ClientSession() as http:
+            listing, calls = running.bot.guild.active_threads, []
+
+            async def reset_once() -> object:
+                calls.append(1)
+                if len(calls) == 1:
+                    raise ConnectionResetError  # Not a discord.DiscordException.
+                return await listing()
+
+            with patch.object(running.bot.guild, "active_threads", new=reset_once):
+                websocket = await running.connect(http)
+                await websocket.send_json(hello_for("fresh"))
+                ack = await websocket.receive_json(timeout=15)
+                await running.bridge.retry_creation_checks()
+                await websocket.close()
+
+        self.assertEqual([t.id for t in fake.threads.values() if not t.archived], [ack["thread_id"]])
 
 
 if __name__ == "__main__":

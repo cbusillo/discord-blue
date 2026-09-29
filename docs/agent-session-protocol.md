@@ -70,8 +70,9 @@ it a few times (after 0.5, 1, 2 and 4 seconds), and if it is still incomplete th
 connection closes without `hello_ack`. A new thread is created only when a
 complete index has no match. A new thread is named with a short creation token,
 `<name> [k3f9x2]`, until its first rename. Before anything is posted in it, other
-open threads carrying the same token are deleted, since discord.py retries a create
-that failed with a 5xx and Discord may have made the first one anyway. A matching
+empty threads the bot opened under the same token are archived and locked, since
+discord.py retries a create that failed with a 5xx and Discord may have made the
+first one anyway. A check that cannot finish is retried by maintenance. A matching
 thread that turns out to have been
 deleted is dropped from the index, and the attach resolves again. Failure to
 reopen or rejoin a matching thread closes the connection without `hello_ack`; it

@@ -320,7 +320,8 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
             await websocket.receive_json(timeout=15)
             await websocket.close()
 
-        self.assertEqual(len(fake.threads), 1, "creating the session's thread left more than one thread")
+        still_open = [t.id for t in fake.threads.values() if not t.archived]
+        self.assertEqual(len(still_open), 1, "creating the session's thread left more than one open thread")
 
     async def test_a_first_deploy_sweep_does_not_archive_a_session_about_to_reconnect(self) -> None:
         """Right after a restart, main's first sweep archives every unbound session thread, including those of
