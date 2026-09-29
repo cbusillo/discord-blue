@@ -9,8 +9,9 @@ from unittest.mock import patch
 import aiohttp
 
 from discord_blue.doodads.agent_session import bridge as bridge_module
-from tests.test_attach_scenarios import hello_for, marker, scenario, until
-from tests.fake_discord import BOT_ID, FakeDiscord, FakeThreadState
+from discord_blue.doodads.agent_session.sessions import AgentSession
+from tests.test_attach_scenarios import Scenario, hello_for, marker, scenario, until
+from tests.fake_discord import BOT_ID, FakeDiscord, FakeThreadState, Fault
 
 # Any of these on a session's thread is churn a reconnect within grace must not cause.
 CHURN = {
@@ -24,6 +25,19 @@ OWNER_ID = 7
 
 def notices(thread: FakeThreadState) -> list[str]:
     return [message.content for message in thread.messages if message.content == bridge_module.SESSION_ENDED_NOTICE]
+
+
+async def attach(running: Scenario, http: aiohttp.ClientSession, hello: dict[str, object]) -> aiohttp.ClientWebSocketResponse:
+    websocket = await running.connect(http)
+    await websocket.send_json(hello)
+    return websocket
+
+
+async def in_grace(running: Scenario, session_id: str) -> AgentSession:
+    session = running.bridge.sessions.get(session_id)
+    assert session is not None
+    assert await until(lambda: session.grace_task is not None, timeout=2)
+    return session
 
 
 class SessionGraceTests(unittest.IsolatedAsyncioTestCase):
@@ -108,3 +122,69 @@ class SessionGraceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(running.archived, [])
         self.assertEqual(notices(thread), [])
         self.assertIs(running.bridge.sessions.get("waiting"), session)
+
+    async def test_an_expiry_archive_that_lands_late_does_not_close_the_reconnected_thread(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        hello = hello_for("late")
+        thread = fake.add_thread("late", marker=marker(hello), members={BOT_ID})
+        with patch.object(bridge_module, "SESSION_DISCONNECT_GRACE_SECONDS", 0.2):
+            async with scenario(fake) as running, aiohttp.ClientSession() as http:
+                first = await attach(running, http, hello)
+                await first.receive_json(timeout=10)
+                # Only the archive is slow: it outlives close_thread's 1 s wait and lands after the reconnect.
+                fake.body_latency.append(("PATCH", "/channels/{channel}", lambda body: body.get("archived") is True, 2.0))
+                await first.close()
+                self.assertTrue(await until(lambda: running.bridge.sessions.get("late") is None, timeout=5))
+                self.assertFalse(thread.archived, "the archive landed before the reconnect; the test proves nothing")
+                second = await attach(running, http, {**hello, "session_epoch": "e2"})
+                ack = await second.receive_json(timeout=10)
+                landed = await until(lambda: thread.id in running.archived, timeout=5)
+                await asyncio.sleep(0.2)  # Room for anything that would react to it.
+                open_after_archive = not thread.archived and not thread.locked
+                await second.close()
+
+        self.assertEqual(ack["thread_id"], thread.id)
+        self.assertTrue(landed, "the expiry archive never reached Discord")
+        self.assertTrue(open_after_archive, "the late expiry archive closed the reconnected session's thread")
+
+    async def test_a_failed_reclaim_puts_the_old_session_back_in_grace(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        hello = hello_for("lost")
+        thread = fake.add_thread("lost", marker=marker(hello), members={BOT_ID})
+        with patch.object(bridge_module, "SESSION_DISCONNECT_GRACE_SECONDS", 1.0):
+            async with scenario(fake) as running, aiohttp.ClientSession() as http:
+                first = await attach(running, http, hello)
+                await first.receive_json(timeout=10)
+                await first.close()
+                previous = await in_grace(running, "lost")
+                # Someone archives the thread during grace, and Discord refuses to reopen it.
+                thread.archived = thread.locked = True
+                thread.archived_at = next(fake.clock)
+                fake.faults.append(Fault("PATCH", "/channels/{channel}", times=10, status=403))
+                second = await attach(running, http, {**hello, "session_epoch": "e2"})
+                refused = await second.receive(timeout=10)
+                restored = (running.bridge.sessions.get("lost"), running.bridge.sessions.by_thread.get(thread.id))
+                ended = await until(lambda: running.bridge.sessions.get("lost") is None, timeout=5)
+
+        self.assertEqual(refused.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(restored, (previous, "lost"))
+        self.assertTrue(ended, "the old session's grace timer did not end it after the failed reclaim")
+        self.assertEqual(running.bridge.sessions.by_thread, {})
+
+    async def test_a_thread_deleted_during_grace_is_replaced_on_reconnect(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        hello = hello_for("deleted")
+        thread = fake.add_thread("deleted", marker=marker(hello), members={BOT_ID})
+        async with scenario(fake) as running, aiohttp.ClientSession() as http:
+            first = await attach(running, http, hello)
+            await first.receive_json(timeout=10)
+            await first.close()
+            await in_grace(running, "deleted")
+            fake.delete_thread(thread.id)  # No gateway event yet: the bot's cache still has the thread.
+            second = await attach(running, http, {**hello, "session_epoch": "e2"})
+            ack = await second.receive_json(timeout=10)
+            replacements = running.threads_marked_for(hello)
+            await second.close()
+
+        self.assertEqual([t.id for t in replacements], [ack["thread_id"]])
+        self.assertNotEqual(ack["thread_id"], thread.id)

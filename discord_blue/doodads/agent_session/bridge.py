@@ -11,6 +11,7 @@ import uuid
 import weakref
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from functools import partial
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
@@ -347,6 +348,8 @@ class AgentSessionBridge:
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._session_attach_lock = asyncio.Lock()
         self._grace_tasks: set[asyncio.Task[None]] = set()
+        # Archive edits that outlived close_thread's wait, by thread ID; an attach waits for them (settle_archive).
+        self._archives_in_flight: dict[int, asyncio.Future[discord.Thread]] = {}
         self.renamer = ThreadRenamer(self.rename_target)
         # No await occurs while resolving the entry, so one event loop turn
         # cannot create two locks for the same session ID.
@@ -932,9 +935,13 @@ class AgentSessionBridge:
                                         exc_info=True,
                                     )
                                     self.sessions.remove_if_current(session)
+                                    self.restore_grace(previous)
                                     session = None
                                     attachment_failed = True
                                 else:
+                                    if previous is not None and previous.grace_task is not None:
+                                        # Only now: had the attach failed, the old session's timer still closes its thread.
+                                        previous.grace_task.cancel()
                                     self.sessions.bind_thread(
                                         hello.session_id,
                                         session_thread.thread.id,
@@ -1043,16 +1050,45 @@ class AgentSessionBridge:
             # finalize_session kept a pending cleanup, so the maintenance sweep retries the thread.
             logger.warning("Unable to close Agent session %s after its grace period", session.session_id, exc_info=True)
 
+    def restore_grace(self, previous: AgentSession | None) -> None:
+        """A reconnect failed to attach: the session it replaced goes back in grace, so its timer still ends it."""
+        if previous is None or previous.grace_task is None or previous.grace_task.done():
+            return
+        if self.sessions.get(previous.session_id) is None:
+            self.sessions.register(previous)
+
     async def resume_thread_in_grace(self, previous: AgentSession | None, hello: SessionHello) -> SessionThread | None:
-        """A reconnect within grace takes its thread back as it is: no discovery, unarchive, joins or notices."""
+        """A reconnect within grace takes its thread back as it is: no discovery, unarchive, joins or notices.
+
+        Returns None, for a normal attach, when the thread changed during grace or cannot be confirmed.
+        """
         if previous is None or previous.grace_task is None or previous.thread_id is None:
             return None
-        previous.grace_task.cancel()
-        thread = await self.get_thread(previous.thread_id)
-        if thread is None or thread.archived or thread.locked:
+        await self.settle_archive(previous.thread_id)
+        try:
+            # Ask Discord, not the cache: a thread deleted during grace can still be cached.
+            thread = await self.bot.fetch_channel(previous.thread_id)
+        except discord.DiscordException:
             return None
+        if not isinstance(thread, discord.Thread) or thread.archived or thread.locked:
+            return None
+        cached = self.bot.get_channel(thread.id)
+        thread = cached if isinstance(cached, discord.Thread) else thread
         self.sessions.bind_thread(hello.session_id, thread.id, previous.notification_message_id)
         return SessionThread(thread=thread, notification_message_id=previous.notification_message_id)
+
+    async def settle_archive(self, thread_id: int) -> bool:
+        """Wait for an end-of-session archive of this thread that is still in flight; True if there was one.
+
+        The archive's own timeout only stops waiting for it; Discord can still apply it later, so an attach waits for
+        it to finish (shielded, never cancelled) before reopening the thread.
+        """
+        archive = self._archives_in_flight.get(thread_id)
+        if archive is None:
+            return False
+        with suppress(Exception):
+            await asyncio.shield(archive)
+        return True
 
     async def find_or_create_session_thread(self, hello: SessionHello) -> SessionThread:
         thread = await self.find_existing_session_thread(hello)
@@ -1072,7 +1108,8 @@ class AgentSessionBridge:
             mapped_session_id = self.sessions.by_thread.get(thread.id)
             if mapped_session_id is not None and mapped_session_id != hello.session_id:
                 raise ValueError(f"Agent session thread {thread.id} is already attached")
-            if thread.archived or thread.locked:
+            # An archive from this thread's last session may still be in flight; reopen after it lands, not before.
+            if await self.settle_archive(thread.id) or thread.archived or thread.locked:
                 await thread.edit(
                     archived=False,
                     locked=False,
@@ -2838,15 +2875,11 @@ class AgentSessionBridge:
             if members_removed:
                 steps.discard("members")
         if "archive" in steps:
+            archive = asyncio.ensure_future(thread.edit(archived=True, locked=True, reason="Agent session ended"))
+            self._archives_in_flight[thread.id] = archive
+            archive.add_done_callback(partial(self.archive_landed, thread.id))
             try:
-                await asyncio.wait_for(
-                    thread.edit(
-                        archived=True,
-                        locked=True,
-                        reason="Agent session disconnected",
-                    ),
-                    timeout=THREAD_ARCHIVE_TIMEOUT_SECONDS,
-                )
+                await asyncio.wait_for(asyncio.shield(archive), timeout=THREAD_ARCHIVE_TIMEOUT_SECONDS)
             except Exception:
                 logger.warning("Unable to archive Agent session thread %s", thread.id, exc_info=True)
             else:
@@ -2860,6 +2893,12 @@ class AgentSessionBridge:
                 else:
                     steps.discard("leave")
         return steps
+
+    def archive_landed(self, thread_id: int, archive: asyncio.Future[discord.Thread]) -> None:
+        if self._archives_in_flight.get(thread_id) is archive:
+            del self._archives_in_flight[thread_id]
+        if not archive.cancelled():
+            archive.exception()  # Retrieved here; close_thread or settle_archive reports it.
 
     async def delete_session_notification(self, message_id: int) -> bool:
         try:
