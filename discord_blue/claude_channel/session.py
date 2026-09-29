@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import socket
 import subprocess
 from collections.abc import Awaitable, Callable
@@ -30,6 +31,8 @@ CAPABILITIES = ["reply", "status_request"]
 CHANNEL = "notifications/claude/channel"
 PERMISSION_REQUEST = "notifications/claude/channel/permission_request"
 WAITING_LOCALLY = "Claude Code is waiting for approval in the terminal"
+# Tool names Discord may show: built-in names and MCP names such as mcp__server__tool.
+TOOL_NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 LOST_CLAUDE = "Lost the Claude Code session, so delivery is uncertain. Check the terminal before retrying."
 
 Notify = Callable[[str, Json], Awaitable[None]]
@@ -66,6 +69,12 @@ def host_label() -> str:
     return f"Claude Code on {socket.gethostname().split('.')[0]}"
 
 
+def waiting_message(params: Json) -> str:
+    tool_name = params.get("tool_name")
+    shown = tool_name if isinstance(tool_name, str) and TOOL_NAME.fullmatch(tool_name) else "a tool"
+    return f"{WAITING_LOCALLY} ({shown})"
+
+
 class ClaudeSession(AgentSessionClient):
     capabilities = CAPABILITIES
     command_errors = (OSError,)
@@ -90,9 +99,9 @@ class ClaudeSession(AgentSessionClient):
     # Claude Code -> Discord
 
     async def on_permission_request(self, params: Json) -> None:
-        # Never answered from here: the terminal dialog is the only place to approve or deny.
-        tool_name = str(params.get("tool_name") or "a tool")
-        self.publish("status_changed", message=f"{WAITING_LOCALLY} ({tool_name})")
+        # Never answered from here: the terminal dialog is the only place to approve or deny. Nothing else
+        # from the request reaches Discord: Claude Code leaves some secrets in its preview unmasked.
+        self.publish("status_changed", message=waiting_message(params))
 
     # Discord -> Claude Code
 

@@ -13,7 +13,7 @@ from aiohttp.test_utils import TestServer
 
 from discord_blue.claude_channel.__main__ import run_channel
 from discord_blue.claude_channel.mcp import METHOD_NOT_FOUND, PROTOCOL_VERSIONS
-from discord_blue.claude_channel.session import CAPABILITIES, CHANNEL, PERMISSION_REQUEST, WAITING_LOCALLY, Identity
+from discord_blue.claude_channel.session import CAPABILITIES, CHANNEL, PERMISSION_REQUEST, WAITING_LOCALLY, Identity, waiting_message
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.doodads.agent_session.protocol import REMOTE_ACTIONS, SessionHello
 from tests.fakes_discord_blue import TOKEN, FakeDiscordBlue
@@ -165,6 +165,8 @@ class ClaudeChannelTests(unittest.IsolatedAsyncioTestCase):
             leftover = await claude.settle()
 
         self.assertEqual((waiting["type"], waiting["message"]), ("status_changed", f"{WAITING_LOCALLY} (Bash)"))
+        # Nothing from the preview or description reaches Discord.
+        self.assertNotIn("relay-test", json.dumps(waiting))
         self.assertNotIn("approval_decision", CAPABILITIES)
         self.assertEqual(refused["type"], "approval_decision_reject")
         # No permission verdict ever goes back to Claude Code.
@@ -185,3 +187,16 @@ class ClaudeChannelTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["capabilities"], {"experimental": {"claude/channel": {}}})
         self.assertEqual(discord.sockets, [])
+
+
+class WaitingMessageTests(unittest.TestCase):
+    def test_only_a_plain_tool_name_from_the_request_is_shown(self) -> None:
+        for tool_name, shown in (
+            ("Bash", "Bash"),
+            ("mcp__github__create_issue", "mcp__github__create_issue"),
+            ("Bash`\n```\n@everyone", "a tool"),
+            ("", "a tool"),
+            (None, "a tool"),
+        ):
+            with self.subTest(tool_name=tool_name):
+                self.assertEqual(waiting_message({"tool_name": tool_name}), f"{WAITING_LOCALLY} ({shown})")
