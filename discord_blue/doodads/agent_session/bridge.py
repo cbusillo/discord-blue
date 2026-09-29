@@ -17,6 +17,13 @@ from typing import Literal, cast
 import discord
 from aiohttp import WSMsgType, web
 
+from discord_blue.doodads.agent_session.formatting import ASSISTANT_MESSAGE_MARKER
+from discord_blue.doodads.agent_session.formatting import MARKDOWN_CODE_FENCE_RE
+from discord_blue.doodads.agent_session.formatting import WAITING_FOR_DIRECTION
+from discord_blue.doodads.agent_session.formatting import convert_markdown_tables
+from discord_blue.doodads.agent_session.formatting import format_user_message
+from discord_blue.doodads.agent_session.formatting import is_assistant_message
+from discord_blue.doodads.agent_session.formatting import mark_assistant_message
 from discord_blue.doodads.agent_session.messages import edit_agent_session_message
 from discord_blue.doodads.agent_session.messages import agent_session_allowed_mentions
 from discord_blue.doodads.agent_session.messages import send_agent_session_message
@@ -104,7 +111,6 @@ SESSION_NOTIFICATION_PREFIXES = (
 CONTINUE_AUTONOMOUSLY_DELIVERED = "Asked the agent session to go ahead until it needs you."
 PAUSE_CURRENT_TURN_DELIVERED = "Asked the agent session to pause what it is doing now."
 SESSION_NOTIFICATION_THREAD_RE = re.compile(r"<#(?P<thread_id>\d+)>")
-MARKDOWN_CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})(?P<info>[^`~\n]*)$")
 REACTION_QUEUED = "⏳"
 REACTION_DELIVERED = "📬"
 REACTION_IN_PROGRESS = "🔄"
@@ -1254,7 +1260,7 @@ class AgentSessionBridge:
         try:
             async for message in thread.history(limit=50):
                 messages += 1
-                if message.content.startswith("**Assistant**"):
+                if is_assistant_message(message.content):
                     assistant_messages += 1
         except discord.DiscordException:
             logger.warning("Unable to score Agent session thread %s", thread.id)
@@ -1280,7 +1286,7 @@ class AgentSessionBridge:
     async def thread_has_assistant_message(thread: discord.Thread) -> bool:
         try:
             async for message in thread.history(limit=50):
-                if message.content.startswith("**Assistant**"):
+                if is_assistant_message(message.content):
                     return True
         except discord.DiscordException:
             logger.warning("Unable to inspect Agent session assistant history %s", thread.id)
@@ -2352,7 +2358,8 @@ class AgentSessionBridge:
 
     @classmethod
     def format_assistant_messages(cls, text: str) -> list[str]:
-        return [f"**Assistant**\n{chunk}" for chunk in cls._split_discord_message(text, DISCORD_ASSISTANT_CHUNK_LIMIT)]
+        chunk_limit = DISCORD_ASSISTANT_CHUNK_LIMIT - len(ASSISTANT_MESSAGE_MARKER)
+        return [mark_assistant_message(chunk) for chunk in cls._split_discord_message(convert_markdown_tables(text), chunk_limit)]
 
     async def post_session_controls(self, session: AgentSession) -> None:
         if session.thread_id is None:
@@ -2977,11 +2984,11 @@ class AgentSessionBridge:
 
     @staticmethod
     def format_user_message_notice(message: str) -> str:
-        return f"**You**\n>>> {message.strip()}"
+        return format_user_message(message)
 
     @staticmethod
     def format_waiting_for_direction(_session: AgentSession) -> str:
-        return "\u200b"
+        return WAITING_FOR_DIRECTION
 
     @staticmethod
     def session_control_reactions(session: AgentSession) -> list[str]:

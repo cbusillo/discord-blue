@@ -101,7 +101,10 @@ failed operations. A dead or stalled monitor is reported as unhealthy.
 Reconnect with the same session identity and metadata. Thread recovery matches
 persisted session markers; a changed PID can be tolerated only for one matching
 stable session ID. The optional assistant snapshot backfills a thread only when
-it has no assistant message. It is not a transcript replay protocol. A new chat
+it has no assistant message. The server recognises its assistant messages by an
+invisible trailing marker, or by the `**Assistant**` label older messages carry,
+and converts Markdown tables outside code fences into bullet lists before
+posting. It is not a transcript replay protocol. A new chat
 gets a new session ID. The client must reject controls for stale epochs and avoid
 executing a repeated command ID twice.
 
