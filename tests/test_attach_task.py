@@ -197,6 +197,31 @@ class AttachTaskTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(closed, "shutdown left the old session's thread open")
 
+    async def test_stopping_after_a_replaced_connection_drops_still_closes_its_thread(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        hello = hello_for("unlucky")
+        thread = fake.add_thread("unlucky", marker=marker(hello), members={BOT_ID})
+        async with scenario(fake, listen_host="127.0.0.1", listen_port=0) as running, aiohttp.ClientSession() as http:
+            await running.bridge.start()
+            first = await running.connect(http)
+            await first.send_json(hello)
+            await first.receive_json(timeout=10)
+            # Another session's slow attach holds the attach lock; a reconnect queues behind it, and only then does
+            # the bridge see the first connection drop, so it never enters grace.
+            await running.bridge._session_attach_lock.acquire()
+            second = await running.connect(http)
+            await second.send_json({**hello, "session_epoch": "e2"})
+            await asyncio.sleep(0.2)
+            await first.close()
+            await asyncio.sleep(0.2)
+            stopping = asyncio.create_task(running.bridge.stop())
+            await asyncio.sleep(0.1)
+            running.bridge._session_attach_lock.release()
+            await asyncio.wait_for(stopping, timeout=15)
+            closed = await until(lambda: thread.archived, timeout=5)
+
+        self.assertTrue(closed, "shutdown left the replaced connection's thread open")
+
 
 def _in_grace(running: Scenario) -> bool:
     session = running.bridge.sessions.get("unlucky")

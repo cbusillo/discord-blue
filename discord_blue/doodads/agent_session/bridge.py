@@ -384,7 +384,6 @@ class AgentSessionBridge:
         if self._runner is not None:
             return
         self._stopping = False
-        self.threads.resume()
         self._monitor_started_at = time.monotonic()
         self._monitor_last_progress = self._monitor_started_at
         self._monitor_has_run = False
@@ -1025,7 +1024,7 @@ class AgentSessionBridge:
                 current = self.sessions.get(session_id)
                 if current is not None and current is not previous and current.thread_id is None:
                     self.sessions.remove_if_current(current)
-                self.restore_grace(previous)
+                self.restore_replaced(previous)
                 raise
             if previous is not None and previous.grace_task is not None:
                 # Only now: had the attach failed, the old session's timer still closes its thread.
@@ -1047,6 +1046,9 @@ class AgentSessionBridge:
         if not session.websocket.closed:
             with suppress(Exception):
                 await asyncio.wait_for(session.websocket.close(), timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS)
+        self.start_grace(session)
+
+    def start_grace(self, session: AgentSession) -> None:
         if session.grace_task is None:
             session.grace_task = asyncio.create_task(self.expire_grace(session), name=f"agent-session-grace-{session.session_id}")
             self._grace_tasks.add(session.grace_task)
@@ -1068,19 +1070,22 @@ class AgentSessionBridge:
             # finalize_session kept a pending cleanup, so the maintenance sweep retries the thread.
             logger.warning("Unable to close Agent session %s after its grace period", session.session_id, exc_info=True)
 
-    def restore_grace(self, previous: AgentSession | None) -> None:
-        """A reconnect failed to attach: the session it replaced goes back in grace, so its timer still ends it.
+    def restore_replaced(self, previous: AgentSession | None) -> None:
+        """A reconnect failed to attach: the session it replaced, if it held a thread, is the session's again.
 
-        If the timer already ran out while the reconnect waited (it stands down for a replacement), the session is
-        ended now instead, so its thread is still closed. During shutdown it is only put back: shutdown ends every
-        registered session, once queued attaches have settled.
+        Its connection may be open still (it is live again), closed and in grace (its timer still ends it), closed
+        before its drop was handled (its grace starts now), or its grace may have run out while the reconnect waited,
+        since the timer stands down for a replacement (it is ended now). During shutdown it is only put back: shutdown
+        ends every registered session once queued attaches have settled.
         """
-        if previous is None or previous.grace_task is None:
-            return
-        if self.sessions.get(previous.session_id) is not None:
+        if previous is None or previous.thread_id is None or self.sessions.get(previous.session_id) is not None:
             return
         self.sessions.register(previous)
-        if previous.grace_task.done() and not self._stopping:
+        if self._stopping or (not previous.websocket.closed and not previous.ended):
+            return
+        if previous.grace_task is None and not previous.ended:
+            self.start_grace(previous)
+        elif previous.ended or (previous.grace_task is not None and previous.grace_task.done()):
             # Not awaited: the failed attach still holds this session's lifecycle lock, which finalize needs.
             ending = asyncio.create_task(self.end_after_grace(previous), name=f"agent-session-grace-{previous.session_id}")
             self._grace_tasks.add(ending)

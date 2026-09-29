@@ -149,8 +149,8 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(thread.archived, "the old archive landed after the restarted bridge reopened the thread")
 
-    async def test_a_request_waiting_for_a_slot_is_not_sent_after_stop(self) -> None:
-        busy, idle = FakeThread(1), FakeThread(2)
+    async def test_a_reopen_waiting_for_a_slot_is_not_sent_after_stop(self) -> None:
+        busy, idle = FakeThread(1), FakeThread(2, archived=True, locked=True)
         workers = ThreadWorkers(Hooks(), concurrency=1)
         archiving, release = asyncio.Event(), asyncio.Event()
         original_edit = busy.edit
@@ -163,14 +163,17 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(busy, "edit", new=slow_edit):
             await workers.close(cast(discord.Thread, busy), {"archive"}, timeout=0)
             await asyncio.wait_for(archiving.wait(), timeout=1)
-            # The only slot is taken; this archive waits for it, and the bridge stops meanwhile.
-            await workers.close(cast(discord.Thread, idle), {"archive"}, timeout=0)
+            # The only slot is taken; this reopen waits for it, and the bridge stops meanwhile.
+            reopening = asyncio.create_task(workers.open(cast(discord.Thread, idle)))
+            await asyncio.sleep(0.01)
             workers.stop()
             release.set()
+            with self.assertRaises(RuntimeError):
+                await asyncio.wait_for(reopening, timeout=1)
             await asyncio.sleep(0.05)
 
-        self.assertTrue(busy.archived)
-        self.assertFalse(idle.archived, "a request chosen before the stop was sent after it")
+        self.assertTrue(busy.archived, "stopping kept a close from finishing")
+        self.assertTrue(idle.archived, "a reopen asked for before the stop was sent after it")
 
     async def test_a_notification_whose_delete_is_still_pending_is_not_adopted(self) -> None:
         bridge = make_bridge()
