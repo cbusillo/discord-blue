@@ -15,7 +15,9 @@ RESPONSES = ("command_ack", "command_reject", "approval_decision_ack", "approval
 class FakeDiscordBlue:
     """Stands in for the deployed agent-session server: acks hello and records events."""
 
-    def __init__(self) -> None:
+    def __init__(self, features: list[str] | None = None) -> None:
+        # None acknowledges like a server that predates hello_ack features.
+        self.features = features
         self.received: asyncio.Queue[Json] = asyncio.Queue()
         self.sockets: list[web.WebSocketResponse] = []
 
@@ -28,7 +30,8 @@ class FakeDiscordBlue:
         async for frame in websocket:
             message = frame.json()
             if message["type"] == "hello":
-                await websocket.send_json({"type": "hello_ack", "thread_id": 1})
+                ack: Json = {"type": "hello_ack", "thread_id": 1}
+                await websocket.send_json(ack if self.features is None else {**ack, "features": self.features})
             if message["type"] != "heartbeat":
                 await self.received.put(message)
         return websocket

@@ -22,7 +22,8 @@ from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.codex_bridge.rpc import AppServerClient
 from discord_blue.codex_bridge.session import ThreadSession
 from tests.stock_codex import ASK_QUESTIONS, UNLOAD_DELAY_SECONDS, StockCodex
-from tests.test_codex_bridge import TOKEN, FakeDiscordBlue
+from discord_blue.doodads.agent_session.protocol import SERVER_FEATURES
+from tests.fakes_discord_blue import TOKEN, FakeDiscordBlue
 
 Json = dict[str, Any]
 CODEX_BIN = os.environ.get("CODEX_BIN", "")
@@ -81,7 +82,7 @@ async def eventually(condition: Callable[[], bool], seconds: float = 30) -> None
 @unittest.skipUnless(CODEX_BIN and sys.platform == "darwin", "set CODEX_BIN to a stock codex binary (macOS sandbox-exec)")
 class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_bridge_mirrors_and_drives_a_thread_owned_by_another_client(self) -> None:
-        discord = FakeDiscordBlue()
+        discord = FakeDiscordBlue(sorted(SERVER_FEATURES))
         app = web.Application()
         app.router.add_get("/agent-session/connect", discord.connect)
         async with StockCodex(CODEX_BIN) as codex, TestServer(app, host="127.0.0.1") as server:

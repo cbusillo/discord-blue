@@ -66,6 +66,8 @@ class AgentSessionClient:
         self.prompts: dict[Any, Json] = {}
         self.commands: OrderedDict[str, Json] = OrderedDict()
         self.last_status: Json | None = None
+        # Features the connected Discord Blue listed in hello_ack; None until one answers.
+        self.server_features: frozenset[str] | None = None
 
     # Events to Discord
 
@@ -87,6 +89,9 @@ class AgentSessionClient:
 
     def hello(self, *, first: bool) -> Json:
         raise NotImplementedError
+
+    def on_server_features(self) -> None:
+        """Called after each hello_ack, before pending prompts are replayed, to drop what this server cannot show."""
 
     # Controls from Discord
 
@@ -159,6 +164,11 @@ class AgentSessionClient:
                         ack = await websocket.receive_json()
                     if not isinstance(ack, dict) or ack.get("type") != "hello_ack":
                         raise ValueError("Discord Blue did not acknowledge the session")
+                    features = ack.get("features")
+                    self.server_features = (
+                        frozenset(f for f in features if isinstance(f, str)) if isinstance(features, list) else frozenset()
+                    )
+                    self.on_server_features()
                     first = False
                     # Prompts retire on disconnect and on every status event, so replay queued history
                     # first and then each still-pending prompt once.

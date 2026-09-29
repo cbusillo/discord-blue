@@ -179,7 +179,9 @@ patch. Each Discord thread is named after the Codex thread's name or first
 prompt. The bridge mirrors user messages, turn starts, completed turns with the
 final answer, interrupts and errors. From Discord you can reply (stock starts a
 turn or steers the running one), pause, ask for status, answer command approvals,
-and answer `request_user_input` prompts. The bridge answers a Codex request only
+and answer `request_user_input` prompts. A command approval shows Codex's
+command exactly as the shell will run it; one Discord cannot show whole stays
+in the TUI. The bridge answers a Codex request only
 after an explicit Discord decision. The first answer wins, so the TUI can still
 answer. File-change, permission and other requests stay in the TUI. Continue,
 new session and end session are not advertised.

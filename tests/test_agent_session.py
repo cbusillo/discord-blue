@@ -604,7 +604,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await websocket.send_json(
             {"type": "hello", "session_id": "transport-session", "session_epoch": epoch, "cwd": "/workspace/example"}
         )
-        self.assertEqual(await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555})
+        self.assertEqual(
+            await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555, "features": ["command_text"]}
+        )
         return websocket
 
     async def send_transport_event(
@@ -1144,7 +1146,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                             "assistant_message": "Last answer",
                         }
                     )
-                    self.assertEqual(await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555})
+                    self.assertEqual(
+                        await websocket.receive_json(timeout=2),
+                        {"type": "hello_ack", "thread_id": 555, "features": ["command_text"]},
+                    )
                     self.assertEqual(thread.sent_messages, ["**Assistant**\nLast answer"])
                     await bridge.send_pause_current_turn(thread, FakeInteraction(thread).user)
                     command = await websocket.receive_json(timeout=2)
@@ -2006,6 +2011,46 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(thread.sent_views[0])
         approval_message = await thread.fetch_message(901)
         self.assertEqual(approval_message.reactions, ["✅", "✖️"])
+
+    async def test_an_approval_shows_the_raw_command_verbatim_or_stays_in_the_tui(self) -> None:
+        # shlex.join would show this as a literal string, while the shell runs the substitution.
+        raw = 'echo "$(touch /tmp/x)" | wc -c'
+        cases = {
+            "raw command shown exactly": (raw, ["echo", "$(touch /tmp/x)", "|", "wc", "-c"], f"```sh\n{raw}\n```"),
+            "older client without it": (None, ["git", "status"], "```sh\ngit status\n```"),
+            "raw command that would break the fence": ("echo '```'", ["echo", "```"], None),
+            "raw command longer than Discord shows": ("x" * (bridge_module.APPROVAL_COMMAND_DISPLAY_LIMIT + 1), ["x"], None),
+            "directory that would push the command out of the message": ("ls", ["ls"], None),
+        }
+        for case, (command_text, argv, shown) in cases.items():
+            with self.subTest(case):
+                thread = FakeThread(555)
+                bridge = AgentSessionBridge(FakeBot(Config(), thread))
+                bridge.sessions.register(AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555))
+                bridge.sessions.bind_thread("session-1", 555)
+                cwd = "/" + "d" * bridge_module.DISCORD_MESSAGE_LIMIT if case.startswith("directory") else "/repo"
+                await bridge.handle_approval_request(
+                    RemoteApprovalRequest(
+                        approval_id="approval-1",
+                        call_id="call-1",
+                        turn_id="turn-1",
+                        session_id="session-1",
+                        session_epoch="epoch-1",
+                        command=argv,
+                        cwd=cwd,
+                        reason="Need approval",
+                        command_text=command_text,
+                    )
+                )
+                [message] = thread.sent_messages
+                session = bridge.sessions.get("session-1")
+                assert session is not None
+                if shown is None:
+                    self.assertIn("Discord cannot show this command in full", message)
+                    self.assertEqual(session.pending_approvals, {})
+                else:
+                    self.assertIn(shown, message)
+                    self.assertEqual(list(session.pending_approvals), ["approval-1"])
 
     async def test_continue_reaction_reuses_control_message_for_status_feedback(self) -> None:
         config = Config()

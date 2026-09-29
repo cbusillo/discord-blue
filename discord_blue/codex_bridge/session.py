@@ -23,7 +23,7 @@ from typing import Any, Protocol
 from discord_blue.agent_client import AgentSessionClient, Rejected
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.codex_bridge.rpc import RequestId, RpcError, TransportError
-from discord_blue.doodads.agent_session.protocol import APPROVAL_COMMAND_DISPLAY_LIMIT
+from discord_blue.doodads.agent_session.protocol import command_text_displayable
 
 Json = dict[str, Any]
 logger = logging.getLogger(__name__)
@@ -83,17 +83,14 @@ def command_argv(command: str) -> list[str]:
         return [command]
 
 
-def discord_command(params: Json) -> list[str] | None:
-    """The argv of a plain command approval that Discord can show in full, or None to keep it in the TUI."""
+def discord_command(params: Json) -> str | None:
+    """The command of a plain command approval that Discord can show verbatim and whole, or None to keep it in the TUI."""
     command = params.get("command")
     if params.get("kind", "command") != "command" or not isinstance(command, str):
         return None
     if any(value is not None for key, value in params.items() if key not in DISCORD_APPROVABLE_FIELDS):
         return None
-    argv = command_argv(command)
-    # Discord shows the joined argv in a code fence, truncated; a fence inside it would end the block early.
-    shown = shlex.join(argv)
-    return argv if len(shown) <= APPROVAL_COMMAND_DISPLAY_LIMIT and "```" not in shown else None
+    return command if command_text_displayable(command) else None
 
 
 def is_answer(item: Json) -> bool:
@@ -234,7 +231,9 @@ class ThreadSession(AgentSessionClient):
         if request_id in self.prompts:
             return  # Stock replays pending requests when this connection rejoins.
         turn_id = str(params.get("turnId") or "")
-        if method == COMMAND_APPROVAL and (argv := discord_command(params)) is not None:
+        # A server that did not list command_text would show the re-quoted argv, not Codex's command.
+        shows_command_text = self.server_features is None or "command_text" in self.server_features
+        if method == COMMAND_APPROVAL and shows_command_text and (command := discord_command(params)) is not None:
             approval_id = str(params.get("approvalId") or params.get("itemId") or request_id)
             self.approvals[approval_id] = request_id
             self.prompts[request_id] = self.event(
@@ -242,7 +241,9 @@ class ThreadSession(AgentSessionClient):
                 approval_id=approval_id,
                 call_id=str(params.get("itemId") or ""),
                 turn_id=turn_id,
-                command=argv,
+                # Discord shows command_text verbatim; servers that predate it render this argv instead.
+                command=command_argv(command),
+                command_text=command,
                 cwd=str(params.get("cwd") or self.cwd),
                 reason=params.get("reason"),
             )
@@ -260,6 +261,18 @@ class ThreadSession(AgentSessionClient):
                 self.publish("status_changed", message="Waiting on a decision in the Codex TUI")
             return
         self.enqueue(self.prompts[request_id])
+
+    def on_server_features(self) -> None:
+        if self.server_features is not None and "command_text" not in self.server_features:
+            self.keep_approvals_local()
+
+    def keep_approvals_local(self) -> None:
+        """Take pending approvals back from a server that would show the re-quoted argv; the TUI still has them."""
+        for request_id, prompt in list(self.prompts.items()):
+            if prompt["type"] == "approval_request":
+                del self.prompts[request_id]
+                self.approvals.pop(str(prompt["approval_id"]), None)
+                self.publish("status_changed", message="Waiting on a decision in the Codex TUI")
 
     def on_resolved(self, request_id: RequestId) -> None:
         prompt = self.prompts.pop(request_id, None)
