@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import unittest
 from typing import Any
 
 from discord_blue.claude_channel.launch import loaded_as_channel
-from discord_blue.claude_channel.session import CHANNEL, HOOK_TOOL, MODEL_CALL, PERMISSION_REQUEST
+from discord_blue.claude_channel.session import CHANNEL, HOOK_TOOL, MODEL_CALL, PERMISSION_REQUEST, waiting_message
 from discord_blue.doodads.agent_session.protocol import SessionHello
 from tests.fakes_discord_blue import FakeDiscordBlue
 from tests.test_claude_channel import IDENTITY, FakeClaudeCode, command, running_channel
@@ -135,25 +136,24 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PermissionNoticeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_a_permission_prompt_posts_claude_codes_preview_as_a_preview_only(self) -> None:
+    async def test_a_permission_prompt_is_announced_without_anything_from_the_request(self) -> None:
+        # Claude Code does not mask an ordinary password, so neither the preview nor the description may reach Discord.
         request = {
             "request_id": "poeyw",
             "tool_name": "Bash",
-            "description": "Print a fence",
-            "input_preview": '{ "command": "echo ```; deploy --token [REDACTED]" }',
+            "description": "Log in with hunter2",
+            "input_preview": '{ "command": "psql postgres://app:hunter2@db/prod ````" }',
         }
         async with running_channel() as (claude, discord):
             await claude.initialize()
             await discord.next("hello")
             claude.send({"method": PERMISSION_REQUEST, "params": request})
-            notice = (await discord.next("notice"))["message"]
+            status = await discord.next("status_changed")
+            notice = await discord.next("notice")
             leftover = await claude.settle()
 
-        self.assertTrue(notice.startswith("Claude is waiting for approval in the terminal: `Bash`"))
-        self.assertIn("Discord cannot", notice)
-        # One fence around the preview: the one inside it cannot end the block early.
-        self.assertEqual(notice.count("```"), 2)
-        self.assertIn("[REDACTED]", notice)
+        self.assertEqual((status["message"], notice["message"]), (waiting_message(request), waiting_message(request)))
+        self.assertNotIn("hunter2", json.dumps([status, notice]))
         self.assertEqual(leftover, [])
 
 

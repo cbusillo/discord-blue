@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import socket
 import subprocess
 import uuid
@@ -40,7 +41,8 @@ CAPABILITIES = ["reply", "status_request"]
 CHANNEL = "notifications/claude/channel"
 PERMISSION_REQUEST = "notifications/claude/channel/permission_request"
 WAITING_LOCALLY = "Claude Code is waiting for approval in the terminal"
-PREVIEW_LIMIT = 1200
+# Tool names Discord may show: built-in names and MCP names such as mcp__server__tool.
+TOOL_NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 LOST_CLAUDE = "Lost the Claude Code session, so delivery is uncertain. Check the terminal before retrying."
 HOOK_TOOL = {
     "name": "dui_hook_event",
@@ -92,17 +94,10 @@ def host_label() -> str:
     return f"Claude Code on {socket.gethostname().split('.')[0]}"
 
 
-def permission_notice(params: Json) -> str:
-    """Tell Discord a permission prompt is open, showing Claude Code's preview as a preview only."""
-    tool_name = str(params.get("tool_name") or "a tool").replace("`", "")
-    description = str(params.get("description") or "")[:300]
-    # Claude Code masks credentials in this preview; a fence inside it would end the block early.
-    preview = str(params.get("input_preview") or "").replace("```", "`\u200b``")
-    if len(preview) > PREVIEW_LIMIT:
-        preview = preview[:PREVIEW_LIMIT] + " …"
-    lines = [f"Claude is waiting for approval in the terminal: `{tool_name}`", *([description] if description else [])]
-    lines.append("Preview from Claude Code (approve or deny in the terminal; Discord cannot):")
-    return "\n".join([*lines, f"```\n{preview}\n```"])
+def waiting_message(params: Json) -> str:
+    tool_name = params.get("tool_name")
+    shown = tool_name if isinstance(tool_name, str) and TOOL_NAME.fullmatch(tool_name) else "a tool"
+    return f"{WAITING_LOCALLY} ({shown})"
 
 
 def unflagged_notice(session_id: str) -> str:
@@ -150,9 +145,11 @@ class ClaudeSession(AgentSessionClient):
     # Claude Code -> Discord
 
     async def on_permission_request(self, params: Json) -> None:
-        # Never answered from here: the terminal dialog is the only place to approve or deny.
-        self.publish("status_changed", message=f"{WAITING_LOCALLY} ({params.get('tool_name') or 'a tool'})")
-        self.publish("notice", message=permission_notice(params))
+        # Never answered from here: the terminal dialog is the only place to approve or deny. Nothing else
+        # from the request reaches Discord: Claude Code leaves some secrets in its preview unmasked.
+        self.publish("status_changed", message=waiting_message(params))
+        # The thread also gets it as a message, since a status only changes the reaction.
+        self.publish("notice", message=waiting_message(params))
 
     async def on_hook_call(self, arguments: Json, meta: Json) -> str:
         if MODEL_CALL in meta:
