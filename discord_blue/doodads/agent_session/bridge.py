@@ -343,7 +343,7 @@ class AgentSessionBridge:
         self._grace_tasks: set[asyncio.Task[None]] = set()
         # Every change to a session thread (reopen, join, members, notice, archive, leave, rename) goes through its
         # worker, one request at a time and never cancelled.
-        self.threads = ThreadWorkers(self)
+        self.threads = ThreadWorkers.for_client(bot, self)
         # No await occurs while resolving the entry, so one event loop turn
         # cannot create two locks for the same session ID.
         self._session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()

@@ -17,10 +17,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import weakref
 from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from typing import Any, Literal, Protocol, TypeVar
+from typing import Any, Literal, Protocol, TypeVar, cast
 
 import discord
 
@@ -77,10 +78,12 @@ class ThreadWorker:
         # Open: the requests still to send ("reopen", "join", "members"), and who waits for them.
         self.open_steps: list[str] = []
         self.open_waiters: list[asyncio.Future[discord.Thread]] = []
-        # Close: the caller's own step set, updated in place as each step lands, so a caller that stopped waiting
-        # still holds exactly what remains. Steps already tried in this pass are not tried again until the next.
-        self.close_steps: set[CleanupStep] = set()
+        # Close: each caller's own step set, updated in place as each step lands, so a caller that stopped waiting
+        # still holds exactly what remains. Overlapping closes share one pass: a step done once is done for all of
+        # them. Steps already tried in this pass are not tried again until the next.
+        self.close_sets: list[set[CleanupStep]] = []
         self.close_tried: set[str] = set()
+        self.close_done: set[CleanupStep] = set()
         self.close_waiters: list[asyncio.Future[None]] = []
         # Members still to remove in this pass (None until fetched), one request each, so a reopen asked for midway
         # stops the rest; and whether every fetch and removal so far succeeded.
@@ -116,13 +119,14 @@ class ThreadWorker:
             # retry, which finds the thread owned and drops them.
             waiter.set_result(None)
             return waiter
-        if steps is not self.close_steps:
-            # A newer close replaces an older one's steps; the older caller keeps its own record of what remains.
-            self.finish_close()
-            self.close_steps = steps
+        if not self.close_waiters:
+            self.start_close_pass()
+        if all(steps is not joined for joined in self.close_sets):
+            # Joining a pass already under way: what it has done needs no repeating for this caller either.
+            steps.difference_update(self.close_done)
+            self.close_sets.append(steps)
         self.thread = thread
         self.wanted = "closed"
-        self.start_close_pass()
         self.close_waiters.append(waiter)
         self.start()
         return waiter
@@ -177,7 +181,8 @@ class ThreadWorker:
         if self.wanted == "closed" and self.close_waiters and thread is not None:
             if self.pool.hooks.owned(self.thread_id):
                 # A session took the thread back: the close is moot, and nothing of it remains to retry.
-                self.close_steps.difference_update(THREAD_CLOSE_STEPS)
+                for steps in self.close_sets:
+                    steps.difference_update(THREAD_CLOSE_STEPS)
                 self.finish_close()
                 return self.next_request()
             request = self.close_request(thread)
@@ -218,11 +223,13 @@ class ThreadWorker:
             self.fail_open(exc)
 
     def close_request(self, thread: discord.Thread) -> Awaitable[None] | None:
-        steps, untried = self.close_steps, self.close_steps - self.close_tried
+        steps: set[CleanupStep] = set().union(*self.close_sets)
+        untried = steps - self.close_tried
         archived = thread.archived or self.maybe_archived
         if archived and untried & {"disconnect_notice", "members"} and "unarchive" not in self.close_tried:
             # A notice or member change needs the thread open; it is archived again at the end.
-            steps.update({"archive", "leave"})
+            for pending in self.close_sets:
+                pending.update({"archive", "leave"})
             return self.send_close_step("unarchive", self.unarchive_for_close(thread))
         if "disconnect_notice" in untried:
             return self.send_close_step("disconnect_notice", self.pool.hooks.post_close_notice(thread))
@@ -233,7 +240,7 @@ class ThreadWorker:
                 return self.remove_member(thread, self.member_ids.pop(0))
             self.close_tried.add("members")
             if self.members_complete:
-                steps.discard("members")
+                self.close_step_done("members", self.close_sets)
             return self.close_request(thread)
         if "archive" in untried:
             self.maybe_archived = True
@@ -266,12 +273,19 @@ class ThreadWorker:
     async def send_close_step(self, step: str, request: Awaitable[object]) -> None:
         """Send one close request; the step stays pending if it raises."""
         self.close_tried.add(step)
+        callers = list(self.close_sets)  # Also those that stop waiting before it lands.
         try:
             await request
         except Exception:
             logger.warning("Unable to %s Agent session thread %s", CLOSE_STEP_ACTIONS[step], self.thread_id, exc_info=True)
         else:
-            self.close_steps.discard(step)  # type: ignore[arg-type]  # "unarchive" is never in it.
+            if step != "unarchive":
+                self.close_step_done(cast(CleanupStep, step), callers)
+
+    def close_step_done(self, step: CleanupStep, callers: list[set[CleanupStep]]) -> None:
+        self.close_done.add(step)
+        for steps in [*callers, *self.close_sets]:
+            steps.discard(step)
 
     def rename_delay(self) -> float | None:
         """Seconds until a wanted rename may be sent; None when there is none."""
@@ -324,7 +338,7 @@ class ThreadWorker:
     # Settling waiters.
 
     def start_close_pass(self) -> None:
-        self.close_tried = set()
+        self.close_sets, self.close_tried, self.close_done = [], set(), set()
         self.member_ids, self.members_complete = None, True
 
     def finish_close(self) -> None:
@@ -351,6 +365,19 @@ class ThreadWorker:
 
 
 class ThreadWorkers:
+    @classmethod
+    def for_client(cls, client: object, hooks: ThreadHooks) -> ThreadWorkers:
+        """The pool for this Discord client, now answering to `hooks` (the newest bridge).
+
+        A reloaded doodad makes a new bridge on the same client; sharing the pool keeps its requests queued behind
+        any its predecessor left running, as Discord will apply those whether or not anyone still waits.
+        """
+        pool = _POOLS.get(client)
+        if pool is None:
+            pool = _POOLS[client] = cls(hooks)
+        pool.hooks = hooks
+        return pool
+
     def __init__(
         self,
         hooks: ThreadHooks,
@@ -429,3 +456,6 @@ class ThreadWorkers:
 
     def resume(self) -> None:
         self.stopped = False
+
+
+_POOLS: weakref.WeakKeyDictionary[object, ThreadWorkers] = weakref.WeakKeyDictionary()

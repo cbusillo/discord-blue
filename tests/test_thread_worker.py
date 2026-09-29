@@ -279,6 +279,64 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(adopted)
 
+    async def test_a_reloaded_bridge_adds_members_back_only_after_the_old_removal_lands(self) -> None:
+        old_bridge = make_bridge()
+        bot = old_bridge.bot
+        bot.config.agent_session.listen_host, bot.config.agent_session.listen_port = "127.0.0.1", 0
+        bot.config.agent_session.auto_join_user_ids = [7]
+        thread = FakeThread(555, members=[7])
+        removing, release = asyncio.Event(), asyncio.Event()
+        membership: list[str] = []
+
+        async def slow_remove(user: object) -> None:
+            removing.set()
+            await release.wait()
+            membership.append("removed")
+
+        async def add_user(user: object) -> None:
+            membership.append("added")
+
+        with patch.object(thread, "remove_user", new=slow_remove), patch.object(thread, "add_user", new=add_user, create=True):
+            await old_bridge.start()
+            await old_bridge.close_thread(cast(discord.Thread, thread), {"members", "archive", "leave"}, timeout=0)
+            await asyncio.wait_for(removing.wait(), timeout=1)
+            await old_bridge.stop()
+            # The doodad is reloaded: a new bridge on the same bot, and the session reattaches at once.
+            new_bridge = bridge_module.AgentSessionBridge(bot)
+            await new_bridge.start()
+            reopening = asyncio.create_task(new_bridge.threads.open(cast(discord.Thread, thread)))
+            await asyncio.sleep(0.05)
+            release.set()
+            await asyncio.wait_for(reopening, timeout=1)
+            await new_bridge.stop()
+
+        self.assertEqual(membership, ["removed", "added"])
+
+    async def test_overlapping_closes_share_one_pass_and_each_record_sees_what_landed(self) -> None:
+        thread = FakeThread(555)
+        workers = ThreadWorkers(Hooks())
+        posting, release = asyncio.Event(), asyncio.Event()
+        original_send = thread.send
+
+        async def slow_send(content: str | None = None, **kwargs: object) -> object:
+            posting.set()
+            await release.wait()
+            return await original_send(content, **kwargs)
+
+        with patch.object(thread, "send", new=slow_send):
+            ended: set[bridge_module.CleanupStep] = {"disconnect_notice", "archive", "leave"}
+            session_close = asyncio.create_task(workers.close(cast(discord.Thread, thread), ended))
+            await asyncio.wait_for(posting.wait(), timeout=1)
+            # An older orphan record for the same thread is retried while the notice is being posted.
+            orphan: set[bridge_module.CleanupStep] = {"disconnect_notice", "archive", "leave"}
+            orphan_close = asyncio.create_task(workers.close(cast(discord.Thread, thread), orphan))
+            release.set()
+            await asyncio.wait_for(asyncio.gather(session_close, orphan_close), timeout=1)
+
+        self.assertEqual(thread.sent_messages, ["Session ended"])
+        self.assertEqual((ended, orphan), (set(), set()))
+        self.assertTrue(thread.archived)
+
 
 if __name__ == "__main__":
     unittest.main()
