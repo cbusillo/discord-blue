@@ -176,10 +176,9 @@ echoed when present.
 `discord-blue-codex-bridge` attaches to the stock Codex app-server daemon as one
 extra client and opens one agent session per live Codex thread. It needs no Codex
 patch. Each Discord thread is named `🔷 <repo> · <label>`: the Codex thread's
-name, else its first substantial prompt (short go-aheads such as "Continue"
-don't count, as a name or a prompt), else a non-default git branch. Labels are
-short, cut at a word boundary. Renaming the Codex thread renames the Discord
-thread. The bridge mirrors user messages, turn starts, completed turns with the
+name, else its latest substantial prompt (short go-aheads such as "Continue"
+don't count), else a non-default git branch. Renaming the Codex thread renames
+the Discord thread. The bridge mirrors user messages, turn starts, completed turns with the
 final answer, interrupts and errors. From Discord you can reply (stock starts a
 turn or steers the running one), pause, ask for status, answer command approvals,
 and answer `request_user_input` prompts. A command approval shows Codex's
@@ -231,11 +230,8 @@ plugin gives each Claude Code CLI session its own Discord thread next to the
 Codex sessions. Claude Code starts `discord-blue-claude-channel` once per
 session as a [channel](https://code.claude.com/docs/en/channels-reference).
 The thread is named `✳️ <repo> · <label>`: the session name (`-n` or
-`/rename`), else the title Claude Code generates for the session (the one the
-`/resume` picker shows, read from the end of the transcript), else the first
-substantial typed prompt (tags such as pasted content and go-aheads such as
-"continue" don't count), else a non-default git branch. Labels are short, cut at
-a word boundary. It mirrors typed prompts and each turn's final answer. A Discord reply
+`/rename`), else the latest substantial typed prompt (short go-aheads such as
+"continue" don't count), else a non-default git branch. It mirrors typed prompts and each turn's final answer. A Discord reply
 becomes the session's next prompt. When Claude asks for a tool permission, the
 thread says which tool is waiting; approve or deny it in the terminal. The thread archives when the session exits.
 

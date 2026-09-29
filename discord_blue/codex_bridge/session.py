@@ -158,7 +158,7 @@ class ThreadSession(AgentSessionClient):
             self.answers.setdefault(turn_id, []).append((item.get("phase"), item["text"]))
 
     def rename(self, name: object) -> None:
-        """thread/name/updated: a name wins over prompts; clearing it falls back to the first substantial prompt."""
+        """thread/name/updated: a name wins over prompts; clearing it falls back to the latest prompt."""
         if isinstance(name, str) and name.strip():
             self.retitle(name=name)
         else:
