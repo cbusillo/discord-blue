@@ -3499,6 +3499,49 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(thread.sent_messages, [])
 
+    async def test_pasted_assistant_marker_does_not_suppress_backfill(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        pasted = f"Please redo this: {mark_assistant_message('Old answer')}"
+        thread.add_message(FakeReplyMessage(1, thread, pasted))
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+        await bridge.handle_user_message(
+            protocol_module.UserMessage(session_id="session-1", session_epoch="epoch-1", message=pasted)
+        )
+        await bridge.post_thread_notice(555, pasted)
+        sent_before_backfill = len(thread.sent_messages)
+        hello = make_hello()
+        hello.assistant_message = "Recovered answer"
+
+        await bridge.backfill_latest_assistant_message(thread, hello)
+
+        self.assertEqual(thread.sent_messages[sent_before_backfill:], [mark_assistant_message("Recovered answer")])
+
+    async def test_long_fences_keep_every_assistant_message_marked_and_within_limit(self) -> None:
+        config = Config()
+        thread = FakeThread(555)
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        fence = "`" * 300
+        answer = f"{fence}text\n" + "\n".join(f"line {index:04d} " + "x" * 30 for index in range(70)) + f"\n{fence}"
+
+        await bridge.post_assistant_message(555, answer)
+
+        posted = list(thread.sent_messages)
+        self.assertGreater(len(posted), 1)
+        for message in posted:
+            self.assertLessEqual(len(message), bridge_module.DISCORD_MESSAGE_LIMIT)
+            self.assertTrue(is_assistant_message(message))
+            self.assertTrue(message.removesuffix(mark_assistant_message("")).endswith(fence))
+        hello = make_hello()
+        hello.assistant_message = answer
+
+        await bridge.backfill_latest_assistant_message(thread, hello)
+
+        self.assertEqual(thread.sent_messages, posted)
+
     async def test_backfill_ignores_bot_notices_that_are_not_assistant_answers(self) -> None:
         config = Config()
         thread = FakeThread(555)

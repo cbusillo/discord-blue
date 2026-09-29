@@ -3,6 +3,10 @@ from __future__ import annotations
 import time
 import unittest
 
+from discord_blue.doodads.agent_session.chunks import ASSISTANT_TRUNCATED_NOTICE
+from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
+from discord_blue.doodads.agent_session.chunks import MAX_ASSISTANT_CHUNKS
+from discord_blue.doodads.agent_session.chunks import format_assistant_messages
 from discord_blue.doodads.agent_session.formatting import LEGACY_ASSISTANT_LABEL
 from discord_blue.doodads.agent_session.formatting import USER_MESSAGE_PREFIX
 from discord_blue.doodads.agent_session.formatting import WAITING_FOR_DIRECTION
@@ -10,6 +14,7 @@ from discord_blue.doodads.agent_session.formatting import convert_markdown_table
 from discord_blue.doodads.agent_session.formatting import format_user_message
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
 from discord_blue.doodads.agent_session.formatting import mark_assistant_message
+from discord_blue.doodads.agent_session.formatting import strip_assistant_markers
 
 
 class AssistantMarkerTests(unittest.TestCase):
@@ -26,7 +31,7 @@ class AssistantMarkerTests(unittest.TestCase):
         for content in (
             format_user_message("Assistant said **Assistant**"),
             WAITING_FOR_DIRECTION,
-            "​",
+            "\u200b",
             "Plain notice",
         ):
             with self.subTest(content=content):
@@ -138,6 +143,50 @@ class MarkdownTableTests(unittest.TestCase):
         duration = time.perf_counter() - started
         self.assertEqual(converted.count("\n- **row"), rows)
         return duration
+
+    def test_fence_info_strings_follow_gfm(self) -> None:
+        table = "| a | b |\n|---|---|\n| 1 | 2 |"
+        for fenced in (
+            f"```text title=~/README.md\n{table}\n```",
+            f"~~~ js `quoted`\n{table}\n~~~",
+            f"````\n```python\n{table}\n```\n````",
+        ):
+            with self.subTest(fenced=fenced):
+                self.assertEqual(convert_markdown_tables(fenced), fenced)
+
+    def test_backtick_fence_with_backtick_info_is_not_a_fence(self) -> None:
+        self.assertEqual(convert_markdown_tables("``` a`b\n| a | b |\n|---|---|\n| 1 | 2 |"), "``` a`b\n- **1**: 2")
+
+    def test_long_headers_are_not_repeated_without_bound(self) -> None:
+        header = "| Name | " + "h" * 1000 + " | " + "g" * 1000 + " |"
+        rows = [f"| r{index} | a | b |" for index in range(2000)]
+        text = "\n".join([header, "|---|---|---|", *rows])
+
+        started = time.perf_counter()
+        converted = convert_markdown_tables(text)
+        messages = format_assistant_messages(text)
+        duration = time.perf_counter() - started
+
+        self.assertEqual(converted, text)
+        self.assertLessEqual(len(messages), MAX_ASSISTANT_CHUNKS)
+        self.assertLess(duration, 2.0)
+
+
+class AssistantChunkTests(unittest.TestCase):
+    def test_long_answers_stop_at_the_chunk_cap_with_a_notice(self) -> None:
+        messages = format_assistant_messages("word " * 100_000)
+
+        self.assertEqual(len(messages), MAX_ASSISTANT_CHUNKS)
+        self.assertTrue(strip_assistant_markers(messages[-1]).rstrip("\u200b").endswith(ASSISTANT_TRUNCATED_NOTICE))
+        for message in messages:
+            self.assertLessEqual(len(message), DISCORD_MESSAGE_LIMIT)
+            self.assertTrue(is_assistant_message(message))
+
+    def test_pasted_markers_are_removed_from_the_answer_body(self) -> None:
+        pasted = mark_assistant_message("quoted")
+        (message,) = format_assistant_messages(f"{pasted} and more")
+
+        self.assertEqual(message, mark_assistant_message("quoted\u200b and more"))
 
 
 if __name__ == "__main__":

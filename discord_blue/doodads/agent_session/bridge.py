@@ -17,16 +17,15 @@ from typing import Literal, cast
 import discord
 from aiohttp import WSMsgType, web
 
-from discord_blue.doodads.agent_session.formatting import ASSISTANT_MESSAGE_MARKER
-from discord_blue.doodads.agent_session.formatting import MARKDOWN_CODE_FENCE_RE
+from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
+from discord_blue.doodads.agent_session.chunks import format_assistant_messages
 from discord_blue.doodads.agent_session.formatting import WAITING_FOR_DIRECTION
-from discord_blue.doodads.agent_session.formatting import convert_markdown_tables
 from discord_blue.doodads.agent_session.formatting import format_user_message
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
-from discord_blue.doodads.agent_session.formatting import mark_assistant_message
 from discord_blue.doodads.agent_session.messages import edit_agent_session_message
 from discord_blue.doodads.agent_session.messages import agent_session_allowed_mentions
 from discord_blue.doodads.agent_session.messages import send_agent_session_message
+from discord_blue.doodads.agent_session.messages import send_assistant_message
 from discord_blue.doodads.agent_session.protocol import (
     APPROVAL_COMMAND_DISPLAY_LIMIT,
     SERVER_FEATURES,
@@ -69,9 +68,6 @@ REPLY_BEFORE_RECONNECT = (
 )
 SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS = 10
 
-DISCORD_MESSAGE_LIMIT = 2000
-DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
-DISCORD_CODE_FENCE_WRAP_RESERVE = 80
 STARTUP_RECONNECT_GRACE_SECONDS = 20
 SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 1
 SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS = 2
@@ -1253,14 +1249,13 @@ class AgentSessionBridge:
             logger.warning("Unable to inspect Agent session thread %s", thread.id)
         return False
 
-    @staticmethod
-    async def score_session_thread(thread: discord.Thread) -> tuple[int, int, int]:
+    async def score_session_thread(self, thread: discord.Thread) -> tuple[int, int, int]:
         assistant_messages = 0
         messages = 0
         try:
             async for message in thread.history(limit=50):
                 messages += 1
-                if is_assistant_message(message.content):
+                if self.is_bot_assistant_message(message):
                     assistant_messages += 1
         except discord.DiscordException:
             logger.warning("Unable to score Agent session thread %s", thread.id)
@@ -1276,17 +1271,17 @@ class AgentSessionBridge:
         assistant_message = hello.assistant_message
         if assistant_message is None:
             return
-        for message in self.format_assistant_messages(assistant_message):
-            await send_agent_session_message(
-                thread,
-                message[:DISCORD_MESSAGE_LIMIT],
-            )
+        for message in format_assistant_messages(assistant_message):
+            await send_assistant_message(thread, message)
 
-    @staticmethod
-    async def thread_has_assistant_message(thread: discord.Thread) -> bool:
+    def is_bot_assistant_message(self, message: discord.Message) -> bool:
+        bot_user = self.bot.user
+        return bot_user is not None and message.author.id == bot_user.id and is_assistant_message(message.content)
+
+    async def thread_has_assistant_message(self, thread: discord.Thread) -> bool:
         try:
             async for message in thread.history(limit=50):
-                if is_assistant_message(message.content):
+                if self.is_bot_assistant_message(message):
                     return True
         except discord.DiscordException:
             logger.warning("Unable to inspect Agent session assistant history %s", thread.id)
@@ -2353,13 +2348,11 @@ class AgentSessionBridge:
                 await message.remove_reaction(existing, bot_user)
 
     async def post_assistant_message(self, thread_id: int, text: str) -> None:
-        for message in self.format_assistant_messages(text):
-            await self.post_thread_notice(thread_id, message)
-
-    @classmethod
-    def format_assistant_messages(cls, text: str) -> list[str]:
-        chunk_limit = DISCORD_ASSISTANT_CHUNK_LIMIT - len(ASSISTANT_MESSAGE_MARKER)
-        return [mark_assistant_message(chunk) for chunk in cls._split_discord_message(convert_markdown_tables(text), chunk_limit)]
+        channel = self.bot.get_channel(thread_id)
+        if not isinstance(channel, discord.Thread):
+            return
+        for message in format_assistant_messages(text):
+            await send_assistant_message(channel, message)
 
     async def post_session_controls(self, session: AgentSession) -> None:
         if session.thread_id is None:
@@ -3106,71 +3099,3 @@ class AgentSessionBridge:
         except discord.DiscordException:
             logger.warning("Unable to replace Agent session reactions on %s", message_id)
             return False
-
-    @staticmethod
-    def _split_discord_message(text: str, limit: int) -> list[str]:
-        normalized = text.strip()
-        if not normalized:
-            return []
-
-        plain_limit = max(1, limit - DISCORD_CODE_FENCE_WRAP_RESERVE)
-        chunks = AgentSessionBridge._split_discord_message_plain(normalized, plain_limit)
-        return AgentSessionBridge._wrap_split_code_fences(chunks)
-
-    @staticmethod
-    def _split_discord_message_plain(text: str, limit: int) -> list[str]:
-        chunks: list[str] = []
-        remaining = text
-        while len(remaining) > limit:
-            split_at = remaining.rfind("\n", 0, limit)
-            if split_at < limit // 2:
-                split_at = remaining.rfind(" ", 0, limit)
-            if split_at < limit // 2:
-                split_at = limit
-            chunks.append(remaining[:split_at].rstrip())
-            remaining = remaining[split_at:].lstrip()
-        if remaining:
-            chunks.append(remaining)
-        return chunks
-
-    @staticmethod
-    def _wrap_split_code_fences(chunks: list[str]) -> list[str]:
-        wrapped: list[str] = []
-        fence_state: tuple[str, int, str] | None = None
-        for chunk in chunks:
-            prefix = AgentSessionBridge._opening_code_fence(fence_state)
-            next_fence_state = AgentSessionBridge._scan_code_fence_state(chunk, fence_state)
-            suffix = AgentSessionBridge._closing_code_fence(next_fence_state)
-            wrapped.append(f"{prefix}{chunk}{suffix}")
-            fence_state = next_fence_state
-        return wrapped
-
-    @staticmethod
-    def _scan_code_fence_state(text: str, state: tuple[str, int, str] | None) -> tuple[str, int, str] | None:
-        for line in text.splitlines():
-            match = MARKDOWN_CODE_FENCE_RE.match(line.rstrip())
-            if match is None:
-                continue
-            fence = match.group("fence")
-            fence_char = fence[0]
-            fence_length = len(fence)
-            if state is None:
-                info = match.group("info").strip()
-                state = (fence_char, fence_length, info)
-            elif fence_char == state[0] and fence_length >= state[1]:
-                state = None
-        return state
-
-    @staticmethod
-    def _opening_code_fence(state: tuple[str, int, str] | None) -> str:
-        if state is None:
-            return ""
-        fence_char, fence_length, info = state
-        return f"{fence_char * fence_length}{info}\n"
-
-    @staticmethod
-    def _closing_code_fence(state: tuple[str, int, str] | None) -> str:
-        if state is None:
-            return ""
-        fence_char, fence_length, _info = state
-        return f"\n{fence_char * fence_length}"
