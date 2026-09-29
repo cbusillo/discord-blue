@@ -37,7 +37,10 @@ human-readable task name used in the Discord thread name. It is not part of
 reconnect matching. `harness` names the agent (`claude` or `codex`); Discord
 shows its icon first in the thread name, `<icon> <repo> · <title>`, capped at
 100 characters. Without a title the name uses a non-default git branch, and
-otherwise just the repository. Older servers ignore `harness`. Omit `origin` for an interactive
+otherwise just the repository. When another live session would have the same
+name, the branch and then a short session ID tell them apart. Every `hello`
+renames a reused thread whose name is out of date. Older servers ignore
+`harness`. Omit `origin` for an interactive
 session without an automation request. `session_id` must be stable across
 reconnections; `session_epoch` identifies the current running session instance.
 The server responds with `{"type":"hello_ack","thread_id":12345,"features":["command_text"]}`

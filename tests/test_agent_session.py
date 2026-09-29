@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import os
 import importlib
 import subprocess
@@ -645,6 +646,39 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(bridge.rename_target(555, "epoch-0"))
         self.assertIsNone(bridge.rename_target(556, "epoch-1"))
 
+    async def test_hello_renames_an_out_of_date_thread_only_after_attaching_and_outside_its_locks(self) -> None:
+        async with self.transport() as (bridge, thread, client):
+            thread.name = "odoo-tenant-opw · Continue"  # A name from before harness icons.
+            edits_while_attaching: list[bool] = []
+            original_edit = thread.edit
+
+            async def watched_edit(**kwargs: object) -> None:
+                if "name" in kwargs:  # Disconnect cleanup archives under the lock, as on main; only renames matter here.
+                    edits_while_attaching.append(bridge.session_lifecycle_lock("s").locked() or bridge._session_attach_lock.locked())
+                await original_edit(**kwargs)
+
+            thread.edit = watched_edit  # type: ignore[method-assign]
+            websocket = await client.ws_connect("/agent-session/connect", headers={"Authorization": "Bearer transport-test-token"})
+            hello = {"type": "hello", "session_id": "s", "session_epoch": "e", "cwd": "/w/odoo-tenant-opw", "harness": "codex"}
+            await websocket.send_json(hello)
+            ack = await websocket.receive_json(timeout=2)
+            await asyncio.wait_for(asyncio.gather(*list(bridge.renamer.tasks.values())), timeout=2)
+
+        self.assertEqual(ack["type"], "hello_ack")
+        self.assertEqual(thread.name, f"{threads_module.HARNESS_ICONS['codex']} odoo-tenant-opw")
+        # The attach itself makes no Discord edit; the one rename runs afterwards, holding no attach lock.
+        self.assertEqual(edits_while_attaching, [False])
+
+    async def test_a_second_live_session_that_would_share_a_name_gets_a_distinct_one(self) -> None:
+        bridge = AgentSessionBridge(FakeBot(Config(), FakeThread(555)))
+        first = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
+        bridge.sessions.register(first)
+        first.thread_name = bridge.thread_name_for(first.hello)
+        second = dataclasses.replace(make_hello(), session_id="session-2")
+
+        self.assertEqual(first.thread_name, threads_module.session_thread_name(second))
+        self.assertNotEqual(bridge.thread_name_for(second), first.thread_name)
+
     async def test_title_and_notice_events_rename_the_thread_and_post_once(self) -> None:
         async with self.transport() as (bridge, thread, client):
             websocket = await self.connect_transport(client)
@@ -660,8 +694,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             # Renames run in the background, coalesced; wait for this thread's to finish.
             await asyncio.wait_for(asyncio.gather(*list(bridge.renamer.tasks.values())), timeout=2)
 
-        self.assertEqual([edit for edit in thread.edits if "name" in edit], [{"name": thread.name}])
-        self.assertIn("Fix the login bug", thread.name or "")
+        # hello names the (unnamed) thread, then the title renames it.
+        self.assertEqual([edit["name"] for edit in thread.edits if "name" in edit], ["example", "example · Fix the login bug"])
         self.assertEqual(thread.sent_messages.count("Replies are off for this session."), 1)
 
     async def test_a_reply_written_before_a_claude_conversation_switch_never_reaches_the_next_one(self) -> None:

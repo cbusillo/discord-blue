@@ -12,7 +12,8 @@
             "input": {
               "event": "SessionStart",
               "session_id": "${session_id}",
-              "session_title": "${session_title}"
+              "session_title": "${session_title}",
+              "transcript_path": "${transcript_path}"
             }
           }
         ]
@@ -45,7 +46,8 @@
               "event": "UserPromptSubmit",
               "session_id": "${session_id}",
               "session_title": "${session_title}",
-              "prompt": "${prompt}"
+              "prompt": "${prompt}",
+              "transcript_path": "${transcript_path}"
             }
           }
         ]
@@ -107,7 +109,8 @@
             "input": {
               "event": "Stop",
               "session_id": "${session_id}",
-              "last_assistant_message": "${last_assistant_message}"
+              "last_assistant_message": "${last_assistant_message}",
+              "transcript_path": "${transcript_path}"
             }
           }
         ]
