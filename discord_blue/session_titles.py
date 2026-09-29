@@ -18,11 +18,10 @@ import re
 LABEL_LIMIT = 45
 MIN_WORDS = 4
 GO_AHEAD = re.compile(r"(?:(?:continue|go|go on|go ahead|yes|y|ok|okay|sure|proceed|next|keep going|do it)\W*)+", re.IGNORECASE)
-# Only a short label is needed; bounding the input bounds the work on a huge paste.
-INPUT_LIMIT = 64 * 1024
-# One tag: opening, closing or self-closing, such as <pasted_content id="fc27">. [^<>] keeps matches from overlapping.
-TAG = re.compile(r"<(/?)([a-zA-Z][\w-]*)\b[^<>]*?(/?)>")
-# System text Claude Code wraps a prompt in; an unclosed one hides the rest of the prompt.
+# A 45-character label needs only the start of a prompt; bounding the input bounds the work on a huge paste.
+INPUT_LIMIT = 4 * 1024
+# Text Claude Code wraps a prompt in: system output, and pasted or attached content. A label never comes from
+# inside one, and an unclosed one (a paste cut off by the bound above) hides the rest of the prompt.
 WRAPPERS = frozenset(
     {
         "system-reminder",
@@ -35,6 +34,15 @@ WRAPPERS = frozenset(
         "bash-input",
         "bash-stdout",
         "bash-stderr",
+        "pasted_content",
+        "pasted-content",
+        "pasted_text",
+        "paste",
+        "attachment",
+        "attachments",
+        "file",
+        "document",
+        "image",
     }
 )
 URL = re.compile(r"\b(?:https?|ftp)://\S+|\bwww\.\S+", re.IGNORECASE)
@@ -42,27 +50,59 @@ QUOTES = str.maketrans("", "", "\"'`" + "\u2018\u2019\u201c\u201d")
 TRAILING = ",;:-([{" + "\u2013\u2014"
 
 
+def scan_tags(text: str) -> list[tuple[int, int, str, bool, bool]]:
+    """Every tag in text as (start, end, name, closing, self_closing), in one pass with no backtracking.
+
+    A tag is `<`, an optional `/`, a name (a letter, then letters, digits, `_` or `-`), anything but `<` or `>`,
+    then `>`. Each character is looked at a bounded number of times, so hostile input cannot make this slow.
+    """
+    tags: list[tuple[int, int, str, bool, bool]] = []
+    length, position = len(text), 0
+    while (start := text.find("<", position)) != -1:
+        index = start + 1
+        closing = index < length and text[index] == "/"
+        index += closing
+        name_start = index
+        if index < length and text[index].isascii() and text[index].isalpha():
+            index += 1
+            while index < length and (text[index].isascii() and (text[index].isalnum() or text[index] in "_-")):
+                index += 1
+        name = text[name_start:index].lower()
+        if not name:
+            position = start + 1
+            continue
+        # The rest of the tag: stop at the first `<` (a new tag starts there) or `>` (this one ends).
+        end = index
+        while end < length and text[end] not in "<>":
+            end += 1
+        if end >= length or text[end] == "<":
+            position = end  # Not a tag; resume at the next `<` without rescanning.
+            continue
+        tags.append((start, end + 1, name, closing, text[end - 1] == "/"))
+        position = end + 1
+    return tags
+
+
 def strip_tags(text: str) -> str:
-    """Remove every tag and whatever a closed tag pair wraps, in one pass over the (bounded) text."""
+    """Remove every tag and whatever a closed tag pair wraps, in one pass over the bounded text."""
     text = text[:INPUT_LIMIT]
     removed: list[tuple[int, int]] = []
     open_tags: list[tuple[str, int]] = []
     open_counts: dict[str, int] = {}
-    for tag in TAG.finditer(text):
-        closing, name, self_closing = tag.group(1) == "/", tag.group(2).lower(), tag.group(3) == "/"
-        removed.append(tag.span())
+    for start, end, name, closing, self_closing in scan_tags(text):
+        removed.append((start, end))
         if self_closing:
             continue
         if not closing:
-            open_tags.append((name, tag.start()))
+            open_tags.append((name, start))
             open_counts[name] = open_counts.get(name, 0) + 1
         elif open_counts.get(name):
             # Close the nearest matching open tag; unclosed tags inside it (such as <br>) go with it.
             while open_tags:
-                opened, start = open_tags.pop()
+                opened, opened_at = open_tags.pop()
                 open_counts[opened] -= 1
                 if opened == name:
-                    removed.append((start, tag.end()))
+                    removed.append((opened_at, end))
                     break
     for name, start in open_tags:
         if name in WRAPPERS:

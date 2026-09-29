@@ -97,7 +97,9 @@ class SessionLabelTests(unittest.TestCase):
     def test_labels_are_short_plain_and_cut_at_a_word_boundary(self) -> None:
         cases = {
             "Fix the flaky\n  login test": "Fix the flaky login test",
-            '<pasted_content id="fc27"> Summarize this "incident" report for me': "Summarize this incident report for me",
+            '<pasted_content id="fc27">log</pasted_content> Summarize this "incident" report for me': (
+                "Summarize this incident report for me"
+            ),
             "Read https://example.com/very/long/path and fix the failing deploy": "Read and fix the failing deploy",
             "I notice it just says codex-lab and the Codex session shows the repo and continue": (
                 "I notice it just says codex-lab and the Codex"
@@ -115,6 +117,8 @@ class SessionLabelTests(unittest.TestCase):
         pastes = {
             "void tags": "<br>" * 1_000_000 + " Fix the flaky login test",
             "unclosed tags": "<div><span>" * 500_000 + " Fix the flaky login test",
+            # The reviewer's input: one unterminated tag whose name keeps going.
+            "unterminated hyphenated tag": "<" + "a-" * 32768,
         }
         for case, paste in pastes.items():
             with self.subTest(case):
@@ -125,8 +129,15 @@ class SessionLabelTests(unittest.TestCase):
 
     def test_an_unclosed_system_wrapper_hides_the_rest_but_other_tags_do_not(self) -> None:
         self.assertIsNone(substantial("<system-reminder>Follow these rules before you answer the user"))
-        self.assertEqual(substantial('<pasted_content id="fc27"> Summarize this incident report'), "Summarize this incident report")
+        # Pasted content never labels a session, even when its closing tag is missing.
+        self.assertIsNone(substantial('<pasted_content id="fc27"> Summarize this incident report'))
         self.assertEqual(substantial("Fix the <b>bold</b> header <br> spacing today please"), "Fix the header spacing today please")
+
+    def test_a_credential_in_an_oversized_paste_never_reaches_the_label(self) -> None:
+        # The paste outgrows the bounded input, so its closing tag is cut off.
+        prompt = '<pasted_content id="p1">DB_PASSWORD=hunter2-prod-secret ' + "x " * 5000 + "</pasted_content> Fix login"
+        self.assertIsNone(substantial(prompt))
+        self.assertIsNone(SessionLabel(prompt=prompt).current)
 
     def test_precedence_is_name_then_auto_title_then_first_substantial_prompt(self) -> None:
         label = SessionLabel(name="Continue", prompt="Continue")

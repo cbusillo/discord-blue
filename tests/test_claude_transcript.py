@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
@@ -58,3 +59,30 @@ class TranscriptTitlesTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertEqual(await TranscriptTitles().read("/w/session.jsonl"), Titles())
         release.set()
+
+    async def test_repeated_stalled_reads_use_one_worker_and_leave_the_shared_executor_free(self) -> None:
+        release = threading.Event()
+        started = threading.Semaphore(0)
+
+        def stalled(_self: TranscriptTitles, _path: str) -> Titles:
+            started.release()
+            release.wait(5)  # Storage that stopped answering.
+            return Titles(ai="late")
+
+        titles = TranscriptTitles()
+        titles.latest = Titles(ai="Known title")
+        with (
+            patch.object(transcript_module, "READ_TIMEOUT_SECONDS", 0.02),
+            patch.object(TranscriptTitles, "read_now", stalled),
+        ):
+            answers = [await titles.read("/w/session.jsonl") for _ in range(20)]
+            # Other work on the loop's shared executor, such as DNS lookups, still runs at once.
+            shared = await asyncio.wait_for(asyncio.to_thread(lambda: "shared executor free"), timeout=1)
+            workers = len(titles.executor._threads)
+        release.set()
+
+        self.assertEqual(set(answers), {Titles(ai="Known title")})
+        self.assertEqual((shared, workers), ("shared executor free", 1))
+        # Only the first read started; the rest reused the last titles instead of queueing.
+        self.assertTrue(started.acquire(timeout=1))
+        self.assertFalse(started.acquire(timeout=0.1))

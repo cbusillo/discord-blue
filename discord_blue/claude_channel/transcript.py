@@ -5,8 +5,10 @@ session itself (the name the /resume picker shows), and
 `{"type":"custom-title","customTitle":...}` when the user names it with `-n` or
 `/rename`. Hooks give the transcript's path. Only a bounded tail of a regular
 file is read, off the event loop and within a time bound, and the result is
-cached until the file changes. A read that fails or takes too long gives no
-titles.
+cached until the file changes. Reads run on this reader's own single worker,
+never the event loop's shared executor, and at most one is in flight: a read
+stalled on slow storage ties up only that worker, and meanwhile the last titles
+read are used.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import asyncio
 import json
 import os
 import stat
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 TAIL_BYTES = 256 * 1024
@@ -30,15 +33,23 @@ class Titles:
 class TranscriptTitles:
     def __init__(self) -> None:
         self.cached: tuple[tuple[str, int, int], Titles] | None = None
+        self.latest = Titles()
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dui-transcript")
+        self.in_flight: asyncio.Future[Titles] | None = None
 
     async def read(self, path: str) -> Titles:
         """The transcript's titles; a stalled disk must not hold up hooks, Discord controls or heartbeats."""
         if not path.endswith(".jsonl"):
             return Titles()
+        if self.in_flight is not None and not self.in_flight.done():
+            return self.latest  # The previous read is still stuck; do not queue another behind it.
+        self.in_flight = asyncio.get_running_loop().run_in_executor(self.executor, self.read_now, path)
         try:
-            return await asyncio.wait_for(asyncio.to_thread(self.read_now, path), timeout=READ_TIMEOUT_SECONDS)
+            # shield: a timeout abandons the wait, not the read, which finishes on the worker in its own time.
+            self.latest = await asyncio.wait_for(asyncio.shield(self.in_flight), timeout=READ_TIMEOUT_SECONDS)
         except TimeoutError:
-            return Titles()
+            return self.latest
+        return self.latest
 
     def read_now(self, path: str) -> Titles:
         try:
