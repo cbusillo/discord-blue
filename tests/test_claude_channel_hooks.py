@@ -11,6 +11,7 @@ from discord_blue.claude_channel.launch import loaded_as_channel
 from discord_blue.claude_channel.session import CHANNEL, HOOK_TOOL, MODEL_CALL, PERMISSION_REQUEST, waiting_message
 from discord_blue.doodads.agent_session.protocol import SessionHello
 from tests.fakes_discord_blue import FakeDiscordBlue
+from tests.test_thread_titles import HARNESS_PROMPTS
 from tests.test_claude_channel import IDENTITY, FakeClaudeCode, command, running_channel
 
 Json = dict[str, Any]
@@ -65,6 +66,29 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
                 ("turn_complete", "PINEAPPLE"),
                 ("user_message", "Now touch a file."),
                 ("turn_complete", "Done."),
+            ],
+        )
+
+    async def test_prompts_claude_code_injects_are_not_mirrored_and_slash_commands_are_shortened(self) -> None:
+        async with running_channel() as (claude, discord):
+            await claude.initialize()
+            await discord.next("hello")
+            for prompt in HARNESS_PROMPTS.values():
+                await hook(claude, "UserPromptSubmit", prompt=prompt)
+            slash = (
+                "<command-message>review is running…</command-message>\n"
+                "<command-name>/review</command-name>\n<command-args>152</command-args>"
+            )
+            await hook(claude, "UserPromptSubmit", prompt=slash)
+            await hook(claude, "UserPromptSubmit", prompt="Fix the login bug in the auth flow")
+            events = await mirrored(claude, discord)
+
+        self.assertEqual(
+            events,
+            [
+                ("user_message", "/review 152"),
+                ("title_changed", "Fix the login bug in the auth flow"),
+                ("user_message", "Fix the login bug in the auth flow"),
             ],
         )
 

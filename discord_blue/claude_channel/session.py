@@ -35,7 +35,7 @@ from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.claude_channel.launch import ancestry, loaded_as_channel
 from discord_blue.codex_bridge.session import REPLY_LIMIT, TEXT_LIMIT, TURN_DONE
 from discord_blue.claude_channel.transcript import TranscriptTitles
-from discord_blue.session_titles import SessionLabel
+from discord_blue.session_titles import SessionLabel, typed_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -183,9 +183,11 @@ class ClaudeSession(AgentSessionClient):
         if event == "UserPromptSubmit":
             prompt = fields.get("prompt", "")
             echo = prompt.lstrip().startswith("<channel") and any(f'command_id="{c}"' in prompt for c in self.injected)
-            await self.retitle(fields, prompt=None if echo else prompt)
-            if prompt.strip() and not echo:
-                self.publish("user_message", message=clip(prompt))
+            # Claude Code also fires this hook for prompts it injects itself, such as task notifications.
+            typed = None if echo else typed_prompt(prompt)
+            await self.retitle(fields, prompt=typed)
+            if typed is not None and typed.strip():
+                self.publish("user_message", message=clip(typed))
         elif event == "Stop":
             self.publish(
                 "turn_complete", message=TURN_DONE, assistant_message=clip(fields.get("last_assistant_message", "")) or None
