@@ -149,15 +149,16 @@ class ThreadWorker:
     async def run(self) -> None:
         try:
             while not self.pool.stopped:
-                request = self.next_request()
-                if request is not None:
-                    async with self.pool.slots:
+                async with self.pool.slots:
+                    # Chosen only once a slot is ours, so a stop or a newer intent that arrived meanwhile decides it.
+                    request = None if self.pool.stopped else self.next_request()
+                    if request is not None:
                         self.in_flight = True
                         try:
                             await request
                         finally:
                             self.in_flight = False
-                    continue
+                        continue
                 delay = self.rename_delay()
                 if delay is None:
                     return
@@ -415,7 +416,8 @@ class ThreadWorkers:
         """At shutdown: drop everything still wanted and let each worker end after its current request.
 
         Nothing is cancelled. The bot, and its HTTP client, can outlive this bridge (a doodad reload), and a request
-        cancelled during a global rate limit would leave every later request of that client waiting forever.
+        cancelled during a global rate limit would leave every later request of that client waiting forever. For the
+        same reason a restarted bridge keeps these workers (`resume`), so its first requests queue behind the old ones.
         """
         self.stopped = True
         for worker in self.workers.values():
@@ -424,3 +426,6 @@ class ThreadWorkers:
             worker.fail_open(RuntimeError("the Agent session bridge is stopping"))
             worker.finish_close()
             worker.wake.set()
+
+    def resume(self) -> None:
+        self.stopped = False

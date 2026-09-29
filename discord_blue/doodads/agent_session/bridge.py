@@ -345,6 +345,8 @@ class AgentSessionBridge:
         # cannot create two locks for the same session ID.
         self._session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._pending_cleanups: dict[tuple[str, str, int | None], PendingSessionCleanup] = {}
+        # Notifications with a DELETE sent and not yet answered; still visible, but never to be adopted by an attach.
+        self._notifications_being_deleted: set[int] = set()
         self._finalizing_cleanups: set[tuple[str, str, int | None]] = set()
         self._monitor_started_at = time.monotonic()
         self._monitor_last_progress = self._monitor_started_at
@@ -364,8 +366,7 @@ class AgentSessionBridge:
         if self._runner is not None:
             return
         self._stopping = False
-        if self.threads.stopped:
-            self.threads = ThreadWorkers(self)
+        self.threads.resume()
         self._monitor_started_at = time.monotonic()
         self._monitor_last_progress = self._monitor_started_at
         self._monitor_has_run = False
@@ -714,7 +715,8 @@ class AgentSessionBridge:
             old_session, old_notice = observed[thread_id]
             if current is old_session and current.notification_message_id == old_notice:
                 ids = {notice.id for notice in notices}
-                if current.notification_message_id not in ids:
+                notices = [notice for notice in notices if notice.id not in self._notifications_being_deleted]
+                if notices and current.notification_message_id not in ids:
                     # Only adopt if neither the connection nor its notice
                     # changed during discovery. Reconnect always wins.
                     current.notification_message_id = notices[0].id
@@ -732,7 +734,7 @@ class AgentSessionBridge:
             # A newly created thread can have a notice before bind_thread runs.
             return
         try:
-            await self.threads.bounded(message.delete(), SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS)
+            await self.threads.bounded(self.delete_notification_message(message), SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS)
         except discord.NotFound:
             return
         except Exception:
@@ -1088,6 +1090,8 @@ class AgentSessionBridge:
                     continue
                 if not message.content.startswith(SESSION_NOTIFICATION_PREFIXES):
                     continue
+                if message.id in self._notifications_being_deleted:
+                    continue  # Going away: the attach posts a new one instead.
                 if self.notification_thread_id(message.content) == thread_id:
                     return message.id
         except discord.DiscordException:
@@ -2788,13 +2792,21 @@ class AgentSessionBridge:
             message = await channel.fetch_message(message_id)
             if any(session.notification_message_id == message_id for session in self.sessions.by_session.values()):
                 return True  # A reconnect adopted it while this cleanup (perhaps no longer awaited) fetched it.
-            await message.delete()
+            await self.delete_notification_message(message)
         except discord.NotFound:
             return True
         except (discord.DiscordException, ValueError):
             logger.warning("Unable to delete Agent session notification message %s", message_id)
             return False
         return True
+
+    async def delete_notification_message(self, message: discord.Message) -> None:
+        """Delete a notification; until Discord answers (a rate limit can take a while), no attach adopts it."""
+        self._notifications_being_deleted.add(message.id)
+        try:
+            await message.delete()
+        finally:
+            self._notifications_being_deleted.discard(message.id)
 
     async def delete_session_notification_for_thread(self, thread_id: int) -> bool:
         try:
@@ -2818,7 +2830,7 @@ class AgentSessionBridge:
                     continue
                 if self.sessions.get_by_thread(thread_id) is not None:
                     return True  # A reconnect took the thread, and its notification, during the scan.
-                await message.delete()
+                await self.delete_notification_message(message)
                 return True
         except discord.DiscordException:
             logger.warning("Unable to delete Agent session notification for thread %s", thread_id)

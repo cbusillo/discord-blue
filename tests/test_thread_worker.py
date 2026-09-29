@@ -111,6 +111,82 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(notice.deleted, "a cleanup nobody waited for deleted the reconnected session's notification")
 
+    async def test_a_restarted_bridge_reopens_a_thread_only_after_the_old_archive_lands(self) -> None:
+        bridge = make_bridge()
+        bridge.bot.config.agent_session.listen_host, bridge.bot.config.agent_session.listen_port = "127.0.0.1", 0
+        thread = FakeThread(555)
+        archiving, release = asyncio.Event(), asyncio.Event()
+        original_edit = thread.edit
+
+        async def slow_archive(**kwargs: object) -> None:
+            if kwargs.get("archived") is True:
+                archiving.set()
+                await release.wait()
+            await original_edit(**kwargs)
+
+        with patch.object(thread, "edit", new=slow_archive):
+            await bridge.start()
+            await bridge.threads.close(cast(discord.Thread, thread), {"archive"}, timeout=0)
+            await asyncio.wait_for(archiving.wait(), timeout=1)
+            await bridge.stop()
+            await bridge.start()
+            # A session reattaches while the old bridge's archive is still in flight.
+            reopening = asyncio.create_task(bridge.threads.open(cast(discord.Thread, thread)))
+            await asyncio.sleep(0.05)
+            release.set()
+            await asyncio.wait_for(reopening, timeout=1)
+            await bridge.stop()
+
+        self.assertFalse(thread.archived, "the old archive landed after the restarted bridge reopened the thread")
+
+    async def test_a_request_waiting_for_a_slot_is_not_sent_after_stop(self) -> None:
+        busy, idle = FakeThread(1), FakeThread(2)
+        workers = ThreadWorkers(Hooks(), concurrency=1)
+        archiving, release = asyncio.Event(), asyncio.Event()
+        original_edit = busy.edit
+
+        async def slow_edit(**kwargs: object) -> None:
+            archiving.set()
+            await release.wait()
+            await original_edit(**kwargs)
+
+        with patch.object(busy, "edit", new=slow_edit):
+            await workers.close(cast(discord.Thread, busy), {"archive"}, timeout=0)
+            await asyncio.wait_for(archiving.wait(), timeout=1)
+            # The only slot is taken; this archive waits for it, and the bridge stops meanwhile.
+            await workers.close(cast(discord.Thread, idle), {"archive"}, timeout=0)
+            workers.stop()
+            release.set()
+            await asyncio.sleep(0.05)
+
+        self.assertTrue(busy.archived)
+        self.assertFalse(idle.archived, "a request chosen before the stop was sent after it")
+
+    async def test_a_notification_whose_delete_is_still_pending_is_not_adopted(self) -> None:
+        bridge = make_bridge()
+        channel = FakeTextChannel(321, [])
+        notice = add_bot_message(channel, 101, "Agent session connected for `repo`: <#501>")
+        deleting, release = asyncio.Event(), asyncio.Event()
+        original_delete = notice.delete
+
+        async def rate_limited_delete() -> None:
+            deleting.set()
+            await release.wait()  # discord.py sleeping through the DELETE's rate limit.
+            await original_delete()
+
+        with (
+            patch.object(bridge_module, "get_agent_session_channel", return_value=channel),
+            patch.object(notice, "delete", new=rate_limited_delete),
+        ):
+            with self.assertRaises(TimeoutError):
+                await bridge.threads.bounded(bridge.delete_session_notification(notice.id), 0.01)
+            await asyncio.wait_for(deleting.wait(), timeout=1)
+            adopted = await bridge.find_session_notification_for_thread(501)
+            release.set()
+            await asyncio.sleep(0.05)
+
+        self.assertIsNone(adopted, "an attach adopted a notification that was about to be deleted")
+
 
 if __name__ == "__main__":
     unittest.main()
