@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import aiohttp
+import discord
 
-from tests.fake_discord import FakeDiscord
-from tests.test_attach_scenarios import hello_for, marker, scenario, until
+from discord_blue.doodads.agent_session import bridge as bridge_module
+from tests.fake_discord import BOT_ID, FakeDiscord
+from tests.test_attach_scenarios import Scenario, hello_for, marker, scenario, until
 
 DISCOVERY = ("GET", "/channels/{channel}/threads/archived/public")
 
@@ -79,6 +83,71 @@ class AttachTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ack["thread_id"], thread.id)
         self.assertEqual(fake.requests.count(DISCOVERY), discoveries, "the later hello searched for the thread again")
         self.assertFalse(thread.archived)
+
+    async def test_a_connection_joining_after_the_thread_is_bound_is_bound_before_its_ack(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        hello = hello_for("late-joiner")
+        thread = fake.add_thread("late-joiner", marker=marker(hello))
+        async with scenario(fake) as running, aiohttp.ClientSession() as http:
+            backfilling, release = asyncio.Event(), asyncio.Event()
+            original = running.bridge.backfill_latest_assistant_message
+
+            async def slow_backfill(*args: object) -> None:
+                backfilling.set()
+                await release.wait()
+                await original(*args)  # type: ignore[arg-type]
+
+            with patch.object(running.bridge, "backfill_latest_assistant_message", new=slow_backfill):
+                first = await running.connect(http)
+                await first.send_json(hello)
+                await asyncio.wait_for(backfilling.wait(), timeout=5)  # Bound to the first connection by now.
+                second = await running.connect(http)
+                await second.send_json({**hello, "session_epoch": "e2"})
+                await asyncio.sleep(0.1)
+                release.set()
+                ack = await second.receive_json(timeout=10)
+                note = {"type": "notice", "session_id": "late-joiner", "session_epoch": "e2", "message": "from the joiner"}
+                await second.send_json(note)
+                delivered = await until(lambda: any(m.content == "from the joiner" for m in thread.messages), 5)
+                await second.close()
+                await first.close()
+
+        self.assertEqual(ack["thread_id"], thread.id)
+        self.assertTrue(delivered, "the acknowledged connection's events never reached its thread")
+
+    async def test_a_grace_that_ran_out_while_the_reconnect_waited_still_closes_the_thread(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        hello = hello_for("unlucky")
+        thread = fake.add_thread("unlucky", marker=marker(hello), members={BOT_ID})
+        refused = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Discord is refusing")
+        with patch.object(bridge_module, "SESSION_DISCONNECT_GRACE_SECONDS", 0.3):
+            async with scenario(fake) as running, aiohttp.ClientSession() as http:
+                first = await running.connect(http)
+                await first.send_json(hello)
+                await first.receive_json(timeout=10)
+                await first.close()
+                self.assertTrue(await until(lambda: running.bridge.sessions.by_thread != {} and _in_grace(running), 5))
+                # Another session's slow attach holds the attach lock; the reconnect queues behind it.
+                await running.bridge._session_attach_lock.acquire()
+                second = await running.connect(http)
+                await second.send_json({**hello, "session_epoch": "e2"})
+                await asyncio.sleep(0.5)  # The old session's grace runs out meanwhile.
+                with (
+                    patch.object(running.bridge, "resume_thread_in_grace", new=AsyncMock(return_value=None)),
+                    patch.object(running.bridge, "find_or_create_session_thread", new=AsyncMock(side_effect=refused)),
+                ):
+                    running.bridge._session_attach_lock.release()
+                    answer = await second.receive(timeout=10)
+                closed = await until(lambda: thread.archived, timeout=5)
+
+        self.assertEqual(answer.type, aiohttp.WSMsgType.CLOSE)
+        self.assertTrue(closed, "nobody closed the thread of a session whose grace ran out")
+        self.assertEqual(running.bridge.sessions.by_thread, {})
+
+
+def _in_grace(running: Scenario) -> bool:
+    session = running.bridge.sessions.get("unlucky")
+    return session is not None and session.grace_task is not None
 
 
 if __name__ == "__main__":

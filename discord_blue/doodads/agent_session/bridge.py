@@ -914,6 +914,10 @@ class AgentSessionBridge:
                         # A newer connection of this session joined the attach while this one waited; it gets the ack.
                         await websocket.close(message=b"replaced by a newer connection", drain=False)
                         break
+                    if session.thread_id != session_thread.thread.id:
+                        # This connection joined after the attach bound the thread to an earlier one: it is the
+                        # thread's owner now, so it is bound before it is acknowledged.
+                        self.sessions.bind_thread(hello.session_id, session_thread.thread.id, session_thread.notification_message_id)
                     try:
                         await websocket.send_json(
                             {
@@ -1040,6 +1044,9 @@ class AgentSessionBridge:
 
     async def expire_grace(self, session: AgentSession) -> None:
         await asyncio.sleep(SESSION_DISCONNECT_GRACE_SECONDS)
+        await self.end_after_grace(session)
+
+    async def end_after_grace(self, session: AgentSession) -> None:
         # A reconnect replaced this session in the registry; the thread belongs to it now.
         if self.sessions.get(session.session_id) is not session:
             return
@@ -1052,11 +1059,21 @@ class AgentSessionBridge:
             logger.warning("Unable to close Agent session %s after its grace period", session.session_id, exc_info=True)
 
     def restore_grace(self, previous: AgentSession | None) -> None:
-        """A reconnect failed to attach: the session it replaced goes back in grace, so its timer still ends it."""
-        if previous is None or previous.grace_task is None or previous.grace_task.done():
+        """A reconnect failed to attach: the session it replaced goes back in grace, so its timer still ends it.
+
+        If the timer already ran out while the reconnect waited (it stands down for a replacement), the session is
+        ended now instead, so its thread is still closed.
+        """
+        if previous is None or previous.grace_task is None or previous.grace_task.cancelled():
             return
-        if self.sessions.get(previous.session_id) is None:
-            self.sessions.register(previous)
+        if self.sessions.get(previous.session_id) is not None:
+            return
+        self.sessions.register(previous)
+        if previous.grace_task.done():
+            # Not awaited: the failed attach still holds this session's lifecycle lock, which finalize needs.
+            ending = asyncio.create_task(self.end_after_grace(previous), name=f"agent-session-grace-{previous.session_id}")
+            self._grace_tasks.add(ending)
+            ending.add_done_callback(self._grace_tasks.discard)
 
     async def resume_thread_in_grace(self, previous: AgentSession | None, hello: SessionHello) -> SessionThread | None:
         """A reconnect within grace takes its thread back as it is: no discovery, unarchive, joins or notices.
