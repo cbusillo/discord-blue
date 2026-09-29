@@ -222,6 +222,34 @@ class AttachTaskTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(closed, "shutdown left the replaced connection's thread open")
 
+    async def test_a_replaced_connection_put_back_after_a_failed_attach_keeps_its_grace(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        hello = hello_for("unlucky")
+        thread = fake.add_thread("unlucky", marker=marker(hello), members={BOT_ID})
+        refused = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Discord is refusing")
+        async with scenario(fake) as running, aiohttp.ClientSession() as http:
+            first = await running.connect(http)
+            await first.send_json(hello)
+            await first.receive_json(timeout=10)
+            await running.bridge._session_attach_lock.acquire()
+            second = await running.connect(http)
+            await second.send_json({**hello, "session_epoch": "e2"})
+            await asyncio.sleep(0.2)
+            await first.close()  # Handled only now, after the reconnect replaced it.
+            await asyncio.sleep(0.2)
+            with (
+                patch.object(running.bridge, "resume_thread_in_grace", new=AsyncMock(return_value=None)),
+                patch.object(running.bridge, "find_or_create_session_thread", new=AsyncMock(side_effect=refused)),
+            ):
+                running.bridge._session_attach_lock.release()
+                await second.receive(timeout=10)
+            await asyncio.sleep(0.3)
+            restored = running.bridge.sessions.get("unlucky")
+
+        self.assertEqual(restored.session_epoch if restored is not None else None, "e1")
+        self.assertTrue(_in_grace(running), "the restored session is not waiting out its grace")
+        self.assertFalse(thread.archived, "the thread was closed before the restored session's grace ran out")
+
 
 def _in_grace(running: Scenario) -> bool:
     session = running.bridge.sessions.get("unlucky")

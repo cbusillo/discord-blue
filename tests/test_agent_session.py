@@ -21,6 +21,7 @@ from aiohttp import ClientWebSocketResponse, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
 
 from tests.fakes_agent_session import FakeBot
+from tests.test_session_cleanup_progress import wait_until
 from tests.fakes_agent_session import FakeInteraction
 from tests.fakes_agent_session import FakeReplyMessage
 from tests.fakes_agent_session import FakeTextChannel
@@ -892,18 +893,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     "session_epoch": "epoch-2",
                 }
             )
-            removed = asyncio.Event()
-            remove_if_current = bridge.sessions.remove_if_current
-
-            def observe_removal(candidate: object) -> object:
-                result = remove_if_current(candidate)
-                if candidate is retired_session:
-                    removed.set()
-                return result
-
-            with patch.object(bridge.sessions, "remove_if_current", new=observe_removal):
-                await old.close()
-                await asyncio.wait_for(removed.wait(), timeout=2)
+            await old.close()
+            self.assertTrue(await wait_until(lambda: retired_session.websocket.closed))
+            await asyncio.sleep(0.05)  # Room for the old connection's teardown to run.
+            self.assertIsNot(bridge.sessions.get("transport-session"), retired_session)
             self.assertEqual(reply.reactions, [bridge_module.REACTION_QUEUED])
             self.assertFalse(thread.archived)
             await self.send_transport_event(

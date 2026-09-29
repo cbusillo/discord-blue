@@ -663,6 +663,8 @@ class AgentSessionBridge:
         timeout = timedelta(seconds=self.bot.config.agent_session.heartbeat_timeout_seconds)
         now = datetime.now(UTC)
         for session_id, session in list(self.sessions.by_session.items()):
+            if self.sessions.get(session_id) is not session:
+                continue  # Replaced while this sweep ran: the newer connection has its own clock.
             if session.grace_task is not None or not session.acknowledged:
                 continue  # In grace (its timer ends it) or still attaching (heartbeats start at the ack).
             if not session.websocket.closed and now - session.last_seen <= timeout:
@@ -1040,7 +1042,13 @@ class AgentSessionBridge:
 
     async def end_connection(self, session: AgentSession) -> None:
         """A connection closed: a clean end closes the thread now; any other drop waits out a grace period."""
-        if session.ended or session.thread_id is None or self.sessions.get(session.session_id) is not session:
+        if self.sessions.get(session.session_id) is not session:
+            # Replaced: the thread is the newer connection's now. Should that one fail to attach, this one is put back
+            # (restore_replaced), and its grace starts then; ending it here would close the thread under it.
+            with suppress(Exception):
+                await asyncio.wait_for(session.websocket.close(), timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS)
+            return
+        if session.ended or session.thread_id is None:
             await self.finalize_session(session)
             return
         if not session.websocket.closed:
