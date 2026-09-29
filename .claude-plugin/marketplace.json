@@ -1,0 +1,14 @@
+{
+  "name": "discord-blue",
+  "description": "Claude Code plugins that connect sessions to Discord Blue",
+  "owner": {
+    "name": "Chris Busillo"
+  },
+  "plugins": [
+    {
+      "name": "dui",
+      "source": "./claude-plugin/dui",
+      "description": "Mirror each Claude Code session into its own Discord Blue thread, with replies and permission approvals"
+    }
+  ]
+}

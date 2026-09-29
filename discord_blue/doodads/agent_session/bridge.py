@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import re
@@ -21,6 +22,8 @@ from discord_blue.doodads.agent_session.messages import agent_session_allowed_me
 from discord_blue.doodads.agent_session.messages import send_agent_session_message
 from discord_blue.doodads.agent_session.protocol import (
     APPROVAL_COMMAND_DISPLAY_LIMIT,
+    SERVER_FEATURES,
+    command_text_displayable,
     RequestUserInputQuestion,
     RemoteApprovalDecision,
     RemoteApprovalRequest,
@@ -51,6 +54,10 @@ from discord_blue.health import health_payload
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
+REPLY_BEFORE_RECONNECT = (
+    "This reply was written before the agent session reconnected (for example after `/clear` or `/resume`), "
+    "so it was not delivered. Send it again if it still applies."
+)
 SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS = 10
 
 DISCORD_MESSAGE_LIMIT = 2000
@@ -930,6 +937,7 @@ class AgentSessionBridge:
                         await websocket.send_json(
                             {
                                 "type": "hello_ack",
+                                "features": sorted(SERVER_FEATURES),
                                 "thread_id": session_thread.thread.id,
                                 **({"capabilities": sorted(hello.capabilities)} if hello.capabilities is not None else {}),
                             }
@@ -956,6 +964,11 @@ class AgentSessionBridge:
                 elif message_type == "approval_decision_reject":
                     logger.warning("Agent session approval decision reject: %s", payload)
                     await self.handle_approval_decision_reject(payload)
+                elif message_type == "title_changed" and session is not None:
+                    await self.handle_title_changed(session, payload.get("title"))
+                elif message_type == "notice" and session is not None and session.thread_id is not None:
+                    if isinstance(notice := payload.get("message"), str) and notice.strip():
+                        await self.post_thread_notice(session.thread_id, notice)
                 elif message_type == "command_ack":
                     logger.info("Agent session command ack: %s", payload.get("command_id"))
                     await self.handle_command_ack(payload)
@@ -1356,6 +1369,10 @@ class AgentSessionBridge:
         text = message.content.strip()
         if not text or text.startswith("!"):
             return False
+        if message.created_at < session.attached_at:
+            # The client reconnected since (for Claude Code, after /clear or /resume); never deliver it to the new epoch.
+            await message.reply(REPLY_BEFORE_RECONNECT, mention_author=False)
+            return True
 
         command = RemoteCommand(
             command_id=str(uuid.uuid4()),
@@ -1676,15 +1693,23 @@ class AgentSessionBridge:
                 session.thread_id, "Action required in the native TUI; this client does not support answering from Discord."
             )
             return
+        content = self.format_approval_request(approval)
+        if approval.command_text is not None and (
+            not command_text_displayable(approval.command_text)
+            # The reason may be cut short; the command and directory may not.
+            or len(self.format_approval_request(dataclasses.replace(approval, reason=None))) > DISCORD_MESSAGE_LIMIT
+        ):
+            # Never offer to approve a command Discord cannot show exactly and whole.
+            await self.post_thread_notice(
+                session.thread_id, "Action required in the native TUI; Discord cannot show this command in full."
+            )
+            return
 
         channel = self.bot.get_channel(session.thread_id)
         if not isinstance(channel, discord.Thread):
             return
 
-        message = await send_agent_session_message(
-            channel,
-            self.format_approval_request(approval),
-        )
+        message = await send_agent_session_message(channel, content[:DISCORD_MESSAGE_LIMIT])
         await self.add_message_reactions(
             message,
             [REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY],
@@ -2482,6 +2507,21 @@ class AgentSessionBridge:
             if command.message_id == old_message_id:
                 command.message_id = new_message_id
 
+    async def handle_title_changed(self, session: AgentSession, title: object) -> None:
+        """Rename the session thread for a title the client learned after hello, such as its first prompt."""
+        if not isinstance(title, str) or not title.strip() or session.thread_id is None:
+            return
+        session.hello.title = title.strip()
+        channel = self.bot.get_channel(session.thread_id)
+        name = session_thread_name(session.hello)
+        if not isinstance(channel, discord.Thread) or channel.name == name:
+            return
+        try:
+            # Discord allows two renames per thread in ten minutes; never hold this connection for a rate limit.
+            await asyncio.wait_for(channel.edit(name=name), timeout=5)
+        except (discord.DiscordException, TimeoutError):
+            logger.warning("Could not rename Agent session thread %s", session.thread_id)
+
     async def post_thread_notice(self, thread_id: int, text: str) -> None:
         channel = self.bot.get_channel(thread_id)
         if isinstance(channel, discord.Thread):
@@ -2839,7 +2879,11 @@ class AgentSessionBridge:
 
     @staticmethod
     def format_approval_request(approval: RemoteApprovalRequest) -> str:
-        command = shlex.join(approval.command) if approval.command else ""
+        """The approval message, untruncated; a raw command_text is shown verbatim instead of the re-quoted argv."""
+        if approval.command_text is not None:
+            command = approval.command_text
+        else:
+            command = shlex.join(approval.command) if approval.command else ""
         parts = [
             "**Approval requested**",
             "Quick review: `✅` approve · `✖️` deny",
@@ -2850,7 +2894,7 @@ class AgentSessionBridge:
             parts.append(f"cwd: `{approval.cwd}`")
         if approval.reason:
             parts.extend(["", approval.reason[:500]])
-        return "\n".join(parts)[:DISCORD_MESSAGE_LIMIT]
+        return "\n".join(parts)
 
     @staticmethod
     def format_approval_pending(

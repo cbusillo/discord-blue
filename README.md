@@ -179,7 +179,9 @@ patch. Each Discord thread is named after the Codex thread's name or first
 prompt. The bridge mirrors user messages, turn starts, completed turns with the
 final answer, interrupts and errors. From Discord you can reply (stock starts a
 turn or steers the running one), pause, ask for status, answer command approvals,
-and answer `request_user_input` prompts. The bridge answers a Codex request only
+and answer `request_user_input` prompts. A command approval shows Codex's
+command exactly as the shell will run it; one Discord cannot show whole stays
+in the TUI. The bridge answers a Codex request only
 after an explicit Discord decision. The first answer wins, so the TUI can still
 answer. File-change, permission and other requests stay in the TUI. Continue,
 new session and end session are not advertised.
@@ -218,6 +220,64 @@ yourself. Behaviour and limits:
 - Run the stock end-to-end test with
   `CODEX_BIN=/path/to/codex uv run python -m unittest tests.test_codex_bridge_stock`.
   It uses a disposable app-server, synthetic auth and a fake model.
+
+## Claude Code sessions (the dui plugin)
+
+This repository is also a local Claude Code plugin marketplace. Its `dui`
+plugin gives each Claude Code CLI session its own Discord thread next to the
+Codex sessions. Claude Code starts `discord-blue-claude-channel` once per
+session as a [channel](https://code.claude.com/docs/en/channels-reference).
+The thread is named after the session name (`-n` or `/rename`) or the first typed
+prompt. It mirrors typed prompts and each turn's final answer. A Discord reply
+becomes the session's next prompt. When Claude asks for a tool permission, the
+thread says which tool is waiting; approve or deny it in the terminal. The thread archives when the session exits.
+
+One-time setup on the Mac:
+
+```sh
+uv tool install --force /path/to/discord_blue-*.whl  # provides discord-blue-claude-channel
+claude plugin marketplace add ~/Developer/discord-blue
+claude plugin install dui@discord-blue
+# In ~/.zshrc, add the channel flag to the existing alias:
+alias claude='claude --allow-dangerously-skip-permissions --dangerously-load-development-channels plugin:dui@discord-blue'
+```
+
+The channel reads the Codex bridge's `~/.config/discord-blue/codex-bridge.toml`
+(`server_url`, `token_file`, `allow_insecure_ws`); its host label is always
+`Claude Code on <host>`. Each launch shows Claude Code's "Loading development
+channels" warning; press Enter. A session that is already running cannot load
+the channel: `/exit`, then `claude --resume <session id>` through the alias. It
+keeps the same session ID, name and transcript.
+
+Behaviour and limits:
+
+- Custom channels are a Claude Code research preview. Only the
+  `--dangerously-load-development-channels` flag enables one, the flag's
+  warning appears on every launch, and the flag and protocol may change.
+- The plugin loads in every session. A session started without the flag is
+  still mirrored, but Claude Code drops channel messages, so the thread offers
+  no replies and says how to resume with the flag.
+- Discord cannot pause, interrupt or end a Claude Code turn, and cannot answer
+  Claude's multiple-choice questions. A reply sent while Claude is working is
+  held, because Claude Code would otherwise queue it and could deliver it after
+  `/clear` or `/resume`. Held replies go out only when Claude Code reports it is
+  idle: its `idle_prompt` notification, about a minute after Claude finishes and
+  only while nobody is typing in the terminal. Each such moment delivers and
+  acknowledges the oldest held reply; the rest wait for the next. Held replies
+  are dropped, with a notice, if the conversation switches first.
+- Discord cannot approve or deny Claude Code's permission prompts. Claude
+  Code's channel permission request carries only a display preview and no
+  tool-call ID, so a Discord decision could not be tied reliably to the call
+  it would allow. The notice names only the tool: the preview can hold secrets
+  Claude Code does not mask, such as passwords or private keys.
+- `/clear` or `/resume` inside a session keeps its thread but reconnects under a
+  new epoch, so replies sent for the previous conversation are rejected. Discord Blue also refuses a reply written before the session last
+  reconnected, and says so. The thread gets a notice for each switch.
+- Hooks reach the channel through an MCP tool, `dui_hook_event`, which the model
+  can also see. Its description says never to call it, and calls that carry a
+  model tool-use ID are ignored.
+- Background sessions claimed from the Claude Code daemon do not show their
+  launch flags, so they are assumed to have the channel.
 
 ## Launchplane/Dokploy migration target
 

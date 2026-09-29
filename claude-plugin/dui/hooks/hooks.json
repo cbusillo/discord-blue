@@ -1,0 +1,132 @@
+{
+  "description": "Mirror this Claude Code session into its Discord Blue thread through the dui channel server.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "clear|compact",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "SessionStart",
+              "session_id": "${session_id}",
+              "session_title": "${session_title}"
+            }
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "clear|resume",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "SessionEnd",
+              "session_id": "${session_id}"
+            }
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "UserPromptSubmit",
+              "session_id": "${session_id}",
+              "session_title": "${session_title}",
+              "prompt": "${prompt}"
+            }
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "PreToolUse",
+              "session_id": "${session_id}"
+            }
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "PostToolUse",
+              "session_id": "${session_id}"
+            }
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "idle_prompt",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "Notification",
+              "session_id": "${session_id}"
+            }
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "Stop",
+              "session_id": "${session_id}",
+              "last_assistant_message": "${last_assistant_message}"
+            }
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "StopFailure",
+              "session_id": "${session_id}"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

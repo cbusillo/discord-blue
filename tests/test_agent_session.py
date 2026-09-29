@@ -27,6 +27,11 @@ from tests.fakes_agent_session import FakeThread
 from tests.fakes_agent_session import FakeWebSocket
 from tests.fakes_agent_session import add_bot_message
 from tests.fakes_agent_session import make_hello
+from tests.test_claude_channel import IDENTITY as CLAUDE_IDENTITY
+from tests.test_claude_channel import FakeClaudeCode
+
+from discord_blue.claude_channel.__main__ import run_channel
+from discord_blue.codex_bridge.config import BridgeConfig
 
 from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 
@@ -599,7 +604,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await websocket.send_json(
             {"type": "hello", "session_id": "transport-session", "session_epoch": epoch, "cwd": "/workspace/example"}
         )
-        self.assertEqual(await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555})
+        self.assertEqual(
+            await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555, "features": ["command_text"]}
+        )
         return websocket
 
     async def send_transport_event(
@@ -627,6 +634,68 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
             await asyncio.wait_for(handled.wait(), timeout=2)
+
+    async def test_title_and_notice_events_rename_the_thread_and_post_once(self) -> None:
+        async with self.transport() as (bridge, thread, client):
+            websocket = await self.connect_transport(client)
+            payloads: list[dict[str, object]] = [
+                {"type": "title_changed", "title": "Fix the login bug"},
+                {"type": "title_changed", "title": "Fix the login bug"},
+                {"type": "title_changed", "title": "  "},
+                {"type": "notice", "message": "Replies are off for this session."},
+                {"type": "notice", "message": ""},
+            ]
+            for payload in payloads:
+                await self.send_transport_event(bridge, websocket, payload)
+
+        self.assertEqual([edit for edit in thread.edits if "name" in edit], [{"name": thread.name}])
+        self.assertIn("Fix the login bug", thread.name or "")
+        self.assertEqual(thread.sent_messages.count("Replies are off for this session."), 1)
+
+    async def test_a_reply_written_before_a_claude_conversation_switch_never_reaches_the_next_one(self) -> None:
+        async with self.transport() as (bridge, thread, client):
+            config = BridgeConfig(
+                server_url=str(client.make_url("/agent-session/connect")),
+                token="transport-test-token",
+                socket_path=Path("/unused"),
+                host_label="Claude Code on test",
+                reconnect_seconds=0.01,
+            )
+            claude = FakeClaudeCode()
+            channel = asyncio.create_task(run_channel(claude.stdin, claude, config, CLAUDE_IDENTITY))
+            try:
+                await claude.initialize()
+                first = await self.wait_for_session(bridge, CLAUDE_IDENTITY.session_id)
+                written_before = FakeReplyMessage(201, thread, "meant for the first conversation")
+                thread.add_message(written_before)
+                await claude.request(
+                    "tools/call",
+                    {"name": "dui_hook_event", "arguments": {"event": "SessionEnd", "session_id": CLAUDE_IDENTITY.session_id}},
+                )
+                second = await self.wait_for_session(bridge, CLAUDE_IDENTITY.session_id, not_epoch=first.session_epoch)
+                # Discord delivers the old message only now, after the reconnect.
+                self.assertTrue(await bridge.send_thread_reply(written_before))
+                written_after = FakeReplyMessage(202, thread, "for the second conversation")
+                thread.add_message(written_after)
+                self.assertTrue(await bridge.send_thread_reply(written_after))
+                injected = await claude.notification("notifications/claude/channel")
+                leftover = await claude.settle()
+            finally:
+                claude.stdin.feed_eof()
+                await asyncio.wait_for(channel, 5)
+
+        self.assertNotEqual(first.session_epoch, second.session_epoch)
+        self.assertEqual(written_before.replies, [bridge_module.REPLY_BEFORE_RECONNECT])
+        self.assertEqual(injected["content"], "for the second conversation")
+        self.assertEqual(leftover, [])
+
+    async def wait_for_session(self, bridge: SessionBridge, session_id: str, *, not_epoch: str | None = None) -> AgentSessionType:
+        async with asyncio.timeout(5):
+            while True:
+                session = bridge.sessions.get(session_id)
+                if session is not None and session.thread_id is not None and session.session_epoch != not_epoch:
+                    return session
+                await asyncio.sleep(0.01)
 
     async def test_websocket_reply_ack_and_reject_update_discord_message(self) -> None:
         async with self.transport() as (bridge, thread, client):
@@ -1077,7 +1146,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                             "assistant_message": "Last answer",
                         }
                     )
-                    self.assertEqual(await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555})
+                    self.assertEqual(
+                        await websocket.receive_json(timeout=2),
+                        {"type": "hello_ack", "thread_id": 555, "features": ["command_text"]},
+                    )
                     self.assertEqual(thread.sent_messages, ["**Assistant**\nLast answer"])
                     await bridge.send_pause_current_turn(thread, FakeInteraction(thread).user)
                     command = await websocket.receive_json(timeout=2)
@@ -1939,6 +2011,46 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(thread.sent_views[0])
         approval_message = await thread.fetch_message(901)
         self.assertEqual(approval_message.reactions, ["✅", "✖️"])
+
+    async def test_an_approval_shows_the_raw_command_verbatim_or_stays_in_the_tui(self) -> None:
+        # shlex.join would show this as a literal string, while the shell runs the substitution.
+        raw = 'echo "$(touch /tmp/x)" | wc -c'
+        cases = {
+            "raw command shown exactly": (raw, ["echo", "$(touch /tmp/x)", "|", "wc", "-c"], f"```sh\n{raw}\n```"),
+            "older client without it": (None, ["git", "status"], "```sh\ngit status\n```"),
+            "raw command that would break the fence": ("echo '```'", ["echo", "```"], None),
+            "raw command longer than Discord shows": ("x" * (bridge_module.APPROVAL_COMMAND_DISPLAY_LIMIT + 1), ["x"], None),
+            "directory that would push the command out of the message": ("ls", ["ls"], None),
+        }
+        for case, (command_text, argv, shown) in cases.items():
+            with self.subTest(case):
+                thread = FakeThread(555)
+                bridge = AgentSessionBridge(FakeBot(Config(), thread))
+                bridge.sessions.register(AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555))
+                bridge.sessions.bind_thread("session-1", 555)
+                cwd = "/" + "d" * bridge_module.DISCORD_MESSAGE_LIMIT if case.startswith("directory") else "/repo"
+                await bridge.handle_approval_request(
+                    RemoteApprovalRequest(
+                        approval_id="approval-1",
+                        call_id="call-1",
+                        turn_id="turn-1",
+                        session_id="session-1",
+                        session_epoch="epoch-1",
+                        command=argv,
+                        cwd=cwd,
+                        reason="Need approval",
+                        command_text=command_text,
+                    )
+                )
+                [message] = thread.sent_messages
+                session = bridge.sessions.get("session-1")
+                assert session is not None
+                if shown is None:
+                    self.assertIn("Discord cannot show this command in full", message)
+                    self.assertEqual(session.pending_approvals, {})
+                else:
+                    self.assertIn(shown, message)
+                    self.assertEqual(list(session.pending_approvals), ["approval-1"])
 
     async def test_continue_reaction_reuses_control_message_for_status_feedback(self) -> None:
         config = Config()

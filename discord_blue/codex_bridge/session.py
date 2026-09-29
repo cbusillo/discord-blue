@@ -14,18 +14,16 @@ started, and stock can unload the thread once its TUI closes.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import shlex
 import uuid
-from collections import OrderedDict, deque
+from collections import deque
 from typing import Any, Protocol
 
-import aiohttp
-
+from discord_blue.agent_client import AgentSessionClient, Rejected
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.codex_bridge.rpc import RequestId, RpcError, TransportError
-from discord_blue.doodads.agent_session.protocol import APPROVAL_COMMAND_DISPLAY_LIMIT
+from discord_blue.doodads.agent_session.protocol import command_text_displayable
 
 Json = dict[str, Any]
 logger = logging.getLogger(__name__)
@@ -55,10 +53,6 @@ DISCORD_APPROVABLE_FIELDS = frozenset(
         "availableDecisions",
     }
 )
-PROMPT_EVENTS = {"approval_request", "request_user_input"}
-STATUS_EVENTS = {"status_changed", "turn_complete", "error"}
-OUTBOX_LIMIT = 256
-COMMAND_MEMORY = 1024
 TEXT_LIMIT = 32_000
 REPLY_LIMIT = 16_000
 TITLE_LIMIT = 80
@@ -73,8 +67,7 @@ class Rpc(Protocol):
     async def respond(self, request_id: RequestId, result: Json | None = None) -> None: ...
 
 
-class Rejected(Exception):
-    """A control that was not executed, with a reason safe to show in Discord."""
+__all__ = ["Rejected", "Rpc", "ThreadSession", "latest_turn"]
 
 
 def thread_title(thread: Json) -> str | None:
@@ -90,17 +83,14 @@ def command_argv(command: str) -> list[str]:
         return [command]
 
 
-def discord_command(params: Json) -> list[str] | None:
-    """The argv of a plain command approval that Discord can show in full, or None to keep it in the TUI."""
+def discord_command(params: Json) -> str | None:
+    """The command of a plain command approval that Discord can show verbatim and whole, or None to keep it in the TUI."""
     command = params.get("command")
     if params.get("kind", "command") != "command" or not isinstance(command, str):
         return None
     if any(value is not None for key, value in params.items() if key not in DISCORD_APPROVABLE_FIELDS):
         return None
-    argv = command_argv(command)
-    # Discord shows the joined argv in a code fence, truncated; a fence inside it would end the block early.
-    shown = shlex.join(argv)
-    return argv if len(shown) <= APPROVAL_COMMAND_DISPLAY_LIMIT and "```" not in shown else None
+    return command if command_text_displayable(command) else None
 
 
 def is_answer(item: Json) -> bool:
@@ -121,11 +111,15 @@ def user_text(item: Json) -> str:
     return "\n".join(str(part.get("text") or "") for part in item.get("content") or [] if part.get("type") == "text")
 
 
-class ThreadSession:
+class ThreadSession(AgentSessionClient):
+    capabilities = CAPABILITIES
+    command_errors = (RpcError, TransportError)
+
     def __init__(self, config: BridgeConfig, rpc: Rpc, thread: Json, latest: Json) -> None:
-        self.config, self.rpc = config, rpc
+        super().__init__(config, thread["id"])
+        self.config: BridgeConfig = config
+        self.rpc = rpc
         self.thread_id: str = thread["id"]
-        self.epoch = uuid.uuid4().hex
         self.cwd = str(thread.get("cwd") or "")
         self.branch = (thread.get("gitInfo") or {}).get("branch")
         self.title = thread_title(thread)
@@ -140,36 +134,14 @@ class ThreadSession:
             self.reported_turns.append(str(latest["id"]))
             self.seen_items.extend(str(i["id"]) for i in latest.get("items") or [] if i.get("id"))
             self.backfill = final_answer([(i.get("phase"), i["text"]) for i in latest.get("items") or [] if is_answer(i)])
-        self.outbox: deque[Json] = deque()
-        self.wakeup = asyncio.Event()
-        self.stopped = asyncio.Event()
-        self.websocket: aiohttp.ClientWebSocketResponse | None = None
         self.prompts: dict[RequestId, Json] = {}
         self.approvals: dict[str, RequestId] = {}
         self.inputs: dict[str, RequestId] = {}
         self.answered: set[RequestId] = set()
         self.echo_ids: deque[str] = deque(maxlen=64)
         self.answers: dict[str, list[tuple[object, str]]] = {}
-        self.commands: OrderedDict[str, Json] = OrderedDict()
-        self.last_status: Json | None = None
 
     # Codex -> Discord
-
-    def event(self, kind: str, **fields: object) -> Json:
-        return {"type": kind, "session_id": self.thread_id, "session_epoch": self.epoch, **fields}
-
-    def publish(self, kind: str, **fields: object) -> None:
-        event = self.event(kind, **fields)
-        if kind in STATUS_EVENTS:
-            self.last_status = event
-        self.enqueue(event)
-
-    def enqueue(self, event: Json) -> None:
-        if len(self.outbox) >= OUTBOX_LIMIT:
-            logger.warning("Dropping the oldest queued event for thread %s", self.thread_id)
-            self.outbox.popleft()
-        self.outbox.append(event)
-        self.wakeup.set()
 
     def on_turn_started(self, turn_id: str) -> None:
         if turn_id == self.active_turn_id or turn_id in self.reported_turns:
@@ -259,7 +231,9 @@ class ThreadSession:
         if request_id in self.prompts:
             return  # Stock replays pending requests when this connection rejoins.
         turn_id = str(params.get("turnId") or "")
-        if method == COMMAND_APPROVAL and (argv := discord_command(params)) is not None:
+        # A server that did not list command_text would show the re-quoted argv, not Codex's command.
+        shows_command_text = self.server_features is None or "command_text" in self.server_features
+        if method == COMMAND_APPROVAL and shows_command_text and (command := discord_command(params)) is not None:
             approval_id = str(params.get("approvalId") or params.get("itemId") or request_id)
             self.approvals[approval_id] = request_id
             self.prompts[request_id] = self.event(
@@ -267,7 +241,9 @@ class ThreadSession:
                 approval_id=approval_id,
                 call_id=str(params.get("itemId") or ""),
                 turn_id=turn_id,
-                command=argv,
+                # Discord shows command_text verbatim; servers that predate it render this argv instead.
+                command=command_argv(command),
+                command_text=command,
                 cwd=str(params.get("cwd") or self.cwd),
                 reason=params.get("reason"),
             )
@@ -286,6 +262,18 @@ class ThreadSession:
             return
         self.enqueue(self.prompts[request_id])
 
+    def on_server_features(self) -> None:
+        if self.server_features is not None and "command_text" not in self.server_features:
+            self.keep_approvals_local()
+
+    def keep_approvals_local(self) -> None:
+        """Take pending approvals back from a server that would show the re-quoted argv; the TUI still has them."""
+        for request_id, prompt in list(self.prompts.items()):
+            if prompt["type"] == "approval_request":
+                del self.prompts[request_id]
+                self.approvals.pop(str(prompt["approval_id"]), None)
+                self.publish("status_changed", message="Waiting on a decision in the Codex TUI")
+
     def on_resolved(self, request_id: RequestId) -> None:
         prompt = self.prompts.pop(request_id, None)
         if prompt is None:
@@ -301,32 +289,10 @@ class ThreadSession:
 
     # Discord -> Codex
 
-    async def handle_control(self, message: Json) -> Json | None:
-        if message.get("type") == "approval_decision":
-            return await self.approval_decision(message)
-        if message.get("type") != "command":
-            return None
-        command_id = message.get("command_id")
-        if message.get("session_id") != self.thread_id or message.get("session_epoch") != self.epoch:
-            return self.event("command_reject", command_id=command_id, reason="Stale session; the command was not executed.")
-        if not isinstance(command_id, str) or not command_id:
-            return self.event("command_reject", command_id=command_id, reason="Invalid command ID.")
-        if command_id in self.commands:
-            return self.commands[command_id]
-        self.commands[command_id] = self.event("command_reject", command_id=command_id, reason="Command already in progress.")
-        try:
-            await self.run_command(message)
-            response = self.event("command_ack", command_id=command_id)
-        except Rejected as exc:
-            response = self.event("command_reject", command_id=command_id, reason=str(exc))
-        except RpcError:
-            response = self.event("command_reject", command_id=command_id, reason="Codex rejected the command; check the Codex TUI.")
-        except TransportError:
-            response = self.event("command_reject", command_id=command_id, reason=LOST_CODEX)
-        self.commands[command_id] = response
-        while len(self.commands) > COMMAND_MEMORY:
-            self.commands.popitem(last=False)
-        return response
+    def failure_reason(self, exc: Exception) -> str:
+        if isinstance(exc, RpcError):
+            return "Codex rejected the command; check the Codex TUI."
+        return LOST_CODEX
 
     async def run_command(self, message: Json) -> None:
         kind = message.get("kind")
@@ -349,7 +315,7 @@ class ThreadSession:
                 raise Rejected("There is no running turn to pause.")
             await self.rpc.request("turn/interrupt", {"threadId": self.thread_id, "turnId": self.active_turn_id})
         elif kind == "status_request":
-            self.enqueue(dict(self.last_status or self.event("status_changed", message="Connected")))
+            self.enqueue(self.status_snapshot())
         elif kind == "request_user_input_response":
             call_id, response = message.get("call_id"), message.get("response")
             request_id = self.inputs.get(str(call_id))
@@ -372,7 +338,7 @@ class ThreadSession:
         approval_id = str(message.get("approval_id") or "")
         decision = {"approved": "accept", "denied": "decline"}.get(str(message.get("decision")))
         reject = self.event("approval_decision_reject", approval_id=approval_id)
-        if message.get("session_id") != self.thread_id or message.get("session_epoch") != self.epoch:
+        if not self.is_current(message):
             return {**reject, "reason": "Stale session; the decision was not sent."}
         request_id = self.approvals.get(approval_id)
         if request_id is None or decision is None:
@@ -388,78 +354,6 @@ class ThreadSession:
     # Discord Blue connection
 
     def hello(self, *, first: bool) -> Json:
-        hello = self.event("hello", host_label=self.config.host_label, cwd=self.cwd, pid=0, capabilities=CAPABILITIES)
+        hello = self.event("hello", host_label=self.config.host_label, cwd=self.cwd, pid=0, capabilities=self.capabilities)
         optional = {"branch": self.branch, "title": self.title, "assistant_message": self.backfill if first else None}
         return {**hello, **{key: value for key, value in optional.items() if value}}
-
-    async def send(self, websocket: aiohttp.ClientWebSocketResponse, message: Json) -> None:
-        async with asyncio.timeout(15):
-            await websocket.send_json(message)
-
-    async def run(self, http: aiohttp.ClientSession) -> None:
-        headers = {"Authorization": f"Bearer {self.config.token}"}
-        first = True
-        while not self.stopped.is_set():
-            try:
-                async with http.ws_connect(self.config.server_url, headers=headers, max_msg_size=1024 * 1024) as websocket:
-                    self.websocket = websocket
-                    await self.send(websocket, self.hello(first=first))
-                    async with asyncio.timeout(self.config.hello_timeout_seconds):
-                        ack = await websocket.receive_json()
-                    if not isinstance(ack, dict) or ack.get("type") != "hello_ack":
-                        raise ValueError("Discord Blue did not acknowledge the session")
-                    first = False
-                    # Prompts retire on disconnect and on every status event, so replay queued history
-                    # first and then each still-pending prompt once.
-                    self.outbox = deque([*(e for e in self.outbox if e["type"] not in PROMPT_EVENTS), *self.prompts.values()])
-                    self.wakeup.set()
-                    await self.serve(websocket)
-            except aiohttp.WSServerHandshakeError as exc:
-                logger.error("Discord Blue refused thread %s (HTTP %s); check server_url and token", self.thread_id, exc.status)
-            except (aiohttp.ClientError, TimeoutError, OSError, ValueError, TypeError) as exc:
-                logger.warning("Discord Blue connection for thread %s ended: %s", self.thread_id, type(exc).__name__)
-            finally:
-                self.websocket = None
-            try:
-                await asyncio.wait_for(self.stopped.wait(), self.config.reconnect_seconds)
-            except TimeoutError:
-                pass
-
-    async def serve(self, websocket: aiohttp.ClientWebSocketResponse) -> None:
-        async def deliver() -> None:
-            while True:
-                await self.wakeup.wait()
-                self.wakeup.clear()
-                while self.outbox:
-                    await self.send(websocket, self.outbox.popleft())
-
-        async def heartbeat() -> None:
-            while True:
-                await asyncio.sleep(self.config.heartbeat_seconds)
-                await self.send(websocket, self.event("heartbeat"))
-
-        async def controls() -> None:
-            async for frame in websocket:
-                if frame.type != aiohttp.WSMsgType.TEXT:
-                    continue
-                try:
-                    message = json.loads(frame.data)
-                except ValueError:
-                    continue
-                if isinstance(message, dict) and (response := await self.handle_control(message)) is not None:
-                    await self.send(websocket, response)
-
-        tasks = [asyncio.create_task(fn()) for fn in (deliver, heartbeat, controls)]
-        try:
-            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                task.result()
-        finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def stop(self) -> None:
-        self.stopped.set()
-        if self.websocket is not None:
-            await self.websocket.close()

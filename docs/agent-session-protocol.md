@@ -37,8 +37,10 @@ human-readable task name used in the Discord thread name. It is not part of
 reconnect matching. Omit `origin` for an interactive
 session without an automation request. `session_id` must be stable across
 reconnections; `session_epoch` identifies the current running session instance.
-The server responds with `{"type":"hello_ack","thread_id":12345}` after
-attaching the Discord thread. Wait for this acknowledgement before publishing
+The server responds with `{"type":"hello_ack","thread_id":12345,"features":["command_text"]}`
+after attaching the Discord thread. `features` lists what the server supports
+beyond the base protocol; a client must not rely on a feature the server did not
+list, since an older server ignores it and omits `features`. Wait for this acknowledgement before publishing
 other events. Send `heartbeat` at an interval shorter than the configured timeout
 (default 120 seconds). On disconnect or timeout the bridge archives the thread.
 Reconnect discovery includes archived private threads that the bot has left,
@@ -133,14 +135,16 @@ an ID or epoch that differs from the connection's current session.
 | `error` | `message`: user-visible error. |
 | `command_ack` | `command_id`: accepted for execution, not proof of completion. |
 | `command_reject` | `command_id`, `reason`: command could not be accepted. |
-| `approval_request` | `approval_id`, `call_id`, `turn_id`, `command` (argv list), `cwd`, optional `reason`. |
+| `approval_request` | `approval_id`, `call_id`, `turn_id`, `command` (argv list), `cwd`, optional `reason`, optional `command_text` (only when `hello_ack` lists it): the command exactly as the shell runs it. Discord shows `command_text` verbatim instead of the re-quoted argv, and keeps the request in the native TUI when it is longer than 1,600 characters, contains a code fence, or does not fit one message with its directory. |
 | `approval_decision_ack` | `approval_id`: decision submission acknowledged; Discord does not assert the winning outcome. |
 | `approval_resolved` | `approval_id`: retire matching approval with neutral Resolved text. |
 | `request_user_input_resolved` | `call_id`, `turn_id`: retire the exact matching input prompt with neutral Resolved text. |
 | `approval_decision_reject` | `approval_id`, `reason`: decision expired or rejected. |
 | `request_user_input` | `call_id`, `turn_id`, `questions`: question objects described below. |
+| `title_changed` | `title`: a title learned after `hello`, such as the first prompt; the thread is renamed. Discord allows two renames per thread in ten minutes. |
+| `notice` | `message`: plain text posted in the thread, such as why controls are unavailable. |
 
-Older bridges ignore these unknown resolution events.
+Older bridges ignore these unknown resolution, title and notice events.
 
 Resolution events are additive: clients may send them when another subscriber
 answers a shared request. No outcome or actor is inferred. Matching requires the
