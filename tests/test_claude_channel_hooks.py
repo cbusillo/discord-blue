@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from typing import Any
 
 from discord_blue.claude_channel.launch import loaded_as_channel
@@ -66,22 +68,37 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_the_label_is_the_user_set_name_else_the_latest_substantial_prompt(self) -> None:
-        async with running_channel() as (claude, discord):
-            await claude.initialize()
-            await discord.next("hello")
-            # Claude Code leaves a placeholder for a field the hook input does not have.
-            for prompt in ("Fix the login bug\nThen test it.", "continue", "yes go ahead", "Now the logout bug please"):
-                await hook(claude, "UserPromptSubmit", session_title="${session_title}", prompt=prompt)
-            await hook(claude, "SessionStart", session_title="auth-refactor")
-            await hook(claude, "UserPromptSubmit", session_title="auth-refactor", prompt="And also update the docs")
-            events = await mirrored(claude, discord)
+    async def test_the_label_is_the_user_name_else_claudes_ai_title_else_the_first_substantial_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "session.jsonl"
+            transcript.write_text("")
+            path = str(transcript)
+            async with running_channel() as (claude, discord):
+                await claude.initialize()
+                await discord.next("hello")
+                # Claude Code leaves a placeholder for a field the hook input does not have.
+                for prompt in (
+                    '<pasted_content id="fc27">',
+                    "continue",
+                    "Fix the login bug\nThen test it.",
+                    "Now the logout bug please",
+                ):
+                    await hook(claude, "UserPromptSubmit", session_title="${session_title}", prompt=prompt, transcript_path=path)
+                # Claude Code names the session itself as it answers.
+                with transcript.open("a") as lines:
+                    lines.write(json.dumps({"type": "ai-title", "aiTitle": "Login bug triage", "sessionId": "s"}) + "\n")
+                await hook(claude, "Stop", last_assistant_message="Done.", transcript_path=path)
+                # The user names it with /rename.
+                with transcript.open("a") as lines:
+                    lines.write(json.dumps({"type": "custom-title", "customTitle": "auth-refactor", "sessionId": "s"}) + "\n")
+                await hook(claude, "UserPromptSubmit", prompt="And also update the docs", transcript_path=path)
+                events = await mirrored(claude, discord)
 
         self.assertEqual(
             [event for event in events if event[0] == "title_changed"],
             [
                 ("title_changed", "Fix the login bug Then test it."),
-                ("title_changed", "Now the logout bug please"),
+                ("title_changed", "Login bug triage"),
                 ("title_changed", "auth-refactor"),
             ],
         )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +39,20 @@ def session_thread_name(hello: SessionHello) -> str:
     return _truncate_thread_name(f"{prefix}{branch}")
 
 
+def distinct_thread_name(hello: SessionHello, taken: set[str]) -> str:
+    """The session's thread name, told apart from other live sessions' names by branch, then a short ID."""
+    name = session_thread_name(hello)
+    if name not in taken:
+        return name
+    if hello.branch and hello.branch not in name:
+        with_branch = _truncate_thread_name(f"{name} · {hello.branch}")
+        if with_branch not in taken:
+            return with_branch
+    # The end of the session ID: Codex IDs share a time-ordered start.
+    suffix = f" #{hello.session_id[-4:]}"
+    return _truncate_thread_name(name, DISCORD_THREAD_NAME_LIMIT - _discord_length(suffix)) + suffix
+
+
 def session_branch_is_title_worthy(branch: str | None) -> bool:
     return bool(branch and branch.lower() not in DEFAULT_BRANCH_NAMES)
 
@@ -56,15 +71,15 @@ def _discord_length(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-def _truncate_thread_name(name: str) -> str:
+def _truncate_thread_name(name: str, limit: int = DISCORD_THREAD_NAME_LIMIT) -> str:
     # Every character is at least one UTF-16 unit, so nothing past this prefix can fit.
-    name = name[: DISCORD_THREAD_NAME_LIMIT + 1]
-    if _discord_length(name) <= DISCORD_THREAD_NAME_LIMIT:
+    name = name[: limit + 1]
+    if _discord_length(name) <= limit:
         return name
     kept, units = [], 0
     for char in name:
         units += 2 if ord(char) > 0xFFFF else 1
-        if units > DISCORD_THREAD_NAME_LIMIT - 1:
+        if units > limit - 1:
             break
         kept.append(char)
     return "".join(kept).rstrip() + "…"
@@ -119,14 +134,22 @@ async def get_agent_session_channel(bot: BlueBot) -> discord.TextChannel:
     raise ValueError(f"Agent session channel {channel_id} is not available")
 
 
-async def create_session_thread(bot: BlueBot, hello: SessionHello) -> SessionThread:
+async def create_session_thread(
+    bot: BlueBot,
+    hello: SessionHello,
+    name: str | None = None,
+    on_created: Callable[[discord.Thread], None] | None = None,
+) -> SessionThread:
     channel = await get_agent_session_channel(bot)
     thread = await channel.create_thread(
-        name=session_thread_name(hello),
+        name=name or session_thread_name(hello),
         auto_archive_duration=1440,
     )
-    notification = await send_agent_session_message(channel, session_notification_message(hello, thread))
+    if on_created is not None:
+        on_created(thread)
+    # The start message marks the thread as a session thread, so post it first: the stale-thread sweep finds it.
     await send_agent_session_message(thread, session_start_message(hello))
+    notification = await send_agent_session_message(channel, session_notification_message(hello, thread))
     await auto_join_configured_users(bot, thread)
     return SessionThread(thread=thread, notification_message_id=notification.id)
 
