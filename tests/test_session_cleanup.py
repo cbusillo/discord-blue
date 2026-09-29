@@ -59,7 +59,8 @@ class SessionCleanupTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555, members=[111])
         bridge = self.make_bridge(thread)
         cleanup = self.cleanup_record(555, "members", "archive", "leave")
-        with patch.object(bridge, "remove_thread_members", new=AsyncMock(side_effect=[False, True])):
+        refused = discord.Forbidden(response=SimpleNamespace(status=403, reason="Forbidden"), message="cannot remove")
+        with patch.object(thread, "remove_user", new=AsyncMock(side_effect=[refused, None])):
             residual = await bridge.cleanup_session_artifacts(cleanup)
             self.assertIsNotNone(residual)
             self.assertEqual(cast(PendingSessionCleanup, residual).pending_steps, {"members"})

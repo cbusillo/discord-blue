@@ -203,4 +203,3 @@ class CleanupFailureTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(bridge.sessions.by_session, {})
                 if phase == "notification":
                     self.assertTrue(bridge._pending_cleanups)
-                await bridge.threads.close_all()

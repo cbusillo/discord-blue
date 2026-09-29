@@ -52,14 +52,14 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
         add_bot_message(thread, 1, "Agent session connected")
         removing = asyncio.Event()
 
-        async def blocked_members(_thread: object) -> bool:
+        async def blocked_members() -> list[object]:
             removing.set()
             await asyncio.Event().wait()
-            return True
+            return []
 
         with (
             patch.object(bridge_module, "get_agent_session_channel", return_value=channel),
-            patch.object(bridge, "remove_thread_members", new=blocked_members),
+            patch.object(thread, "fetch_members", new=blocked_members),
         ):
             task = asyncio.create_task(bridge.cleanup_stale_session_threads())
             await asyncio.wait_for(removing.wait(), timeout=1)
@@ -152,7 +152,6 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(cancelled.is_set(), "the blocked delete was cancelled instead of left to finish")
         self.assertTrue(later.deleted)
         self.assertTrue(bridge._pending_cleanups)
-        await bridge.threads.close_all()
 
     async def test_notice_changed_during_discovery_is_not_overwritten(self) -> None:
         bridge = make_bridge()

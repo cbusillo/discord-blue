@@ -37,7 +37,6 @@ RENAMES_PER_WINDOW = 2
 CLOSE_STEP_ACTIONS = {
     "unarchive": "reopen (to close)",
     "disconnect_notice": "post the close notice in",
-    "members": "remove members from",
     "archive": "archive",
     "leave": "leave",
 }
@@ -61,9 +60,11 @@ class ThreadHooks(Protocol):
         """The thread to rename, only while the session epoch that asked still owns it."""
         ...
 
-    async def post_close_notice(self, thread: discord.Thread) -> None: ...
+    def bot_user_id(self) -> int | None:
+        """The bot's own member ID, never removed from a thread."""
+        ...
 
-    async def remove_members(self, thread: discord.Thread) -> bool: ...
+    async def post_close_notice(self, thread: discord.Thread) -> None: ...
 
     async def add_configured_members(self, thread: discord.Thread) -> None: ...
 
@@ -81,6 +82,10 @@ class ThreadWorker:
         self.close_steps: set[CleanupStep] = set()
         self.close_tried: set[str] = set()
         self.close_waiters: list[asyncio.Future[None]] = []
+        # Members still to remove in this pass (None until fetched), one request each, so a reopen asked for midway
+        # stops the rest; and whether every fetch and removal so far succeeded.
+        self.member_ids: list[int] | None = None
+        self.members_complete = True
         # Our own archive may have landed (or be about to) without discord.py's cached thread saying so yet.
         self.maybe_archived = False
         self.name: tuple[str, str] | None = None
@@ -117,7 +122,7 @@ class ThreadWorker:
             self.close_steps = steps
         self.thread = thread
         self.wanted = "closed"
-        self.close_tried = set()
+        self.start_close_pass()
         self.close_waiters.append(waiter)
         self.start()
         return waiter
@@ -143,7 +148,7 @@ class ThreadWorker:
 
     async def run(self) -> None:
         try:
-            while True:
+            while not self.pool.stopped:
                 request = self.next_request()
                 if request is not None:
                     async with self.pool.slots:
@@ -221,7 +226,14 @@ class ThreadWorker:
         if "disconnect_notice" in untried:
             return self.send_close_step("disconnect_notice", self.pool.hooks.post_close_notice(thread))
         if "members" in untried:
-            return self.send_close_step("members", self.pool.hooks.remove_members(thread))
+            if self.member_ids is None:
+                return self.fetch_members(thread)
+            if self.member_ids:
+                return self.remove_member(thread, self.member_ids.pop(0))
+            self.close_tried.add("members")
+            if self.members_complete:
+                steps.discard("members")
+            return self.close_request(thread)
         if "archive" in untried:
             self.maybe_archived = True
             return self.send_close_step("archive", thread.edit(archived=True, locked=True, reason="Agent session ended"))
@@ -229,19 +241,35 @@ class ThreadWorker:
             return self.send_close_step("leave", thread.leave())
         return None
 
+    async def fetch_members(self, thread: discord.Thread) -> None:
+        try:
+            members: list[Any] = list(await thread.fetch_members())
+        except Exception:
+            logger.warning("Unable to list members of Agent session thread %s", self.thread_id, exc_info=True)
+            self.members_complete = False
+            members = list(thread.members)  # The cached members are still worth removing.
+        bot_user_id = self.pool.hooks.bot_user_id()
+        self.member_ids = [member.id for member in members if member.id != bot_user_id]
+
+    async def remove_member(self, thread: discord.Thread, member_id: int) -> None:
+        try:
+            await thread.remove_user(discord.Object(id=member_id))
+        except Exception:
+            logger.warning("Unable to remove user %s from Agent session thread %s", member_id, self.thread_id)
+            self.members_complete = False
+
     async def unarchive_for_close(self, thread: discord.Thread) -> None:
         await thread.edit(archived=False, locked=False, reason="Preparing to close Agent session thread")
         self.maybe_archived = False
 
     async def send_close_step(self, step: str, request: Awaitable[object]) -> None:
-        """Send one close request; the step stays pending if it raises or reports failure (returns False)."""
+        """Send one close request; the step stays pending if it raises."""
         self.close_tried.add(step)
         try:
-            succeeded = await request is not False
+            await request
         except Exception:
             logger.warning("Unable to %s Agent session thread %s", CLOSE_STEP_ACTIONS[step], self.thread_id, exc_info=True)
-            return
-        if succeeded:
+        else:
             self.close_steps.discard(step)  # type: ignore[arg-type]  # "unarchive" is never in it.
 
     def rename_delay(self) -> float | None:
@@ -281,8 +309,8 @@ class ThreadWorker:
         except discord.RateLimited as exc:
             # Too long a wait for discord.py to sleep through: try this name again once Discord allows it,
             # unless a newer one was asked for meanwhile.
+            # The thread still has the name it was last given, so applied_name stays as it is.
             self.rename_not_before = self.pool.clock() + exc.retry_after
-            self.applied_name = None
             if self.name is None:
                 self.name = (name, epoch)
         except Exception:
@@ -294,9 +322,13 @@ class ThreadWorker:
 
     # Settling waiters.
 
+    def start_close_pass(self) -> None:
+        self.close_tried = set()
+        self.member_ids, self.members_complete = None, True
+
     def finish_close(self) -> None:
         waiters, self.close_waiters = self.close_waiters, []
-        self.close_tried = set()
+        self.start_close_pass()
         if self.wanted == "closed":
             self.wanted = None
         for waiter in waiters:
@@ -329,6 +361,7 @@ class ThreadWorkers:
         self.slots = asyncio.Semaphore(concurrency)
         self.workers: dict[int, ThreadWorker] = {}
         self.background: set[asyncio.Task[Any]] = set()
+        self.stopped = False
 
     def worker(self, thread_id: int) -> ThreadWorker:
         for idle in [key for key, worker in self.workers.items() if key != thread_id and worker.idle]:
@@ -378,15 +411,16 @@ class ThreadWorkers:
             # Also retrieved (and raised) by a caller still waiting; logged for one that stopped.
             logger.debug("Agent session Discord request failed: %r", exc)
 
-    async def close_all(self) -> None:
-        """At shutdown only: drop wanted renames and stop every worker and request still running."""
-        tasks: list[asyncio.Task[Any]] = [*self.background]
+    def stop(self) -> None:
+        """At shutdown: drop everything still wanted and let each worker end after its current request.
+
+        Nothing is cancelled. The bot, and its HTTP client, can outlive this bridge (a doodad reload), and a request
+        cancelled during a global rate limit would leave every later request of that client waiting forever.
+        """
+        self.stopped = True
         for worker in self.workers.values():
             worker.name = None
-            if worker.task is not None:
-                tasks.append(worker.task)
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        self.workers.clear()
-        self.background.clear()
+            worker.open_steps = []
+            worker.fail_open(RuntimeError("the Agent session bridge is stopping"))
+            worker.finish_close()
+            worker.wake.set()

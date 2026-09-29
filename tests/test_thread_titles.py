@@ -241,8 +241,8 @@ class RenameOnlyHooks:
     async def post_close_notice(self, _thread: discord.Thread) -> None:
         raise AssertionError("renames only")
 
-    async def remove_members(self, _thread: discord.Thread) -> bool:
-        raise AssertionError("renames only")
+    def bot_user_id(self) -> int | None:
+        return None
 
     async def add_configured_members(self, _thread: discord.Thread) -> None:
         raise AssertionError("renames only")
@@ -251,7 +251,7 @@ class RenameOnlyHooks:
 class ThreadRenameTests(unittest.IsolatedAsyncioTestCase):
     def workers(self, resolve: Callable[[int, str], FakeThread | None], clock: FakeClock) -> ThreadWorkers:
         workers = ThreadWorkers(RenameOnlyHooks(resolve), clock=clock)
-        self.addAsyncCleanup(workers.close_all)
+        self.addCleanup(workers.stop)
         return workers
 
     @staticmethod
@@ -298,6 +298,18 @@ class ThreadRenameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread.edits, [])
         await self.pass_time(workers, clock, 1.0)
         self.assertEqual(thread.edits, ["new"])
+
+    async def test_a_rate_limited_rename_back_to_the_cached_name_is_still_retried(self) -> None:
+        thread, clock = FakeThread("A", cache_updates=False), FakeClock()
+        workers = self.workers(lambda _thread_id, _epoch: thread, clock)
+        workers.rename(1, "B", "epoch-1")
+        await self.settle()
+        # Discord shows B, the cache still says A; the rename back to A is rate limited.
+        thread.rate_limited_for = 45.0
+        workers.rename(1, "A", "epoch-1")
+        await self.settle()
+        await self.pass_time(workers, clock, 45.0)
+        self.assertEqual(thread.edits, ["B", "A"])
 
     async def test_a_thread_without_a_live_session_is_not_renamed(self) -> None:
         workers = self.workers(lambda _thread_id, _epoch: None, FakeClock())

@@ -364,6 +364,8 @@ class AgentSessionBridge:
         if self._runner is not None:
             return
         self._stopping = False
+        if self.threads.stopped:
+            self.threads = ThreadWorkers(self)
         self._monitor_started_at = time.monotonic()
         self._monitor_last_progress = self._monitor_started_at
         self._monitor_has_run = False
@@ -484,7 +486,7 @@ class AgentSessionBridge:
         await self.stop_background_task("heartbeat", self._heartbeat_task)
         self._heartbeat_task = None
         await self.disconnect_active_sessions()
-        await self.threads.close_all()
+        self.threads.stop()
         try:
             await asyncio.wait_for(self._runner.cleanup(), timeout=SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS)
         except TimeoutError:
@@ -2592,8 +2594,8 @@ class AgentSessionBridge:
     async def post_close_notice(self, thread: discord.Thread) -> None:
         await send_agent_session_message(thread, SESSION_ENDED_NOTICE)
 
-    async def remove_members(self, thread: discord.Thread) -> bool:
-        return await self.remove_thread_members(thread)
+    def bot_user_id(self) -> int | None:
+        return self.bot.user.id if self.bot.user is not None else None
 
     async def add_configured_members(self, thread: discord.Thread) -> None:
         await auto_join_configured_users(self.bot, thread)
@@ -2784,6 +2786,8 @@ class AgentSessionBridge:
         try:
             channel = await get_agent_session_channel(self.bot)
             message = await channel.fetch_message(message_id)
+            if any(session.notification_message_id == message_id for session in self.sessions.by_session.values()):
+                return True  # A reconnect adopted it while this cleanup (perhaps no longer awaited) fetched it.
             await message.delete()
         except discord.NotFound:
             return True
@@ -2812,6 +2816,8 @@ class AgentSessionBridge:
                     continue
                 if mention not in message.content:
                     continue
+                if self.sessions.get_by_thread(thread_id) is not None:
+                    return True  # A reconnect took the thread, and its notification, during the scan.
                 await message.delete()
                 return True
         except discord.DiscordException:
@@ -2841,30 +2847,6 @@ class AgentSessionBridge:
         except discord.DiscordException:
             return None
         return fetched if isinstance(fetched, discord.Thread) else None
-
-    async def remove_thread_members(self, thread: discord.Thread) -> bool:
-        bot_user = self.bot.user
-        bot_user_id = bot_user.id if bot_user is not None else None
-        success = True
-        try:
-            members = await thread.fetch_members()
-        except discord.DiscordException:
-            success = False
-            members = thread.members
-
-        for member in members:
-            if member.id == bot_user_id:
-                continue
-            try:
-                await thread.remove_user(discord.Object(id=member.id))
-            except discord.DiscordException:
-                success = False
-                logger.warning(
-                    "Unable to remove user %s from Agent session thread %s",
-                    member.id,
-                    thread.id,
-                )
-        return success
 
     def is_operator(self, user: discord.User | discord.Member) -> bool:
         role_name = self.bot.config.agent_session.operator_role_name or self.bot.config.discord.employee_role_name

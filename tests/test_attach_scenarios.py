@@ -100,7 +100,7 @@ async def scenario(fake: FakeDiscord, **agent_session: object) -> AsyncIterator[
             finally:
                 for grace in list(bridge._grace_tasks):
                     grace.cancel()
-                await bridge.threads.close_all()
+                bridge.threads.stop()
                 await runner.cleanup()
 
 
