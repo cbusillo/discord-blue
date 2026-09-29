@@ -362,7 +362,7 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
             done = {"threadId": "root", "turn": {"id": "t1", "status": "completed", "items": [answer]}}
             await bridge.dispatch({"method": "turn/completed", "params": done})
             await bridge.dispatch({"method": "turn/completed", "params": done})
-            events = [await discord.next() for _ in range(3)]
+            events = [await discord.next() for _ in range(4)]
             self.assertTrue(discord.received.empty())
 
             await bridge.dispatch(status("root", "idle"))
@@ -373,6 +373,7 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
             [
                 ("status_changed", "Turn started", None),
                 ("user_message", "typed in the TUI", None),
+                ("title_changed", "typed in the TUI", None),
                 ("turn_complete", TURN_DONE, "Fixed it."),
             ],
         )

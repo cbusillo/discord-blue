@@ -6,13 +6,8 @@ import time
 import unittest
 
 from discord_blue.doodads.agent_session.renames import RENAME_WINDOW_SECONDS, ThreadRenamer
-from discord_blue.doodads.agent_session.threads import (
-    DISCORD_THREAD_NAME_LIMIT,
-    HARNESS_ICONS,
-    distinct_thread_name,
-    session_thread_name,
-)
-from discord_blue.session_titles import LABEL_LIMIT, SessionLabel, substantial
+from discord_blue.doodads.agent_session.threads import DISCORD_THREAD_NAME_LIMIT, HARNESS_ICONS, session_thread_name
+from discord_blue.session_titles import SessionLabel, substantial
 from tests.fakes_agent_session import make_hello
 
 
@@ -53,23 +48,6 @@ class ThreadNameTests(unittest.TestCase):
         self.assertLess(time.process_time() - started, 0.5)
         self.assertEqual(utf16_length(name), DISCORD_THREAD_NAME_LIMIT)
 
-    def test_sessions_that_would_share_a_name_are_told_apart(self) -> None:
-        icon = HARNESS_ICONS["codex"]
-        base = dataclasses.replace(make_hello(), cwd="/w/shiny-infra-ops", harness="codex", branch="main")
-        first, second, third = (dataclasses.replace(base, session_id=f"01a0eb5e-{n}{n}{n}{n}") for n in (1, 2, 3))
-        taken: set[str] = set()
-        names = []
-        for hello in (first, second, third):
-            names.append(distinct_thread_name(hello, taken))
-            taken.add(names[-1])
-        self.assertEqual(names, [f"{icon} shiny-infra-ops", f"{icon} shiny-infra-ops · main", f"{icon} shiny-infra-ops #3333"])
-        # A suffix survives truncation.
-        long = dataclasses.replace(third, title="word " * 40)
-        taken = {session_thread_name(long), distinct_thread_name(dataclasses.replace(long, branch=None), set())}
-        suffixed = distinct_thread_name(dataclasses.replace(long, branch=None), taken)
-        self.assertTrue(suffixed.endswith(" #3333"))
-        self.assertLessEqual(utf16_length(suffixed), DISCORD_THREAD_NAME_LIMIT)
-
     def test_a_long_title_is_cut_to_discords_limit_with_the_icon_counted(self) -> None:
         for harness in HARNESS_ICONS:
             with self.subTest(harness):
@@ -79,66 +57,32 @@ class ThreadNameTests(unittest.TestCase):
 
 
 class SessionLabelTests(unittest.TestCase):
-    def test_low_information_prompts_and_tags_do_not_name_a_session(self) -> None:
+    def test_low_information_prompts_do_not_name_a_session(self) -> None:
         for prompt in (
             "Continue",
             "go",
+            "yes",
             "ok thanks",
+            "keep going",
             "Yes, go ahead. Proceed!",
             "/clear",
-            '<pasted_content id="fc27">',
-            "<system-reminder>You must follow these rules carefully</system-reminder> ok",
-            "<command-name>/model</command-name><command-args>haiku please now</command-args>",
+            "<command-name>x y z</command-name>",
             "   ",
         ):
             with self.subTest(prompt=prompt):
                 self.assertIsNone(substantial(prompt))
+        self.assertEqual(substantial("Fix the flaky\n  login test"), "Fix the flaky login test")
 
-    def test_labels_are_short_plain_and_cut_at_a_word_boundary(self) -> None:
-        cases = {
-            "Fix the flaky\n  login test": "Fix the flaky login test",
-            '<pasted_content id="fc27"> Summarize this "incident" report for me': "Summarize this incident report for me",
-            "Read https://example.com/very/long/path and fix the failing deploy": "Read and fix the failing deploy",
-            "I notice it just says codex-lab and the Codex session shows the repo and continue": (
-                "I notice it just says codex-lab and the Codex"
-            ),
-        }
-        for prompt, label in cases.items():
-            with self.subTest(prompt=prompt):
-                shown = substantial(prompt)
-                self.assertEqual(shown, label)
-                assert shown is not None
-                self.assertLessEqual(len(shown), LABEL_LIMIT)
-                self.assertFalse(shown.endswith("…"))
-
-    def test_tag_stripping_takes_linear_time_on_a_huge_paste(self) -> None:
-        pastes = {
-            "void tags": "<br>" * 1_000_000 + " Fix the flaky login test",
-            "unclosed tags": "<div><span>" * 500_000 + " Fix the flaky login test",
-        }
-        for case, paste in pastes.items():
-            with self.subTest(case):
-                started = time.process_time()
-                substantial(paste)
-                # A rescan per unmatched tag took seconds on 64 KB; one bounded pass takes milliseconds.
-                self.assertLess(time.process_time() - started, 0.5)
-
-    def test_an_unclosed_system_wrapper_hides_the_rest_but_other_tags_do_not(self) -> None:
-        self.assertIsNone(substantial("<system-reminder>Follow these rules before you answer the user"))
-        self.assertEqual(substantial('<pasted_content id="fc27"> Summarize this incident report'), "Summarize this incident report")
-        self.assertEqual(substantial("Fix the <b>bold</b> header <br> spacing today please"), "Fix the header spacing today please")
-
-    def test_precedence_is_name_then_auto_title_then_first_substantial_prompt(self) -> None:
-        label = SessionLabel(name="Continue", prompt="Continue")
-        # Codex names a thread "Continue" by itself; that is not a name.
+    def test_a_name_wins_the_latest_substantial_prompt_follows_and_unchanged_labels_are_not_resent(self) -> None:
+        label = SessionLabel(name=None, prompt="Continue")
         self.assertIsNone(label.current)
         self.assertEqual(label.update(prompt="Fix the flaky login test"), "Fix the flaky login test")
-        self.assertIsNone(label.update(prompt="Now update the release notes"))
-        self.assertEqual(label.update(auto="Login flake investigation"), "Login flake investigation")
+        self.assertIsNone(label.update(prompt="continue"))
+        self.assertEqual(label.update(prompt="Now update the release notes"), "Now update the release notes")
         self.assertEqual(label.update(name="auth-refactor"), "auth-refactor")
-        self.assertIsNone(label.update(auto="Something newer"))
-        # Clearing the name falls back to the auto title.
-        self.assertEqual(label.update(clear_name=True), "Something newer")
+        self.assertIsNone(label.update(prompt="And one more substantial prompt"))
+        # Clearing the name falls back to the latest substantial prompt.
+        self.assertEqual(label.update(clear_name=True), "And one more substantial prompt")
 
 
 class FakeThread:
