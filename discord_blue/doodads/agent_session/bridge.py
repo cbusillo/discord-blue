@@ -11,6 +11,7 @@ import uuid
 import weakref
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
@@ -62,7 +63,11 @@ REPLY_BEFORE_RECONNECT = (
 )
 SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS = 10
 # Attaching a thread holds the session lifecycle lock, so it must finish well inside a reconnect's wait for it.
+# Only the short, mutating part runs under the locks: finding a reusable thread reads the history of every
+# candidate thread and the parent channel, which took about 30 s in production, so it runs before the locks.
 SESSION_ATTACH_TIMEOUT_SECONDS = 8
+# Discovery holds no lock; it only has to answer before the client stops waiting for hello_ack (90 s).
+SESSION_DISCOVERY_TIMEOUT_SECONDS = 60
 THREAD_REOPEN_TIMEOUT_SECONDS = 3
 # Retry a reopen that hit a rate limit; Discord's rename window is ten minutes.
 THREAD_REOPEN_RETRY_SECONDS = (30, 60, 120, 300, 600)
@@ -338,6 +343,14 @@ class RequestUserInputView(discord.ui.View):
         )
 
 
+@dataclass(frozen=True, slots=True)
+class Discovered:
+    """What discovery found before attaching: a reusable thread, if any, and its parent-channel notification."""
+
+    thread: discord.Thread | None
+    notification_message_id: int | None
+
+
 class AgentSessionBridge:
     def __init__(self, bot: BlueBot) -> None:
         self.bot = bot
@@ -349,6 +362,8 @@ class AgentSessionBridge:
         self._session_attach_lock = asyncio.Lock()
         self.renamer = ThreadRenamer(self.rename_target)
         self._reopen_tasks: set[asyncio.Task[None]] = set()
+        # Threads a hello has discovered but not yet bound; the stale-thread sweep leaves them alone.
+        self._claimed_threads: set[int] = set()
         # No await occurs while resolving the entry, so one event loop turn
         # cannot create two locks for the same session ID.
         self._session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
@@ -495,9 +510,7 @@ class AgentSessionBridge:
             return
         self._stopping = True
         await self.renamer.close()
-        for task in list(self._reopen_tasks):
-            task.cancel()
-        await asyncio.gather(*self._reopen_tasks, return_exceptions=True)
+        await self.stop_reopen_tasks()
         await self.stop_background_task("maintenance", self._cleanup_task)
         self._cleanup_task = None
         await self.stop_background_task("heartbeat", self._heartbeat_task)
@@ -814,6 +827,7 @@ class AgentSessionBridge:
             async with lock:
                 if (
                     thread.id in self.sessions.by_thread
+                    or thread.id in self._claimed_threads
                     or self._session_attach_lock.locked()
                     or self.has_pending_cleanup_for_thread(thread.id)
                 ):
@@ -907,6 +921,19 @@ class AgentSessionBridge:
                     rejecting_stopping_session = False
                     attachment_failed = False
                     session_thread: SessionThread | None = None
+                    try:
+                        discovered = await asyncio.wait_for(
+                            self.discover_session_thread(hello), timeout=SESSION_DISCOVERY_TIMEOUT_SECONDS
+                        )
+                    except (discord.DiscordException, ValueError, TimeoutError) as exc:
+                        logger.warning(
+                            "Unable to find a Discord thread for Agent session %s: %s",
+                            hello.session_id,
+                            type(exc).__name__,
+                            exc_info=True,
+                        )
+                        await websocket.close(message=b"unable to find Discord thread", drain=False)
+                        break
                     lifecycle_lock = self.session_lifecycle_lock(hello.session_id)
                     try:
                         await asyncio.wait_for(lifecycle_lock.acquire(), timeout=SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS)
@@ -915,19 +942,25 @@ class AgentSessionBridge:
                         await websocket.close(message=b"session cleanup still in progress", drain=False)
                         break
                     try:
-                        # Discord can hold a request for minutes behind a rate limit. One deadline covers waiting
-                        # for the global attach lock and the attach itself, so the lifecycle lock is released
-                        # well before a reconnect gives up waiting for it.
+                        # Discord can hold a request for minutes behind a rate limit, so this session's own
+                        # attach work is bounded, releasing the lifecycle lock well before a reconnect gives up
+                        # waiting for it. Independent sessions do not queue behind each other here: only
+                        # creating a new thread takes the global attach lock.
                         async with asyncio.timeout(SESSION_ATTACH_TIMEOUT_SECONDS):
-                            async with self._session_attach_lock:
-                                if self._stopping:
-                                    rejecting_stopping_session = True
-                                else:
-                                    session = AgentSession(hello=hello, websocket=websocket)
-                                    self.sessions.register(session)
-                                    session_thread = await self.attach_session_thread(session)
-                    except (discord.DiscordException, ValueError, TimeoutError):
-                        logger.warning("Unable to attach Discord thread for Agent session %s", hello.session_id)
+                            if self._stopping:
+                                rejecting_stopping_session = True
+                            else:
+                                session = AgentSession(hello=hello, websocket=websocket)
+                                self.sessions.register(session)
+                                session_thread = await self.attach_session_thread(session, discovered)
+                    except (discord.DiscordException, ValueError, TimeoutError) as exc:
+                        # The reason matters: a bare warning hid a deadline that every attach missed.
+                        logger.warning(
+                            "Unable to attach Discord thread for Agent session %s: %s",
+                            hello.session_id,
+                            type(exc).__name__,
+                            exc_info=True,
+                        )
                         if session is not None:
                             self.abandon_attach(session)
                         session = None
@@ -935,6 +968,8 @@ class AgentSessionBridge:
                         attachment_failed = True
                     finally:
                         lifecycle_lock.release()
+                        if discovered.thread is not None:
+                            self._claimed_threads.discard(discovered.thread.id)
                     if attachment_failed:
                         await websocket.close(message=b"unable to attach Discord thread", drain=False)
                         break
@@ -995,14 +1030,25 @@ class AgentSessionBridge:
 
         return websocket
 
-    async def attach_session_thread(self, session: AgentSession) -> SessionThread:
+    async def discover_session_thread(self, hello: SessionHello) -> Discovered:
+        """The slow, read-only part of attaching: a reusable thread and its notification. Holds no lock."""
+        thread = await self.find_existing_session_thread(hello)
+        if thread is None:
+            return Discovered(thread=None, notification_message_id=None)
+        # Until the attach binds it, keep the stale-thread sweep from archiving the thread this session found.
+        self._claimed_threads.add(thread.id)
+        return Discovered(thread=thread, notification_message_id=await self.find_session_notification_for_thread(thread.id))
+
+    async def attach_session_thread(self, session: AgentSession, discovered: Discovered | None = None) -> SessionThread:
         session.thread_name = self.thread_name_for(session.hello)
 
         def created(thread: discord.Thread) -> None:
             # Known at once, so an attach cut short can still clean up the thread it made.
             session.created_thread_id = thread.id
 
-        session_thread = await self.find_or_create_session_thread(session.hello, name=session.thread_name, on_created=created)
+        session_thread = await self.find_or_create_session_thread(
+            session.hello, name=session.thread_name, on_created=created, discovered=discovered
+        )
         self.sessions.bind_thread(session.session_id, session_thread.thread.id, session_thread.notification_message_id)
         await self.backfill_latest_assistant_message(session_thread.thread, session.hello)
         return session_thread
@@ -1045,17 +1091,22 @@ class AgentSessionBridge:
         hello: SessionHello,
         name: str | None = None,
         on_created: Callable[[discord.Thread], None] | None = None,
+        discovered: Discovered | None = None,
     ) -> SessionThread:
-        thread = await self.find_existing_session_thread(hello)
+        if discovered is None:
+            discovered = await self.discover_session_thread(hello)
+        thread = discovered.thread or self.thread_bound_to(hello.session_id)
         if thread is None:
-            session_thread = await create_session_thread(self.bot, hello, name, on_created)
-            thread_lock = self.thread_lifecycle_lock(session_thread.thread.id)
-            async with thread_lock:
-                self.sessions.bind_thread(
-                    hello.session_id,
-                    session_thread.thread.id,
-                    session_thread.notification_message_id,
-                )
+            # The stale-thread sweep defers while this lock is held: a new thread is marked before it is bound.
+            async with self._session_attach_lock:
+                session_thread = await create_session_thread(self.bot, hello, name, on_created)
+                thread_lock = self.thread_lifecycle_lock(session_thread.thread.id)
+                async with thread_lock:
+                    self.sessions.bind_thread(
+                        hello.session_id,
+                        session_thread.thread.id,
+                        session_thread.notification_message_id,
+                    )
             return session_thread
 
         thread_lock = self.thread_lifecycle_lock(thread.id)
@@ -1070,9 +1121,22 @@ class AgentSessionBridge:
             else:
                 # Discord refuses joins on an archived thread; reopen and join later instead of failing the attach.
                 self.reopen_later(thread, hello.session_id)
-            notification_message_id = await self.ensure_session_notification(hello, thread)
+            notification_message_id = discovered.notification_message_id
+            if discovered.thread is not thread:
+                notification_message_id = await self.ensure_session_notification(hello, thread)
+            elif notification_message_id is None:
+                # Discovery already scanned the parent channel; post without scanning it again under the lock.
+                notification_message_id = await self.post_session_notification(hello, thread)
             self.sessions.bind_thread(hello.session_id, thread.id, notification_message_id)
             return SessionThread(thread=thread, notification_message_id=notification_message_id)
+
+    def thread_bound_to(self, session_id: str) -> discord.Thread | None:
+        """A thread an earlier attach of this session bound while this one was still discovering."""
+        for thread_id, owner in self.sessions.by_thread.items():
+            if owner == session_id:
+                channel = self.bot.get_channel(thread_id)
+                return channel if isinstance(channel, discord.Thread) else None
+        return None
 
     async def reopen_thread(self, thread: discord.Thread) -> bool:
         """Unarchive and unlock a thread within a short bound; False if it is still closed."""
@@ -1088,6 +1152,12 @@ class AgentSessionBridge:
             logger.warning("Could not reopen Agent session thread %s yet; retrying in the background", thread.id)
             return False
         return True
+
+    async def stop_reopen_tasks(self) -> None:
+        tasks = list(self._reopen_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def reopen_later(self, thread: discord.Thread, session_id: str) -> None:
         task = asyncio.create_task(self.retry_reopen(thread, session_id), name=f"agent-session-reopen-{thread.id}")
@@ -1114,6 +1184,9 @@ class AgentSessionBridge:
         existing_message_id = await self.find_session_notification_for_thread(thread.id)
         if existing_message_id is not None:
             return existing_message_id
+        return await self.post_session_notification(hello, thread)
+
+    async def post_session_notification(self, hello: SessionHello, thread: discord.Thread) -> int | None:
         try:
             channel = await get_agent_session_channel(self.bot)
             message = await send_agent_session_message(channel, session_notification_message(hello, thread))

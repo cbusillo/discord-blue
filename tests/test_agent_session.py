@@ -657,6 +657,49 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.thread_name, threads_module.session_thread_name(second))
         self.assertNotEqual(bridge.thread_name_for(second), first.thread_name)
 
+    async def test_six_sessions_reconnecting_at_once_after_a_restart_all_attach(self) -> None:
+        """Production after #145: discovery took ~30 s against an 8 s attach deadline, so every attach failed."""
+        config = Config()
+        config.agent_session.token = "restart-token"
+        channel = FakeTextChannel(config.agent_session.channel_id or config.discord.bot_channel_id, [])
+        bridge = AgentSessionBridge(FakeBot(config, None, channel=channel))
+        threads = {f"session-{n}": FakeThread(1000 + n, archived=True, joined=False) for n in range(6)}
+        stuck = asyncio.Event()
+
+        async def rate_limited_edit(**_kwargs: object) -> None:
+            await stuck.wait()  # One thread's edits sit behind a rename rate limit.
+
+        threads["session-0"].edit = rate_limited_edit  # type: ignore[method-assign]
+
+        async def slow_discovery(hello: SessionHelloType) -> FakeThread:
+            await asyncio.sleep(0.3)  # Reading every candidate thread's history: scaled from ~30 s.
+            return threads[hello.session_id]
+
+        async def slow_notification_scan(_thread_id: int) -> None:
+            await asyncio.sleep(0.1)  # Scanning the parent channel's history.
+
+        app = web.Application()
+        bridge.register_routes(app)
+        with (
+            patch.object(bridge_module, "SESSION_ATTACH_TIMEOUT_SECONDS", 0.2),  # Scaled from 8 s.
+            patch.object(bridge_module, "THREAD_REOPEN_TIMEOUT_SECONDS", 0.05),
+            patch.object(bridge, "find_existing_session_thread", new=slow_discovery),
+            patch.object(bridge, "find_session_notification_for_thread", new=slow_notification_scan),
+        ):
+            async with TestClient(TestServer(app)) as client:
+
+                async def reconnect(session_id: str) -> dict[str, object]:
+                    websocket = await client.ws_connect("/agent-session/connect", headers={"Authorization": "Bearer restart-token"})
+                    await websocket.send_json({"type": "hello", "session_id": session_id, "session_epoch": "e", "cwd": "/w/repo"})
+                    return cast(dict[str, object], await websocket.receive_json(timeout=5))
+
+                acks = await asyncio.gather(*(reconnect(session_id) for session_id in threads))
+                attached = dict(bridge.sessions.by_thread)
+                await bridge.stop_reopen_tasks()
+
+        self.assertEqual([ack["type"] for ack in acks], ["hello_ack"] * 6)
+        self.assertEqual(attached, {thread.id: session_id for session_id, thread in threads.items()})
+
     async def test_hello_brings_an_existing_threads_old_name_up_to_date(self) -> None:
         async with self.transport() as (bridge, thread, client):
             thread.name = "workspace · Continue"  # A name from before harness icons.
@@ -723,7 +766,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             created = FakeThread(777)
 
             async def create_then_stall(
-                _hello: object, name: object = None, on_created: Callable[[object], None] | None = None
+                _hello: object, name: object = None, on_created: Callable[[object], None] | None = None, discovered: object = None
             ) -> object:
                 assert on_created is not None
                 on_created(created)
@@ -743,21 +786,51 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(bridge.has_pending_cleanup_for_thread(777))
             self.assertEqual((bridge.sessions.get("s"), bridge.sessions.by_thread), (None, {}))
 
-    async def test_the_attach_deadline_includes_waiting_for_other_attaches(self) -> None:
-        async with self.transport() as (bridge, _thread, client):
-            await bridge._session_attach_lock.acquire()  # Another session's slow attach.
-            try:
-                with patch.object(bridge_module, "SESSION_ATTACH_TIMEOUT_SECONDS", 0.05):
-                    websocket = await client.ws_connect(
-                        "/agent-session/connect", headers={"Authorization": "Bearer transport-test-token"}
-                    )
+    async def test_a_reattach_does_not_queue_behind_another_sessions_thread_creation(self) -> None:
+        config = Config()
+        config.agent_session.token = "t"
+        thread = FakeThread(555)
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        app = web.Application()
+        bridge.register_routes(app)
+        found = bridge_module.Discovered(thread=cast(Any, thread), notification_message_id=1)
+        await bridge._session_attach_lock.acquire()  # Another session is creating its thread.
+        try:
+            with (
+                patch.object(bridge_module, "SESSION_ATTACH_TIMEOUT_SECONDS", 0.2),
+                patch.object(bridge, "discover_session_thread", new=AsyncMock(return_value=found)),
+            ):
+                async with TestClient(TestServer(app)) as client:
+                    websocket = await client.ws_connect("/agent-session/connect", headers={"Authorization": "Bearer t"})
+                    await websocket.send_json({"type": "hello", "session_id": "s", "session_epoch": "e", "cwd": "/w/repo"})
+                    ack = await websocket.receive_json(timeout=2)
+        finally:
+            bridge._session_attach_lock.release()
+
+        self.assertEqual((ack["type"], ack["thread_id"]), ("hello_ack", 555))
+
+    async def test_a_creation_that_cannot_start_in_time_releases_the_session_lock(self) -> None:
+        config = Config()
+        config.agent_session.token = "t"
+        bridge = AgentSessionBridge(FakeBot(config, FakeThread(555)))
+        app = web.Application()
+        bridge.register_routes(app)
+        nothing = bridge_module.Discovered(thread=None, notification_message_id=None)
+        await bridge._session_attach_lock.acquire()  # Another session's creation outlasts this one's bound.
+        try:
+            with (
+                patch.object(bridge_module, "SESSION_ATTACH_TIMEOUT_SECONDS", 0.05),
+                patch.object(bridge, "discover_session_thread", new=AsyncMock(return_value=nothing)),
+            ):
+                async with TestClient(TestServer(app)) as client:
+                    websocket = await client.ws_connect("/agent-session/connect", headers={"Authorization": "Bearer t"})
                     await websocket.send_json({"type": "hello", "session_id": "s", "session_epoch": "e", "cwd": "/w/repo"})
                     closed = await websocket.receive(timeout=2)
-            finally:
-                bridge._session_attach_lock.release()
+        finally:
+            bridge._session_attach_lock.release()
 
-            self.assertEqual(closed.type, WSMsgType.CLOSE)
-            self.assertFalse(bridge.session_lifecycle_lock("s").locked())
+        self.assertEqual(closed.type, WSMsgType.CLOSE)
+        self.assertFalse(bridge.session_lifecycle_lock("s").locked())
 
     async def test_a_new_thread_is_marked_as_a_session_thread_before_its_notification_is_posted(self) -> None:
         config = Config()

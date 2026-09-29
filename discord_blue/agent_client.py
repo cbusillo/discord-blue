@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import uuid
 from collections import OrderedDict, deque
 from typing import Any, ClassVar, Protocol
@@ -182,7 +183,8 @@ class AgentSessionClient:
             finally:
                 self.websocket = None
             try:
-                await asyncio.wait_for(self.stopped.wait(), self.config.reconnect_seconds)
+                # Jitter spreads the reconnects of many sessions after a server restart instead of repeating one wave.
+                await asyncio.wait_for(self.stopped.wait(), self.config.reconnect_seconds * random.uniform(0.5, 1.5))
             except TimeoutError:
                 pass
 
