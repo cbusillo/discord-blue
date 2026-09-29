@@ -20,30 +20,43 @@ MIN_WORDS = 4
 GO_AHEAD = re.compile(r"(?:(?:continue|go|go on|go ahead|yes|y|ok|okay|sure|proceed|next|keep going|do it)\W*)+", re.IGNORECASE)
 # A 45-character label needs only the start of a prompt; bounding the input bounds the work on a huge paste.
 INPUT_LIMIT = 4 * 1024
-# Text Claude Code wraps a prompt in: system output, and pasted or attached content. A label never comes from
-# inside one, and an unclosed one (a paste cut off by the bound above) hides the rest of the prompt.
-WRAPPERS = frozenset(
+# Tags that open a prompt Claude Code injected itself rather than one the user typed: task and subagent
+# notifications, reminders, and local command output. Such a prompt is neither mirrored nor used as a label.
+HARNESS_TAGS = frozenset(
     {
+        "task-notification",
+        "agent-message",
         "system-reminder",
         "local-command-stdout",
         "local-command-stderr",
-        "command-name",
-        "command-message",
-        "command-args",
-        "channel",
-        "bash-input",
+        "local-command-caveat",
         "bash-stdout",
         "bash-stderr",
-        "pasted_content",
-        "pasted-content",
-        "pasted_text",
-        "paste",
-        "attachment",
-        "attachments",
-        "file",
-        "document",
-        "image",
+        "user-prompt-submit-hook",
     }
+)
+# The tags Claude Code wraps a typed slash command in.
+SLASH_COMMAND_TAGS = frozenset({"command-name", "command-message", "command-args"})
+# Text Claude Code wraps a prompt in: system output, and pasted or attached content. A label never comes from
+# inside one, and an unclosed one (a paste cut off by the bound above) hides the rest of the prompt.
+WRAPPERS = (
+    HARNESS_TAGS
+    | SLASH_COMMAND_TAGS
+    | frozenset(
+        {
+            "channel",
+            "bash-input",
+            "pasted_content",
+            "pasted-content",
+            "pasted_text",
+            "paste",
+            "attachment",
+            "attachments",
+            "file",
+            "document",
+            "image",
+        }
+    )
 )
 URL = re.compile(r"\b(?:https?|ftp)://\S+|\bwww\.\S+", re.IGNORECASE)
 QUOTES = str.maketrans("", "", "\"'`" + "\u2018\u2019\u201c\u201d")
@@ -115,6 +128,37 @@ def strip_tags(text: str) -> str:
         position = max(position, end)
     kept.append(text[position:])
     return " ".join(kept)
+
+
+def typed_prompt(prompt: str) -> str | None:
+    """What the user typed, for mirroring: None for a prompt Claude Code injected, `/name args` for a slash
+    command, else the prompt unchanged. Only a bounded prefix is scanned."""
+    text = prompt.lstrip()[:INPUT_LIMIT]
+    if not text.startswith("<"):
+        return prompt
+    tags = scan_tags(text)
+    if not tags or tags[0][0] != 0:
+        return prompt
+    first = tags[0][2]
+    if first in HARNESS_TAGS:
+        return None
+    if first not in SLASH_COMMAND_TAGS:
+        return prompt
+    parts: dict[str, str] = {}
+    opened: dict[str, int] = {}
+    for start, end, name, closing, _self_closing in tags:
+        if name not in ("command-name", "command-args") or name in parts:
+            continue
+        if not closing:
+            opened[name] = end
+        elif name in opened:
+            parts[name] = " ".join(text[opened[name] : start].split())
+    command = parts.get("command-name", "")
+    if not command:
+        return None
+    if not command.startswith("/"):
+        command = f"/{command}"
+    return f"{command} {parts.get('command-args', '')}".rstrip()
 
 
 def clean(text: str) -> str:
