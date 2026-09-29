@@ -13,7 +13,7 @@ so it can post Claude Code's own (credential-masked) preview as a notice.
 The plugin's hooks call ``dui_hook_event`` on this server to mirror typed
 prompts, final answers and titles. Claude Code queues channel messages while a
 turn runs and keeps them across ``/clear`` and ``/resume``, so Discord replies
-are held until the turn ends. When the conversation ends or changes, the session
+are held until Claude Code reports it is idle. When the conversation ends or changes, the session
 takes a new epoch, so Discord controls meant for the old conversation are
 rejected.
 """
@@ -185,12 +185,11 @@ class ClaudeSession(AgentSessionClient):
             self.publish(
                 "turn_complete", message=TURN_DONE, assistant_message=clip(fields.get("last_assistant_message", "")) or None
             )
-            await self.release_held()
+            # Not idle yet: another plugin's Stop hook may still keep Claude working.
         elif event == "StopFailure":
             self.publish("error", message="Claude Code ended the turn with an error; check the terminal.")
-            await self.release_held()
         elif event == "Notification":
-            # idle_prompt: Claude Code is waiting for input, which also covers a turn interrupted without Stop.
+            # idle_prompt: Claude Code has been waiting for input for about a minute, the only confirmed idle signal.
             await self.release_held()
         elif event == "SessionStart":
             self.retitle(fields.get("session_title") or "")
@@ -210,8 +209,10 @@ class ClaudeSession(AgentSessionClient):
         ended = "The Claude Code conversation in this thread ended (/clear or /resume)"
         self.publish("notice", message=f"{ended}; earlier replies from Discord are no longer accepted.")
         if dropped:
-            waiting = f"{dropped} Discord {'reply was' if dropped == 1 else 'replies were'} waiting for the turn to end"
-            self.publish("notice", message=f"{waiting} and not delivered. Send again if still needed.")
+            waiting = f"{dropped} Discord {'reply was' if dropped == 1 else 'replies were'} waiting for Claude Code to be idle"
+            self.publish(
+                "notice", message=f"{waiting} and {'was' if dropped == 1 else 'were'} not delivered. Send again if still needed."
+            )
 
     def retitle(self, text: str) -> None:
         title = thread_title({"name": text})
@@ -228,7 +229,7 @@ class ClaudeSession(AgentSessionClient):
         await self.notify(CHANNEL, {"content": text, "meta": {"command_id": command_id}})
 
     async def release_held(self) -> None:
-        """Claude Code is idle: deliver the oldest held reply, which starts a turn; the rest wait for its end.
+        """Claude Code is confirmed idle: deliver the oldest held reply, which starts a turn; the rest wait.
 
         Delivering more at once would leave them in Claude Code's own queue, where /clear or /resume
         could carry them into the next conversation.

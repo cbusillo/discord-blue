@@ -228,8 +228,7 @@ session as a [channel](https://code.claude.com/docs/en/channels-reference).
 The thread is named after the session name (`-n` or `/rename`) or the first typed
 prompt. It mirrors typed prompts and each turn's final answer. A Discord reply
 becomes the session's next prompt. When Claude asks for a tool permission, the
-thread says so and shows Claude Code's preview of the request; approve or deny
-it in the terminal. The thread archives when the session exits.
+thread says which tool is waiting; approve or deny it in the terminal. The thread archives when the session exits.
 
 One-time setup on the Mac:
 
@@ -257,17 +256,18 @@ Behaviour and limits:
   still mirrored, but Claude Code drops channel messages, so the thread offers
   no replies and says how to resume with the flag.
 - Discord cannot pause, interrupt or end a Claude Code turn, and cannot answer
-  Claude's multiple-choice questions. A reply sent while a turn runs is held,
-  because Claude Code would otherwise queue it and could deliver it after
-  `/clear` or `/resume`. Each time the turn ends (or, after an interrupt, Claude
-  Code reports it is idle) the oldest held reply is delivered and acknowledged;
-  the rest wait for the turn it starts. Held replies are dropped, with a notice,
-  if the conversation switches first.
+  Claude's multiple-choice questions. A reply sent while Claude is working is
+  held, because Claude Code would otherwise queue it and could deliver it after
+  `/clear` or `/resume`. Held replies go out only when Claude Code reports it is
+  idle: its `idle_prompt` notification, about a minute after Claude finishes and
+  only while nobody is typing in the terminal. Each such moment delivers and
+  acknowledges the oldest held reply; the rest wait for the next. Held replies
+  are dropped, with a notice, if the conversation switches first.
 - Discord cannot approve or deny Claude Code's permission prompts. Claude
-  Code's channel permission request carries only a display preview, with
-  credentials masked and long fields shortened, and no tool-call ID, so a
-  Discord decision could not be tied reliably to the call it would allow. The
-  notice shows that preview, marked as a preview.
+  Code's channel permission request carries only a display preview and no
+  tool-call ID, so a Discord decision could not be tied reliably to the call
+  it would allow. The notice names only the tool: the preview can hold secrets
+  Claude Code does not mask, such as passwords or private keys.
 - `/clear` or `/resume` inside a session keeps its thread but reconnects under a
   new epoch, so replies sent for the previous conversation are rejected. Discord Blue also refuses a reply written before the session last
   reconnected, and says so. The thread gets a notice for each switch.
