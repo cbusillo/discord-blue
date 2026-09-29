@@ -1235,12 +1235,16 @@ class AgentSessionBridge:
             if delay:
                 await asyncio.sleep(delay)
             await self.discovery.fresh(channel, force=attempt > 0)
-            thread = await self.match_session_thread(hello)
-            if thread is not None or self.discovery.complete:
-                return thread
+            if self.discovery.complete:
+                return await self.match_session_thread(hello, complete=True)
+        # Still incomplete: an exact match is still this session's thread (the best of those read), but neither a
+        # pid-relaxed match nor "no match" can be trusted, since an unread thread might be the better or only one.
+        thread = await self.match_session_thread(hello, complete=False)
+        if thread is not None:
+            return thread
         raise DiscoveryIncomplete(f"Agent session discovery stayed incomplete for session {hello.session_id}")
 
-    async def match_session_thread(self, hello: SessionHello) -> discord.Thread | None:
+    async def match_session_thread(self, hello: SessionHello, *, complete: bool) -> discord.Thread | None:
         expected_starts = self.expected_session_start_messages(hello)
         expected_starts_without_pid = self.session_start_messages_without_pid(expected_starts)
         matches: list[discord.Thread] = []
@@ -1259,6 +1263,8 @@ class AgentSessionBridge:
                 self.session_start_without_pid(message) in expected_starts_without_pid for message in opening
             ):
                 pid_relaxed_matches.append(entry.thread)
+        if not complete:
+            pid_relaxed_matches = []
         if len(matches) == 1:
             return matches[0]
         if matches:
@@ -1283,7 +1289,7 @@ class AgentSessionBridge:
                 hello.host_label,
                 len(pid_relaxed_matches),
             )
-        elif self.discovery.complete:
+        elif complete:
             logger.info(
                 "No reusable Agent session thread found for cwd=%s branch=%s host=%s pid=%s "
                 "after checking %s candidate(s), skipped_mapped=%s",

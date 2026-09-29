@@ -33,8 +33,6 @@ class IndexedThread:
     thread: discord.Thread
     # The bot's own messages among the thread's first OPENING_MESSAGES, oldest first; None until read.
     opening: list[str] | None = None
-    # When this bot created it (see add); a refresh whose listing began earlier keeps it.
-    added_at: float | None = None
 
 
 @dataclass(slots=True)
@@ -65,17 +63,15 @@ class DiscoveryIndex:
             logger.warning("Agent session discovery index refresh failed: %r", exc)
 
     async def refresh(self, channel: discord.TextChannel) -> None:
-        started = self.clock()
         listed, complete = await self.list_threads(channel)
-        # Threads gone from the listing (deleted) leave the index; ones still there keep what was read, and threads
-        # created while the listing ran are kept although it could not include them.
-        threads = {
-            thread.id: IndexedThread(thread, known.opening if (known := self.threads.get(thread.id)) else None) for thread in listed
-        }
-        for thread_id, entry in self.threads.items():
-            if thread_id not in threads and entry.added_at is not None and entry.added_at >= started:
-                threads[thread_id] = entry
-        self.threads = threads
+        # A listing only adds and updates. A thread missing from it is not gone: discord.py caches a thread it just
+        # created or reopened only once the gateway says so, and archive listings omit open threads. Only Discord
+        # saying a thread does not exist removes one (forget), or empties what it matches (a NotFound read).
+        for thread in listed:
+            if (known := self.threads.get(thread.id)) is not None:
+                known.thread = thread
+            else:
+                self.threads[thread.id] = IndexedThread(thread)
         unread = [entry for entry in self.threads.values() if entry.opening is None]
         slots = asyncio.Semaphore(CONCURRENT_READS)
 
@@ -127,8 +123,10 @@ class DiscoveryIndex:
                 async for message in entry.thread.history(limit=OPENING_MESSAGES, oldest_first=True)
                 if message.author.id == bot_user_id
             ]
-        except discord.NotFound:
-            entry.opening = []  # Deleted since the listing: nothing to match.
+        except (discord.NotFound, discord.Forbidden):
+            # Deleted since the listing, or not readable by the bot (so not a thread it could reattach): nothing to
+            # match. Only a failure that may pass (a 5xx, a rate limit) leaves the index incomplete.
+            entry.opening = []
         except (discord.DiscordException, ValueError):
             logger.warning("Unable to read Agent session thread %s; it stays unread", entry.thread.id)
             return False
@@ -136,7 +134,7 @@ class DiscoveryIndex:
 
     def add(self, thread: discord.Thread, opening: list[str]) -> None:
         """A thread this bot just created, so a reconnect finds it before the next listing does."""
-        self.threads[thread.id] = IndexedThread(thread, list(opening), added_at=self.clock())
+        self.threads[thread.id] = IndexedThread(thread, list(opening))
 
     def forget(self, thread_id: int) -> None:
         """Discord says this thread no longer exists; drop what was read, so any listing that still names it re-reads."""
