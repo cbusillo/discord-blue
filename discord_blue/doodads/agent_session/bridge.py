@@ -51,6 +51,7 @@ from discord_blue.doodads.agent_session.sessions import (
     PendingRemoteUserInput,
     RejectedCommandMessage,
 )
+from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
 from discord_blue.doodads.agent_session.thread_worker import RenameTarget, ThreadWorkers
 from discord_blue.doodads.agent_session.threads import SessionThread
 from discord_blue.doodads.agent_session.threads import auto_join_configured_users
@@ -74,6 +75,9 @@ SESSION_DISCONNECT_GRACE_SECONDS = 300
 SESSION_ENDED_NOTICE = "Session ended"
 
 STARTUP_RECONNECT_GRACE_SECONDS = 20
+# Before giving up on an incomplete discovery (a failed read or listing page), refresh it again after these waits.
+DISCOVERY_RETRY_DELAYS_SECONDS = (0.5, 1.0, 2.0, 4.0)
+DISCORD_UNKNOWN_CHANNEL = 10003
 # After a start, sessions from before it reconnect over this long, and until they do nothing marks their threads as
 # theirs, so the maintenance sweeps leave unbound threads and notifications alone for this long.
 STARTUP_SWEEP_HOLD_SECONDS = 600
@@ -133,6 +137,18 @@ CONTROL_REACTIONS = {
     REACTION_CONTROL_END,
 }
 TRANSIENT_REACTIONS = STATUS_REACTIONS | CONTROL_REACTIONS
+
+
+class DiscoveryIncomplete(discord.DiscordException):
+    """Discovery could not read every candidate, so it cannot say the session has no thread; nothing is created."""
+
+
+class CandidateGone(Exception):
+    """The thread discovery chose no longer exists on Discord."""
+
+    def __init__(self, thread_id: int) -> None:
+        super().__init__(thread_id)
+        self.thread_id = thread_id
 
 
 class BridgeStopping(Exception):
@@ -351,6 +367,7 @@ class AgentSessionBridge:
         # Every change to a session thread (reopen, join, members, notice, archive, leave, rename) goes through its
         # worker, one request at a time and never cancelled.
         self.threads = ThreadWorkers.for_client(bot, self)
+        self.discovery = DiscoveryIndex(self.bot_user_id)
         # No await occurs while resolving the entry, so one event loop turn
         # cannot create two locks for the same session ID.
         self._session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
@@ -1121,9 +1138,19 @@ class AgentSessionBridge:
         return SessionThread(thread=thread, notification_message_id=previous.notification_message_id)
 
     async def find_or_create_session_thread(self, hello: SessionHello) -> SessionThread:
+        try:
+            return await self.find_or_create_session_thread_once(hello)
+        except CandidateGone as gone:
+            # The thread discovery found was deleted meanwhile (a cached listing still named it): forget it and
+            # resolve again, which creates a replacement if the session has no other thread.
+            self.discovery.forget(gone.thread_id)
+            return await self.find_or_create_session_thread_once(hello)
+
+    async def find_or_create_session_thread_once(self, hello: SessionHello) -> SessionThread:
         thread = await self.find_existing_session_thread(hello)
         if thread is None:
             session_thread = await create_session_thread(self.bot, hello)
+            self.discovery.add(session_thread.thread, [session_start_message(hello)])
             self.sessions.bind_thread(
                 hello.session_id,
                 session_thread.thread.id,
@@ -1138,7 +1165,12 @@ class AgentSessionBridge:
         # here until it is bound, the thread counts as owned, so a close that is already under way stops.
         self._attaching_threads[thread.id] += 1
         try:
-            thread = await self.threads.open(thread)
+            try:
+                thread = await self.threads.open(thread)
+            except discord.NotFound as exc:
+                if exc.code == DISCORD_UNKNOWN_CHANNEL:
+                    raise CandidateGone(thread.id) from exc
+                raise
             notification_message_id = await self.ensure_session_notification(hello, thread)
             self.sessions.bind_thread(hello.session_id, thread.id, notification_message_id)
         finally:
@@ -1189,39 +1221,52 @@ class AgentSessionBridge:
         return int(match.group("thread_id"))
 
     async def find_existing_session_thread(self, hello: SessionHello) -> discord.Thread | None:
+        """The session's thread from the shared discovery index; None only when a complete index has no match.
+
+        An incomplete index (a listing page or a candidate's read failed) is refreshed a few times; if it stays
+        incomplete the attach fails with DiscoveryIncomplete rather than creating a second thread.
+        """
         try:
             channel = await get_agent_session_channel(self.bot)
         except ValueError:
             logger.warning("Unable to find reusable Agent session thread: channel is unavailable")
             return None
+        for attempt, delay in enumerate((0.0, *DISCOVERY_RETRY_DELAYS_SECONDS)):
+            if delay:
+                await asyncio.sleep(delay)
+            await self.discovery.fresh(channel, force=attempt > 0)
+            thread = await self.match_session_thread(hello)
+            if thread is not None or self.discovery.complete:
+                return thread
+        raise DiscoveryIncomplete(f"Agent session discovery stayed incomplete for session {hello.session_id}")
 
+    async def match_session_thread(self, hello: SessionHello) -> discord.Thread | None:
         expected_starts = self.expected_session_start_messages(hello)
         expected_starts_without_pid = self.session_start_messages_without_pid(expected_starts)
-        best_thread: discord.Thread | None = None
-        best_score: tuple[int, int, int] | None = None
-        seen: set[int] = set()
+        matches: list[discord.Thread] = []
+        pid_relaxed_matches: list[discord.Thread] = []
         skipped_mapped = 0
-        pid_relaxed_matches: list[tuple[discord.Thread, tuple[int, int, int]]] = []
-        for thread in await self.session_thread_candidates(channel, include_unjoined_private=True):
-            if thread.id in seen:
-                continue
-            seen.add(thread.id)
-            mapped_session_id = self.sessions.by_thread.get(thread.id)
+        entries = self.discovery.entries()
+        for entry in entries:
+            mapped_session_id = self.sessions.by_thread.get(entry.thread.id)
             if mapped_session_id is not None and mapped_session_id != hello.session_id:
                 skipped_mapped += 1
                 continue
-            if not await self.session_thread_matches(thread, expected_starts):
-                if await self.session_thread_matches_without_pid(thread, expected_starts_without_pid):
-                    pid_relaxed_matches.append((thread, await self.score_session_thread(thread)))
-                continue
-            score = await self.score_session_thread(thread)
-            if best_score is None or score > best_score:
-                best_thread = thread
-                best_score = score
-        if best_thread is not None:
-            return best_thread
+            opening = entry.opening or []
+            if any(message in expected_starts for message in opening):
+                matches.append(entry.thread)
+            elif expected_starts_without_pid and any(
+                self.session_start_without_pid(message) in expected_starts_without_pid for message in opening
+            ):
+                pid_relaxed_matches.append(entry.thread)
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            # Rare (an earlier duplicate): the thread with the most conversation wins, as before.
+            scores = [await self.score_session_thread(thread) for thread in matches]
+            return max(zip(scores, matches, strict=True), key=lambda pair: pair[0])[1]
         if len(pid_relaxed_matches) == 1:
-            thread, _score = pid_relaxed_matches[0]
+            thread = pid_relaxed_matches[0]
             logger.info(
                 "Reusing Agent session thread %s despite pid mismatch for cwd=%s branch=%s host=%s",
                 thread.id,
@@ -1238,7 +1283,7 @@ class AgentSessionBridge:
                 hello.host_label,
                 len(pid_relaxed_matches),
             )
-        else:
+        elif self.discovery.complete:
             logger.info(
                 "No reusable Agent session thread found for cwd=%s branch=%s host=%s pid=%s "
                 "after checking %s candidate(s), skipped_mapped=%s",
@@ -1246,10 +1291,10 @@ class AgentSessionBridge:
                 hello.branch or "unknown",
                 hello.host_label,
                 hello.pid,
-                len(seen),
+                len(entries),
                 skipped_mapped,
             )
-        return best_thread
+        return None
 
     @staticmethod
     def expected_session_start_messages(hello: SessionHello) -> set[str]:
@@ -1331,45 +1376,6 @@ class AgentSessionBridge:
         except (discord.DiscordException, ValueError):
             logger.warning("Unable to scan private archived Agent session threads")
         return candidates
-
-    async def session_thread_matches(
-        self,
-        thread: discord.Thread,
-        expected_starts: set[str],
-    ) -> bool:
-        bot_user = self.bot.user
-        if bot_user is None:
-            return False
-        try:
-            async for message in thread.history(limit=10, oldest_first=True):
-                if message.author.id != bot_user.id:
-                    continue
-                if message.content in expected_starts:
-                    return True
-        except discord.DiscordException:
-            logger.warning("Unable to inspect Agent session thread %s", thread.id)
-        return False
-
-    async def session_thread_matches_without_pid(
-        self,
-        thread: discord.Thread,
-        expected_starts_without_pid: set[str],
-    ) -> bool:
-        if not expected_starts_without_pid:
-            return False
-        bot_user = self.bot.user
-        if bot_user is None:
-            return False
-        try:
-            async for message in thread.history(limit=10, oldest_first=True):
-                if message.author.id != bot_user.id:
-                    continue
-                start_without_pid = self.session_start_without_pid(message.content)
-                if start_without_pid in expected_starts_without_pid:
-                    return True
-        except discord.DiscordException:
-            logger.warning("Unable to inspect Agent session thread %s", thread.id)
-        return False
 
     async def score_session_thread(self, thread: discord.Thread) -> tuple[int, int, int]:
         assistant_messages = 0
