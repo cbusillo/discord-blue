@@ -175,8 +175,10 @@ echoed when present.
 
 `discord-blue-codex-bridge` attaches to the stock Codex app-server daemon as one
 extra client and opens one agent session per live Codex thread. It needs no Codex
-patch. Each Discord thread is named after the Codex thread's name or first
-prompt. The bridge mirrors user messages, turn starts, completed turns with the
+patch. Each Discord thread is named `🔷 <repo> · <label>`: the Codex thread's
+name, else its latest substantial prompt (short go-aheads such as "Continue"
+don't count), else a non-default git branch. Renaming the Codex thread renames
+the Discord thread. The bridge mirrors user messages, turn starts, completed turns with the
 final answer, interrupts and errors. From Discord you can reply (stock starts a
 turn or steers the running one), pause, ask for status, answer command approvals,
 and answer `request_user_input` prompts. A command approval shows Codex's
@@ -227,8 +229,9 @@ This repository is also a local Claude Code plugin marketplace. Its `dui`
 plugin gives each Claude Code CLI session its own Discord thread next to the
 Codex sessions. Claude Code starts `discord-blue-claude-channel` once per
 session as a [channel](https://code.claude.com/docs/en/channels-reference).
-The thread is named after the session name (`-n` or `/rename`) or the first typed
-prompt. It mirrors typed prompts and each turn's final answer. A Discord reply
+The thread is named `✳️ <repo> · <label>`: the session name (`-n` or
+`/rename`), else the latest substantial typed prompt (short go-aheads such as
+"continue" don't count), else a non-default git branch. It mirrors typed prompts and each turn's final answer. A Discord reply
 becomes the session's next prompt. When Claude asks for a tool permission, the
 thread says which tool is waiting; approve or deny it in the terminal. The thread archives when the session exits.
 

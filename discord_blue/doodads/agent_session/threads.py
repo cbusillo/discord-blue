@@ -12,6 +12,8 @@ from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
 DISCORD_THREAD_NAME_LIMIT = 100
+# The thread-name icon for each agent a client reports in hello's `harness`; others get none.
+HARNESS_ICONS = {"claude": "\u2733\ufe0f", "codex": "\U0001f537"}
 DEFAULT_BRANCH_NAMES = {"main", "master", "develop", "development", "dev", "trunk"}
 
 
@@ -22,13 +24,18 @@ class SessionThread:
 
 
 def session_thread_name(hello: SessionHello) -> str:
+    """`<icon> <repo> · <label>`: the client's title, else a non-default branch, else just the repo."""
+    icon = HARNESS_ICONS.get(hello.harness or "")
     repo = session_display_name(hello)
+    prefix = f"{icon} {repo}" if icon else repo
     if hello.origin and hello.origin.kind in {"launchplane", "agent_session"}:
-        return _truncate_thread_name(repo)
+        return _truncate_thread_name(prefix)
     if hello.title:
-        return _truncate_thread_name(f"{repo} · {hello.title}")
+        # Bound a client-supplied title before any per-character work; only the start can fit anyway.
+        title = " ".join(hello.title[: DISCORD_THREAD_NAME_LIMIT * 4].split())
+        return _truncate_thread_name(f"{prefix} · {title}")
     branch = f" · {hello.branch}" if session_branch_is_title_worthy(hello.branch) else ""
-    return _truncate_thread_name(f"{repo}{branch}")
+    return _truncate_thread_name(f"{prefix}{branch}")
 
 
 def session_branch_is_title_worthy(branch: str | None) -> bool:
@@ -44,10 +51,23 @@ def session_display_name(hello: SessionHello) -> str:
     return repo
 
 
+def _discord_length(text: str) -> int:
+    # Count UTF-16 units, as a JavaScript client would, so an emoji icon never pushes a name over the limit.
+    return len(text.encode("utf-16-le")) // 2
+
+
 def _truncate_thread_name(name: str) -> str:
-    if len(name) <= DISCORD_THREAD_NAME_LIMIT:
+    # Every character is at least one UTF-16 unit, so nothing past this prefix can fit.
+    name = name[: DISCORD_THREAD_NAME_LIMIT + 1]
+    if _discord_length(name) <= DISCORD_THREAD_NAME_LIMIT:
         return name
-    return name[: DISCORD_THREAD_NAME_LIMIT - 1].rstrip() + "…"
+    kept, units = [], 0
+    for char in name:
+        units += 2 if ord(char) > 0xFFFF else 1
+        if units > DISCORD_THREAD_NAME_LIMIT - 1:
+            break
+        kept.append(char)
+    return "".join(kept).rstrip() + "…"
 
 
 def session_origin_lines(hello: SessionHello) -> list[str]:

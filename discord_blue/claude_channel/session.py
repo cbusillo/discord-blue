@@ -33,7 +33,8 @@ from dataclasses import dataclass
 from discord_blue.agent_client import DEFERRED, PROMPT_EVENTS, AgentSessionClient, Json, Rejected
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.claude_channel.launch import ancestry, loaded_as_channel
-from discord_blue.codex_bridge.session import REPLY_LIMIT, TEXT_LIMIT, TURN_DONE, thread_title
+from discord_blue.codex_bridge.session import REPLY_LIMIT, TEXT_LIMIT, TURN_DONE
+from discord_blue.session_titles import SessionLabel
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,8 @@ class ClaudeSession(AgentSessionClient):
         super().__init__(config, identity.session_id)
         self.identity = identity
         self.notify = notify
-        self.title: str | None = None
+        # session_title in hook input is a user-set name (-n or /rename); 2.1.284 exposes no separate auto title.
+        self.label = SessionLabel()
         self.conversation_id: str | None = identity.session_id
         self.controls = CAPABILITIES if identity.channel else ["status_request"]
         # Discord replies held while a turn runs: Claude Code queues channel messages and would deliver
@@ -138,8 +140,9 @@ class ClaudeSession(AgentSessionClient):
             cwd=self.identity.cwd,
             pid=self.identity.pid,
             capabilities=self.controls,
+            harness="claude",
         )
-        optional = {"branch": self.identity.branch, "title": self.title}
+        optional = {"branch": self.identity.branch, "title": self.label.current}
         return {**hello, **{key: value for key, value in optional.items() if value}}
 
     # Claude Code -> Discord
@@ -169,7 +172,7 @@ class ClaudeSession(AgentSessionClient):
             return
         if conversation and conversation != self.conversation_id:
             if self.conversation_id is None:
-                self.conversation_id, self.title = conversation, None
+                self.conversation_id, self.label = conversation, SessionLabel()
                 self.publish("notice", message=f"This Claude Code session is now on conversation `{conversation}`.")
             else:
                 await self.switch_conversation(conversation)
@@ -178,7 +181,7 @@ class ClaudeSession(AgentSessionClient):
         if event == "UserPromptSubmit":
             prompt = fields.get("prompt", "")
             echo = prompt.lstrip().startswith("<channel") and any(f'command_id="{c}"' in prompt for c in self.injected)
-            self.retitle(fields.get("session_title") or self.title or ("" if echo else prompt))
+            self.retitle(name=fields.get("session_title"), prompt=None if echo else prompt)
             if prompt.strip() and not echo:
                 self.publish("user_message", message=clip(prompt))
         elif event == "Stop":
@@ -192,7 +195,7 @@ class ClaudeSession(AgentSessionClient):
             # idle_prompt: Claude Code has been waiting for input for about a minute, the only confirmed idle signal.
             await self.release_held()
         elif event == "SessionStart":
-            self.retitle(fields.get("session_title") or "")
+            self.retitle(name=fields.get("session_title"))
 
     async def switch_conversation(self, conversation: str | None) -> None:
         """Start a new epoch so Discord controls meant for the previous conversation are rejected."""
@@ -200,7 +203,7 @@ class ClaudeSession(AgentSessionClient):
         self.commands.clear()
         self.prompts.clear()
         dropped, self.held, self.turn_running = len(self.held), [], False
-        self.conversation_id, self.title = conversation, None
+        self.conversation_id, self.label = conversation, SessionLabel()
         if self.websocket is not None:
             # Reconnect so Discord Blue binds the thread to the new epoch; nothing more goes out on this socket.
             await self.websocket.close()
@@ -214,10 +217,8 @@ class ClaudeSession(AgentSessionClient):
                 "notice", message=f"{waiting} and {'was' if dropped == 1 else 'were'} not delivered. Send again if still needed."
             )
 
-    def retitle(self, text: str) -> None:
-        title = thread_title({"name": text})
-        if title and title != self.title:
-            self.title = title
+    def retitle(self, *, name: str | None = None, prompt: str | None = None) -> None:
+        if (title := self.label.update(name=name, prompt=prompt)) is not None:
             self.publish("title_changed", title=title)
 
     # Discord -> Claude Code

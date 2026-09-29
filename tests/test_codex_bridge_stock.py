@@ -98,7 +98,8 @@ class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
             running = asyncio.create_task(bridge.run())
             try:
                 hello = await discord.next("hello")
-                self.assertEqual((hello["session_id"], hello["title"]), (thread_id, "hello"))
+                # The one-word first prompt names nothing, so the thread is named after the repo alone.
+                self.assertEqual((hello["session_id"], hello.get("title"), hello["harness"]), (thread_id, None, "codex"))
                 self.assertIn("hello", hello["assistant_message"])
                 session = bridge.sessions[thread_id]
                 # An idle thread is mirrored without joining it.

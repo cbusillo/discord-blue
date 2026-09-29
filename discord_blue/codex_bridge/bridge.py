@@ -119,7 +119,7 @@ class CodexBridge:
         elif method == "thread/closed":
             await self.detach(thread_id)
         elif method == "thread/name/updated":
-            session.title = params.get("threadName") or session.title
+            session.rename(params.get("threadName"))
         elif method == "turn/started":
             session.on_turn_started(str((params.get("turn") or {}).get("id")))
         elif method == "item/completed":
@@ -150,7 +150,7 @@ class CodexBridge:
         assert self.http is not None
         self.sessions[thread_id] = session
         self.tasks[thread_id] = asyncio.create_task(session.run(self.http), name=f"codex-bridge-{thread_id}")
-        logger.info("Mirroring Codex thread %s (%s)", thread_id, session.title)
+        logger.info("Mirroring Codex thread %s (%s)", thread_id, session.label.current)
         if (thread.get("status") or {}).get("type") == "active":
             await self.subscribe(session)
 
