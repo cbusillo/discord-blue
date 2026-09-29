@@ -9,6 +9,7 @@ import shlex
 import time
 import uuid
 import weakref
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -85,6 +86,8 @@ MAINTENANCE_INTERVAL_SECONDS = 300
 MAINTENANCE_DISCOVERY_TIMEOUT_SECONDS = 30
 PENDING_CLEANUP_LIMIT = 256
 PENDING_CLEANUP_MAX_ATTEMPTS = 5
+# Notifications deleted recently enough that a history page read before the delete may still list them.
+DELETED_NOTIFICATIONS_REMEMBERED = 1024
 SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
 SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = 5
 SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS = SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS + SESSION_THREAD_CLEANUP_TIMEOUT_SECONDS
@@ -345,8 +348,12 @@ class AgentSessionBridge:
         # cannot create two locks for the same session ID.
         self._session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._pending_cleanups: dict[tuple[str, str, int | None], PendingSessionCleanup] = {}
-        # Notifications with a DELETE sent and not yet answered; still visible, but never to be adopted by an attach.
-        self._notifications_being_deleted: set[int] = set()
+        # Notifications with a DELETE sent (a count, as sweeps and cleanups can overlap) or already done: an attach or
+        # sweep never adopts one, even from a history page read before the delete landed.
+        self._notification_deletes: Counter[int] = Counter()
+        self._deleted_notifications: dict[int, None] = {}
+        # Threads an attach is reopening and has not bound yet; no close may touch them meanwhile.
+        self._attaching_threads: Counter[int] = Counter()
         self._finalizing_cleanups: set[tuple[str, str, int | None]] = set()
         self._monitor_started_at = time.monotonic()
         self._monitor_last_progress = self._monitor_started_at
@@ -715,7 +722,7 @@ class AgentSessionBridge:
             old_session, old_notice = observed[thread_id]
             if current is old_session and current.notification_message_id == old_notice:
                 ids = {notice.id for notice in notices}
-                notices = [notice for notice in notices if notice.id not in self._notifications_being_deleted]
+                notices = [notice for notice in notices if not self.notification_going(notice.id)]
                 if notices and current.notification_message_id not in ids:
                     # Only adopt if neither the connection nor its notice
                     # changed during discovery. Reconnect always wins.
@@ -1058,10 +1065,17 @@ class AgentSessionBridge:
         mapped_session_id = self.sessions.by_thread.get(thread.id)
         if mapped_session_id is not None and mapped_session_id != hello.session_id:
             raise ValueError(f"Agent session thread {thread.id} is already attached")
-        # The thread's worker reopens it after any close request of its last session has landed, never before.
-        thread = await self.threads.open(thread)
-        notification_message_id = await self.ensure_session_notification(hello, thread)
-        self.sessions.bind_thread(hello.session_id, thread.id, notification_message_id)
+        # The thread's worker reopens it after any close request of its last session has landed, never before. From
+        # here until it is bound, the thread counts as owned, so a close that is already under way stops.
+        self._attaching_threads[thread.id] += 1
+        try:
+            thread = await self.threads.open(thread)
+            notification_message_id = await self.ensure_session_notification(hello, thread)
+            self.sessions.bind_thread(hello.session_id, thread.id, notification_message_id)
+        finally:
+            self._attaching_threads[thread.id] -= 1
+            if self._attaching_threads[thread.id] <= 0:
+                del self._attaching_threads[thread.id]
         return SessionThread(thread=thread, notification_message_id=notification_message_id)
 
     async def ensure_session_notification(self, hello: SessionHello, thread: discord.Thread) -> int | None:
@@ -1090,7 +1104,7 @@ class AgentSessionBridge:
                     continue
                 if not message.content.startswith(SESSION_NOTIFICATION_PREFIXES):
                     continue
-                if message.id in self._notifications_being_deleted:
+                if self.notification_going(message.id):
                     continue  # Going away: the attach posts a new one instead.
                 if self.notification_thread_id(message.content) == thread_id:
                     return message.id
@@ -2584,7 +2598,7 @@ class AgentSessionBridge:
     # The thread workers' view of the bridge (ThreadHooks).
 
     def owned(self, thread_id: int) -> bool:
-        return self.sessions.get_by_thread(thread_id) is not None
+        return thread_id in self._attaching_threads or self.sessions.get_by_thread(thread_id) is not None
 
     def rename_target(self, thread_id: int, epoch: str) -> RenameTarget | None:
         """The thread to rename, only while the session epoch that asked still owns it."""
@@ -2801,12 +2815,27 @@ class AgentSessionBridge:
         return True
 
     async def delete_notification_message(self, message: discord.Message) -> None:
-        """Delete a notification; until Discord answers (a rate limit can take a while), no attach adopts it."""
-        self._notifications_being_deleted.add(message.id)
+        """Delete a notification; from the request on (a rate limit can hold it a while), no attach adopts it."""
+        self._notification_deletes[message.id] += 1
         try:
             await message.delete()
+        except discord.NotFound:
+            self.remember_deleted_notification(message.id)
+            raise
+        else:
+            self.remember_deleted_notification(message.id)
         finally:
-            self._notifications_being_deleted.discard(message.id)
+            self._notification_deletes[message.id] -= 1
+            if self._notification_deletes[message.id] <= 0:
+                del self._notification_deletes[message.id]
+
+    def remember_deleted_notification(self, message_id: int) -> None:
+        self._deleted_notifications[message_id] = None
+        while len(self._deleted_notifications) > DELETED_NOTIFICATIONS_REMEMBERED:
+            del self._deleted_notifications[next(iter(self._deleted_notifications))]
+
+    def notification_going(self, message_id: int) -> bool:
+        return message_id in self._notification_deletes or message_id in self._deleted_notifications
 
     async def delete_session_notification_for_thread(self, thread_id: int) -> bool:
         try:
