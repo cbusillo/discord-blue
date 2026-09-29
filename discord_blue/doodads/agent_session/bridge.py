@@ -49,6 +49,7 @@ from discord_blue.doodads.agent_session.threads import auto_join_configured_user
 from discord_blue.doodads.agent_session.threads import create_session_thread
 from discord_blue.doodads.agent_session.threads import get_agent_session_channel
 from discord_blue.doodads.agent_session.threads import session_notification_message
+from discord_blue.doodads.agent_session.threads import distinct_thread_name
 from discord_blue.doodads.agent_session.threads import session_thread_name
 from discord_blue.doodads.agent_session.threads import session_start_message
 from discord_blue.health import health_payload
@@ -60,6 +61,9 @@ REPLY_BEFORE_RECONNECT = (
     "so it was not delivered. Send it again if it still applies."
 )
 SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS = 10
+# Attaching a thread holds the session lifecycle lock, so it must finish well inside a reconnect's wait for it.
+SESSION_ATTACH_TIMEOUT_SECONDS = 8
+THREAD_REOPEN_TIMEOUT_SECONDS = 3
 
 DISCORD_MESSAGE_LIMIT = 2000
 DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
@@ -912,22 +916,16 @@ class AgentSessionBridge:
                                 session = AgentSession(hello=hello, websocket=websocket)
                                 self.sessions.register(session)
                                 try:
-                                    session_thread = await self.find_or_create_session_thread(hello)
-                                except (discord.DiscordException, ValueError):
+                                    # Discord can hold a request for minutes behind a rate limit; the lifecycle
+                                    # lock must be released well before a reconnect gives up waiting for it.
+                                    session_thread = await asyncio.wait_for(
+                                        self.attach_session_thread(session), timeout=SESSION_ATTACH_TIMEOUT_SECONDS
+                                    )
+                                except (discord.DiscordException, ValueError, TimeoutError):
                                     logger.warning("Unable to attach Discord thread for Agent session %s", hello.session_id)
                                     self.sessions.remove_if_current(session)
                                     session = None
                                     attachment_failed = True
-                                else:
-                                    self.sessions.bind_thread(
-                                        hello.session_id,
-                                        session_thread.thread.id,
-                                        session_thread.notification_message_id,
-                                    )
-                                    await self.backfill_latest_assistant_message(
-                                        session_thread.thread,
-                                        hello,
-                                    )
                     finally:
                         lifecycle_lock.release()
                     if attachment_failed:
@@ -936,15 +934,21 @@ class AgentSessionBridge:
                     if rejecting_stopping_session:
                         await websocket.close(message=b"bridge shutdown", drain=False)
                         break
-                    if session_thread is not None:
-                        await websocket.send_json(
-                            {
-                                "type": "hello_ack",
-                                "features": sorted(SERVER_FEATURES),
-                                "thread_id": session_thread.thread.id,
-                                **({"capabilities": sorted(hello.capabilities)} if hello.capabilities is not None else {}),
-                            }
-                        )
+                    if session_thread is not None and session is not None:
+                        try:
+                            await websocket.send_json(
+                                {
+                                    "type": "hello_ack",
+                                    "features": sorted(SERVER_FEATURES),
+                                    "thread_id": session_thread.thread.id,
+                                    **({"capabilities": sorted(hello.capabilities)} if hello.capabilities is not None else {}),
+                                }
+                            )
+                        except (ConnectionError, RuntimeError):
+                            logger.info("Agent session %s left before its hello was acknowledged", hello.session_id)
+                            break
+                        # Existing threads keep an old name until renamed; bring every thread up to date on hello.
+                        self.request_thread_name(session)
                 elif message_type in {"approval_resolved", "request_user_input_resolved"}:
                     await self.handle_prompt_resolved(message_type, payload)
                 elif message_type == "heartbeat" and session is not None:
@@ -984,10 +988,32 @@ class AgentSessionBridge:
 
         return websocket
 
-    async def find_or_create_session_thread(self, hello: SessionHello) -> SessionThread:
+    async def attach_session_thread(self, session: AgentSession) -> SessionThread:
+        session.thread_name = self.thread_name_for(session.hello)
+        session_thread = await self.find_or_create_session_thread(session.hello, name=session.thread_name)
+        self.sessions.bind_thread(session.session_id, session_thread.thread.id, session_thread.notification_message_id)
+        await self.backfill_latest_assistant_message(session_thread.thread, session.hello)
+        return session_thread
+
+    def thread_name_for(self, hello: SessionHello) -> str:
+        taken = {
+            other.thread_name
+            for other in self.sessions.live_sessions()
+            if other.session_id != hello.session_id and other.thread_name is not None
+        }
+        return distinct_thread_name(hello, taken)
+
+    def request_thread_name(self, session: AgentSession) -> None:
+        if session.thread_id is None:
+            return
+        session.thread_name = self.thread_name_for(session.hello)
+        # Renames run in the background, coalesced and within Discord's rate limit.
+        self.renamer.request(session.thread_id, session.thread_name, session.session_epoch)
+
+    async def find_or_create_session_thread(self, hello: SessionHello, name: str | None = None) -> SessionThread:
         thread = await self.find_existing_session_thread(hello)
         if thread is None:
-            session_thread = await create_session_thread(self.bot, hello)
+            session_thread = await create_session_thread(self.bot, hello, name)
             thread_lock = self.thread_lifecycle_lock(session_thread.thread.id)
             async with thread_lock:
                 self.sessions.bind_thread(
@@ -1003,11 +1029,14 @@ class AgentSessionBridge:
             if mapped_session_id is not None and mapped_session_id != hello.session_id:
                 raise ValueError(f"Agent session thread {thread.id} is already attached")
             if thread.archived or thread.locked:
-                await thread.edit(
-                    archived=False,
-                    locked=False,
-                    reason="Reattaching live Agent session after bridge restart",
-                )
+                try:
+                    # A rename can leave this thread's edits rate-limited for minutes; never wait that long here.
+                    await asyncio.wait_for(
+                        thread.edit(archived=False, locked=False, reason="Reattaching live Agent session after bridge restart"),
+                        timeout=THREAD_REOPEN_TIMEOUT_SECONDS,
+                    )
+                except (TimeoutError, discord.DiscordException):
+                    logger.warning("Could not reopen Agent session thread %s now; the next message reopens it", thread.id)
             if thread.is_private():
                 await thread.join()
             await auto_join_configured_users(self.bot, thread)
@@ -2515,8 +2544,7 @@ class AgentSessionBridge:
         if not isinstance(title, str) or not title.strip() or session.thread_id is None:
             return
         session.hello.title = title.strip()
-        # Renames run in the background, coalesced and within Discord's rate limit.
-        self.renamer.request(session.thread_id, session_thread_name(session.hello), session.session_epoch)
+        self.request_thread_name(session)
 
     def rename_target(self, thread_id: int, epoch: str) -> discord.Thread | None:
         """The thread to rename, only while the session epoch that asked still owns it."""

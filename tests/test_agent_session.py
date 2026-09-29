@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import os
 import importlib
 import subprocess
@@ -16,6 +17,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
 from aiohttp import ClientWebSocketResponse, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -645,6 +647,89 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(bridge.rename_target(555, "epoch-0"))
         self.assertIsNone(bridge.rename_target(556, "epoch-1"))
 
+    async def test_a_second_live_session_that_would_share_a_name_gets_a_distinct_one(self) -> None:
+        bridge = AgentSessionBridge(FakeBot(Config(), FakeThread(555)))
+        first = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
+        bridge.sessions.register(first)
+        first.thread_name = bridge.thread_name_for(first.hello)
+        second = dataclasses.replace(make_hello(), session_id="session-2")
+
+        self.assertEqual(first.thread_name, threads_module.session_thread_name(second))
+        self.assertNotEqual(bridge.thread_name_for(second), first.thread_name)
+
+    async def test_hello_brings_an_existing_threads_old_name_up_to_date(self) -> None:
+        async with self.transport() as (bridge, thread, client):
+            thread.name = "workspace · Continue"  # A name from before harness icons.
+            websocket = await client.ws_connect("/agent-session/connect", headers={"Authorization": "Bearer transport-test-token"})
+            hello = {"type": "hello", "session_id": "s", "session_epoch": "e", "cwd": "/w/odoo-tenant-opw", "harness": "codex"}
+            await websocket.send_json(hello)
+            await websocket.receive_json(timeout=2)
+            await asyncio.wait_for(asyncio.gather(*list(bridge.renamer.tasks.values())), timeout=2)
+
+        self.assertEqual(thread.name, f"{threads_module.HARNESS_ICONS['codex']} odoo-tenant-opw")
+
+    async def test_a_slow_discord_attach_never_holds_the_session_lock_past_a_reconnects_wait(self) -> None:
+        async with self.transport() as (bridge, _thread, client):
+            stuck = asyncio.Event()
+
+            async def rate_limited(*_args: object, **_kwargs: object) -> object:
+                await stuck.wait()  # discord.py sleeping behind a rate limit
+                raise AssertionError("unreachable")
+
+            with (
+                patch.object(bridge_module, "SESSION_ATTACH_TIMEOUT_SECONDS", 0.05),
+                patch.object(bridge, "find_or_create_session_thread", new=rate_limited),
+            ):
+                first = await client.ws_connect("/agent-session/connect", headers={"Authorization": "Bearer transport-test-token"})
+                await first.send_json({"type": "hello", "session_id": "s", "session_epoch": "e1", "cwd": "/w/repo"})
+                closed = await first.receive(timeout=2)
+            self.assertEqual(closed.type, WSMsgType.CLOSE)
+            self.assertFalse(bridge.session_lifecycle_lock("s").locked())
+            # The reconnect attaches at once instead of timing out on the lock.
+            second = await client.ws_connect("/agent-session/connect", headers={"Authorization": "Bearer transport-test-token"})
+            await second.send_json({"type": "hello", "session_id": "s", "session_epoch": "e2", "cwd": "/w/repo"})
+            self.assertEqual((await second.receive_json(timeout=2))["type"], "hello_ack")
+
+    async def test_reopening_a_rate_limited_thread_does_not_block_the_attach(self) -> None:
+        config = Config()
+        thread = FakeThread(555, archived=True)
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        stuck = asyncio.Event()
+
+        async def rate_limited_edit(**_kwargs: object) -> None:
+            await stuck.wait()
+
+        thread.edit = rate_limited_edit  # type: ignore[method-assign]
+        with (
+            patch.object(bridge_module, "THREAD_REOPEN_TIMEOUT_SECONDS", 0.05),
+            patch.object(bridge, "find_existing_session_thread", new=AsyncMock(return_value=thread)),
+            patch.object(bridge, "ensure_session_notification", new=AsyncMock(return_value=None)),
+        ):
+            attached = await asyncio.wait_for(bridge.find_or_create_session_thread(make_hello()), timeout=2)
+
+        self.assertIs(attached.thread, thread)
+
+    async def test_a_client_gone_before_hello_ack_is_not_an_unhandled_error(self) -> None:
+        async with self.transport() as (bridge, _thread, client):
+            # What the live server hit: the client gave up while its hello waited.
+            gone = aiohttp.ClientConnectionResetError("Cannot write to closing transport")
+            with (
+                patch.object(web.WebSocketResponse, "send_json", new=AsyncMock(side_effect=gone)),
+                self.assertNoLogs("aiohttp.server", level="ERROR"),
+            ):
+                websocket = await client.ws_connect(
+                    "/agent-session/connect", headers={"Authorization": "Bearer transport-test-token"}
+                )
+                await websocket.send_json({"type": "hello", "session_id": "s", "session_epoch": "e", "cwd": "/w/repo"})
+                closed = await websocket.receive(timeout=2)
+                async with asyncio.timeout(2):
+                    while bridge.sessions.get("s") is not None:
+                        await asyncio.sleep(0.01)
+                # The client sees the close before the handler returns; give aiohttp the moment it needs to log.
+                await asyncio.sleep(0.1)
+
+        self.assertEqual(closed.type, WSMsgType.CLOSE)
+
     async def test_title_and_notice_events_rename_the_thread_and_post_once(self) -> None:
         async with self.transport() as (bridge, thread, client):
             websocket = await self.connect_transport(client)
@@ -660,8 +745,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             # Renames run in the background, coalesced; wait for this thread's to finish.
             await asyncio.wait_for(asyncio.gather(*list(bridge.renamer.tasks.values())), timeout=2)
 
-        self.assertEqual([edit for edit in thread.edits if "name" in edit], [{"name": thread.name}])
-        self.assertIn("Fix the login bug", thread.name or "")
+        # hello names the (unnamed) thread, then the title renames it.
+        self.assertEqual([edit["name"] for edit in thread.edits if "name" in edit], ["example", "example · Fix the login bug"])
         self.assertEqual(thread.sent_messages.count("Replies are off for this session."), 1)
 
     async def test_a_reply_written_before_a_claude_conversation_switch_never_reaches_the_next_one(self) -> None:
