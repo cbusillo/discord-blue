@@ -12,6 +12,7 @@ import weakref
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from functools import partial
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
@@ -67,13 +68,15 @@ REPLY_BEFORE_RECONNECT = (
     "This reply was written before the agent session reconnected (for example after `/clear` or `/resume`), "
     "so it was not delivered. Send it again if it still applies."
 )
-SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS = 10
 # A connection that drops without a clean session_end (including a failed hello_ack) keeps its thread untouched
 # this long, so a reconnect resumes it without an archive, member changes or notices.
 SESSION_DISCONNECT_GRACE_SECONDS = 300
 SESSION_ENDED_NOTICE = "Session ended"
 
 STARTUP_RECONNECT_GRACE_SECONDS = 20
+# After a start, sessions from before it reconnect over this long, and until they do nothing marks their threads as
+# theirs, so the maintenance sweeps leave unbound threads and notifications alone for this long.
+STARTUP_SWEEP_HOLD_SECONDS = 600
 SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 1
 SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS = 2
 # How long teardown waits for its thread's close steps. The steps themselves are never cancelled: one still running
@@ -90,9 +93,9 @@ PENDING_CLEANUP_MAX_ATTEMPTS = 5
 DELETED_NOTIFICATIONS_REMEMBERED = 1024
 SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
 SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = 5
+SHUTDOWN_ATTACH_SETTLE_SECONDS = 10
 SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS = SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS + SESSION_THREAD_CLEANUP_TIMEOUT_SECONDS
 
-assert SESSION_FINALIZATION_TIMEOUT_SECONDS < SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS
 AGENT_SESSION_CONNECT_PATH = "/agent-session/connect"
 SESSION_START_PREFIX = "Agent session connected"
 SESSION_NOTIFICATION_PREFIX = "Agent session connected for "
@@ -130,6 +133,10 @@ CONTROL_REACTIONS = {
     REACTION_CONTROL_END,
 }
 TRANSIENT_REACTIONS = STATUS_REACTIONS | CONTROL_REACTIONS
+
+
+class BridgeStopping(Exception):
+    """The bridge is shutting down, so an attach does not start."""
 
 
 class RequestUserInputSelect(discord.ui.Select[discord.ui.View]):
@@ -354,6 +361,10 @@ class AgentSessionBridge:
         self._deleted_notifications: dict[int, None] = {}
         # Threads an attach is reopening and has not bound yet; no close may touch them meanwhile.
         self._attaching_threads: Counter[int] = Counter()
+        # One attach per session ID; a reconnecting socket joins the one already running instead of starting over.
+        self._attach_tasks: dict[str, asyncio.Task[SessionThread]] = {}
+        # Each attached thread as the attach resolved it, for handlers while discord.py's cache lacks it.
+        self._attached_threads: dict[int, discord.Thread] = {}
         self._finalizing_cleanups: set[tuple[str, str, int | None]] = set()
         self._monitor_started_at = time.monotonic()
         self._monitor_last_progress = self._monitor_started_at
@@ -373,7 +384,6 @@ class AgentSessionBridge:
         if self._runner is not None:
             return
         self._stopping = False
-        self.threads.resume()
         self._monitor_started_at = time.monotonic()
         self._monitor_last_progress = self._monitor_started_at
         self._monitor_has_run = False
@@ -493,6 +503,10 @@ class AgentSessionBridge:
         self._cleanup_task = None
         await self.stop_background_task("heartbeat", self._heartbeat_task)
         self._heartbeat_task = None
+        # Queued attaches stop at the lock and put back the sessions they replaced, so shutdown ends those too. They
+        # are waited for, not cancelled: one may be sending a Discord request.
+        if self._attach_tasks:
+            await asyncio.wait(list(self._attach_tasks.values()), timeout=SHUTDOWN_ATTACH_SETTLE_SECONDS)
         await self.disconnect_active_sessions()
         self.threads.stop()
         try:
@@ -541,6 +555,8 @@ class AgentSessionBridge:
             removed = self.sessions.remove_if_current(session)
             if removed is None:
                 return False
+            if removed.thread_id is not None:
+                self._attached_threads.pop(removed.thread_id, None)
 
             fallback_cleanup = self.pending_cleanup_for_session(removed)
             self._finalizing_cleanups.add(fallback_cleanup.key)
@@ -611,8 +627,9 @@ class AgentSessionBridge:
             self.record_maintenance_progress()
             try:
                 await self.retry_pending_cleanups()
-                await self.cleanup_stale_session_notifications()
-                await self.cleanup_stale_session_threads()
+                if time.monotonic() - self._monitor_started_at >= STARTUP_SWEEP_HOLD_SECONDS:
+                    await self.cleanup_stale_session_notifications()
+                    await self.cleanup_stale_session_threads()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -646,6 +663,8 @@ class AgentSessionBridge:
         timeout = timedelta(seconds=self.bot.config.agent_session.heartbeat_timeout_seconds)
         now = datetime.now(UTC)
         for session_id, session in list(self.sessions.by_session.items()):
+            if self.sessions.get(session_id) is not session:
+                continue  # Replaced while this sweep ran: the newer connection has its own clock.
             if session.grace_task is not None or not session.acknowledged:
                 continue  # In grace (its timer ends it) or still attaching (heartbeats start at the ack).
             if not session.websocket.closed and now - session.last_seen <= timeout:
@@ -669,10 +688,14 @@ class AgentSessionBridge:
             finally:
                 self.record_monitor_progress()
 
+    def attaching(self) -> bool:
+        """An attach is under way, so a thread or notification without a session may be about to get one."""
+        return self._session_attach_lock.locked() or bool(self._attach_tasks)
+
     async def cleanup_stale_session_notifications(self) -> None:
         # An in-flight attachment may have published a notice before binding it.
         # Defer this sweep rather than pinning maintenance behind its network I/O.
-        if self._session_attach_lock.locked():
+        if self.attaching():
             return
         await self.cleanup_stale_session_notifications_locked()
 
@@ -716,7 +739,7 @@ class AgentSessionBridge:
 
         for thread_id, notices in deferred.items():
             self.record_maintenance_progress()
-            if self.threads.busy(thread_id) or self._session_attach_lock.locked():
+            if self.threads.busy(thread_id) or self.attaching():
                 continue
             current = self.sessions.get_by_thread(thread_id)
             old_session, old_notice = observed[thread_id]
@@ -737,7 +760,7 @@ class AgentSessionBridge:
                 await self.delete_discovered_notification(notice, thread_id)
 
     async def delete_discovered_notification(self, message: discord.Message, thread_id: int | None) -> None:
-        if self._session_attach_lock.locked():
+        if self.attaching():
             # A newly created thread can have a notice before bind_thread runs.
             return
         try:
@@ -794,7 +817,7 @@ class AgentSessionBridge:
             if (
                 self.threads.busy(thread.id)
                 or thread.id in self.sessions.by_thread
-                or self._session_attach_lock.locked()
+                or self.attaching()
                 or self.has_pending_cleanup_for_thread(thread.id)
             ):
                 # Creation may have published a marker before binding its
@@ -878,82 +901,48 @@ class AgentSessionBridge:
                         logger.warning("Rejecting invalid Agent session hello")
                         await websocket.close(message=b"invalid hello", drain=False)
                         break
-                    rejecting_stopping_session = False
-                    attachment_failed = False
-                    session_thread: SessionThread | None = None
-                    lifecycle_lock = self.session_lifecycle_lock(hello.session_id)
-                    try:
-                        await asyncio.wait_for(lifecycle_lock.acquire(), timeout=SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS)
-                    except TimeoutError:
-                        logger.warning("Timed out waiting to attach Agent session %s", hello.session_id)
-                        await websocket.close(message=b"session cleanup still in progress", drain=False)
-                        break
-                    try:
-                        async with self._session_attach_lock:
-                            if self._stopping:
-                                rejecting_stopping_session = True
-                            else:
-                                previous = self.sessions.get(hello.session_id)
-                                session = AgentSession(hello=hello, websocket=websocket)
-                                self.sessions.register(session)
-                                try:
-                                    session_thread = await self.resume_thread_in_grace(
-                                        previous, hello
-                                    ) or await self.find_or_create_session_thread(hello)
-                                except (discord.DiscordException, ValueError) as exc:
-                                    logger.warning(
-                                        "Unable to attach Discord thread for Agent session %s: %s",
-                                        hello.session_id,
-                                        type(exc).__name__,
-                                        exc_info=True,
-                                    )
-                                    self.sessions.remove_if_current(session)
-                                    self.restore_grace(previous)
-                                    session = None
-                                    attachment_failed = True
-                                else:
-                                    if previous is not None and previous.grace_task is not None:
-                                        # Only now: had the attach failed, the old session's timer still closes its thread.
-                                        previous.grace_task.cancel()
-                                    self.sessions.bind_thread(
-                                        hello.session_id,
-                                        session_thread.thread.id,
-                                        session_thread.notification_message_id,
-                                    )
-                                    await self.backfill_latest_assistant_message(
-                                        session_thread.thread,
-                                        hello,
-                                    )
-                    finally:
-                        lifecycle_lock.release()
-                    if attachment_failed:
-                        await websocket.close(message=b"unable to attach Discord thread", drain=False)
-                        break
-                    if rejecting_stopping_session:
+                    if self._stopping:
                         await websocket.close(message=b"bridge shutdown", drain=False)
                         break
-                    if session_thread is not None:
-                        try:
-                            await websocket.send_json(
-                                {
-                                    "type": "hello_ack",
-                                    "features": sorted(SERVER_FEATURES),
-                                    "thread_id": session_thread.thread.id,
-                                    **({"capabilities": sorted(hello.capabilities)} if hello.capabilities is not None else {}),
-                                }
-                            )
-                        except ConnectionError:
-                            # The client stopped waiting; it will reconnect, so this starts a grace period below.
-                            logger.info("Agent session %s left before its hello was acknowledged", hello.session_id)
-                            break
-                        if session is not None:
-                            # Heartbeats start after the ack, so the watchdog's clock starts here too.
-                            session.acknowledged = True
-                            session.touch()
-                        # Attached, acknowledged and outside every lock: bring the thread's name up to date in
-                        # the background. The thread's worker coalesces and rate-limits; nothing here waits on Discord.
-                        if session is not None:
-                            self.request_thread_name(session)
+                    # The newest connection is the session's from now on; the attach answers only it.
+                    previous = self.sessions.get(hello.session_id)
+                    session = AgentSession(hello=hello, websocket=websocket)
+                    self.sessions.register(session)
+                    try:
+                        session_thread = await asyncio.shield(self.attach_task(hello, previous))
+                    except BridgeStopping:
+                        await websocket.close(message=b"bridge shutdown", drain=False)
+                        break
+                    except (discord.DiscordException, ValueError):
+                        await websocket.close(message=b"unable to attach Discord thread", drain=False)
+                        break
+                    if self.sessions.get(hello.session_id) is not session:
+                        # A newer connection of this session joined the attach while this one waited; it gets the ack.
+                        await websocket.close(message=b"replaced by a newer connection", drain=False)
+                        break
+                    if session.thread_id != session_thread.thread.id:
+                        # This connection joined after the attach bound the thread to an earlier one: it is the
+                        # thread's owner now, so it is bound before it is acknowledged.
+                        self.sessions.bind_thread(hello.session_id, session_thread.thread.id, session_thread.notification_message_id)
+                    try:
+                        await websocket.send_json(
+                            {
+                                "type": "hello_ack",
+                                "features": sorted(SERVER_FEATURES),
+                                "thread_id": session_thread.thread.id,
+                                **({"capabilities": sorted(hello.capabilities)} if hello.capabilities is not None else {}),
+                            }
+                        )
+                    except ConnectionError:
+                        # The client stopped waiting; it will reconnect, so this starts a grace period below.
+                        logger.info("Agent session %s left before its hello was acknowledged", hello.session_id)
+                        break
+                    # Heartbeats start after the ack, so the watchdog's clock starts here too.
+                    session.acknowledged = True
+                    session.touch()
+                    # Attached, acknowledged and outside every lock: bring the thread's name up to date in the
+                    # background. The thread's worker coalesces and rate-limits; nothing here waits on Discord.
+                    self.request_thread_name(session)
                 elif message_type in {"approval_resolved", "request_user_input_resolved"}:
                     await self.handle_prompt_resolved(message_type, payload)
                 elif message_type == "heartbeat" and session is not None:
@@ -997,14 +986,77 @@ class AgentSessionBridge:
 
         return websocket
 
+    def attach_task(self, hello: SessionHello, previous: AgentSession | None) -> asyncio.Task[SessionThread]:
+        """The session's running attach, or a new one; it outlives the sockets that wait for it."""
+        task = self._attach_tasks.get(hello.session_id)
+        if task is None:
+            task = asyncio.create_task(self.attach(hello, previous), name=f"agent-session-attach-{hello.session_id}")
+            self._attach_tasks[hello.session_id] = task
+            task.add_done_callback(partial(self.attach_done, hello.session_id))
+        return task
+
+    def attach_done(self, session_id: str, task: asyncio.Task[SessionThread]) -> None:
+        if self._attach_tasks.get(session_id) is task:
+            del self._attach_tasks[session_id]
+        if not task.cancelled():
+            task.exception()  # Retrieved here; every socket that still waits gets it too.
+
+    async def attach(self, hello: SessionHello, previous: AgentSession | None) -> SessionThread:
+        """Find, reopen or create the session's thread and bind it to whichever connection is current by then.
+
+        The first hello's identity decides discovery; a reconnecting socket joins rather than starting again, so
+        progress survives a client that stops waiting for its ack.
+        """
+        session_id = hello.session_id
+        async with self.session_lifecycle_lock(session_id), self._session_attach_lock:
+            try:
+                if self._stopping:
+                    raise BridgeStopping
+                session_thread = await self.resume_thread_in_grace(previous, hello) or await self.find_or_create_session_thread(
+                    hello
+                )
+            except (discord.DiscordException, ValueError, BridgeStopping) as exc:
+                if not isinstance(exc, BridgeStopping):
+                    logger.warning(
+                        "Unable to attach Discord thread for Agent session %s: %s",
+                        session_id,
+                        type(exc).__name__,
+                        exc_info=True,
+                    )
+                current = self.sessions.get(session_id)
+                if current is not None and current is not previous and current.thread_id is None:
+                    self.sessions.remove_if_current(current)
+                self.restore_replaced(previous)
+                raise
+            if previous is not None and previous.grace_task is not None:
+                # Only now: had the attach failed, the old session's timer still closes its thread.
+                previous.grace_task.cancel()
+            self.sessions.bind_thread(session_id, session_thread.thread.id, session_thread.notification_message_id)
+            self._attached_threads[session_thread.thread.id] = session_thread.thread
+            try:
+                await self.backfill_latest_assistant_message(session_thread.thread, hello)
+            except Exception:
+                # Only the thread's history is short; the session is attached all the same.
+                logger.warning("Unable to backfill Agent session thread %s", session_thread.thread.id, exc_info=True)
+        return session_thread
+
     async def end_connection(self, session: AgentSession) -> None:
         """A connection closed: a clean end closes the thread now; any other drop waits out a grace period."""
-        if session.ended or session.thread_id is None or self.sessions.get(session.session_id) is not session:
+        if self.sessions.get(session.session_id) is not session:
+            # Replaced: the thread is the newer connection's now. Should that one fail to attach, this one is put back
+            # (restore_replaced), and its grace starts then; ending it here would close the thread under it.
+            with suppress(Exception):
+                await asyncio.wait_for(session.websocket.close(), timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS)
+            return
+        if session.ended or session.thread_id is None:
             await self.finalize_session(session)
             return
         if not session.websocket.closed:
             with suppress(Exception):
                 await asyncio.wait_for(session.websocket.close(), timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS)
+        self.start_grace(session)
+
+    def start_grace(self, session: AgentSession) -> None:
         if session.grace_task is None:
             session.grace_task = asyncio.create_task(self.expire_grace(session), name=f"agent-session-grace-{session.session_id}")
             self._grace_tasks.add(session.grace_task)
@@ -1012,6 +1064,9 @@ class AgentSessionBridge:
 
     async def expire_grace(self, session: AgentSession) -> None:
         await asyncio.sleep(SESSION_DISCONNECT_GRACE_SECONDS)
+        await self.end_after_grace(session)
+
+    async def end_after_grace(self, session: AgentSession) -> None:
         # A reconnect replaced this session in the registry; the thread belongs to it now.
         if self.sessions.get(session.session_id) is not session:
             return
@@ -1023,12 +1078,26 @@ class AgentSessionBridge:
             # finalize_session kept a pending cleanup, so the maintenance sweep retries the thread.
             logger.warning("Unable to close Agent session %s after its grace period", session.session_id, exc_info=True)
 
-    def restore_grace(self, previous: AgentSession | None) -> None:
-        """A reconnect failed to attach: the session it replaced goes back in grace, so its timer still ends it."""
-        if previous is None or previous.grace_task is None or previous.grace_task.done():
+    def restore_replaced(self, previous: AgentSession | None) -> None:
+        """A reconnect failed to attach: the session it replaced, if it held a thread, is the session's again.
+
+        Its connection may be open still (it is live again), closed and in grace (its timer still ends it), closed
+        before its drop was handled (its grace starts now), or its grace may have run out while the reconnect waited,
+        since the timer stands down for a replacement (it is ended now). During shutdown it is only put back: shutdown
+        ends every registered session once queued attaches have settled.
+        """
+        if previous is None or previous.thread_id is None or self.sessions.get(previous.session_id) is not None:
             return
-        if self.sessions.get(previous.session_id) is None:
-            self.sessions.register(previous)
+        self.sessions.register(previous)
+        if self._stopping or (not previous.websocket.closed and not previous.ended):
+            return
+        if previous.grace_task is None and not previous.ended:
+            self.start_grace(previous)
+        elif previous.ended or (previous.grace_task is not None and previous.grace_task.done()):
+            # Not awaited: the failed attach still holds this session's lifecycle lock, which finalize needs.
+            ending = asyncio.create_task(self.end_after_grace(previous), name=f"agent-session-grace-{previous.session_id}")
+            self._grace_tasks.add(ending)
+            ending.add_done_callback(self._grace_tasks.discard)
 
     async def resume_thread_in_grace(self, previous: AgentSession | None, hello: SessionHello) -> SessionThread | None:
         """A reconnect within grace takes its thread back as it is: no discovery, unarchive, joins or notices.
@@ -1737,7 +1806,7 @@ class AgentSessionBridge:
             return
         if command.message_id == session.control_message_id:
             session.control_status_reaction = None if reaction == REACTION_REJECTED else reaction
-            channel = self.bot.get_channel(command.thread_id)
+            channel = self.thread_channel(command.thread_id)
             if isinstance(channel, discord.Thread):
                 await self.refresh_session_controls(session, channel)
             return
@@ -1772,7 +1841,7 @@ class AgentSessionBridge:
             )
             return
 
-        channel = self.bot.get_channel(session.thread_id)
+        channel = self.thread_channel(session.thread_id)
         if not isinstance(channel, discord.Thread):
             return
 
@@ -1809,7 +1878,7 @@ class AgentSessionBridge:
             )
             return
 
-        channel = self.bot.get_channel(session.thread_id)
+        channel = self.thread_channel(session.thread_id)
         if not isinstance(channel, discord.Thread):
             return
 
@@ -2196,7 +2265,7 @@ class AgentSessionBridge:
         async with pending.ui_lock:
             if only_active and pending.retired:
                 return
-            channel = self.bot.get_channel(pending.thread_id)
+            channel = self.thread_channel(pending.thread_id)
             if not isinstance(channel, discord.Thread):
                 return
             try:
@@ -2271,7 +2340,7 @@ class AgentSessionBridge:
             return
         if not user_message.message.strip():
             return
-        channel = self.bot.get_channel(session.thread_id)
+        channel = self.thread_channel(session.thread_id)
         if not isinstance(channel, discord.Thread):
             return
 
@@ -2331,7 +2400,7 @@ class AgentSessionBridge:
         thread_id: int,
         reaction: str,
     ) -> None:
-        channel = self.bot.get_channel(thread_id)
+        channel = self.thread_channel(thread_id)
         if not isinstance(channel, discord.Thread):
             return
         session.control_status_reaction = reaction
@@ -2364,7 +2433,7 @@ class AgentSessionBridge:
         session.control_message_id = message.id
 
     async def set_message_reaction(self, thread_id: int, message_id: int, reaction: str) -> None:
-        channel = self.bot.get_channel(thread_id)
+        channel = self.thread_channel(thread_id)
         if not isinstance(channel, discord.Thread):
             return
         try:
@@ -2384,7 +2453,7 @@ class AgentSessionBridge:
             logger.warning("Unable to update Agent session reply reaction %s", message_id)
 
     async def clear_message_transient_reactions(self, thread_id: int, message_id: int) -> None:
-        channel = self.bot.get_channel(thread_id)
+        channel = self.thread_channel(thread_id)
         if not isinstance(channel, discord.Thread):
             return
         bot_user = self.bot.user
@@ -2401,7 +2470,7 @@ class AgentSessionBridge:
                 await message.remove_reaction(existing, bot_user)
 
     async def post_assistant_message(self, thread_id: int, text: str) -> None:
-        channel = self.bot.get_channel(thread_id)
+        channel = self.thread_channel(thread_id)
         if not isinstance(channel, discord.Thread):
             return
         for message in format_assistant_messages(text):
@@ -2410,7 +2479,7 @@ class AgentSessionBridge:
     async def post_session_controls(self, session: AgentSession) -> None:
         if session.thread_id is None:
             return
-        channel = self.bot.get_channel(session.thread_id)
+        channel = self.thread_channel(session.thread_id)
         if not isinstance(channel, discord.Thread):
             return
         session.pending_control_confirmation = None
@@ -2444,7 +2513,7 @@ class AgentSessionBridge:
                 if session.active_command_id == command_id:
                     session.active_command_id = None
         async with pending.ui_lock:
-            channel = self.bot.get_channel(pending.thread_id)
+            channel = self.thread_channel(pending.thread_id)
             if not isinstance(channel, discord.Thread):
                 return
             try:
@@ -2491,7 +2560,7 @@ class AgentSessionBridge:
     async def clear_session_controls(self, session: AgentSession) -> None:
         if session.thread_id is None or session.control_message_id is None:
             return
-        channel = self.bot.get_channel(session.thread_id)
+        channel = self.thread_channel(session.thread_id)
         if not isinstance(channel, discord.Thread):
             return
         try:
@@ -2511,7 +2580,7 @@ class AgentSessionBridge:
         session.control_interruptions_enabled = False
 
     async def delete_session_message(self, thread_id: int, message_id: int) -> None:
-        channel = self.bot.get_channel(thread_id)
+        channel = self.thread_channel(thread_id)
         if not isinstance(channel, discord.Thread):
             return
         try:
@@ -2532,7 +2601,7 @@ class AgentSessionBridge:
     ) -> bool:
         if session.thread_id is None:
             return False
-        channel = self.bot.get_channel(session.thread_id)
+        channel = self.thread_channel(session.thread_id)
         if not isinstance(channel, discord.Thread):
             return False
 
@@ -2606,7 +2675,7 @@ class AgentSessionBridge:
         session = self.sessions.get(session_id) if session_id is not None else None
         if session is None or session.session_epoch != epoch:
             return None
-        channel = self.bot.get_channel(thread_id)
+        channel = self.thread_channel(thread_id)
         return channel if isinstance(channel, discord.Thread) else None
 
     async def post_close_notice(self, thread: discord.Thread) -> None:
@@ -2619,7 +2688,7 @@ class AgentSessionBridge:
         await auto_join_configured_users(self.bot, thread)
 
     async def post_thread_notice(self, thread_id: int, text: str) -> None:
-        channel = self.bot.get_channel(thread_id)
+        channel = self.thread_channel(thread_id)
         if isinstance(channel, discord.Thread):
             await send_agent_session_message(
                 channel,
@@ -2867,7 +2936,7 @@ class AgentSessionBridge:
         return True
 
     async def get_thread_for_cleanup(self, thread_id: int) -> tuple[discord.Thread | None, bool]:
-        channel = self.bot.get_channel(thread_id)
+        channel = self.thread_channel(thread_id)
         if isinstance(channel, discord.Thread):
             return channel, True
         try:
@@ -2879,8 +2948,17 @@ class AgentSessionBridge:
             return None, False
         return (fetched, True) if isinstance(fetched, discord.Thread) else (None, True)
 
-    async def get_thread(self, thread_id: int) -> discord.Thread | None:
+    def thread_channel(self, thread_id: int) -> object | None:
+        """discord.py's cached channel, else the thread this bridge attached.
+
+        discord.py caches a reopened thread again only when its gateway update arrives, after the REST reply; an event
+        sent right after hello_ack must not be dropped in that window.
+        """
         channel = self.bot.get_channel(thread_id)
+        return channel if channel is not None else self._attached_threads.get(thread_id)
+
+    async def get_thread(self, thread_id: int) -> discord.Thread | None:
+        channel = self.thread_channel(thread_id)
         if isinstance(channel, discord.Thread):
             return channel
         try:

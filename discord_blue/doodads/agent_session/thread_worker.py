@@ -152,10 +152,10 @@ class ThreadWorker:
 
     async def run(self) -> None:
         try:
-            while not self.pool.stopped:
+            while True:
                 async with self.pool.slots:
                     # Chosen only once a slot is ours, so a stop or a newer intent that arrived meanwhile decides it.
-                    request = None if self.pool.stopped else self.next_request()
+                    request = self.next_request()
                     if request is not None:
                         self.in_flight = True
                         try:
@@ -389,7 +389,6 @@ class ThreadWorkers:
         self.slots = asyncio.Semaphore(concurrency)
         self.workers: dict[int, ThreadWorker] = {}
         self.background: set[asyncio.Task[Any]] = set()
-        self.stopped = False
 
     def worker(self, thread_id: int) -> ThreadWorker:
         for idle in [key for key, worker in self.workers.items() if key != thread_id and worker.idle]:
@@ -440,22 +439,19 @@ class ThreadWorkers:
             logger.debug("Agent session Discord request failed: %r", exc)
 
     def stop(self) -> None:
-        """At shutdown: drop everything still wanted and let each worker end after its current request.
+        """At shutdown: drop wanted reopens and renames; closes still run, since ending sessions is shutdown's job.
 
         Nothing is cancelled. The bot, and its HTTP client, can outlive this bridge (a doodad reload), and a request
         cancelled during a global rate limit would leave every later request of that client waiting forever. For the
-        same reason a restarted bridge keeps these workers (`resume`), so its first requests queue behind the old ones.
+        same reason a restarted or reloaded bridge keeps these workers, so its first requests queue behind the old ones.
         """
-        self.stopped = True
         for worker in self.workers.values():
             worker.name = None
+            if worker.wanted == "open":
+                worker.wanted = None
             worker.open_steps = []
             worker.fail_open(RuntimeError("the Agent session bridge is stopping"))
-            worker.finish_close()
             worker.wake.set()
-
-    def resume(self) -> None:
-        self.stopped = False
 
 
 _POOLS: weakref.WeakKeyDictionary[object, ThreadWorkers] = weakref.WeakKeyDictionary()

@@ -50,10 +50,6 @@ class SessionCleanupTests(unittest.IsolatedAsyncioTestCase):
             + bridge_module.SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS
             + bridge_module.SESSION_THREAD_CLEANUP_TIMEOUT_SECONDS,
         )
-        self.assertLess(
-            bridge_module.SESSION_FINALIZATION_TIMEOUT_SECONDS,
-            bridge_module.SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS,
-        )
 
     async def test_member_failure_does_not_skip_archive_and_retry_recloses_thread(self) -> None:
         thread = FakeThread(555, members=[111])

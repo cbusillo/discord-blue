@@ -68,7 +68,15 @@ If reopening succeeds but joining fails, the thread can remain open without an
 attached session until a successful retry or startup cleanup.
 Cleanup and reattachment are serialized per session ID so old disconnect cleanup
 cannot close a reattached session; unrelated sessions can still attach.
-An attachment waiting on the same session's cleanup closes after ten seconds.
+Each session has at most one attach running, and it outlives the connections that
+wait for it. A `hello` for a session whose attach is already running joins it
+rather than starting over, and waits for the same session's cleanup rather than
+being refused. When the attach finishes, only the newest connection gets
+`hello_ack`; an older one still waiting is closed. If every waiting connection
+has left by then, the session keeps its thread through the disconnect grace
+period, so the next `hello` resumes it without searching again. `hello_ack` is
+sent once the thread is open and usable: events sent right after it reach the
+thread even before Discord's gateway reports the thread reopened.
 Heartbeat sweeps skip sessions whose lifecycle lock is busy and try them again on
 the next sweep, allowing other stale sessions to be cleaned up.
 
@@ -105,7 +113,10 @@ or slow session does not terminate the heartbeat monitor.
 
 Failed Discord cleanup is retained for periodic retry in a bounded, deduplicated
 in-memory queue (256 records, up to five retry attempts). Maintenance runs every
-five minutes after the startup reconnect grace. Successful steps are removed
+five minutes after the startup reconnect grace. For the first ten minutes after a
+start, it removes no thread or notification that no session has claimed, because
+sessions from before the start may still be reconnecting; it also leaves them
+alone while any attach is running. Successful steps are removed
 from the shared retry record immediately, so cancellation retains only unfinished
 work. Busy attachments, and threads whose worker is still sending a request, defer
 retries without consuming their attempt budget;
