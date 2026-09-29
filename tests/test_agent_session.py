@@ -1122,7 +1122,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(bridge.sessions.get(hello.session_id))
         self.assertEqual(len(channel._threads), 1)
 
-    async def test_hello_closes_when_same_session_cleanup_lock_times_out(self) -> None:
+    async def test_hello_waits_for_the_same_sessions_cleanup_then_attaches(self) -> None:
         async with self.transport() as (bridge, _, client):
             existing_hello = SessionHello.from_payload(
                 {
@@ -1141,20 +1141,25 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 headers={"Authorization": "Bearer transport-test-token"},
             )
             try:
-                with patch.object(bridge_module, "SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS", 0.01):
-                    await websocket.send_json(
-                        {
-                            "type": "hello",
-                            "session_id": "transport-session",
-                            "session_epoch": "epoch-2",
-                            "cwd": "/workspace/example",
-                        }
-                    )
-                    message = await websocket.receive(timeout=2)
-                self.assertIn(message.type, {WSMsgType.CLOSE, WSMsgType.CLOSED})
-                self.assertIs(bridge.sessions.get("transport-session"), existing)
+                await websocket.send_json(
+                    {
+                        "type": "hello",
+                        "session_id": "transport-session",
+                        "session_epoch": "epoch-2",
+                        "cwd": "/workspace/example",
+                    }
+                )
+                # The old connection's cleanup still holds the session: nothing is answered yet, nor refused.
+                with self.assertRaises(TimeoutError):
+                    await websocket.receive(timeout=0.2)
             finally:
                 lifecycle_lock.release()
+            ack = await websocket.receive_json(timeout=2)
+
+        self.assertEqual(ack["type"], "hello_ack")
+        current = bridge.sessions.get("transport-session")
+        self.assertIsNotNone(current)
+        self.assertIsNot(current, existing)
 
     async def test_websocket_auth_rejects_missing_or_wrong_token(self) -> None:
         config = Config()

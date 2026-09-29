@@ -149,16 +149,15 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
                 ClaudeSession(config, Identity(session_id=h["session_id"], cwd=h["cwd"], branch="main", pid=1), notify)
                 for h in hellos
             ]
-            with patch.object(bridge_module, "SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS", 0.33):
-                tasks = [asyncio.create_task(client.run(http)) for client in clients]
-                try:
-                    attached = await until(lambda: len(running.bridge.sessions.by_thread) == 7, timeout=4)  # ~2 min
-                finally:
-                    for client in clients:
-                        await client.stop()
-                    for task in tasks:
-                        task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
+            tasks = [asyncio.create_task(client.run(http)) for client in clients]
+            try:
+                attached = await until(lambda: len(running.bridge.sessions.by_thread) == 7, timeout=4)  # ~2 min
+            finally:
+                for client in clients:
+                    await client.stop()
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         self.assertTrue(attached, "not every session attached after the restart")
 
@@ -268,7 +267,6 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(ack["type"], "hello_ack")
 
-    @fails_on_main
     async def test_an_event_sent_right_after_the_ack_is_delivered(self) -> None:
         """discord.py re-caches a reopened thread only when its gateway THREAD_UPDATE arrives, after the REST reply.
         Main acknowledges as soon as the reopen returns, and handlers that look the thread up in the cache drop
@@ -327,7 +325,6 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(fake.threads), 1, "creating the session's thread left more than one thread")
 
-    @fails_on_main
     async def test_a_first_deploy_sweep_does_not_archive_a_session_about_to_reconnect(self) -> None:
         """Right after a restart, main's first sweep archives every unbound session thread, including those of
         sessions whose clients are still waiting out their reconnect delay (no store record protects them yet)."""
