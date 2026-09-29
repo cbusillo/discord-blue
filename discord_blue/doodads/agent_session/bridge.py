@@ -56,6 +56,8 @@ from discord_blue.doodads.agent_session.thread_worker import RenameTarget, Threa
 from discord_blue.doodads.agent_session.threads import SessionThread
 from discord_blue.doodads.agent_session.threads import auto_join_configured_users
 from discord_blue.doodads.agent_session.threads import create_session_thread
+from discord_blue.doodads.agent_session.threads import creation_token_suffix
+from discord_blue.doodads.agent_session.threads import new_creation_token
 from discord_blue.doodads.agent_session.threads import get_agent_session_channel
 from discord_blue.doodads.agent_session.threads import session_notification_message
 from discord_blue.doodads.agent_session.threads import distinct_thread_name
@@ -1149,7 +1151,10 @@ class AgentSessionBridge:
     async def find_or_create_session_thread_once(self, hello: SessionHello) -> SessionThread:
         thread = await self.find_existing_session_thread(hello)
         if thread is None:
-            session_thread = await create_session_thread(self.bot, hello)
+            token = new_creation_token()
+            session_thread = await create_session_thread(
+                self.bot, hello, token=token, settle=partial(self.delete_creation_duplicates, token)
+            )
             self.discovery.add(session_thread.thread, [session_start_message(hello)])
             self.sessions.bind_thread(
                 hello.session_id,
@@ -1178,6 +1183,27 @@ class AgentSessionBridge:
             if self._attaching_threads[thread.id] <= 0:
                 del self._attaching_threads[thread.id]
         return SessionThread(thread=thread, notification_message_id=notification_message_id)
+
+    async def delete_creation_duplicates(self, token: str, created: discord.Thread) -> None:
+        """Delete other threads carrying this creation's token: discord.py retries a create that failed with a 5xx,
+        and Discord may have made the first one anyway. Runs before anything is posted, so they are empty."""
+        suffix = creation_token_suffix(token)
+        try:
+            active = await created.guild.active_threads()
+        except (discord.DiscordException, AttributeError):
+            logger.warning("Unable to check for duplicate Agent session threads of %s", created.id, exc_info=True)
+            return
+        for thread in active:
+            if thread.id == created.id or thread.parent_id != created.parent_id or not (thread.name or "").endswith(suffix):
+                continue
+            try:
+                await thread.delete(reason="Duplicate Agent session thread from a retried create")
+            except discord.NotFound:
+                continue
+            except discord.DiscordException:
+                logger.warning("Unable to delete duplicate Agent session thread %s", thread.id, exc_info=True)
+            else:
+                logger.info("Deleted duplicate Agent session thread %s of %s", thread.id, created.id)
 
     async def ensure_session_notification(self, hello: SessionHello, thread: discord.Thread) -> int | None:
         existing_message_id = await self.find_session_notification_for_thread(thread.id)

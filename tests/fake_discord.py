@@ -172,6 +172,7 @@ class FakeDiscord:
         ("DELETE", "/channels/{channel}/thread-members/{member}"),
         ("GET", "/channels/{channel}"),
         ("PATCH", "/channels/{channel}"),
+        ("DELETE", "/channels/{channel}"),
     )
 
     def resolve(self, method: str, path: str) -> tuple[str, dict[str, str]]:
@@ -235,6 +236,10 @@ class FakeDiscord:
             return 200, {"threads": active, "members": []}
         if template.startswith("/channels/{channel}") and "archived" in template:
             return 200, self.archived_page(template, query)
+        if template == "/channels/{channel}" and method == "DELETE" and thread is not None:
+            self.delete_thread(thread.id)
+            self.notify(thread)
+            return 200, thread.payload()
         if template == "/channels/{channel}/threads":
             created = self.add_thread(str(body.get("name") or "thread"), private=body.get("type", 12) == 12)
             created.members.add(BOT_ID)
