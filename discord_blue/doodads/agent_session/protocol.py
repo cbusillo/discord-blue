@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shlex
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -8,28 +7,6 @@ from typing import Any, Literal
 # Discord shows at most this many characters of an approval's shell-joined command.
 # Clients must not offer a Discord approval for a command longer than this.
 APPROVAL_COMMAND_DISPLAY_LIMIT = 1600
-DISCORD_MESSAGE_LIMIT = 2000
-APPROVAL_REASON_LIMIT = 500
-
-
-def approval_text(command: list[str], cwd: str, reason: str | None) -> str:
-    """The Discord text for an approval request before Discord's length limit; the reason may be shortened."""
-    parts = ["**Approval requested**", "Quick review: `✅` approve · `✖️` deny", "", f"```sh\n{shlex.join(command)}\n```"]
-    if cwd:
-        parts.append(f"cwd: `{cwd}`")
-    if reason:
-        parts.extend(["", reason[:APPROVAL_REASON_LIMIT]])
-    return "\n".join(parts)
-
-
-def approval_fits_discord(argv: list[str], cwd: str = "") -> bool:
-    """Whether Discord shows this approval's whole command and directory; clients keep any other approval local."""
-    shown = shlex.join(argv)
-    # The command sits in a code fence and the directory in backticks; either could end early.
-    if len(shown) > APPROVAL_COMMAND_DISPLAY_LIMIT or "```" in shown or "`" in cwd:
-        return False
-    return len(approval_text(argv, cwd, None)) <= DISCORD_MESSAGE_LIMIT
-
 
 # Actions a client can accept; omitted capabilities retain the legacy contract.
 REMOTE_ACTIONS = frozenset(

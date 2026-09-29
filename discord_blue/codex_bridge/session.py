@@ -23,7 +23,7 @@ from typing import Any, Protocol
 from discord_blue.agent_client import AgentSessionClient, Rejected
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.codex_bridge.rpc import RequestId, RpcError, TransportError
-from discord_blue.doodads.agent_session.protocol import approval_fits_discord
+from discord_blue.doodads.agent_session.protocol import APPROVAL_COMMAND_DISPLAY_LIMIT
 
 Json = dict[str, Any]
 logger = logging.getLogger(__name__)
@@ -91,7 +91,9 @@ def discord_command(params: Json) -> list[str] | None:
     if any(value is not None for key, value in params.items() if key not in DISCORD_APPROVABLE_FIELDS):
         return None
     argv = command_argv(command)
-    return argv if approval_fits_discord(argv) else None
+    # Discord shows the joined argv in a code fence, truncated; a fence inside it would end the block early.
+    shown = shlex.join(argv)
+    return argv if len(shown) <= APPROVAL_COMMAND_DISPLAY_LIMIT and "```" not in shown else None
 
 
 def is_answer(item: Json) -> bool:
