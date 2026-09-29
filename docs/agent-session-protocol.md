@@ -62,8 +62,16 @@ and reattachment restores its membership. The bot needs Discord’s
 `Manage Threads` and `Read Message History` permissions for private-thread
 recovery. Existing session metadata must still match before a thread is reused.
 If Discord denies access to all private archives, discovery falls back to private
-archives the bot has joined. Failure to reopen or rejoin a matching thread closes
-the connection without `hello_ack`; it does not create a replacement thread.
+archives the bot has joined. Discovery keeps one index of the channel's threads
+for every session: it lists every page once and reads each thread's opening
+messages once, and a restart's reconnects share one scan. A listing page or read
+that fails or is rate limited leaves the index incomplete. The attach refreshes
+it a few times (after 0.5, 1, 2 and 4 seconds), and if it is still incomplete the
+connection closes without `hello_ack`. A new thread is created only when a
+complete index has no match. A matching thread that turns out to have been
+deleted is dropped from the index, and the attach resolves again. Failure to
+reopen or rejoin a matching thread closes the connection without `hello_ack`; it
+does not create a replacement thread.
 If reopening succeeds but joining fails, the thread can remain open without an
 attached session until a successful retry or startup cleanup.
 Cleanup and reattachment are serialized per session ID so old disconnect cleanup

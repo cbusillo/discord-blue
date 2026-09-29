@@ -120,7 +120,6 @@ def fails_on_main(test: Callable[..., Any]) -> Callable[..., Any]:
 
 
 class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
-    @fails_on_main
     async def test_a_restart_wave_of_seven_sessions_converges(self) -> None:
         """Main serializes attaches on one global lock, each reading every candidate thread's history (~30 s in
         production). Seven sessions need ~7 attach-times in sequence, longer than a client waits for its ack, so
@@ -291,7 +290,6 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(delivered, "the first event after hello_ack never reached the thread")
 
-    @fails_on_main
     async def test_a_failed_discovery_read_does_not_create_a_duplicate_thread(self) -> None:
         """Main's discovery treats an error reading a candidate's history as 'not this session', so a transient
         Discord failure hides the session's existing thread and the bridge creates a second one."""
