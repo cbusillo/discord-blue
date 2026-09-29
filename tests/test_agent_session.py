@@ -635,6 +635,16 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             )
             await asyncio.wait_for(handled.wait(), timeout=2)
 
+    async def test_only_the_session_epoch_that_owns_a_thread_can_rename_it(self) -> None:
+        thread = FakeThread(555)
+        bridge = AgentSessionBridge(FakeBot(Config(), thread))
+        bridge.sessions.register(AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555))
+        bridge.sessions.bind_thread("session-1", 555)
+
+        self.assertIs(bridge.rename_target(555, "epoch-1"), thread)
+        self.assertIsNone(bridge.rename_target(555, "epoch-0"))
+        self.assertIsNone(bridge.rename_target(556, "epoch-1"))
+
     async def test_title_and_notice_events_rename_the_thread_and_post_once(self) -> None:
         async with self.transport() as (bridge, thread, client):
             websocket = await self.connect_transport(client)

@@ -31,7 +31,9 @@ def session_thread_name(hello: SessionHello) -> str:
     if hello.origin and hello.origin.kind in {"launchplane", "agent_session"}:
         return _truncate_thread_name(prefix)
     if hello.title:
-        return _truncate_thread_name(f"{prefix} · {' '.join(hello.title.split())}")
+        # Bound a client-supplied title before any per-character work; only the start can fit anyway.
+        title = " ".join(hello.title[: DISCORD_THREAD_NAME_LIMIT * 4].split())
+        return _truncate_thread_name(f"{prefix} · {title}")
     branch = f" · {hello.branch}" if session_branch_is_title_worthy(hello.branch) else ""
     return _truncate_thread_name(f"{prefix}{branch}")
 
@@ -55,11 +57,17 @@ def _discord_length(text: str) -> int:
 
 
 def _truncate_thread_name(name: str) -> str:
+    # Every character is at least one UTF-16 unit, so nothing past this prefix can fit.
+    name = name[: DISCORD_THREAD_NAME_LIMIT + 1]
     if _discord_length(name) <= DISCORD_THREAD_NAME_LIMIT:
         return name
-    while _discord_length(name) > DISCORD_THREAD_NAME_LIMIT - 1:
-        name = name[:-1]
-    return name.rstrip() + "…"
+    kept, units = [], 0
+    for char in name:
+        units += 2 if ord(char) > 0xFFFF else 1
+        if units > DISCORD_THREAD_NAME_LIMIT - 1:
+            break
+        kept.append(char)
+    return "".join(kept).rstrip() + "…"
 
 
 def session_origin_lines(hello: SessionHello) -> list[str]:

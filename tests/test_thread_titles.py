@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import time
 import unittest
 
 from discord_blue.doodads.agent_session.renames import RENAME_WINDOW_SECONDS, ThreadRenamer
@@ -38,6 +39,14 @@ class ThreadNameTests(unittest.TestCase):
         for case, (hello, name) in cases.items():
             with self.subTest(case):
                 self.assertEqual(session_thread_name(hello), name)
+
+    def test_a_huge_title_is_cut_without_scanning_all_of_it(self) -> None:
+        hello = dataclasses.replace(make_hello(), harness="claude", title="x" * 5_000_000)
+        started = time.process_time()
+        name = session_thread_name(hello)
+        # Scanning five million characters repeatedly would take minutes; bounded work takes microseconds.
+        self.assertLess(time.process_time() - started, 0.5)
+        self.assertEqual(utf16_length(name), DISCORD_THREAD_NAME_LIMIT)
 
     def test_a_long_title_is_cut_to_discords_limit_with_the_icon_counted(self) -> None:
         for harness in HARNESS_ICONS:
@@ -77,17 +86,20 @@ class SessionLabelTests(unittest.TestCase):
 
 
 class FakeThread:
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, *, cache_updates: bool = True) -> None:
         self.name = name
         self.edits: list[str] = []
         self.hang = False
+        # discord.py returns the edited thread; the cached object's name updates only when the gateway says so.
+        self.cache_updates = cache_updates
 
     async def edit(self, *, name: str) -> None:
         if self.hang:
             self.hang = False
             await asyncio.sleep(3600)  # discord.py sleeping through a rate limit
         self.edits.append(name)
-        self.name = name
+        if self.cache_updates:
+            self.name = name
 
 
 class FakeClock:
@@ -113,18 +125,18 @@ class ThreadRenamerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_renames_are_coalesced_deferred_past_the_rate_limit_and_skipped_when_unchanged(self) -> None:
         thread, clock = FakeThread("old"), FakeClock()
-        renamer = ThreadRenamer(lambda _thread_id: thread, clock=clock, sleep=clock.sleep)
+        renamer = ThreadRenamer(lambda _thread_id, _epoch: thread, clock=clock, sleep=clock.sleep)
         for name in ("a", "b", "c"):
-            renamer.request(1, name)  # Requests before the task runs keep only the latest.
+            renamer.request(1, name, "epoch-1")  # Requests before the task runs keep only the latest.
         await self.settle(renamer)
-        renamer.request(1, "d")
+        renamer.request(1, "d", "epoch-1")
         await self.settle(renamer)
-        renamer.request(1, "d")  # Already the thread's name: nothing to send.
+        renamer.request(1, "d", "epoch-1")  # Already the thread's name: nothing to send.
         await self.settle(renamer)
         self.assertEqual(thread.edits, ["c", "d"])
 
         for name in ("e", "f"):
-            renamer.request(1, name)
+            renamer.request(1, name, "epoch-1")
         await self.settle(renamer)
         # The window allows RENAMES_PER_WINDOW renames, so the latest waits for it to reopen.
         self.assertEqual((thread.edits, clock.waits), (["c", "d"], [RENAME_WINDOW_SECONDS]))
@@ -135,9 +147,9 @@ class ThreadRenamerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_rename_discord_holds_back_is_retried_after_the_window(self) -> None:
         thread, clock = FakeThread("old"), FakeClock()
-        renamer = ThreadRenamer(lambda _thread_id: thread, clock=clock, sleep=clock.sleep, timeout=0.01)
+        renamer = ThreadRenamer(lambda _thread_id, _epoch: thread, clock=clock, sleep=clock.sleep, timeout=0.01)
         thread.hang = True
-        renamer.request(1, "new")
+        renamer.request(1, "new", "epoch-1")
         await asyncio.sleep(0.05)
         self.assertEqual((thread.edits, clock.waits), ([], [RENAME_WINDOW_SECONDS]))
         clock.gate.set()
@@ -146,7 +158,48 @@ class ThreadRenamerTests(unittest.IsolatedAsyncioTestCase):
         await renamer.close()
 
     async def test_a_thread_without_a_live_session_is_not_renamed(self) -> None:
-        renamer = ThreadRenamer(lambda _thread_id: None)
-        renamer.request(1, "new")
+        renamer = ThreadRenamer(lambda _thread_id, _epoch: None)
+        renamer.request(1, "new", "epoch-1")
         await self.settle(renamer)
         self.assertEqual(renamer.tasks, {})
+
+    async def test_a_rename_asked_for_by_an_earlier_session_epoch_is_dropped(self) -> None:
+        thread, clock = FakeThread("old"), FakeClock()
+        owner = {"epoch": "epoch-1"}
+        renamer = ThreadRenamer(
+            lambda _thread_id, epoch: thread if epoch == owner["epoch"] else None, clock=clock, sleep=clock.sleep
+        )
+        for name in ("a", "b", "c"):
+            renamer.request(1, name, "epoch-1")
+            await self.settle(renamer)
+        self.assertEqual((thread.edits, clock.waits), (["a", "b"], [RENAME_WINDOW_SECONDS]))
+        # The session reconnects under a new epoch while "c" waits for the window.
+        owner["epoch"] = "epoch-2"
+        clock.gate.set()
+        await self.settle(renamer)
+        self.assertEqual(thread.edits, ["a", "b"])
+        await renamer.close()
+
+    async def test_the_last_applied_name_decides_whether_a_rename_is_needed(self) -> None:
+        thread, clock = FakeThread("A", cache_updates=False), FakeClock()
+        renamer = ThreadRenamer(lambda _thread_id, _epoch: thread, clock=clock, sleep=clock.sleep)
+        renamer.request(1, "B", "epoch-1")
+        await self.settle(renamer)
+        # The cache still says A, but Discord shows B; asking for A again must rename.
+        renamer.request(1, "A", "epoch-1")
+        await self.settle(renamer)
+        self.assertEqual(thread.edits, ["B", "A"])
+        await renamer.close()
+
+    async def test_idle_rename_history_is_forgotten_and_close_clears_everything(self) -> None:
+        clock = FakeClock()
+        threads = {1: FakeThread("one"), 2: FakeThread("two")}
+        renamer = ThreadRenamer(lambda thread_id, _epoch: threads[thread_id], clock=clock, sleep=clock.sleep)
+        renamer.request(1, "one renamed", "epoch-1")
+        await self.settle(renamer)
+        clock.now += RENAME_WINDOW_SECONDS
+        renamer.request(2, "two renamed", "epoch-1")
+        await self.settle(renamer)
+        self.assertEqual((set(renamer.recent), set(renamer.applied)), ({2}, {2}))
+        await renamer.close()
+        self.assertEqual((renamer.recent, renamer.applied, renamer.wanted, renamer.tasks), ({}, {}, {}, {}))

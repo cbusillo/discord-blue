@@ -2516,12 +2516,16 @@ class AgentSessionBridge:
             return
         session.hello.title = title.strip()
         # Renames run in the background, coalesced and within Discord's rate limit.
-        self.renamer.request(session.thread_id, session_thread_name(session.hello))
+        self.renamer.request(session.thread_id, session_thread_name(session.hello), session.session_epoch)
 
-    def rename_target(self, thread_id: int) -> discord.Thread | None:
-        """The thread to rename, only while a live session owns it."""
+    def rename_target(self, thread_id: int, epoch: str) -> discord.Thread | None:
+        """The thread to rename, only while the session epoch that asked still owns it."""
+        session_id = self.sessions.by_thread.get(thread_id)
+        session = self.sessions.get(session_id) if session_id is not None else None
+        if session is None or session.session_epoch != epoch:
+            return None
         channel = self.bot.get_channel(thread_id)
-        return channel if isinstance(channel, discord.Thread) and self.sessions.by_thread.get(thread_id) else None
+        return channel if isinstance(channel, discord.Thread) else None
 
     async def post_thread_notice(self, thread_id: int, text: str) -> None:
         channel = self.bot.get_channel(thread_id)
