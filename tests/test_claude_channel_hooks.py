@@ -66,19 +66,24 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_an_unnamed_session_is_titled_by_its_first_typed_prompt(self) -> None:
+    async def test_the_label_is_the_user_set_name_else_the_latest_substantial_prompt(self) -> None:
         async with running_channel() as (claude, discord):
             await claude.initialize()
             await discord.next("hello")
             # Claude Code leaves a placeholder for a field the hook input does not have.
-            await hook(claude, "UserPromptSubmit", session_title="${session_title}", prompt="Fix the login bug\nThen test it.")
-            await hook(claude, "UserPromptSubmit", session_title="${session_title}", prompt="Also the logout bug")
-            await hook(claude, "SessionStart", session_title="Renamed")
+            for prompt in ("Fix the login bug\nThen test it.", "continue", "yes go ahead", "Now the logout bug please"):
+                await hook(claude, "UserPromptSubmit", session_title="${session_title}", prompt=prompt)
+            await hook(claude, "SessionStart", session_title="auth-refactor")
+            await hook(claude, "UserPromptSubmit", session_title="auth-refactor", prompt="And also update the docs")
             events = await mirrored(claude, discord)
 
         self.assertEqual(
             [event for event in events if event[0] == "title_changed"],
-            [("title_changed", "Fix the login bug"), ("title_changed", "Renamed")],
+            [
+                ("title_changed", "Fix the login bug Then test it."),
+                ("title_changed", "Now the logout bug please"),
+                ("title_changed", "auth-refactor"),
+            ],
         )
 
     async def test_the_model_cannot_post_through_the_hook_tool(self) -> None:
@@ -106,7 +111,7 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
         async with running_channel() as (claude, discord):
             await claude.initialize()
             before = await discord.next("hello")
-            await hook(claude, "UserPromptSubmit", prompt="First task")
+            await hook(claude, "UserPromptSubmit", prompt="Work on the first task")
             await hook(claude, "SessionEnd")
             # The session reconnects under a new epoch; a reply sent for the old conversation arrives late.
             after = await discord.next("hello")
@@ -115,7 +120,7 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
             current = await discord.control(command(after, "cmd-new", "reply", text="for whatever runs now"))
             injected = await claude.notification(CHANNEL)
             await hook(claude, "SessionStart", session_id="new-conversation")
-            await hook(claude, "UserPromptSubmit", session_id="new-conversation", prompt="Second task")
+            await hook(claude, "UserPromptSubmit", session_id="new-conversation", prompt="Work on the second task")
             events = await mirrored(claude, discord, session_id="new-conversation")
             leftover = await claude.settle()
 
@@ -130,7 +135,7 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
             [event for event in events if event[0] in ("title_changed", "notice")],
             [
                 ("notice", "This Claude Code session is now on conversation `new-conversation`."),
-                ("title_changed", "Second task"),
+                ("title_changed", "Work on the second task"),
             ],
         )
 

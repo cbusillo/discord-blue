@@ -81,6 +81,8 @@ class SessionHello:
     assistant_message: str | None = None
     capabilities: frozenset[str] | None = None
     title: str | None = None
+    # Which agent the session runs, such as "claude" or "codex"; Discord shows its icon in the thread name.
+    harness: str | None = None
 
     def supports(self, action: str) -> bool:
         return action in REMOTE_ACTIONS and (self.capabilities is None or action in self.capabilities)
@@ -100,6 +102,7 @@ class SessionHello:
             origin=origin,
             assistant_message=str(payload["assistant_message"]) if payload.get("assistant_message") else None,
             title=str(payload["title"]) if payload.get("title") else None,
+            harness=payload["harness"] if isinstance(payload.get("harness"), str) else None,
         )
 
 

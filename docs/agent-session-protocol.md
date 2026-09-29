@@ -32,9 +32,12 @@ The client sends JSON text messages. Start each connection with:
 }
 ```
 
-`origin`, `assistant_message`, and `title` are optional. `title` is a short
+`origin`, `assistant_message`, `title`, and `harness` are optional. `title` is a short
 human-readable task name used in the Discord thread name. It is not part of
-reconnect matching. Omit `origin` for an interactive
+reconnect matching. `harness` names the agent (`claude` or `codex`); Discord
+shows its icon first in the thread name, `<icon> <repo> · <title>`, capped at
+100 characters. Without a title the name uses a non-default git branch, and
+otherwise just the repository. Older servers ignore `harness`. Omit `origin` for an interactive
 session without an automation request. `session_id` must be stable across
 reconnections; `session_epoch` identifies the current running session instance.
 The server responds with `{"type":"hello_ack","thread_id":12345,"features":["command_text"]}`
@@ -141,7 +144,7 @@ an ID or epoch that differs from the connection's current session.
 | `request_user_input_resolved` | `call_id`, `turn_id`: retire the exact matching input prompt with neutral Resolved text. |
 | `approval_decision_reject` | `approval_id`, `reason`: decision expired or rejected. |
 | `request_user_input` | `call_id`, `turn_id`, `questions`: question objects described below. |
-| `title_changed` | `title`: a title learned after `hello`, such as the first prompt; the thread is renamed. Discord allows two renames per thread in ten minutes. |
+| `title_changed` | `title`: a title learned after `hello`, such as a new name or prompt; the thread is renamed in the background. Discord allows about two renames per thread in ten minutes, so the server renames only when the name changes, keeps only the latest pending name, and waits for the window to reopen. |
 | `notice` | `message`: plain text posted in the thread, such as why controls are unavailable. |
 
 Older bridges ignore these unknown resolution, title and notice events.

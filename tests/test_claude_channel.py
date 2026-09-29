@@ -137,6 +137,7 @@ class ClaudeChannelTests(unittest.IsolatedAsyncioTestCase):
             (IDENTITY.session_id, IDENTITY.cwd, IDENTITY.branch, IDENTITY.pid, "Claude Code on test", frozenset(CAPABILITIES)),
         )
         self.assertLess(frozenset(CAPABILITIES), REMOTE_ACTIONS)
+        self.assertEqual(hello.harness, "claude")
 
     async def test_a_discord_reply_is_injected_once_and_other_controls_are_refused(self) -> None:
         async with running_channel() as (claude, discord):

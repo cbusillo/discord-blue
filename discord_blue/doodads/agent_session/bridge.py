@@ -43,6 +43,7 @@ from discord_blue.doodads.agent_session.sessions import (
     PendingRemoteUserInput,
     RejectedCommandMessage,
 )
+from discord_blue.doodads.agent_session.renames import ThreadRenamer
 from discord_blue.doodads.agent_session.threads import SessionThread
 from discord_blue.doodads.agent_session.threads import auto_join_configured_users
 from discord_blue.doodads.agent_session.threads import create_session_thread
@@ -340,6 +341,7 @@ class AgentSessionBridge:
         self._cleanup_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._session_attach_lock = asyncio.Lock()
+        self.renamer = ThreadRenamer(self.rename_target)
         # No await occurs while resolving the entry, so one event loop turn
         # cannot create two locks for the same session ID.
         self._session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
@@ -485,6 +487,7 @@ class AgentSessionBridge:
         if self._runner is None:
             return
         self._stopping = True
+        await self.renamer.close()
         await self.stop_background_task("maintenance", self._cleanup_task)
         self._cleanup_task = None
         await self.stop_background_task("heartbeat", self._heartbeat_task)
@@ -2508,19 +2511,17 @@ class AgentSessionBridge:
                 command.message_id = new_message_id
 
     async def handle_title_changed(self, session: AgentSession, title: object) -> None:
-        """Rename the session thread for a title the client learned after hello, such as its first prompt."""
+        """Rename the session thread for a title the client learned after hello, such as its latest prompt."""
         if not isinstance(title, str) or not title.strip() or session.thread_id is None:
             return
         session.hello.title = title.strip()
-        channel = self.bot.get_channel(session.thread_id)
-        name = session_thread_name(session.hello)
-        if not isinstance(channel, discord.Thread) or channel.name == name:
-            return
-        try:
-            # Discord allows two renames per thread in ten minutes; never hold this connection for a rate limit.
-            await asyncio.wait_for(channel.edit(name=name), timeout=5)
-        except (discord.DiscordException, TimeoutError):
-            logger.warning("Could not rename Agent session thread %s", session.thread_id)
+        # Renames run in the background, coalesced and within Discord's rate limit.
+        self.renamer.request(session.thread_id, session_thread_name(session.hello))
+
+    def rename_target(self, thread_id: int) -> discord.Thread | None:
+        """The thread to rename, only while a live session owns it."""
+        channel = self.bot.get_channel(thread_id)
+        return channel if isinstance(channel, discord.Thread) and self.sessions.by_thread.get(thread_id) else None
 
     async def post_thread_notice(self, thread_id: int, text: str) -> None:
         channel = self.bot.get_channel(thread_id)

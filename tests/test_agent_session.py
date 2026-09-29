@@ -647,6 +647,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             ]
             for payload in payloads:
                 await self.send_transport_event(bridge, websocket, payload)
+            # Renames run in the background, coalesced; wait for this thread's to finish.
+            await asyncio.wait_for(asyncio.gather(*list(bridge.renamer.tasks.values())), timeout=2)
 
         self.assertEqual([edit for edit in thread.edits if "name" in edit], [{"name": thread.name}])
         self.assertIn("Fix the login bug", thread.name or "")

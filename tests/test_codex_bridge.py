@@ -124,6 +124,20 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLess(frozenset(CAPABILITIES), REMOTE_ACTIONS)
 
+    async def test_codex_renames_and_substantial_prompts_retitle_the_thread(self) -> None:
+        rpc = FakeRpc(thread("root", preview="Continue"))
+        async with running_bridge(rpc) as (bridge, discord):
+            hello = SessionHello.from_payload(await discord.next("hello"))
+            typed = {"type": "userMessage", "id": "u1", "content": [{"type": "text", "text": "Fix the flaky login test"}]}
+            await bridge.dispatch({"method": "item/completed", "params": {"threadId": "root", "turnId": "t1", "item": typed}})
+            for name in ("Login flake", None):
+                await bridge.dispatch({"method": "thread/name/updated", "params": {"threadId": "root", "threadName": name}})
+            titles = [(await discord.next("title_changed"))["title"] for _ in range(3)]
+
+        # "Continue" names nothing, so the thread starts as the repo (and branch) alone.
+        self.assertEqual((hello.harness, hello.title), ("codex", None))
+        self.assertEqual(titles, ["Fix the flaky login test", "Login flake", "Fix the flaky login test"])
+
     async def test_reply_runs_once_and_its_echo_is_not_mirrored(self) -> None:
         rpc = FakeRpc(thread("root"))
         async with running_bridge(rpc) as (bridge, discord):
@@ -348,17 +362,18 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
             done = {"threadId": "root", "turn": {"id": "t1", "status": "completed", "items": [answer]}}
             await bridge.dispatch({"method": "turn/completed", "params": done})
             await bridge.dispatch({"method": "turn/completed", "params": done})
-            events = [await discord.next() for _ in range(3)]
+            events = [await discord.next() for _ in range(4)]
             self.assertTrue(discord.received.empty())
 
             await bridge.dispatch(status("root", "idle"))
             await bridge.dispatch(status("root", "active"))
 
         self.assertEqual(
-            [(e["type"], e["message"], e.get("assistant_message")) for e in events],
+            [(e["type"], e.get("message") or e.get("title"), e.get("assistant_message")) for e in events],
             [
                 ("status_changed", "Turn started", None),
                 ("user_message", "typed in the TUI", None),
+                ("title_changed", "typed in the TUI", None),
                 ("turn_complete", TURN_DONE, "Fixed it."),
             ],
         )

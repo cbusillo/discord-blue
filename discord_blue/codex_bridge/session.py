@@ -24,6 +24,7 @@ from discord_blue.agent_client import AgentSessionClient, Rejected
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.codex_bridge.rpc import RequestId, RpcError, TransportError
 from discord_blue.doodads.agent_session.protocol import command_text_displayable
+from discord_blue.session_titles import SessionLabel
 
 Json = dict[str, Any]
 logger = logging.getLogger(__name__)
@@ -55,7 +56,6 @@ DISCORD_APPROVABLE_FIELDS = frozenset(
 )
 TEXT_LIMIT = 32_000
 REPLY_LIMIT = 16_000
-TITLE_LIMIT = 80
 SEEN_LIMIT = 256
 TURN_DONE = "Turn complete. Replies here will start the next turn."
 LOST_CODEX = "Lost the Codex connection, so delivery is uncertain. Check the Codex TUI before retrying."
@@ -68,12 +68,6 @@ class Rpc(Protocol):
 
 
 __all__ = ["Rejected", "Rpc", "ThreadSession", "latest_turn"]
-
-
-def thread_title(thread: Json) -> str | None:
-    text = str(thread.get("name") or thread.get("preview") or "").strip()
-    first_line = text.splitlines()[0] if text else ""
-    return first_line[: TITLE_LIMIT - 1] + "…" if len(first_line) > TITLE_LIMIT else first_line or None
 
 
 def command_argv(command: str) -> list[str]:
@@ -122,7 +116,7 @@ class ThreadSession(AgentSessionClient):
         self.thread_id: str = thread["id"]
         self.cwd = str(thread.get("cwd") or "")
         self.branch = (thread.get("gitInfo") or {}).get("branch")
-        self.title = thread_title(thread)
+        self.label = SessionLabel(name=thread.get("name"), prompt=thread.get("preview"))
         self.active_turn_id: str | None = None
         self.subscribed = False
         self.membership = asyncio.Lock()
@@ -159,8 +153,20 @@ class ThreadSession(AgentSessionClient):
                 return
             if text := user_text(item).strip():
                 self.publish("user_message", message=text)
+                self.retitle(prompt=text)
         elif is_answer(item) and len(self.answers) < 64:
             self.answers.setdefault(turn_id, []).append((item.get("phase"), item["text"]))
+
+    def rename(self, name: object) -> None:
+        """thread/name/updated: a name wins over prompts; clearing it falls back to the latest prompt."""
+        if isinstance(name, str) and name.strip():
+            self.retitle(name=name)
+        else:
+            self.retitle(clear_name=True)
+
+    def retitle(self, *, name: str | None = None, prompt: str | None = None, clear_name: bool = False) -> None:
+        if (title := self.label.update(name=name, prompt=prompt, clear_name=clear_name)) is not None:
+            self.publish("title_changed", title=title)
 
     def on_turn_completed(self, turn: Json) -> None:
         turn_id = str(turn.get("id"))
@@ -354,6 +360,8 @@ class ThreadSession(AgentSessionClient):
     # Discord Blue connection
 
     def hello(self, *, first: bool) -> Json:
-        hello = self.event("hello", host_label=self.config.host_label, cwd=self.cwd, pid=0, capabilities=self.capabilities)
-        optional = {"branch": self.branch, "title": self.title, "assistant_message": self.backfill if first else None}
+        hello = self.event(
+            "hello", host_label=self.config.host_label, cwd=self.cwd, pid=0, capabilities=self.capabilities, harness="codex"
+        )
+        optional = {"branch": self.branch, "title": self.label.current, "assistant_message": self.backfill if first else None}
         return {**hello, **{key: value for key, value in optional.items() if value}}
