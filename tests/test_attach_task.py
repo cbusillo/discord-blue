@@ -144,6 +144,59 @@ class AttachTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(closed, "nobody closed the thread of a session whose grace ran out")
         self.assertEqual(running.bridge.sessions.by_thread, {})
 
+    async def test_a_failed_backfill_still_attaches_a_late_joiner(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        hello = hello_for("no-history")
+        thread = fake.add_thread("no-history", marker=marker(hello))
+        refused = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "cannot post")
+        async with scenario(fake) as running, aiohttp.ClientSession() as http:
+            backfilling, release = asyncio.Event(), asyncio.Event()
+
+            async def failing_backfill(*_args: object) -> None:
+                backfilling.set()
+                await release.wait()
+                raise refused
+
+            with patch.object(running.bridge, "backfill_latest_assistant_message", new=failing_backfill):
+                first = await running.connect(http)
+                await first.send_json(hello)
+                await asyncio.wait_for(backfilling.wait(), timeout=5)
+                second = await running.connect(http)
+                await second.send_json({**hello, "session_epoch": "e2"})
+                await asyncio.sleep(0.1)
+                release.set()
+                ack = await second.receive_json(timeout=10)
+                owner = running.bridge.sessions.get("no-history")
+                await second.close()
+                await first.close()
+
+        self.assertEqual(ack["thread_id"], thread.id)
+        self.assertEqual(owner.thread_id if owner is not None else None, thread.id)
+
+    async def test_stopping_with_a_reconnect_queued_still_closes_the_old_sessions_thread(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        hello = hello_for("unlucky")
+        thread = fake.add_thread("unlucky", marker=marker(hello), members={BOT_ID})
+        async with scenario(fake, listen_host="127.0.0.1", listen_port=0) as running, aiohttp.ClientSession() as http:
+            await running.bridge.start()
+            first = await running.connect(http)
+            await first.send_json(hello)
+            await first.receive_json(timeout=10)
+            await first.close()
+            self.assertTrue(await until(lambda: _in_grace(running), 5))
+            # Another session's slow attach holds the attach lock; the reconnect queues behind it.
+            await running.bridge._session_attach_lock.acquire()
+            second = await running.connect(http)
+            await second.send_json({**hello, "session_epoch": "e2"})
+            await asyncio.sleep(0.2)
+            stopping = asyncio.create_task(running.bridge.stop())
+            await asyncio.sleep(0.1)
+            running.bridge._session_attach_lock.release()
+            await asyncio.wait_for(stopping, timeout=15)
+            closed = await until(lambda: thread.archived, timeout=5)
+
+        self.assertTrue(closed, "shutdown left the old session's thread open")
+
 
 def _in_grace(running: Scenario) -> bool:
     session = running.bridge.sessions.get("unlucky")

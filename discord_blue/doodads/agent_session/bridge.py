@@ -93,6 +93,7 @@ PENDING_CLEANUP_MAX_ATTEMPTS = 5
 DELETED_NOTIFICATIONS_REMEMBERED = 1024
 SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
 SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = 5
+SHUTDOWN_ATTACH_SETTLE_SECONDS = 10
 SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS = SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS + SESSION_THREAD_CLEANUP_TIMEOUT_SECONDS
 
 AGENT_SESSION_CONNECT_PATH = "/agent-session/connect"
@@ -503,6 +504,10 @@ class AgentSessionBridge:
         self._cleanup_task = None
         await self.stop_background_task("heartbeat", self._heartbeat_task)
         self._heartbeat_task = None
+        # Queued attaches stop at the lock and put back the sessions they replaced, so shutdown ends those too. They
+        # are waited for, not cancelled: one may be sending a Discord request.
+        if self._attach_tasks:
+            await asyncio.wait(list(self._attach_tasks.values()), timeout=SHUTDOWN_ATTACH_SETTLE_SECONDS)
         await self.disconnect_active_sessions()
         self.threads.stop()
         try:
@@ -1003,19 +1008,20 @@ class AgentSessionBridge:
         """
         session_id = hello.session_id
         async with self.session_lifecycle_lock(session_id), self._session_attach_lock:
-            if self._stopping:
-                raise BridgeStopping
             try:
+                if self._stopping:
+                    raise BridgeStopping
                 session_thread = await self.resume_thread_in_grace(previous, hello) or await self.find_or_create_session_thread(
                     hello
                 )
-            except (discord.DiscordException, ValueError) as exc:
-                logger.warning(
-                    "Unable to attach Discord thread for Agent session %s: %s",
-                    session_id,
-                    type(exc).__name__,
-                    exc_info=True,
-                )
+            except (discord.DiscordException, ValueError, BridgeStopping) as exc:
+                if not isinstance(exc, BridgeStopping):
+                    logger.warning(
+                        "Unable to attach Discord thread for Agent session %s: %s",
+                        session_id,
+                        type(exc).__name__,
+                        exc_info=True,
+                    )
                 current = self.sessions.get(session_id)
                 if current is not None and current is not previous and current.thread_id is None:
                     self.sessions.remove_if_current(current)
@@ -1026,7 +1032,11 @@ class AgentSessionBridge:
                 previous.grace_task.cancel()
             self.sessions.bind_thread(session_id, session_thread.thread.id, session_thread.notification_message_id)
             self._attached_threads[session_thread.thread.id] = session_thread.thread
-            await self.backfill_latest_assistant_message(session_thread.thread, hello)
+            try:
+                await self.backfill_latest_assistant_message(session_thread.thread, hello)
+            except Exception:
+                # Only the thread's history is short; the session is attached all the same.
+                logger.warning("Unable to backfill Agent session thread %s", session_thread.thread.id, exc_info=True)
         return session_thread
 
     async def end_connection(self, session: AgentSession) -> None:
@@ -1062,14 +1072,15 @@ class AgentSessionBridge:
         """A reconnect failed to attach: the session it replaced goes back in grace, so its timer still ends it.
 
         If the timer already ran out while the reconnect waited (it stands down for a replacement), the session is
-        ended now instead, so its thread is still closed.
+        ended now instead, so its thread is still closed. During shutdown it is only put back: shutdown ends every
+        registered session, once queued attaches have settled.
         """
-        if previous is None or previous.grace_task is None or previous.grace_task.cancelled():
+        if previous is None or previous.grace_task is None:
             return
         if self.sessions.get(previous.session_id) is not None:
             return
         self.sessions.register(previous)
-        if previous.grace_task.done():
+        if previous.grace_task.done() and not self._stopping:
             # Not awaited: the failed attach still holds this session's lifecycle lock, which finalize needs.
             ending = asyncio.create_task(self.end_after_grace(previous), name=f"agent-session-grace-{previous.session_id}")
             self._grace_tasks.add(ending)
