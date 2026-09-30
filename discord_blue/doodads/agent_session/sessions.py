@@ -151,8 +151,9 @@ class AgentSessionRegistry:
 
     def remove(self, session_id: str) -> AgentSession | None:
         session = self.by_session.pop(session_id, None)
-        if session and session.thread_id is not None:
-            self.by_thread.pop(session.thread_id, None)
+        # Every thread mapped to this session ID, including one a replaced connection was bound to.
+        for thread_id in [thread_id for thread_id, mapped in self.by_thread.items() if mapped == session_id]:
+            del self.by_thread[thread_id]
         return session
 
     def remove_if_current(self, session: AgentSession) -> AgentSession | None:

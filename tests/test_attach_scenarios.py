@@ -100,7 +100,7 @@ async def scenario(fake: FakeDiscord, **agent_session: object) -> AsyncIterator[
             finally:
                 for grace in list(bridge._grace_tasks):
                     grace.cancel()
-                await bridge.renamer.close()
+                bridge.threads.stop()
                 await runner.cleanup()
 
 
@@ -120,7 +120,6 @@ def fails_on_main(test: Callable[..., Any]) -> Callable[..., Any]:
 
 
 class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
-    @fails_on_main
     async def test_a_restart_wave_of_seven_sessions_converges(self) -> None:
         """Main serializes attaches on one global lock, each reading every candidate thread's history (~30 s in
         production). Seven sessions need ~7 attach-times in sequence, longer than a client waits for its ack, so
@@ -149,16 +148,15 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
                 ClaudeSession(config, Identity(session_id=h["session_id"], cwd=h["cwd"], branch="main", pid=1), notify)
                 for h in hellos
             ]
-            with patch.object(bridge_module, "SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS", 0.33):
-                tasks = [asyncio.create_task(client.run(http)) for client in clients]
-                try:
-                    attached = await until(lambda: len(running.bridge.sessions.by_thread) == 7, timeout=4)  # ~2 min
-                finally:
-                    for client in clients:
-                        await client.stop()
-                    for task in tasks:
-                        task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
+            tasks = [asyncio.create_task(client.run(http)) for client in clients]
+            try:
+                attached = await until(lambda: len(running.bridge.sessions.by_thread) == 7, timeout=4)  # ~2 min
+            finally:
+                for client in clients:
+                    await client.stop()
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         self.assertTrue(attached, "not every session attached after the restart")
 
@@ -239,7 +237,35 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ack["type"], "hello_ack")
         self.assertTrue(still_open, "an archive from the earlier session closed the reconnected session's thread")
 
-    @fails_on_main
+    async def test_a_teardown_that_stops_waiting_in_a_global_rate_limit_leaves_discord_usable(self) -> None:
+        """Cancelling a discord.py 2.7.1 request while it sleeps out a global 429 leaves its global-limit event
+        cleared, so every later request waits forever (the #147 review). Teardown's wait for its archive ends while
+        discord.py is in that sleep; the next session must still attach."""
+        fake = FakeDiscord(latency=0.002)
+        ending, arriving = hello_for("ending"), hello_for("arriving")
+        fake.add_thread("ending", marker=marker(ending), members={BOT_ID})
+        fake.add_thread("arriving", marker=marker(arriving), archived=True, locked=True)
+        with (
+            patch.object(bridge_module, "SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS", 0.2),
+            patch.object(bridge_module, "THREAD_CLOSE_WAIT_SECONDS", 0.1),
+        ):
+            async with scenario(fake) as running, aiohttp.ClientSession() as http:
+                first = await running.connect(http)
+                await first.send_json(ending)
+                await first.receive_json(timeout=10)
+                # The close notice meets a global rate limit: 100 s, scaled to 1 s, far longer than teardown waits.
+                fake.faults.append(Fault("POST", "/channels/{channel}/messages", status=429, retry_after=100, is_global=True))
+                await first.send_json({"type": "session_end", "session_id": "ending", "session_epoch": "e1"})
+                await first.close()
+                self.assertTrue(await until(lambda: not fake.faults, timeout=5), "the close notice was never sent")
+                await asyncio.sleep(0.3)  # Teardown has stopped waiting; discord.py is still in the global sleep.
+                second = await running.connect(http)
+                await second.send_json(arriving)
+                ack = await second.receive_json(timeout=10)
+                await second.close()
+
+        self.assertEqual(ack["type"], "hello_ack")
+
     async def test_an_event_sent_right_after_the_ack_is_delivered(self) -> None:
         """discord.py re-caches a reopened thread only when its gateway THREAD_UPDATE arrives, after the REST reply.
         Main acknowledges as soon as the reopen returns, and handlers that look the thread up in the cache drop
@@ -264,7 +290,6 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(delivered, "the first event after hello_ack never reached the thread")
 
-    @fails_on_main
     async def test_a_failed_discovery_read_does_not_create_a_duplicate_thread(self) -> None:
         """Main's discovery treats an error reading a candidate's history as 'not this session', so a transient
         Discord failure hides the session's existing thread and the bridge creates a second one."""
@@ -283,7 +308,6 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ack.get("thread_id"), existing.id, "the session was given a new thread instead of its own")
         self.assertEqual([t.id for t in running.threads_marked_for(hello)], [existing.id])
 
-    @fails_on_main
     async def test_a_create_retried_by_discord_py_leaves_no_duplicate_thread(self) -> None:
         """discord.py retries a 5xx internally. When Discord created the thread before answering 502, the retry
         creates a second one; main posts the marker only in the second, so the first is an unmarked orphan."""
@@ -296,9 +320,9 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
             await websocket.receive_json(timeout=15)
             await websocket.close()
 
-        self.assertEqual(len(fake.threads), 1, "creating the session's thread left more than one thread")
+        still_open = [t.id for t in fake.threads.values() if not t.archived]
+        self.assertEqual(len(still_open), 1, "creating the session's thread left more than one open thread")
 
-    @fails_on_main
     async def test_a_first_deploy_sweep_does_not_archive_a_session_about_to_reconnect(self) -> None:
         """Right after a restart, main's first sweep archives every unbound session thread, including those of
         sessions whose clients are still waiting out their reconnect delay (no store record protects them yet)."""

@@ -116,6 +116,9 @@ class FakeThread:
         self.join_raises = False
         self._member_ids = list(members or [])
         self.removed_user_ids: list[int] = []
+        self.parent_id: int | None = None
+        self.owner_id: int | None = 999
+        self.message_count = 0
 
     def add_message(self, message: FakeReplyMessage) -> None:
         self._messages[message.id] = message

@@ -42,14 +42,7 @@ class SessionCleanupTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_finalization_budgets_fit_reconnect_deadline(self) -> None:
-        thread_budget = (
-            bridge_module.THREAD_LOOKUP_TIMEOUT_SECONDS
-            + bridge_module.THREAD_UNARCHIVE_TIMEOUT_SECONDS
-            + bridge_module.THREAD_DISCONNECT_NOTICE_TIMEOUT_SECONDS
-            + bridge_module.THREAD_MEMBER_CLEANUP_TIMEOUT_SECONDS
-            + bridge_module.THREAD_ARCHIVE_TIMEOUT_SECONDS
-            + bridge_module.THREAD_LEAVE_TIMEOUT_SECONDS
-        )
+        thread_budget = bridge_module.THREAD_LOOKUP_TIMEOUT_SECONDS + bridge_module.THREAD_CLOSE_WAIT_SECONDS
         self.assertLessEqual(thread_budget, bridge_module.SESSION_THREAD_CLEANUP_TIMEOUT_SECONDS)
         self.assertGreaterEqual(
             bridge_module.SESSION_FINALIZATION_TIMEOUT_SECONDS,
@@ -57,16 +50,13 @@ class SessionCleanupTests(unittest.IsolatedAsyncioTestCase):
             + bridge_module.SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS
             + bridge_module.SESSION_THREAD_CLEANUP_TIMEOUT_SECONDS,
         )
-        self.assertLess(
-            bridge_module.SESSION_FINALIZATION_TIMEOUT_SECONDS,
-            bridge_module.SESSION_LIFECYCLE_LOCK_TIMEOUT_SECONDS,
-        )
 
     async def test_member_failure_does_not_skip_archive_and_retry_recloses_thread(self) -> None:
         thread = FakeThread(555, members=[111])
         bridge = self.make_bridge(thread)
         cleanup = self.cleanup_record(555, "members", "archive", "leave")
-        with patch.object(bridge, "remove_thread_members", new=AsyncMock(side_effect=[False, True])):
+        refused = discord.Forbidden(response=SimpleNamespace(status=403, reason="Forbidden"), message="cannot remove")
+        with patch.object(thread, "remove_user", new=AsyncMock(side_effect=[refused, None])):
             residual = await bridge.cleanup_session_artifacts(cleanup)
             self.assertIsNotNone(residual)
             self.assertEqual(cast(PendingSessionCleanup, residual).pending_steps, {"members"})
@@ -81,25 +71,32 @@ class SessionCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(thread.locked)
         self.assertTrue(thread.left)
 
-    async def test_thread_lock_recheck_lets_new_attachment_win(self) -> None:
-        thread = FakeThread(555)
+    async def test_a_session_taking_the_thread_mid_close_stops_the_close(self) -> None:
+        thread = FakeThread(555, members=[111])
         bridge = self.make_bridge(thread)
-        cleanup = self.cleanup_record(555, "archive", "leave")
-        thread_lock = bridge.thread_lifecycle_lock(thread.id)
-        await thread_lock.acquire()
-        cleanup_task = asyncio.create_task(bridge.cleanup_session_artifacts(cleanup))
-        await asyncio.sleep(0)
-        self.assertFalse(cleanup_task.done())
+        cleanup = self.cleanup_record(555, "disconnect_notice", "archive", "leave")
+        posting, release = asyncio.Event(), asyncio.Event()
+        original_send = thread.send
 
-        session = AgentSession(
-            hello=make_hello(),
-            websocket=cast(web.WebSocketResponse, FakeWebSocket()),
-            thread_id=thread.id,
-        )
-        bridge.sessions.register(session)
-        thread_lock.release()
+        async def slow_notice(content: str | None = None, **kwargs: object) -> object:
+            posting.set()
+            await release.wait()
+            return await original_send(content, **kwargs)
 
-        self.assertIsNone(await cleanup_task)
+        with patch.object(thread, "send", new=slow_notice):
+            cleanup_task = asyncio.create_task(bridge.cleanup_session_artifacts(cleanup))
+            await asyncio.wait_for(posting.wait(), timeout=1)
+            # A reconnect takes the thread while the close's first request is still in flight.
+            session = AgentSession(
+                hello=make_hello(),
+                websocket=cast(web.WebSocketResponse, FakeWebSocket()),
+                thread_id=thread.id,
+            )
+            bridge.sessions.register(session)
+            release.set()
+            residual = await asyncio.wait_for(cleanup_task, timeout=1)
+
+        self.assertIsNone(residual)
         self.assertFalse(thread.archived)
         self.assertFalse(thread.left)
 

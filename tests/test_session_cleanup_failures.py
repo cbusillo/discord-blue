@@ -196,7 +196,8 @@ class CleanupFailureTests(unittest.IsolatedAsyncioTestCase):
                     self.assertLogs(bridge_module.logger, level="WARNING"),
                 ):
                     await bridge.finalize_session(session)
-                self.assertTrue(cancelled.is_set())
+                # Closing the websocket is local and is cut off; a Discord delete is left to finish on its own.
+                self.assertEqual(cancelled.is_set(), phase == "socket")
                 self.assertTrue(thread.archived)
                 self.assertTrue(thread.left)
                 self.assertEqual(bridge.sessions.by_session, {})
