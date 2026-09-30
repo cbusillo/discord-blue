@@ -15,7 +15,7 @@ updates:
   - package-ecosystem: "docker"
     directory: "/"
     cooldown:
-      semver-major-days: 30
+      default-days: 7
     schedule:
       interval: "weekly"
     groups:
@@ -26,7 +26,7 @@ updates:
   - package-ecosystem: "docker-compose"
     directory: "/"
     cooldown:
-      semver-major-days: 30
+      default-days: 7
     schedule:
       interval: "weekly"
     groups:
@@ -37,7 +37,7 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     cooldown:
-      semver-major-days: 30
+      default-days: 7
     schedule:
       interval: "weekly"
     groups:
