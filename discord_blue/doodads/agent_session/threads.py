@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -133,12 +135,42 @@ async def get_agent_session_channel(bot: BlueBot) -> discord.TextChannel:
     raise ValueError(f"Agent session channel {channel_id} is not available")
 
 
-async def create_session_thread(bot: BlueBot, hello: SessionHello) -> SessionThread:
+CREATION_TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
+
+
+def new_creation_token() -> str:
+    return "".join(secrets.choice(CREATION_TOKEN_ALPHABET) for _ in range(6))
+
+
+def creation_token_suffix(token: str) -> str:
+    return f" [{token}]"
+
+
+def tokened_thread_name(hello: SessionHello, token: str) -> str:
+    """The session's thread name plus its creation token, which the first rename removes."""
+    suffix = creation_token_suffix(token)
+    return _truncate_thread_name(session_thread_name(hello), DISCORD_THREAD_NAME_LIMIT - _discord_length(suffix)) + suffix
+
+
+async def create_session_thread(
+    bot: BlueBot,
+    hello: SessionHello,
+    *,
+    token: str | None = None,
+    settle: Callable[[discord.Thread], Awaitable[None]] | None = None,
+) -> SessionThread:
+    """Create the session's thread, let `settle` see it before anything is posted, then announce it.
+
+    With a token, the thread's name carries it: the only field Discord sets atomically with a private thread, so a
+    duplicate made by discord.py retrying the create can be told apart from other sessions' threads.
+    """
     channel = await get_agent_session_channel(bot)
     thread = await channel.create_thread(
-        name=session_thread_name(hello),
+        name=tokened_thread_name(hello, token) if token else session_thread_name(hello),
         auto_archive_duration=1440,
     )
+    if settle is not None:
+        await settle(thread)
     notification = await send_agent_session_message(channel, session_notification_message(hello, thread))
     await send_agent_session_message(thread, session_start_message(hello))
     await auto_join_configured_users(bot, thread)

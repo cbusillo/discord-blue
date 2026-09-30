@@ -23,7 +23,7 @@ from aiohttp.test_utils import TestServer
 from discord.http import HTTPClient, Route, handle_message_parameters
 
 from discord_blue.plugs.discord_plug import MAX_RATELIMIT_SLEEP_SECONDS
-from tests.fake_discord import PARENT_ID, FakeDiscord, FakeThreadState
+from tests.fake_discord import BOT_ID, GUILD_ID, PARENT_ID, FakeDiscord, FakeThreadState
 from tests.fakes_agent_session import FakeBot, FakeReplyMessage, FakeTextChannel, FakeThread, UserLike
 
 Json = dict[str, Any]
@@ -56,6 +56,10 @@ class HttpThread(FakeThread):
         self.bot, self.http = bot, bot.http
         self.name = str(data.get("name"))
         self.parent = bot.parent
+        self.parent_id = int(data.get("parent_id") or PARENT_ID)
+        self.owner_id = int(data["owner_id"]) if data.get("owner_id") else None
+        self.message_count = int(data.get("message_count") or 0)
+        self.guild = bot.guild  # type: ignore[assignment]
 
     def refresh(self, data: Json) -> None:
         metadata = data.get("thread_metadata") or {}
@@ -169,6 +173,7 @@ class HttpBot(FakeBot):
     def __init__(self, config: object, http: HTTPClient, fake: FakeDiscord) -> None:
         super().__init__(config)  # type: ignore[arg-type]
         self.http = http
+        self.guild = SimpleNamespace(id=GUILD_ID, me=SimpleNamespace(id=BOT_ID), active_threads=self.active_threads)
         self.parent = HttpChannel(self)
         self.cache: dict[int, HttpThread] = {}
         for state in fake.threads.values():
@@ -187,6 +192,11 @@ class HttpBot(FakeBot):
 
     def get_channel(self, channel_id: int) -> HttpThread | HttpChannel | None:  # type: ignore[override]
         return self.parent if channel_id == PARENT_ID else self.cache.get(channel_id)
+
+    async def active_threads(self) -> list[HttpThread]:
+        """Guild.active_threads(): every open thread, straight from REST rather than the gateway cache."""
+        data = as_json(await self.http.get_active_threads(GUILD_ID))
+        return [HttpThread(self, thread) for thread in data["threads"]]
 
     async def fetch_thread(self, thread_id: int) -> HttpThread:
         return HttpThread(self, as_json(await self.http.get_channel(thread_id)))

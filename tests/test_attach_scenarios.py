@@ -308,7 +308,6 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ack.get("thread_id"), existing.id, "the session was given a new thread instead of its own")
         self.assertEqual([t.id for t in running.threads_marked_for(hello)], [existing.id])
 
-    @fails_on_main
     async def test_a_create_retried_by_discord_py_leaves_no_duplicate_thread(self) -> None:
         """discord.py retries a 5xx internally. When Discord created the thread before answering 502, the retry
         creates a second one; main posts the marker only in the second, so the first is an unmarked orphan."""
@@ -321,7 +320,8 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
             await websocket.receive_json(timeout=15)
             await websocket.close()
 
-        self.assertEqual(len(fake.threads), 1, "creating the session's thread left more than one thread")
+        still_open = [t.id for t in fake.threads.values() if not t.archived]
+        self.assertEqual(len(still_open), 1, "creating the session's thread left more than one open thread")
 
     async def test_a_first_deploy_sweep_does_not_archive_a_session_about_to_reconnect(self) -> None:
         """Right after a restart, main's first sweep archives every unbound session thread, including those of

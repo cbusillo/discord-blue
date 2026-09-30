@@ -56,6 +56,8 @@ from discord_blue.doodads.agent_session.thread_worker import RenameTarget, Threa
 from discord_blue.doodads.agent_session.threads import SessionThread
 from discord_blue.doodads.agent_session.threads import auto_join_configured_users
 from discord_blue.doodads.agent_session.threads import create_session_thread
+from discord_blue.doodads.agent_session.threads import creation_token_suffix
+from discord_blue.doodads.agent_session.threads import new_creation_token
 from discord_blue.doodads.agent_session.threads import get_agent_session_channel
 from discord_blue.doodads.agent_session.threads import session_notification_message
 from discord_blue.doodads.agent_session.threads import distinct_thread_name
@@ -149,6 +151,14 @@ class CandidateGone(Exception):
     def __init__(self, thread_id: int) -> None:
         super().__init__(thread_id)
         self.thread_id = thread_id
+
+
+@dataclasses.dataclass(slots=True)
+class CreationCheck:
+    created_id: int
+    parent_id: int | None
+    guild: discord.Guild
+    attempts: int = 0
 
 
 class BridgeStopping(Exception):
@@ -368,6 +378,8 @@ class AgentSessionBridge:
         # worker, one request at a time and never cancelled.
         self.threads = ThreadWorkers.for_client(bot, self)
         self.discovery = DiscoveryIndex(self.bot_user_id)
+        # Creations whose duplicate check could not finish, by token; maintenance retries them.
+        self._creation_checks: dict[str, CreationCheck] = {}
         # No await occurs while resolving the entry, so one event loop turn
         # cannot create two locks for the same session ID.
         self._session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
@@ -644,6 +656,7 @@ class AgentSessionBridge:
             self.record_maintenance_progress()
             try:
                 await self.retry_pending_cleanups()
+                await self.retry_creation_checks()
                 if time.monotonic() - self._monitor_started_at >= STARTUP_SWEEP_HOLD_SECONDS:
                     await self.cleanup_stale_session_notifications()
                     await self.cleanup_stale_session_threads()
@@ -1149,7 +1162,10 @@ class AgentSessionBridge:
     async def find_or_create_session_thread_once(self, hello: SessionHello) -> SessionThread:
         thread = await self.find_existing_session_thread(hello)
         if thread is None:
-            session_thread = await create_session_thread(self.bot, hello)
+            token = new_creation_token()
+            session_thread = await create_session_thread(
+                self.bot, hello, token=token, settle=partial(self.delete_creation_duplicates, token)
+            )
             self.discovery.add(session_thread.thread, [session_start_message(hello)])
             self.sessions.bind_thread(
                 hello.session_id,
@@ -1178,6 +1194,67 @@ class AgentSessionBridge:
             if self._attaching_threads[thread.id] <= 0:
                 del self._attaching_threads[thread.id]
         return SessionThread(thread=thread, notification_message_id=notification_message_id)
+
+    async def delete_creation_duplicates(self, token: str, created: discord.Thread) -> None:
+        """Close other threads of this creation: discord.py retries a create that failed with a 5xx, and Discord may
+        have made the first one anyway. Runs before anything is posted, so a duplicate is still empty. If the check
+        cannot finish now, maintenance retries it."""
+        try:
+            done = await self.check_creation_duplicates(token, created.id, created.parent_id, created.guild)
+        except Exception:
+            logger.warning("Unable to check for duplicate Agent session threads of %s", created.id, exc_info=True)
+            done = False
+        if not done:
+            self._creation_checks[token] = CreationCheck(created.id, created.parent_id, created.guild)
+
+    async def check_creation_duplicates(self, token: str, created_id: int, parent_id: int | None, guild: discord.Guild) -> bool:
+        """True once every duplicate is archived and locked; False if listing or an archive failed, to retry later.
+
+        A duplicate is archived rather than deleted: the checks below cannot rule out that someone posts in it
+        before the request lands, and an archive can be undone.
+        """
+        suffix = creation_token_suffix(token)
+        bot_user_id = self.bot_user_id()
+        try:
+            active = await guild.active_threads()
+        except Exception:
+            logger.warning("Unable to check for duplicate Agent session threads of %s", created_id, exc_info=True)
+            return False
+        done = True
+        for thread in active:
+            # Only an empty thread the bot itself created under the same parent, carrying this creation's token: a
+            # name alone can be copied, but not ownership, and a session thread has at least its marker.
+            if (
+                thread.id == created_id
+                or thread.parent_id != parent_id
+                or thread.owner_id != bot_user_id
+                or thread.message_count
+                or not (thread.name or "").endswith(suffix)
+                or thread.id in self.sessions.by_thread
+            ):
+                continue
+            remaining = await self.threads.close(thread, {"archive", "leave"}, timeout=THREAD_CLOSE_WAIT_SECONDS)
+            if "archive" in remaining:
+                logger.warning("Unable to archive duplicate Agent session thread %s yet", thread.id)
+                done = False
+            else:
+                logger.info("Archived duplicate Agent session thread %s of %s", thread.id, created_id)
+        return done
+
+    async def retry_creation_checks(self) -> None:
+        for token, check in list(self._creation_checks.items()):
+            self.record_maintenance_progress()
+            check.attempts += 1
+            try:
+                done = await self.check_creation_duplicates(token, check.created_id, check.parent_id, check.guild)
+            except Exception:
+                logger.warning("Unable to check for duplicate Agent session threads of %s", check.created_id, exc_info=True)
+                done = False
+            if done:
+                self._creation_checks.pop(token, None)
+            elif check.attempts >= PENDING_CLEANUP_MAX_ATTEMPTS:
+                self._creation_checks.pop(token, None)
+                logger.warning("Giving up on duplicate Agent session threads of %s", check.created_id)
 
     async def ensure_session_notification(self, hello: SessionHello, thread: discord.Thread) -> int | None:
         existing_message_id = await self.find_session_notification_for_thread(thread.id)
