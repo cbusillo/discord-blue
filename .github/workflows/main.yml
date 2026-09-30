@@ -6,6 +6,7 @@ name: Deploy to Production
   push:
     branches:
       - main
+      - "launchplane/train/**"
 permissions:
   contents: read
   id-token: write
