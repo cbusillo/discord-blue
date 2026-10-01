@@ -15,7 +15,7 @@ from discord_blue.plugs.discord_plug import BlueBot
 logger = logging.getLogger(__name__)
 DISCORD_THREAD_NAME_LIMIT = 100
 # The thread-name icon for each agent a client reports in hello's `harness`; others get none.
-HARNESS_ICONS = {"claude": "\u2733\ufe0f", "codex": "\U0001f537"}
+HARNESS_ICONS = {"claude": "\u2734\ufe0f", "codex": "\U0001f537"}
 DEFAULT_BRANCH_NAMES = {"main", "master", "develop", "development", "dev", "trunk"}
 
 

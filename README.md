@@ -383,6 +383,8 @@ maintenance.
 
 ## Icon artwork
 
-The approved [charcoal-and-orange DUI icon](docs/assets/dui-icon.png) is original
+The retained [charcoal-and-orange DUI icon](docs/assets/dui-icon.png) is original
 artwork: paired conversation bubbles and terminal chevrons. It is designed for
 Discord's circular avatar crop and checked at 32, 40 and 128 pixels.
+It is not applied to the bot or server. Session thread names use standard emoji:
+Claude uses the orange eight-pointed star (✴️), and Codex uses the blue diamond (🔷).
