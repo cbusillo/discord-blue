@@ -1582,11 +1582,13 @@ class AgentSessionBridge:
         return None
 
     async def send_thread_reply(self, message: discord.Message) -> bool:
-        if not isinstance(message.channel, discord.Thread):
-            return False
-
         session = self.sessions.get_by_thread(message.channel.id)
         if session is None:
+            return False
+        # MESSAGE_CREATE can arrive before the reopened thread returns to discord.py's cache.
+        # Its PartialMessageable still identifies the thread already bound by our acknowledged hello.
+        thread = self.thread_channel(message.channel.id)
+        if not isinstance(thread, discord.Thread):
             return False
         if session.websocket.closed:
             await message.reply("Agent session is offline; reply was not delivered.", mention_author=False)
@@ -1597,6 +1599,9 @@ class AgentSessionBridge:
         if message.created_at < session.attached_at:
             # The client reconnected since (for Claude Code, after /clear or /resume); never deliver it to the new epoch.
             await message.reply(REPLY_BEFORE_RECONNECT, mention_author=False)
+            return True
+        if not session.acknowledged:
+            await message.reply("Agent session is reconnecting; send the reply again in a moment.", mention_author=False)
             return True
 
         command = RemoteCommand(
@@ -1612,8 +1617,6 @@ class AgentSessionBridge:
             message_id=message.id,
             kind="reply",
         )
-        thread = message.channel
-
         queued = False
 
         async def show_queued() -> None:

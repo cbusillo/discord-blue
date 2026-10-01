@@ -346,7 +346,9 @@ Behaviour and limits:
   Claude Code does not mask, such as passwords or private keys.
 - `/clear` or `/resume` inside a session keeps its thread but reconnects under a
   new epoch, so replies sent for the previous conversation are rejected. Discord Blue also refuses a reply written before the session last
-  reconnected, and says so. The thread gets a notice for each switch.
+  reconnected, and says so. A reply received while the session is still attaching
+  gets a reconnecting notice asking you to send it again; it is not delivered
+  ahead of the connection acknowledgment. The thread gets a notice for each switch.
 - Hooks reach the channel through an MCP tool, `dui_hook_event`, which the model
   can also see. Its description says never to call it, and calls that carry a
   model tool-use ID are ignored.

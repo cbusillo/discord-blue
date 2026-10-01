@@ -117,6 +117,25 @@ def decision(hello: Json, approval_id: str, verdict: str) -> Json:
 
 
 class ClaudeChannelTests(unittest.IsolatedAsyncioTestCase):
+    async def test_server_restart_reconnects_both_directions_without_restarting_mcp(self) -> None:
+        async with running_channel() as (claude, discord):
+            await claude.initialize()
+            first = await discord.next("hello")
+            await discord.close()
+            reattached = await discord.next("hello")
+            self.assertEqual(
+                (reattached["session_id"], reattached["session_epoch"]),
+                (first["session_id"], first["session_epoch"]),
+            )
+            reply = command(reattached, "after-restart", "reply", text="Still here")
+            self.assertEqual((await discord.control(reply))["type"], "command_ack")
+            self.assertEqual((await claude.notification(CHANNEL))["content"], "Still here")
+            await claude.request(
+                "tools/call",
+                {"name": "dui_hook_event", "arguments": {"event": "Stop", "last_assistant_message": "Reply after restart"}},
+            )
+            self.assertEqual((await discord.next("turn_complete"))["assistant_message"], "Reply after restart")
+
     async def test_handshake_registers_a_relaying_channel_and_opens_the_session(self) -> None:
         async with running_channel() as (claude, discord):
             initialized = await claude.initialize()

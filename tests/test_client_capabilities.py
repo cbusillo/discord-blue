@@ -26,6 +26,7 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.fixture = self.enterContext(prompt_fixture())
         self.bridge, self.session = self.fixture.bridge, self.fixture.session
+        self.session.acknowledged = True
         self.thread, self.socket = self.fixture.thread, self.fixture.socket
         self.user = cast(Any, FakeInteraction(self.thread).user)
 

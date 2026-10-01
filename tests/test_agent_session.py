@@ -745,7 +745,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         async with asyncio.timeout(5):
             while True:
                 session = bridge.sessions.get(session_id)
-                if session is not None and session.thread_id is not None and session.session_epoch != not_epoch:
+                if (
+                    session is not None
+                    and session.acknowledged
+                    and session.thread_id is not None
+                    and session.session_epoch != not_epoch
+                ):
                     return session
                 await asyncio.sleep(0.01)
 
@@ -1728,6 +1733,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
         session = AgentSession(
+            acknowledged=True,
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
@@ -1759,7 +1765,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket(closed=True)
-        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(acknowledged=True, hello=make_hello(), websocket=websocket, thread_id=555)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
         message = FakeReplyMessage(777, thread, "hello?")
@@ -2186,6 +2192,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         control_message = add_bot_message(thread, 801, WAITING_FOR_DIRECTION)
         control_message.reactions = ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"]
         session = AgentSession(
+            acknowledged=True,
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
@@ -2212,6 +2219,74 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session.control_interruptions_enabled)
         self.assertEqual(websocket.sent_json[0]["kind"], "reply")
 
+    async def test_reply_after_reattach_works_before_gateway_thread_cache_returns(self) -> None:
+        async with self.transport() as (bridge, thread, client):
+            websocket = await self.connect_transport(client)
+            bridge.bot._thread = None
+            reply = FakeReplyMessage(802, thread, "Reply after server restart")
+            thread.add_message(reply)
+            # discord.py uses PartialMessageable for a MESSAGE_CREATE whose thread is not cached.
+            reply.channel = cast(Any, SimpleNamespace(id=thread.id))
+            self.assertTrue(await bridge.send_thread_reply(cast(Any, reply)))
+            delivered = await websocket.receive_json(timeout=2)
+            self.assertEqual((delivered["kind"], delivered["text"]), ("reply", reply.content))
+            self.assertEqual(reply.reactions, [bridge_module.REACTION_QUEUED])
+            unknown = FakeReplyMessage(803, thread, "Unattached channel")
+            unknown.channel = cast(Any, SimpleNamespace(id=987654))
+            self.assertFalse(await bridge.send_thread_reply(cast(Any, unknown)))
+
+    async def test_reply_during_backfill_cannot_precede_the_hello_ack(self) -> None:
+        async with self.transport() as (bridge, thread, client):
+            entered, release = asyncio.Event(), asyncio.Event()
+
+            async def stalled_backfill(*_args: object) -> None:
+                entered.set()
+                await release.wait()
+
+            with patch.object(bridge, "backfill_latest_assistant_message", new=stalled_backfill):
+                connecting = asyncio.create_task(self.connect_transport(client))
+                try:
+                    await asyncio.wait_for(entered.wait(), 2)
+                    reply = FakeReplyMessage(802, thread, "During reattach")
+                    thread.add_message(reply)
+                    reply.channel = cast(Any, SimpleNamespace(id=thread.id))
+                    self.assertTrue(await bridge.send_thread_reply(cast(Any, reply)))
+                    self.assertEqual(len(reply.replies), 1)
+                    self.assertIn("reconnecting", reply.replies[0])
+                    self.assertEqual(reply.reactions, [])
+                    session = bridge.sessions.get("transport-session")
+                    stale = FakeReplyMessage(
+                        803, thread, "Earlier conversation", created_at=session.attached_at - timedelta(seconds=1)
+                    )
+                    self.assertTrue(await bridge.send_thread_reply(cast(Any, stale)))
+                    self.assertEqual(stale.replies, [bridge_module.REPLY_BEFORE_RECONNECT])
+                    for text in ("", "!command"):
+                        ignored = FakeReplyMessage(804, thread, text)
+                        self.assertFalse(await bridge.send_thread_reply(cast(Any, ignored)))
+                        self.assertEqual(ignored.replies, [])
+                finally:
+                    release.set()
+                # connect_transport verifies that hello_ack, rather than a command, is the first frame.
+                await connecting
+
+    async def test_uncached_reply_listener_still_checks_operator_authority(self) -> None:
+        async with self.transport() as (bridge, thread, client):
+            websocket = await self.connect_transport(client)
+            bridge.bot.config.agent_session.enabled = True
+            cog = AgentSessionDoodad(bridge.bot)
+            cog.bridge = bridge
+            reply = FakeReplyMessage(802, thread, "Authorized reply")
+            thread.add_message(reply)
+            reply.channel = cast(Any, SimpleNamespace(id=thread.id))
+            reply.author = SimpleNamespace(id=123, bot=False)
+            with patch.object(bridge, "is_operator", return_value=False):
+                await cog.route_thread_reply(cast(Any, reply))
+            self.assertEqual(reply.reactions, [])
+            self.assertEqual(bridge.sessions.get("transport-session").pending_commands, {})
+            with patch.object(bridge, "is_operator", return_value=True):
+                await cog.route_thread_reply(cast(Any, reply))
+            self.assertEqual((await websocket.receive_json(timeout=2))["text"], reply.content)
+
     async def test_thread_reply_ack_clears_delivery_receipt(self) -> None:
         config = Config()
         config.discord.employee_role_name = ""
@@ -2221,6 +2296,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         control_message = add_bot_message(thread, 801, WAITING_FOR_DIRECTION)
         control_message.reactions = ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"]
         session = AgentSession(
+            acknowledged=True,
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
@@ -2256,6 +2332,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         control_message = add_bot_message(thread, 801, WAITING_FOR_DIRECTION)
         control_message.reactions = ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"]
         session = AgentSession(
+            acknowledged=True,
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
@@ -2303,6 +2380,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         control_message = add_bot_message(thread, 801, WAITING_FOR_DIRECTION)
         control_message.reactions = ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"]
         session = AgentSession(
+            acknowledged=True,
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
