@@ -73,6 +73,16 @@ def check_types(raw: dict[str, object]) -> None:
         raise ValueError("hello_timeout_seconds must be positive")
 
 
+def socket_for_home(home: Path) -> Path:
+    """Codex transport belongs to CODEX_HOME, independently of its SQLite home."""
+    return home.expanduser().absolute() / "app-server-control" / "app-server-control.sock"
+
+
+def default_socket_path() -> Path:
+    home = os.environ.get("CODEX_HOME")
+    return socket_for_home(Path(home)) if home else DEFAULT_SOCKET_PATH.expanduser()
+
+
 def load_config(path: Path) -> BridgeConfig:
     raw = tomllib.loads(path.expanduser().read_text())
     check_types(raw)
@@ -84,7 +94,7 @@ def load_config(path: Path) -> BridgeConfig:
     return BridgeConfig(
         server_url=server_url,
         token=token,
-        socket_path=Path(str(raw.get("socket_path") or DEFAULT_SOCKET_PATH)).expanduser(),
+        socket_path=Path(str(raw["socket_path"])).expanduser() if raw.get("socket_path") else default_socket_path(),
         host_label=str(raw.get("host_label") or f"Codex on {socket.gethostname().split('.')[0]}"),
         **({"hello_timeout_seconds": float(cast(float, raw["hello_timeout_seconds"]))} if "hello_timeout_seconds" in raw else {}),
     )

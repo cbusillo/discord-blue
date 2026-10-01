@@ -5,6 +5,7 @@ import os
 import shlex
 import tempfile
 import unittest
+from unittest.mock import patch
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,8 +15,9 @@ import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+from discord_blue.codex_bridge.__main__ import run_bridges
 from discord_blue.codex_bridge.bridge import CodexBridge
-from discord_blue.codex_bridge.config import BridgeConfig, load_config
+from discord_blue.codex_bridge.config import BridgeConfig, load_config, socket_for_home
 from discord_blue.codex_bridge.session import CAPABILITIES, TURN_DONE, ThreadSession
 from discord_blue.doodads.agent_session.protocol import (
     APPROVAL_COMMAND_DISPLAY_LIMIT,
@@ -466,6 +468,20 @@ class ConfigTests(unittest.TestCase):
             path.write_text(body)
             return load_config(path)
 
+    def test_default_transport_follows_account_home_not_shared_sqlite_home(self) -> None:
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"CODEX_HOME": home, "CODEX_SQLITE_HOME": "/shared"}):
+            config = self.load('server_url = "wss://bridge.example/agent-session/connect"')
+            self.assertEqual(config.socket_path, socket_for_home(Path(home)))
+            explicit = self.load('server_url = "wss://bridge.example/agent-session/connect"\nsocket_path = "/chosen.sock"')
+            self.assertEqual(explicit.socket_path, Path("/chosen.sock"))
+
+    def test_no_account_home_uses_default_transport(self) -> None:
+        with patch.dict(os.environ, {"CODEX_HOME": "", "CODEX_SQLITE_HOME": "/shared"}):
+            self.assertEqual(
+                self.load('server_url = "wss://bridge.example/agent-session/connect"').socket_path,
+                socket_for_home(Path.home() / ".codex"),
+            )
+
     def test_server_url_must_be_encrypted_unless_loopback_or_explicitly_trusted(self) -> None:
         self.assertEqual(self.load('server_url = "wss://bridge.example/agent-session/connect"').token, "t")
         self.load('server_url = "ws://127.0.0.1:8787/agent-session/connect"')
@@ -510,3 +526,54 @@ class ConfigTests(unittest.TestCase):
             (Path(home) / "b.toml").write_text(f'{url}\ntoken_file = "{token}"')
             with self.assertRaisesRegex(ValueError, "readable"):
                 load_config(Path(home) / "b.toml")
+
+
+class MultiHomeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_multiple_homes_run_independently_and_aliases_join_only_once(self) -> None:
+        entered: set[Path] = set()
+        stopped: set[Path] = set()
+        ready = asyncio.Event()
+
+        class FakeBridge:
+            def __init__(self, config: BridgeConfig) -> None:
+                self.path = config.socket_path
+
+            async def run(self) -> None:
+                entered.add(self.path)
+                if len(entered) == 2:
+                    ready.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    stopped.add(self.path)
+
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root).resolve()
+            alias = home / "alias"
+            alias.symlink_to(home / "account-a", target_is_directory=True)
+            config = BridgeConfig("ws://localhost/agent-session/connect", TOKEN, home / "unused", "test")
+            with patch("discord_blue.codex_bridge.__main__.CodexBridge", FakeBridge):
+                task = asyncio.create_task(run_bridges(config, [home / "account-a", home / "account-b", alias]))
+                try:
+                    await asyncio.wait_for(ready.wait(), 2)
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            expected = {socket_for_home(home / name) for name in ("account-a", "account-b")}
+            self.assertEqual(entered, expected)
+            self.assertEqual(stopped, expected)
+
+    async def test_no_home_override_preserves_configured_socket(self) -> None:
+        used: list[Path] = []
+
+        class FakeBridge:
+            def __init__(self, config: BridgeConfig) -> None:
+                used.append(config.socket_path)
+
+            async def run(self) -> None:
+                return
+
+        config = BridgeConfig("ws://localhost/agent-session/connect", TOKEN, Path("/configured.sock"), "test")
+        with patch("discord_blue.codex_bridge.__main__.CodexBridge", FakeBridge):
+            await run_bridges(config, [])
+        self.assertEqual(used, [config.socket_path])

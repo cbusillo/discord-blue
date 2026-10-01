@@ -173,6 +173,7 @@ class StockCodex:
             "PATH": "/usr/bin:/bin",
             "HOME": str(self.home),
             "CODEX_HOME": str(self.home),
+            "CODEX_SQLITE_HOME": str(self.home / "shared-sqlite"),
             "CODEX_REFRESH_TOKEN_URL_OVERRIDE": f"{backend}/oauth/token",
         }
         self.log = log = (self.home / "app-server.log").open("wb")
