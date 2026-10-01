@@ -98,3 +98,28 @@ class OutboxTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(running, 5)
 
         self.assertEqual(texts, [str(number) for number in range(OUTBOX_LIMIT)])
+
+
+class HelloTests(unittest.IsolatedAsyncioTestCase):
+    async def test_the_reason_discord_blue_refuses_a_session_is_logged(self) -> None:
+        async def refuse(request: web.Request) -> web.WebSocketResponse:
+            websocket = web.WebSocketResponse()
+            await websocket.prepare(request)
+            await websocket.receive_json()
+            await websocket.close(message=b"unable to attach Discord thread")
+            return websocket
+
+        app = web.Application()
+        app.router.add_get("/agent-session/connect", refuse)
+        async with TestServer(app, host="127.0.0.1") as server, aiohttp.ClientSession() as http:
+            client = DroppingClient(Connection(f"ws://127.0.0.1:{server.port}/agent-session/connect"))
+            with self.assertLogs("discord_blue.agent_client", "WARNING") as logs:
+                running = asyncio.create_task(client.run(http))
+                try:
+                    while not logs.output:
+                        await asyncio.sleep(0.01)
+                finally:
+                    await client.stop()
+                    await asyncio.wait_for(running, 5)
+
+        self.assertIn("unable to attach Discord thread", logs.output[0])
