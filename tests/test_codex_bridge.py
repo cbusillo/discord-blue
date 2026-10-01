@@ -69,6 +69,23 @@ class FakeRpc:
         return [params for name, params in self.calls if name == method]
 
 
+class HeldTurnsRpc(FakeRpc):
+    """Holds the next `holds` thread/turns/list calls until the test releases each, to land events between reads."""
+
+    def __init__(self, holds: int) -> None:
+        super().__init__()
+        self.holds = holds
+        self.held: asyncio.Queue[asyncio.Event] = asyncio.Queue()
+
+    async def request(self, method: str, params: Json | None = None) -> Json:
+        if method == "thread/turns/list" and self.holds:
+            self.holds -= 1
+            release = asyncio.Event()
+            await self.held.put(release)
+            await release.wait()
+        return await super().request(method, params)
+
+
 @asynccontextmanager
 async def running_bridge(
     rpc: FakeRpc, features: list[str] | None = CURRENT_FEATURES
@@ -406,34 +423,41 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rpc.called("thread/resume"), [{"threadId": "new", "excludeTurns": True}])
 
     async def test_a_turn_that_ends_while_a_retried_join_reads_the_thread_is_released(self) -> None:
-        class SlowTurnsRpc(FakeRpc):
-            def __init__(self) -> None:
-                super().__init__()
-                self.listing, self.listed = asyncio.Event(), asyncio.Event()
-
-            async def request(self, method: str, params: Json | None = None) -> Json:
-                if method == "thread/turns/list" and not self.listed.is_set():
-                    self.listing.set()
-                    await self.listed.wait()
-                return await super().request(method, params)
-
-        rpc = SlowTurnsRpc()
+        rpc = HeldTurnsRpc(holds=1)
         async with running_bridge(rpc) as (bridge, discord):
             rpc.threads["new"] = thread("new", preview="", status={"type": "active", "activeFlags": []})
             await bridge.dispatch(status("new", "active"))
             rpc.threads["new"]["preview"] = "Fix the login bug"
-            await rpc.listing.wait()
+            reading = await rpc.held.get()
             # The short first turn ends after the retry read the thread as busy, before its session exists.
             rpc.threads["new"] = {**rpc.threads["new"], "status": {"type": "idle"}}
             rpc.latest_turn = {"id": "t1", "status": "completed", "items": []}
             await bridge.dispatch(status("new", "idle"))
             retry = bridge.retries["new"]
-            rpc.listed.set()
+            reading.set()
             await retry
             await discord.next("hello")
+            # Staying subscribed would keep stock from unloading the thread when its TUI closes.
+            self.assertFalse(bridge.sessions["new"].subscribed)
 
-        # Staying subscribed would keep stock from unloading the thread when its TUI closes.
-        self.assertEqual(rpc.called("thread/unsubscribe"), [{"threadId": "new"}])
+    async def test_a_status_held_during_a_retried_join_does_not_overtake_a_newer_one(self) -> None:
+        rpc = HeldTurnsRpc(holds=2)
+        async with running_bridge(rpc) as (bridge, _discord):
+            rpc.threads["new"] = thread("new", preview="", status={"type": "active", "activeFlags": []})
+            await bridge.dispatch(status("new", "active"))
+            rpc.threads["new"]["preview"] = "Fix the login bug"
+            reading = await rpc.held.get()
+            await bridge.dispatch(status("new", "active"))
+            retry = bridge.retries["new"]
+            reading.set()
+            subscribing = await rpc.held.get()
+            # The turn ends while the join subscribes; that newer idle must win over the active held for the join.
+            rpc.latest_turn = {"id": "t1", "status": "completed", "items": []}
+            idle = asyncio.create_task(bridge.dispatch(status("new", "idle")))
+            await asyncio.sleep(0)
+            subscribing.set()
+            await asyncio.gather(idle, retry)
+            self.assertFalse(bridge.sessions["new"].subscribed)
 
     async def test_naming_a_thread_that_is_not_mirrored_yet_opens_it(self) -> None:
         rpc = FakeRpc(thread("new", preview=""))

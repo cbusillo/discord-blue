@@ -162,10 +162,12 @@ class CodexBridge:
         self.sessions[thread_id] = session
         self.tasks[thread_id] = asyncio.create_task(session.run(self.http), name=f"codex-bridge-{thread_id}")
         logger.info("Mirroring Codex thread %s (%s)", thread_id, session.label.current)
-        if (thread.get("status") or {}).get("type") == "active":
-            await self.subscribe(session)
         if late is not None:
+            # Newer than the thread read. Applied before anything awaits, so a status that reaches the session later
+            # queues behind it on the session's membership lock instead of being overtaken by it.
             await self.apply_status(session, late)
+        elif (thread.get("status") or {}).get("type") == "active":
+            await self.subscribe(session)
 
     async def apply_status(self, session: ThreadSession, status: Json) -> None:
         if status.get("type") == "notLoaded":
