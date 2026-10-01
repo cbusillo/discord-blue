@@ -380,3 +380,9 @@ This follows the product-repo pattern used by repos such as Sell Your Outboard
 and VeriReel. Individual runners may also carry per-runner labels such as
 `chris-testing-discord-blue-1` and `chris-testing-discord-blue-2` for targeted
 maintenance.
+
+## Icon artwork
+
+The approved [charcoal-and-orange DUI icon](docs/assets/dui-icon.png) is original
+artwork: paired conversation bubbles and terminal chevrons. It is designed for
+Discord's circular avatar crop and checked at 32, 40 and 128 pixels.
