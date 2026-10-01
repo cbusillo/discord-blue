@@ -84,6 +84,10 @@ async def scenario(fake: FakeDiscord, **agent_session: object) -> AsyncIterator[
         patch.object(bridge_module.discord, "Thread", FakeThread),
         patch.object(bridge_module.discord, "TextChannel", FakeTextChannel),
         scaled_discord_sleeps(0.01),
+        # Discovery's own retry backoff, scaled like discord.py's so an unreadable candidate costs ~0.1 s, not 7.5 s.
+        patch.object(
+            bridge_module, "DISCOVERY_RETRY_DELAYS_SECONDS", tuple(d * 0.01 for d in bridge_module.DISCOVERY_RETRY_DELAYS_SECONDS)
+        ),
     ):
         async with discord_bot(fake, config) as bot:
             bridge = bridge_module.AgentSessionBridge(bot)  # type: ignore[arg-type]
