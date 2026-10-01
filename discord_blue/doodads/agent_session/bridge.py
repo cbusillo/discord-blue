@@ -1593,15 +1593,15 @@ class AgentSessionBridge:
         if session.websocket.closed:
             await message.reply("Agent session is offline; reply was not delivered.", mention_author=False)
             return True
-        if not session.acknowledged:
-            await message.reply("Agent session is reconnecting; send the reply again in a moment.", mention_author=False)
-            return True
         text = message.content.strip()
         if not text or text.startswith("!"):
             return False
         if message.created_at < session.attached_at:
             # The client reconnected since (for Claude Code, after /clear or /resume); never deliver it to the new epoch.
             await message.reply(REPLY_BEFORE_RECONNECT, mention_author=False)
+            return True
+        if not session.acknowledged:
+            await message.reply("Agent session is reconnecting; send the reply again in a moment.", mention_author=False)
             return True
 
         command = RemoteCommand(

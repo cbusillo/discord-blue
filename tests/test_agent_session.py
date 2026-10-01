@@ -745,7 +745,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         async with asyncio.timeout(5):
             while True:
                 session = bridge.sessions.get(session_id)
-                if session is not None and session.thread_id is not None and session.session_epoch != not_epoch:
+                if (
+                    session is not None
+                    and session.acknowledged
+                    and session.thread_id is not None
+                    and session.session_epoch != not_epoch
+                ):
                     return session
                 await asyncio.sleep(0.01)
 
@@ -2249,6 +2254,16 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(len(reply.replies), 1)
                     self.assertIn("reconnecting", reply.replies[0])
                     self.assertEqual(reply.reactions, [])
+                    session = bridge.sessions.get("transport-session")
+                    stale = FakeReplyMessage(
+                        803, thread, "Earlier conversation", created_at=session.attached_at - timedelta(seconds=1)
+                    )
+                    self.assertTrue(await bridge.send_thread_reply(cast(Any, stale)))
+                    self.assertEqual(stale.replies, [bridge_module.REPLY_BEFORE_RECONNECT])
+                    for text in ("", "!command"):
+                        ignored = FakeReplyMessage(804, thread, text)
+                        self.assertFalse(await bridge.send_thread_reply(cast(Any, ignored)))
+                        self.assertEqual(ignored.replies, [])
                 finally:
                     release.set()
                 # connect_transport verifies that hello_ack, rather than a command, is the first frame.
