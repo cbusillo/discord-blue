@@ -2212,6 +2212,22 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session.control_interruptions_enabled)
         self.assertEqual(websocket.sent_json[0]["kind"], "reply")
 
+    async def test_reply_after_reattach_works_before_gateway_thread_cache_returns(self) -> None:
+        async with self.transport() as (bridge, thread, client):
+            websocket = await self.connect_transport(client)
+            bridge.bot._thread = None
+            reply = FakeReplyMessage(802, thread, "Reply after server restart")
+            thread.add_message(reply)
+            # discord.py uses PartialMessageable for a MESSAGE_CREATE whose thread is not cached.
+            reply.channel = cast(Any, SimpleNamespace(id=thread.id))
+            self.assertTrue(await bridge.send_thread_reply(cast(Any, reply)))
+            delivered = await websocket.receive_json(timeout=2)
+            self.assertEqual((delivered["kind"], delivered["text"]), ("reply", reply.content))
+            self.assertEqual(reply.reactions, [bridge_module.REACTION_QUEUED])
+            unknown = FakeReplyMessage(803, thread, "Unattached channel")
+            unknown.channel = cast(Any, SimpleNamespace(id=987654))
+            self.assertFalse(await bridge.send_thread_reply(cast(Any, unknown)))
+
     async def test_thread_reply_ack_clears_delivery_receipt(self) -> None:
         config = Config()
         config.discord.employee_role_name = ""
