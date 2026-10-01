@@ -297,7 +297,7 @@ This repository is also a local Claude Code plugin marketplace. Its `dui`
 plugin gives each Claude Code CLI session its own Discord thread next to the
 Codex sessions. Claude Code starts `discord-blue-claude-channel` once per
 session as a [channel](https://code.claude.com/docs/en/channels-reference).
-The thread is named `✳️ <repo> · <label>`: the session name (`-n` or
+The thread is named `✴️ <repo> · <label>`: the session name (`-n` or
 `/rename`), else the title Claude Code generates for the session (the one the
 `/resume` picker shows, read from the end of the transcript), else the first
 substantial typed prompt (tags such as pasted content and go-aheads such as
