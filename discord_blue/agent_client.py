@@ -28,6 +28,7 @@ OUTBOX_LIMIT = 256
 COMMAND_MEMORY = 1024
 # Exiting should not hang on an unreachable server; without session_end the thread closes after its grace period.
 SESSION_END_TIMEOUT_SECONDS = 2
+CLOSED_MESSAGES = {aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED}
 
 
 class ConnectionConfig(Protocol):
@@ -50,6 +51,10 @@ DEFERRED = object()
 
 class Rejected(Exception):
     """A control that was not executed, with a reason safe to show in Discord."""
+
+
+class HelloRefused(Exception):
+    """Discord Blue closed the connection instead of acknowledging the hello; carries its close code and reason."""
 
 
 class AgentSessionClient:
@@ -164,7 +169,11 @@ class AgentSessionClient:
                     self.websocket = websocket
                     await self.send(websocket, self.hello(first=first))
                     async with asyncio.timeout(self.config.hello_timeout_seconds):
-                        ack = await websocket.receive_json()
+                        reply = await websocket.receive()
+                    if reply.type in CLOSED_MESSAGES:
+                        # The server says why it would not attach the session, such as a Discord thread it could not open.
+                        raise HelloRefused(f"code {websocket.close_code}: {str(reply.extra or 'no reason given')[:200]}")
+                    ack = json.loads(reply.data) if reply.type is aiohttp.WSMsgType.TEXT else None
                     if not isinstance(ack, dict) or ack.get("type") != "hello_ack":
                         raise ValueError("Discord Blue did not acknowledge the session")
                     features = ack.get("features")
@@ -180,6 +189,8 @@ class AgentSessionClient:
                     await self.serve(websocket)
             except aiohttp.WSServerHandshakeError as exc:
                 logger.error("Discord Blue refused session %s (HTTP %s); check server_url and token", self.session_id, exc.status)
+            except HelloRefused as exc:
+                logger.warning("Discord Blue closed session %s before acknowledging it (%s)", self.session_id, exc)
             except (aiohttp.ClientError, TimeoutError, OSError, ValueError, TypeError) as exc:
                 logger.warning("Discord Blue connection for session %s ended: %s", self.session_id, type(exc).__name__)
             finally:
