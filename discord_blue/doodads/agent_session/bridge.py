@@ -1593,6 +1593,9 @@ class AgentSessionBridge:
         if session.websocket.closed:
             await message.reply("Agent session is offline; reply was not delivered.", mention_author=False)
             return True
+        if not session.acknowledged:
+            await message.reply("Agent session is reconnecting; send the reply again in a moment.", mention_author=False)
+            return True
         text = message.content.strip()
         if not text or text.startswith("!"):
             return False
