@@ -24,6 +24,7 @@ from discord_blue.codex_bridge.session import Rejected, Rpc, ThreadSession, late
 
 Json = dict[str, Any]
 logger = logging.getLogger(__name__)
+UNNAMED = "it has no name or preview yet"
 
 CLIENT_INFO = {"name": "discord_blue_codex_bridge", "title": "Discord Blue Codex bridge", "version": "0.1.0"}
 # Streaming deltas are never mirrored; opting out keeps the bounded receive queue small.
@@ -56,6 +57,8 @@ class CodexBridge:
         self.http: aiohttp.ClientSession | None = None
         self.sessions: dict[str, ThreadSession] = {}
         self.tasks: dict[str, asyncio.Task[None]] = {}
+        self.retries: dict[str, asyncio.Task[None]] = {}
+        self.joining: set[str] = set()
 
     async def run(self) -> None:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=20)) as http:
@@ -115,6 +118,9 @@ class CodexBridge:
                     # Stock reports idle before turn/completed; a turn still being tracked holds the join.
                     await session.release()
         elif session is None:
+            if method == "thread/name/updated":
+                # Naming a thread nobody has mirrored yet is also the first sign that it is in use.
+                await self.join(thread_id)
             return
         elif method == "thread/closed":
             await self.detach(thread_id, ended=True)
@@ -133,26 +139,64 @@ class CodexBridge:
 
     async def join(self, thread_id: str) -> None:
         """Open a Discord session for a loaded root thread; subscribe only if it is busy."""
-        if not thread_id or thread_id in self.sessions or self.rpc is None:
+        if not thread_id or thread_id in self.sessions or thread_id in self.joining or self.rpc is None:
             return
+        rpc = self.rpc
+        self.joining.add(thread_id)
         try:
-            thread = (await self.rpc.request("thread/read", {"threadId": thread_id}))["thread"]
+            thread = (await rpc.request("thread/read", {"threadId": thread_id}))["thread"]
+            busy = (thread.get("status") or {}).get("type") == "active"
             # Never load a thread from disk, and skip subagents and threads nobody has used yet.
-            if thread.get("parentThreadId") or thread.get("ephemeral") or (thread.get("status") or {}).get("type") == "notLoaded":
+            if skip := self.skip_reason(thread):
+                logger.info("Not joining Codex thread %s: %s", thread_id, skip)
+                if busy and skip == UNNAMED:
+                    self.retry_join(thread_id)
                 return
-            if not (thread.get("name") or thread.get("preview")):
-                return
-            page = await self.rpc.request("thread/turns/list", {"threadId": thread_id, "limit": 1, "itemsView": "summary"})
+            page = await rpc.request("thread/turns/list", {"threadId": thread_id, "limit": 1, "itemsView": "summary"})
         except RpcError as exc:
             logger.info("Not joining Codex thread %s: %s", thread_id, exc)
             return
-        session = ThreadSession(self.config, self.rpc, thread, latest_turn(page))
+        finally:
+            self.joining.discard(thread_id)
+        if thread_id in self.sessions or rpc is not self.rpc:
+            return
+        session = ThreadSession(self.config, rpc, thread, latest_turn(page))
         assert self.http is not None
         self.sessions[thread_id] = session
         self.tasks[thread_id] = asyncio.create_task(session.run(self.http), name=f"codex-bridge-{thread_id}")
         logger.info("Mirroring Codex thread %s (%s)", thread_id, session.label.current)
         if (thread.get("status") or {}).get("type") == "active":
             await self.subscribe(session)
+
+    @staticmethod
+    def skip_reason(thread: Json) -> str | None:
+        if thread.get("parentThreadId"):
+            return "it is a subagent thread"
+        if thread.get("ephemeral"):
+            return "it is ephemeral"
+        if (thread.get("status") or {}).get("type") == "notLoaded":
+            return "it is not loaded"
+        if not (thread.get("name") or thread.get("preview")):
+            return UNNAMED
+        return None
+
+    def retry_join(self, thread_id: str) -> None:
+        """Read a busy unnamed thread again shortly: its prompt is recorded just after its first turn starts."""
+        if thread_id not in self.retries:
+            self.retries[thread_id] = asyncio.create_task(self.rejoin_unnamed(thread_id), name=f"codex-bridge-retry-{thread_id}")
+
+    async def rejoin_unnamed(self, thread_id: str) -> None:
+        try:
+            for delay in self.config.unnamed_retry_seconds:
+                await asyncio.sleep(delay)
+                if thread_id in self.sessions:
+                    return
+                await self.join(thread_id)
+            if thread_id not in self.sessions:
+                logger.info("Codex thread %s still has no name or preview; it is joined when it is named or goes idle", thread_id)
+        finally:
+            if self.retries.get(thread_id) is asyncio.current_task():
+                del self.retries[thread_id]
 
     async def subscribe(self, session: ThreadSession) -> None:
         try:
@@ -171,6 +215,11 @@ class CodexBridge:
             await asyncio.gather(task, return_exceptions=True)
 
     async def detach_all(self) -> None:
+        retries = list(self.retries.values())
+        self.retries.clear()
+        for retry in retries:
+            retry.cancel()
+        await asyncio.gather(*retries, return_exceptions=True)
         for thread_id in list(self.sessions):
             await self.detach(thread_id)
         self.rpc = None

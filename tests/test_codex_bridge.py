@@ -79,7 +79,12 @@ async def running_bridge(
     async with TestServer(app, host="127.0.0.1") as server, aiohttp.ClientSession() as http:
         url = f"ws://127.0.0.1:{server.port}/agent-session/connect"
         config = BridgeConfig(
-            server_url=url, token=TOKEN, socket_path=Path("/unused"), host_label="Codex on test", reconnect_seconds=0.05
+            server_url=url,
+            token=TOKEN,
+            socket_path=Path("/unused"),
+            host_label="Codex on test",
+            reconnect_seconds=0.05,
+            unnamed_retry_seconds=(0.01, 0.01, 0.01),
         )
         bridge = CodexBridge(config)
         bridge.rpc, bridge.http = rpc, http
@@ -382,6 +387,33 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         membership = [name for name, _ in rpc.calls if name in ("thread/resume", "thread/unsubscribe")]
         self.assertEqual(membership, ["thread/resume", "thread/unsubscribe", "thread/resume"])
+
+    async def test_a_prompt_recorded_after_the_first_turn_starts_still_opens_the_thread(self) -> None:
+        # `codex --remote unix:// -- "<prompt>"` starts its turn before stock records the prompt as the preview.
+        rpc = FakeRpc()
+        async with running_bridge(rpc) as (bridge, discord):
+            rpc.threads["new"] = thread("new", preview="", status={"type": "active", "activeFlags": []})
+            await bridge.dispatch({"method": "thread/started", "params": {"thread": rpc.threads["new"]}})
+            await bridge.dispatch(status("new", "active"))
+            self.assertNotIn("new", bridge.sessions)
+            rpc.threads["new"]["preview"] = "Fix the login bug"
+            hello = SessionHello.from_payload(await discord.next("hello"))
+            # Retries still scheduled after the join must not open the thread twice.
+            await asyncio.sleep(0.05)
+            self.assertTrue(discord.received.empty())
+
+        self.assertEqual((hello.session_id, hello.title), ("new", "Fix the login bug"))
+        self.assertEqual(rpc.called("thread/resume"), [{"threadId": "new", "excludeTurns": True}])
+
+    async def test_naming_a_thread_that_is_not_mirrored_yet_opens_it(self) -> None:
+        rpc = FakeRpc(thread("new", preview=""))
+        async with running_bridge(rpc) as (bridge, discord):
+            self.assertEqual(bridge.sessions, {})
+            rpc.threads["new"]["name"] = "Login flake"
+            await bridge.dispatch({"method": "thread/name/updated", "params": {"threadId": "new", "threadName": "Login flake"}})
+            hello = SessionHello.from_payload(await discord.next("hello"))
+
+        self.assertEqual((hello.session_id, hello.title), ("new", "Login flake"))
 
     async def test_a_turn_that_finished_before_the_join_is_still_reported(self) -> None:
         rpc = FakeRpc(thread("root"))

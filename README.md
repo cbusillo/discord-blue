@@ -206,6 +206,11 @@ yourself. Behaviour and limits:
 
 - Every loaded root thread gets a Discord thread, which stays open for as long as
   the Codex thread stays loaded, even if it sits idle for days.
+- A thread is mirrored once it has a name or a first prompt. A prompt passed on
+  the command line (`codex … -- "Your task"`) starts the turn a few seconds
+  before stock records it, so the bridge reads a busy, unnamed thread again for
+  about 15 seconds, and also joins when a thread is named. The bridge log
+  records every thread it does not join, with the reason.
 - The bridge subscribes to a thread (`thread/resume`, no config overrides, which
   can restart an idle thread cold) only while a turn runs, a prompt is pending,
   or a Discord reply arrives. It unsubscribes when the turn ends. Stock
