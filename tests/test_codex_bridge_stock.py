@@ -181,7 +181,7 @@ class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
             running = asyncio.create_task(CodexBridge(config).run())
             try:
                 async with native_tui(codex, remote=True):
-                    hello = await discord.next("hello")
+                    hello = await discord.next("hello", timeout=30)
                     self.assertEqual(hello["harness"], "codex")
                     if not hello.get("assistant_message"):
                         done = await discord.next("turn_complete")

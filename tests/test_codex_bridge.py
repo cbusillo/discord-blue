@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from discord_blue.codex_bridge.__main__ import codex_home, run_bridges
+from discord_blue.codex_bridge.__main__ import codex_home, run_bridge, run_bridges
 from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.config import BridgeConfig, load_config, socket_for_home
 from discord_blue.codex_bridge.session import CAPABILITIES, TURN_DONE, ThreadSession
@@ -538,10 +539,12 @@ class MultiHomeTests(unittest.IsolatedAsyncioTestCase):
     async def test_one_home_restarts_after_a_bad_reply_without_restarting_another(self) -> None:
         ready = asyncio.Event()
         starts: dict[Path, int] = {}
+        labels: dict[Path, str] = {}
 
         class FakeBridge:
             def __init__(self, config: BridgeConfig) -> None:
                 self.path = config.socket_path
+                labels[self.path] = config.host_label
 
             async def run(self) -> None:
                 starts[self.path] = starts.get(self.path, 0) + 1
@@ -563,6 +566,38 @@ class MultiHomeTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.gather(task, return_exceptions=True)
             self.assertEqual(starts[socket_for_home(home / "broken")], 2)
             self.assertEqual(starts[socket_for_home(home / "healthy")], 1)
+            self.assertEqual(len(set(labels.values())), len(labels))
+            self.assertTrue(all(str(home) not in label for label in labels.values()))
+
+    async def test_persistent_failure_backs_off_and_logs_frames_without_provider_data(self) -> None:
+        delays: list[float] = []
+        provider_message = "synthetic-private-provider-data"
+
+        class BrokenBridge:
+            def __init__(self, _config: BridgeConfig) -> None:
+                pass
+
+            async def run(self) -> None:
+                raise KeyError(provider_message)
+
+        async def sleep(delay: float) -> None:
+            delays.append(delay)
+            if len(delays) == 3:
+                raise asyncio.CancelledError
+
+        config = BridgeConfig("ws://localhost/agent-session/connect", TOKEN, Path("/unused.sock"), "test")
+        with (
+            patch("discord_blue.codex_bridge.__main__.CodexBridge", BrokenBridge),
+            patch("discord_blue.codex_bridge.__main__.asyncio.sleep", sleep),
+            self.assertLogs(level="ERROR") as logs,
+            self.assertRaises(asyncio.CancelledError),
+        ):
+            await run_bridge(config)
+        self.assertEqual(delays[0], config.reconnect_seconds)
+        self.assertTrue(all(a < b for a, b in pairwise(delays)))
+        self.assertIn("KeyError", "\n".join(logs.output))
+        self.assertIn(" in run", "\n".join(logs.output))
+        self.assertNotIn(provider_message, "\n".join(logs.output))
 
     async def test_multiple_homes_run_independently_and_aliases_join_only_once(self) -> None:
         entered: set[Path] = set()

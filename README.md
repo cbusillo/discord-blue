@@ -231,7 +231,10 @@ yourself. Behaviour and limits:
   `--codex-home` once per home; these options override the configured socket.
   Each connection reconnects independently. Point only one bridge at each
   daemon. Keep the homes separate when they use different accounts, and do not
-  resume the same thread in two daemons at once.
+  resume the same thread in two daemons at once. Multiple connections get numbered
+  host labels in the order supplied, without exposing account-home names. An
+  unexpected bridge failure retries with increasing delay (up to one minute),
+  while the other homes keep mirroring.
 
 ### Standalone TUI launches with Discord mirroring
 
@@ -269,6 +272,9 @@ discord-blue-codex-bridge --codex-home "${CODEX_HOME:-$HOME/.codex}"
 These commands are future-launch setup, not a procedure to restart an active
 bridge or convert running embedded sessions. Closing and resuming an existing
 session on a daemon is an owner-coordinated action.
+If launchd owns the bridge, put the `--codex-home` arguments in its existing
+`ProgramArguments` at the next planned launch; the template shows where. Do not
+start an additional manual process against the same daemon.
 
 Run the stock end-to-end test with
 `CODEX_BIN=/path/to/codex uv run python -m unittest tests.test_codex_bridge_stock`.

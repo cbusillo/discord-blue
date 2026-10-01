@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging
 import sys
+import traceback
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
@@ -21,6 +22,7 @@ def codex_home(value: str) -> Path:
 
 
 async def run_bridge(config: BridgeConfig) -> None:
+    delay = config.reconnect_seconds
     while True:
         try:
             await CodexBridge(config).run()
@@ -28,16 +30,21 @@ async def run_bridge(config: BridgeConfig) -> None:
         except Exception as exc:
             # Keep a malformed response or client bug in one home from ending every other mirror.
             # Exception messages can contain provider data; log only the exception type.
-            logger.error("Codex bridge failed (%s); retrying this connection", type(exc).__name__)
-            await asyncio.sleep(config.reconnect_seconds)
+            frames = "".join(
+                f"\n  {frame.filename}:{frame.lineno} in {frame.name}" for frame in traceback.extract_tb(exc.__traceback__)
+            )
+            logger.error("Codex bridge failed (%s); retrying this connection in %s seconds%s", type(exc).__name__, delay, frames)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, max(config.reconnect_seconds, 60))
 
 
 async def run_bridges(config: BridgeConfig, homes: list[Path]) -> None:
     # A connection failure is retried by its own bridge, without detaching other homes.
     sockets = list(dict.fromkeys(socket_for_home(home.expanduser().resolve()) for home in homes)) if homes else [config.socket_path]
     async with asyncio.TaskGroup() as group:
-        for path in sockets:
-            group.create_task(run_bridge(replace(config, socket_path=path)))
+        for index, path in enumerate(sockets, start=1):
+            label = f"{config.host_label} · connection {index}" if len(sockets) > 1 else config.host_label
+            group.create_task(run_bridge(replace(config, socket_path=path, host_label=label)))
 
 
 def main() -> None:
