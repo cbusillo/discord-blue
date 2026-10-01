@@ -178,7 +178,7 @@ class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
                     hello = await discord.next("hello", timeout=30)
                     self.assertEqual(hello["harness"], "codex")
                     if not hello.get("assistant_message"):
-                        done = await discord.next("turn_complete")
+                        done = await discord.next("turn_complete", timeout=30)
                         self.assertIn("Mirror native TUI launch", done["assistant_message"])
                     else:
                         self.assertIn("Mirror native TUI launch", hello["assistant_message"])

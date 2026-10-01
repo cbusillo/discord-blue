@@ -588,7 +588,7 @@ class MultiHomeTests(unittest.IsolatedAsyncioTestCase):
         config = BridgeConfig("ws://localhost/agent-session/connect", TOKEN, Path("/unused.sock"), "test")
         with (
             patch("discord_blue.codex_bridge.__main__.CodexBridge", BrokenBridge),
-            patch("discord_blue.codex_bridge.__main__.asyncio.sleep", sleep),
+            patch("discord_blue.codex_bridge.__main__.sleep", sleep),
             self.assertLogs(level="ERROR") as logs,
             self.assertRaises(asyncio.CancelledError),
         ):
@@ -618,8 +618,8 @@ class MultiHomeTests(unittest.IsolatedAsyncioTestCase):
         config = BridgeConfig("ws://localhost/agent-session/connect", TOKEN, Path("/unused.sock"), "test")
         with (
             patch("discord_blue.codex_bridge.__main__.CodexBridge", BrokenBridge),
-            patch("discord_blue.codex_bridge.__main__.asyncio.sleep", sleep),
-            patch("discord_blue.codex_bridge.__main__.time.monotonic", side_effect=ticks),
+            patch("discord_blue.codex_bridge.__main__.sleep", sleep),
+            patch("discord_blue.codex_bridge.__main__.monotonic", side_effect=ticks),
             self.assertLogs(level="ERROR"),
             self.assertRaises(asyncio.CancelledError),
         ):
