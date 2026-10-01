@@ -261,7 +261,7 @@ native TUI stock test.
 At the next bridge launch, select the same home (or repeat for several homes):
 
 ```sh
-discord-blue-codex-bridge --codex-home "$CODEX_HOME"
+discord-blue-codex-bridge --codex-home "${CODEX_HOME:-$HOME/.codex}"
 # Multiple homes, using placeholders for account-specific directories:
 # discord-blue-codex-bridge --codex-home ~/.codex --codex-home /path/to/account-home
 ```

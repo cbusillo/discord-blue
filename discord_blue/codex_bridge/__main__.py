@@ -11,13 +11,33 @@ from pathlib import Path
 from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.config import DEFAULT_CONFIG_PATH, BridgeConfig, load_config, socket_for_home
 
+logger = logging.getLogger(__name__)
+
+
+def codex_home(value: str) -> Path:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("CODEX_HOME must not be empty; omit --codex-home to use the configured/default socket")
+    return Path(value)
+
+
+async def run_bridge(config: BridgeConfig) -> None:
+    while True:
+        try:
+            await CodexBridge(config).run()
+            return
+        except Exception as exc:
+            # Keep a malformed response or client bug in one home from ending every other mirror.
+            # Exception messages can contain provider data; log only the exception type.
+            logger.error("Codex bridge failed (%s); retrying this connection", type(exc).__name__)
+            await asyncio.sleep(config.reconnect_seconds)
+
 
 async def run_bridges(config: BridgeConfig, homes: list[Path]) -> None:
     # A connection failure is retried by its own bridge, without detaching other homes.
     sockets = list(dict.fromkeys(socket_for_home(home.expanduser().resolve()) for home in homes)) if homes else [config.socket_path]
     async with asyncio.TaskGroup() as group:
         for path in sockets:
-            group.create_task(CodexBridge(replace(config, socket_path=path)).run())
+            group.create_task(run_bridge(replace(config, socket_path=path)))
 
 
 def main() -> None:
@@ -25,7 +45,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="TOML config file")
     parser.add_argument(
         "--codex-home",
-        type=Path,
+        type=codex_home,
         action="append",
         default=[],
         help="Mirror this CODEX_HOME's daemon (repeat for multiple accounts); overrides socket_path",

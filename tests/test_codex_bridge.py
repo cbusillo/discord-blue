@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import shlex
@@ -15,7 +16,7 @@ import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from discord_blue.codex_bridge.__main__ import run_bridges
+from discord_blue.codex_bridge.__main__ import codex_home, run_bridges
 from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.config import BridgeConfig, load_config, socket_for_home
 from discord_blue.codex_bridge.session import CAPABILITIES, TURN_DONE, ThreadSession
@@ -529,6 +530,40 @@ class ConfigTests(unittest.TestCase):
 
 
 class MultiHomeTests(unittest.IsolatedAsyncioTestCase):
+    def test_empty_home_is_rejected_instead_of_connecting_to_the_working_directory(self) -> None:
+        for value in ("", "   "):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                codex_home(value)
+
+    async def test_one_home_restarts_after_a_bad_reply_without_restarting_another(self) -> None:
+        ready = asyncio.Event()
+        starts: dict[Path, int] = {}
+
+        class FakeBridge:
+            def __init__(self, config: BridgeConfig) -> None:
+                self.path = config.socket_path
+
+            async def run(self) -> None:
+                starts[self.path] = starts.get(self.path, 0) + 1
+                if "broken" in self.path.parts and starts[self.path] == 1:
+                    raise KeyError("thread")  # A malformed daemon thread/read response.
+                if sum(starts.values()) == 3:
+                    ready.set()
+                await asyncio.Event().wait()
+
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root).resolve()
+            config = BridgeConfig("ws://localhost/agent-session/connect", TOKEN, home / "unused", "test", reconnect_seconds=0.01)
+            with patch("discord_blue.codex_bridge.__main__.CodexBridge", FakeBridge), self.assertLogs(level="ERROR"):
+                task = asyncio.create_task(run_bridges(config, [home / "broken", home / "healthy"]))
+                try:
+                    await asyncio.wait_for(ready.wait(), 2)
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            self.assertEqual(starts[socket_for_home(home / "broken")], 2)
+            self.assertEqual(starts[socket_for_home(home / "healthy")], 1)
+
     async def test_multiple_homes_run_independently_and_aliases_join_only_once(self) -> None:
         entered: set[Path] = set()
         stopped: set[Path] = set()

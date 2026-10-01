@@ -29,6 +29,7 @@ from tests.fakes_discord_blue import TOKEN, FakeDiscordBlue
 
 Json = dict[str, Any]
 CODEX_BIN = os.environ.get("CODEX_BIN", "")
+NATIVE_MODEL = "gpt-5.4-mini"
 
 
 @asynccontextmanager
@@ -55,7 +56,7 @@ async def native_tui(codex: StockCodex, *, remote: bool) -> AsyncIterator[asynci
             pass
 
     loop.add_reader(master, drain)
-    args = ["--remote", f"unix://{codex.socket_path}"] if remote else []
+    args = ["--remote", "unix://"] if remote else []
     env = {
         "PATH": "/usr/bin:/bin",
         "TERM": "xterm-256color",
@@ -77,7 +78,7 @@ async def native_tui(codex: StockCodex, *, remote: bool) -> AsyncIterator[asynci
             codex.codex_bin,
             *args,
             "-m",
-            "gpt-5.4",
+            NATIVE_MODEL,
             "-c",
             "model_reasoning_effort=medium",
             "--",
@@ -191,6 +192,7 @@ class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
                         await readback.initialize()
                         loaded = (await readback.request("thread/read", {"threadId": hello["session_id"]}))["thread"]
                         self.assertEqual(loaded["reasoningEffort"], "medium")
+                        self.assertEqual(loaded["model"], NATIVE_MODEL)
             finally:
                 running.cancel()
                 await asyncio.gather(running, return_exceptions=True)
