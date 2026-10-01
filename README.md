@@ -297,7 +297,7 @@ This repository is also a local Claude Code plugin marketplace. Its `dui`
 plugin gives each Claude Code CLI session its own Discord thread next to the
 Codex sessions. Claude Code starts `discord-blue-claude-channel` once per
 session as a [channel](https://code.claude.com/docs/en/channels-reference).
-The thread is named `✳️ <repo> · <label>`: the session name (`-n` or
+The thread is named `✴️ <repo> · <label>`: the session name (`-n` or
 `/rename`), else the title Claude Code generates for the session (the one the
 `/resume` picker shows, read from the end of the transcript), else the first
 substantial typed prompt (tags such as pasted content and go-aheads such as
@@ -383,6 +383,8 @@ maintenance.
 
 ## Icon artwork
 
-The approved [charcoal-and-orange DUI icon](docs/assets/dui-icon.png) is original
+The retained [charcoal-and-orange DUI icon](docs/assets/dui-icon.png) is original
 artwork: paired conversation bubbles and terminal chevrons. It is designed for
 Discord's circular avatar crop and checked at 32, 40 and 128 pixels.
+It is not applied to the bot or server. Session thread names use standard emoji:
+Claude uses the orange eight-pointed star (✴️), and Codex uses the blue diamond (🔷).
