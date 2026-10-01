@@ -5,7 +5,7 @@ import os
 import socket
 import stat
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
@@ -36,6 +36,10 @@ class BridgeConfig:
     # How long to wait for hello_ack. Attaching after a Discord Blue restart can take minutes while every session
     # reattaches at once; giving up early only queues another attach behind the ones still running.
     hello_timeout_seconds: float = 300
+    # A prompt passed on the command line starts the first turn before stock records it as the thread's preview, so a
+    # busy thread with no name or preview yet is read again after each of these delays instead of waiting for its turn
+    # to end. Stock records the prompt about 2.5 s after the turn starts.
+    unnamed_retry_seconds: tuple[float, ...] = (0.5, 1, 2, 4, 8)
 
 
 def validate_server_url(url: str, *, allow_insecure_ws: bool) -> None:
@@ -94,10 +98,12 @@ def load_config(path: Path) -> BridgeConfig:
     token = read_token(raw.get("token_file"))
     if not token:
         raise ValueError(f"set token_file or {TOKEN_ENV} to the Discord Blue agent-session token")
-    return BridgeConfig(
+    config = BridgeConfig(
         server_url=server_url,
         token=token,
         socket_path=socket_path,
         host_label=str(raw.get("host_label") or f"Codex on {socket.gethostname().split('.')[0]}"),
-        **({"hello_timeout_seconds": float(cast(float, raw["hello_timeout_seconds"]))} if "hello_timeout_seconds" in raw else {}),
     )
+    if "hello_timeout_seconds" in raw:
+        config = replace(config, hello_timeout_seconds=float(cast(float, raw["hello_timeout_seconds"])))
+    return config
