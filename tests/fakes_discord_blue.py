@@ -40,9 +40,9 @@ class FakeDiscordBlue:
         for websocket in self.sockets:
             await websocket.close()
 
-    async def next(self, *kinds: str) -> Json:
+    async def next(self, *kinds: str, timeout: float = 5) -> Json:
         while True:
-            message = await asyncio.wait_for(self.received.get(), timeout=5)
+            message = await asyncio.wait_for(self.received.get(), timeout=timeout)
             if not kinds or message["type"] in kinds:
                 return message
 

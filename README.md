@@ -194,7 +194,7 @@ Configure `~/.config/discord-blue/codex-bridge.toml`:
 ```toml
 server_url = "wss://BRIDGE_HOST/agent-session/connect"
 token_file = "~/.config/discord-blue/codex-bridge.token"  # mode 600; or set AGENT_SESSION_TOKEN
-# socket_path = "~/.codex/app-server-control/app-server-control.sock"
+# socket_path = "~/.codex/app-server-control/app-server-control.sock"  # overrides CODEX_HOME
 # host_label = "Codex on Chris-Studio"
 # allow_insecure_ws = false  # true permits ws:// to a trusted private host
 # hello_timeout_seconds = 300  # how long to wait for Discord Blue to attach the thread
@@ -224,9 +224,72 @@ yourself. Behaviour and limits:
   their threads open for five minutes; a session that reconnects within that time
   continues in the same thread, with a new epoch, so old Discord controls are
   rejected.
-- Run the stock end-to-end test with
-  `CODEX_BIN=/path/to/codex uv run python -m unittest tests.test_codex_bridge_stock`.
-  It uses a disposable app-server, synthetic auth and a fake model.
+- Without an explicit `socket_path`, the bridge follows `CODEX_HOME` (default
+  `~/.codex`). `CODEX_SQLITE_HOME` shares saved history, not the live app-server
+  transport or the account used by the server.
+- One bridge process can mirror multiple account-home daemons. Pass
+  `--codex-home` once per home; these options override the configured socket.
+  Each connection reconnects independently. Point only one bridge at each
+  daemon. Keep the homes separate when they use different accounts, and do not
+  resume the same thread in two daemons at once. The operator's host label stays
+  unchanged across home selection or ordering changes, so the server can find
+  existing Discord threads after a restart. Account-home names are not exposed.
+  An unexpected bridge failure retries with increasing delay (up to one minute),
+  while the other homes keep mirroring.
+
+### Standalone TUI launches with Discord mirroring
+
+A `codex` TUI process is visible only when its session lives in an app-server
+that the bridge connects to. Codex 0.159.3's
+[daemon eligibility policy](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/tui/src/daemon_startup.rs)
+excludes overrides such as `-c model_reasoning_effort=medium` from implicit
+daemon attachment, selecting an embedded runtime even when a daemon is running.
+Those embedded sessions were never observable through this daemon bridge.
+The bridge cannot attach to them retroactively or infer live control from
+shared SQLite history.
+
+For the **next launch**, use Codex's built-in explicit endpoint selection.
+In a terminal with the intended `CODEX_HOME` already selected, start that
+home's daemon if needed, then connect the TUI to it:
+
+```sh
+codex app-server daemon start
+codex --remote unix:// -m gpt-6.1-sol -c model_reasoning_effort=medium -- "Your task"
+```
+
+`unix://` selects the endpoint for that `CODEX_HOME`. The server uses its own
+home's credentials and configuration; do not point an account-specific client
+at another account's server. Arbitrary server configuration overrides and
+profiles must be configured on the intended server, rather than assuming the
+remote client changes them. Model and reasoning selection are covered by the
+native TUI stock test.
+
+At the next bridge launch, select the same home (or repeat for several homes):
+
+```sh
+discord-blue-codex-bridge --codex-home "${CODEX_HOME:-$HOME/.codex}"
+# Multiple homes, using placeholders for account-specific directories:
+# discord-blue-codex-bridge --codex-home ~/.codex --codex-home /path/to/account-home
+```
+
+These commands are future-launch setup, not a procedure to restart an active
+bridge or convert running embedded sessions. Closing and resuming an existing
+session on a daemon is an owner-coordinated action.
+An installed, non-editable `uv tool` copy does not pick up repository changes
+automatically. Build the merged wheel (`uv build --wheel`) and install it
+(`uv tool install --force dist/discord_blue-0.2.0-py3-none-any.whl`) as part of
+the next planned bridge launch, after the current bridge has stopped.
+`uv run discord-blue-codex-bridge` uses the checkout version instead.
+If launchd owns the bridge, put the `--codex-home` arguments in its existing
+`ProgramArguments` at the next planned launch; the template shows where. Do not
+start an additional manual process against the same daemon.
+
+Run the stock end-to-end test with
+`CODEX_BIN=/path/to/codex uv run python -m unittest tests.test_codex_bridge_stock`.
+It uses disposable app-servers and TUIs, synthetic auth and a fake model,
+including the embedded-versus-explicit-remote launch case. The stock fixture
+uses a foreground `app-server --listen unix://` listener; it does not test
+installing or managing a daemon service.
 
 ## Claude Code sessions (the dui plugin)
 

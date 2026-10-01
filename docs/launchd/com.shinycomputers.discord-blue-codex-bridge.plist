@@ -10,6 +10,9 @@
     <string>REPO_DIR/.venv/bin/discord-blue-codex-bridge</string>
     <string>--config</string>
     <string>HOME_DIR/.config/discord-blue/codex-bridge.toml</string>
+    <!-- For multiple homes, append the codex-home option/home argument pairs
+         described in README here at the next planned launch. Do not start
+         a second bridge against the same daemon. -->
   </array>
   <key>WorkingDirectory</key>
   <string>REPO_DIR</string>

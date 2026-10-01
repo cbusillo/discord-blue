@@ -10,6 +10,8 @@ import asyncio
 import os
 import sys
 import unittest
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -21,12 +23,82 @@ from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.codex_bridge.rpc import AppServerClient
 from discord_blue.codex_bridge.session import ThreadSession
-from tests.stock_codex import ASK_QUESTIONS, UNLOAD_DELAY_SECONDS, StockCodex
+from tests.stock_codex import ASK_QUESTIONS, SANDBOX_POLICY, UNLOAD_DELAY_SECONDS, StockCodex
 from discord_blue.doodads.agent_session.protocol import SERVER_FEATURES
 from tests.fakes_discord_blue import TOKEN, FakeDiscordBlue
 
 Json = dict[str, Any]
 CODEX_BIN = os.environ.get("CODEX_BIN", "")
+NATIVE_MODEL = "gpt-5.4-mini"
+
+
+@asynccontextmanager
+async def native_tui(codex: StockCodex, *, remote: bool) -> AsyncIterator[asyncio.subprocess.Process]:
+    """A real TUI using only disposable homes and the loopback fake model."""
+    import fcntl
+    import pty
+    import struct
+    import termios
+
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+    os.set_blocking(master, False)
+    output = bytearray()
+    loop = asyncio.get_running_loop()
+
+    def drain() -> None:
+        try:
+            data = os.read(master, 65536)
+            output.extend(data)
+            if b"\x1b[6n" in data:
+                os.write(master, b"\x1b[1;1R")
+        except (BlockingIOError, OSError):
+            pass
+
+    loop.add_reader(master, drain)
+    args = ["--remote", "unix://"] if remote else []
+    env = {**codex.env, "TERM": "xterm-256color"}
+
+    def terminal_session() -> None:
+        os.setsid()
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+    process = None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "/usr/bin/sandbox-exec",
+            "-p",
+            SANDBOX_POLICY,
+            codex.codex_bin,
+            *args,
+            "-m",
+            NATIVE_MODEL,
+            "-c",
+            "model_reasoning_effort=medium",
+            "--",
+            "Mirror native TUI launch",
+            cwd=codex.work,
+            env=env,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            preexec_fn=terminal_session,
+        )
+        try:
+            yield process
+        except TimeoutError as exc:
+            raise AssertionError(f"Native TUI did not run (exit={process.returncode}): {output[-8000:]!r}") from exc
+    finally:
+        if process is not None and process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), 5)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+        loop.remove_reader(master)
+        os.close(master)
+        os.close(slave)
 
 
 class TuiStandIn:
@@ -81,6 +153,45 @@ async def eventually(condition: Callable[[], bool], seconds: float = 30) -> None
 
 @unittest.skipUnless(CODEX_BIN and sys.platform == "darwin", "set CODEX_BIN to a stock codex binary (macOS sandbox-exec)")
 class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_remote_mirrors_the_native_tui_with_reasoning_override(self) -> None:
+        discord = FakeDiscordBlue(sorted(SERVER_FEATURES))
+        app = web.Application()
+        app.router.add_get("/agent-session/connect", discord.connect)
+        async with StockCodex(CODEX_BIN) as codex, TestServer(app, host="127.0.0.1") as server:
+            with (codex.home / "config.toml").open("a") as config_file:
+                config_file.write(f'\n[projects."{codex.work.resolve()}"]\ntrust_level = "trusted"\n')
+            config = BridgeConfig(
+                f"ws://127.0.0.1:{server.port}/agent-session/connect",
+                TOKEN,
+                codex.socket_path,
+                "test",
+            )
+            async with AppServerClient(codex.socket_path) as rpc:
+                await rpc.initialize()
+                # The same TUI flags without --remote select an embedded runtime, not this daemon.
+                async with native_tui(codex, remote=False):
+                    await eventually(lambda: codex.calls > 0)
+                    self.assertEqual((await rpc.request("thread/loaded/list", {}))["data"], [])
+            running = asyncio.create_task(CodexBridge(config).run())
+            try:
+                async with native_tui(codex, remote=True):
+                    hello = await discord.next("hello", timeout=30)
+                    self.assertEqual(hello["harness"], "codex")
+                    if not hello.get("assistant_message"):
+                        done = await discord.next("turn_complete", timeout=30)
+                        self.assertIn("Mirror native TUI launch", done["assistant_message"])
+                    else:
+                        self.assertIn("Mirror native TUI launch", hello["assistant_message"])
+                    async with AppServerClient(codex.socket_path) as readback:
+                        await readback.initialize()
+                        loaded = (await readback.request("thread/read", {"threadId": hello["session_id"]}))["thread"]
+                        self.assertEqual(loaded["reasoningEffort"], "medium")
+                        self.assertEqual(loaded["model"], NATIVE_MODEL)
+            finally:
+                running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
+                await discord.close()
+
     async def test_bridge_mirrors_and_drives_a_thread_owned_by_another_client(self) -> None:
         discord = FakeDiscordBlue(sorted(SERVER_FEATURES))
         app = web.Application()
