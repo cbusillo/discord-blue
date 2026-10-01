@@ -59,6 +59,8 @@ class CodexBridge:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.retries: dict[str, asyncio.Task[None]] = {}
         self.joining: set[str] = set()
+        # The newest status change that arrived while a retried join was reading its thread, applied once it joins.
+        self.late_status: dict[str, Json] = {}
 
     async def run(self) -> None:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=20)) as http:
@@ -104,19 +106,12 @@ class CodexBridge:
             await self.join(str((params.get("thread") or {}).get("id") or ""))
         elif method == "thread/status/changed":
             status = params.get("status") or {}
-            if session is None:
-                await self.join(thread_id)
-            elif status.get("type") == "notLoaded":
-                # Stock unloads a thread once no client is subscribed: its TUI has closed.
-                await self.detach(thread_id, ended=True)
+            if session is not None:
+                await self.apply_status(session, status)
+            elif thread_id in self.joining:
+                self.late_status[thread_id] = status
             else:
-                session.on_status(status)
-                if status.get("type") == "active":
-                    await self.subscribe(session)
-                elif status.get("type") == "idle":
-                    # Covers a turn that finished before the join landed, which sends no turn/completed here.
-                    # Stock reports idle before turn/completed; a turn still being tracked holds the join.
-                    await session.release()
+                await self.join(thread_id)
         elif session is None:
             if method == "thread/name/updated":
                 # Naming a thread nobody has mirrored yet is also the first sign that it is in use.
@@ -143,6 +138,7 @@ class CodexBridge:
             return
         rpc = self.rpc
         self.joining.add(thread_id)
+        self.late_status.pop(thread_id, None)
         try:
             thread = (await rpc.request("thread/read", {"threadId": thread_id}))["thread"]
             busy = (thread.get("status") or {}).get("type") == "active"
@@ -158,6 +154,7 @@ class CodexBridge:
             return
         finally:
             self.joining.discard(thread_id)
+            late = self.late_status.pop(thread_id, None)
         if thread_id in self.sessions or rpc is not self.rpc:
             return
         session = ThreadSession(self.config, rpc, thread, latest_turn(page))
@@ -167,6 +164,21 @@ class CodexBridge:
         logger.info("Mirroring Codex thread %s (%s)", thread_id, session.label.current)
         if (thread.get("status") or {}).get("type") == "active":
             await self.subscribe(session)
+        if late is not None:
+            await self.apply_status(session, late)
+
+    async def apply_status(self, session: ThreadSession, status: Json) -> None:
+        if status.get("type") == "notLoaded":
+            # Stock unloads a thread once no client is subscribed: its TUI has closed.
+            await self.detach(session.thread_id, ended=True)
+            return
+        session.on_status(status)
+        if status.get("type") == "active":
+            await self.subscribe(session)
+        elif status.get("type") == "idle":
+            # Covers a turn that finished before the join landed, which sends no turn/completed here.
+            # Stock reports idle before turn/completed; a turn still being tracked holds the join.
+            await session.release()
 
     @staticmethod
     def skip_reason(thread: Json) -> str | None:
@@ -217,6 +229,7 @@ class CodexBridge:
     async def detach_all(self) -> None:
         retries = list(self.retries.values())
         self.retries.clear()
+        self.late_status.clear()
         for retry in retries:
             retry.cancel()
         await asyncio.gather(*retries, return_exceptions=True)

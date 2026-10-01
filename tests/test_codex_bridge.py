@@ -405,6 +405,36 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((hello.session_id, hello.title), ("new", "Fix the login bug"))
         self.assertEqual(rpc.called("thread/resume"), [{"threadId": "new", "excludeTurns": True}])
 
+    async def test_a_turn_that_ends_while_a_retried_join_reads_the_thread_is_released(self) -> None:
+        class SlowTurnsRpc(FakeRpc):
+            def __init__(self) -> None:
+                super().__init__()
+                self.listing, self.listed = asyncio.Event(), asyncio.Event()
+
+            async def request(self, method: str, params: Json | None = None) -> Json:
+                if method == "thread/turns/list" and not self.listed.is_set():
+                    self.listing.set()
+                    await self.listed.wait()
+                return await super().request(method, params)
+
+        rpc = SlowTurnsRpc()
+        async with running_bridge(rpc) as (bridge, discord):
+            rpc.threads["new"] = thread("new", preview="", status={"type": "active", "activeFlags": []})
+            await bridge.dispatch(status("new", "active"))
+            rpc.threads["new"]["preview"] = "Fix the login bug"
+            await rpc.listing.wait()
+            # The short first turn ends after the retry read the thread as busy, before its session exists.
+            rpc.threads["new"] = {**rpc.threads["new"], "status": {"type": "idle"}}
+            rpc.latest_turn = {"id": "t1", "status": "completed", "items": []}
+            await bridge.dispatch(status("new", "idle"))
+            retry = bridge.retries["new"]
+            rpc.listed.set()
+            await retry
+            await discord.next("hello")
+
+        # Staying subscribed would keep stock from unloading the thread when its TUI closes.
+        self.assertEqual(rpc.called("thread/unsubscribe"), [{"threadId": "new"}])
+
     async def test_naming_a_thread_that_is_not_mirrored_yet_opens_it(self) -> None:
         rpc = FakeRpc(thread("new", preview=""))
         async with running_bridge(rpc) as (bridge, discord):
