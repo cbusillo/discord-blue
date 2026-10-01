@@ -231,9 +231,10 @@ yourself. Behaviour and limits:
   `--codex-home` once per home; these options override the configured socket.
   Each connection reconnects independently. Point only one bridge at each
   daemon. Keep the homes separate when they use different accounts, and do not
-  resume the same thread in two daemons at once. Multiple connections get numbered
-  host labels in the order supplied, without exposing account-home names. An
-  unexpected bridge failure retries with increasing delay (up to one minute),
+  resume the same thread in two daemons at once. The operator's host label stays
+  unchanged across home selection or ordering changes, so the server can find
+  existing Discord threads after a restart. Account-home names are not exposed.
+  An unexpected bridge failure retries with increasing delay (up to one minute),
   while the other homes keep mirroring.
 
 ### Standalone TUI launches with Discord mirroring

@@ -477,6 +477,10 @@ class ConfigTests(unittest.TestCase):
             explicit = self.load('server_url = "wss://bridge.example/agent-session/connect"\nsocket_path = "/chosen.sock"')
             self.assertEqual(explicit.socket_path, Path("/chosen.sock"))
 
+    def test_relative_socket_is_rejected_at_startup(self) -> None:
+        with self.assertRaises(ValueError):
+            self.load('server_url = "wss://bridge.example/agent-session/connect"\nsocket_path = "codex.sock"')
+
     def test_no_account_home_uses_default_transport(self) -> None:
         with patch.dict(os.environ, {"CODEX_HOME": "", "CODEX_SQLITE_HOME": "/shared"}):
             self.assertEqual(
@@ -566,7 +570,6 @@ class MultiHomeTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.gather(task, return_exceptions=True)
             self.assertEqual(starts[socket_for_home(home / "broken")], 2)
             self.assertEqual(starts[socket_for_home(home / "healthy")], 1)
-            self.assertEqual(len(set(labels.values())), len(labels))
             self.assertTrue(all(str(home) not in label for label in labels.values()))
 
     async def test_persistent_failure_backs_off_and_logs_frames_without_provider_data(self) -> None:
@@ -627,6 +630,27 @@ class MultiHomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delays[0], config.reconnect_seconds)
         self.assertEqual(delays[1], delays[0])
         self.assertGreater(delays[2], delays[1])
+
+    async def test_home_selection_and_order_preserve_durable_host_identity(self) -> None:
+        used: list[tuple[Path, str]] = []
+
+        class FakeBridge:
+            def __init__(self, config: BridgeConfig) -> None:
+                used.append((config.socket_path, config.host_label))
+
+            async def run(self) -> None:
+                return
+
+        with tempfile.TemporaryDirectory() as root:
+            a, b = Path(root) / "a", Path(root) / "b"
+            config = BridgeConfig("ws://localhost/agent-session/connect", TOKEN, socket_for_home(a.resolve()), "test")
+            with patch("discord_blue.codex_bridge.__main__.CodexBridge", FakeBridge):
+                await run_bridges(config, [])
+                await run_bridges(config, [a, b])
+                await run_bridges(config, [b, a])
+            labels = [label for path, label in used if path == config.socket_path]
+            self.assertEqual(len(labels), 3)
+            self.assertEqual(len(set(labels)), 1)
 
     async def test_multiple_homes_run_independently_and_aliases_join_only_once(self) -> None:
         entered: set[Path] = set()

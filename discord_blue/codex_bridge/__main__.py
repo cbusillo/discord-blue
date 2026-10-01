@@ -48,9 +48,9 @@ async def run_bridges(config: BridgeConfig, homes: list[Path]) -> None:
     # A connection failure is retried by its own bridge, without detaching other homes.
     sockets = list(dict.fromkeys(socket_for_home(home.expanduser().resolve()) for home in homes)) if homes else [config.socket_path]
     async with asyncio.TaskGroup() as group:
-        for index, path in enumerate(sockets, start=1):
-            label = f"{config.host_label} · connection {index}" if len(sockets) > 1 else config.host_label
-            group.create_task(run_bridge(replace(config, socket_path=path, host_label=label)))
+        for path in sockets:
+            # The server's durable thread lookup includes host_label: keep it stable across home ordering changes.
+            group.create_task(run_bridge(replace(config, socket_path=path)))
 
 
 def main() -> None:

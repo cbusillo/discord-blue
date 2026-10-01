@@ -88,13 +88,16 @@ def load_config(path: Path) -> BridgeConfig:
     check_types(raw)
     server_url = str(raw.get("server_url") or "")
     validate_server_url(server_url, allow_insecure_ws=raw.get("allow_insecure_ws", False) is True)
+    socket_path = Path(str(raw["socket_path"])).expanduser() if raw.get("socket_path") else default_socket_path()
+    if not socket_path.is_absolute():
+        raise ValueError("socket_path must be absolute")
     token = read_token(raw.get("token_file"))
     if not token:
         raise ValueError(f"set token_file or {TOKEN_ENV} to the Discord Blue agent-session token")
     return BridgeConfig(
         server_url=server_url,
         token=token,
-        socket_path=Path(str(raw["socket_path"])).expanduser() if raw.get("socket_path") else default_socket_path(),
+        socket_path=socket_path,
         host_label=str(raw.get("host_label") or f"Codex on {socket.gethostname().split('.')[0]}"),
         **({"hello_timeout_seconds": float(cast(float, raw["hello_timeout_seconds"]))} if "hello_timeout_seconds" in raw else {}),
     )
