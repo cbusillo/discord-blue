@@ -17,7 +17,7 @@ import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from discord_blue.codex_bridge.__main__ import codex_home, run_bridge, run_bridges
+from discord_blue.codex_bridge.__main__ import FAILURE_RESET_SECONDS, codex_home, run_bridge, run_bridges
 from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.config import BridgeConfig, load_config, socket_for_home
 from discord_blue.codex_bridge.session import CAPABILITIES, TURN_DONE, ThreadSession
@@ -598,6 +598,35 @@ class MultiHomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("KeyError", "\n".join(logs.output))
         self.assertIn(" in run", "\n".join(logs.output))
         self.assertNotIn(provider_message, "\n".join(logs.output))
+
+    async def test_a_recovered_home_resets_its_unexpected_failure_delay(self) -> None:
+        delays: list[float] = []
+
+        class BrokenBridge:
+            def __init__(self, _config: BridgeConfig) -> None:
+                pass
+
+            async def run(self) -> None:
+                raise KeyError("thread")
+
+        async def sleep(delay: float) -> None:
+            delays.append(delay)
+            if len(delays) == 3:
+                raise asyncio.CancelledError
+
+        ticks = [0, 0, 0, FAILURE_RESET_SECONDS * 2, FAILURE_RESET_SECONDS * 2, FAILURE_RESET_SECONDS * 2]
+        config = BridgeConfig("ws://localhost/agent-session/connect", TOKEN, Path("/unused.sock"), "test")
+        with (
+            patch("discord_blue.codex_bridge.__main__.CodexBridge", BrokenBridge),
+            patch("discord_blue.codex_bridge.__main__.asyncio.sleep", sleep),
+            patch("discord_blue.codex_bridge.__main__.time.monotonic", side_effect=ticks),
+            self.assertLogs(level="ERROR"),
+            self.assertRaises(asyncio.CancelledError),
+        ):
+            await run_bridge(config)
+        self.assertEqual(delays[0], config.reconnect_seconds)
+        self.assertEqual(delays[1], delays[0])
+        self.assertGreater(delays[2], delays[1])
 
     async def test_multiple_homes_run_independently_and_aliases_join_only_once(self) -> None:
         entered: set[Path] = set()

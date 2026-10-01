@@ -239,8 +239,10 @@ yourself. Behaviour and limits:
 ### Standalone TUI launches with Discord mirroring
 
 A `codex` TUI process is visible only when its session lives in an app-server
-that the bridge connects to. For example, `-c model_reasoning_effort=medium`
-selects an embedded runtime on Codex 0.159.3 even when a daemon is running.
+that the bridge connects to. Codex 0.159.3's
+[daemon eligibility policy](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/tui/src/daemon_startup.rs)
+excludes overrides such as `-c model_reasoning_effort=medium` from implicit
+daemon attachment, selecting an embedded runtime even when a daemon is running.
 Those embedded sessions were never observable through this daemon bridge.
 The bridge cannot attach to them retroactively or infer live control from
 shared SQLite history.
@@ -272,6 +274,11 @@ discord-blue-codex-bridge --codex-home "${CODEX_HOME:-$HOME/.codex}"
 These commands are future-launch setup, not a procedure to restart an active
 bridge or convert running embedded sessions. Closing and resuming an existing
 session on a daemon is an owner-coordinated action.
+An installed, non-editable `uv tool` copy does not pick up repository changes
+automatically. Build the merged wheel (`uv build --wheel`) and install it
+(`uv tool install --force dist/discord_blue-0.2.0-py3-none-any.whl`) as part of
+the next planned bridge launch, after the current bridge has stopped.
+`uv run discord-blue-codex-bridge` uses the checkout version instead.
 If launchd owns the bridge, put the `--codex-home` arguments in its existing
 `ProgramArguments` at the next planned launch; the template shows where. Do not
 start an additional manual process against the same daemon.
@@ -279,7 +286,9 @@ start an additional manual process against the same daemon.
 Run the stock end-to-end test with
 `CODEX_BIN=/path/to/codex uv run python -m unittest tests.test_codex_bridge_stock`.
 It uses disposable app-servers and TUIs, synthetic auth and a fake model,
-including the embedded-versus-explicit-remote launch case.
+including the embedded-versus-explicit-remote launch case. The stock fixture
+uses a foreground `app-server --listen unix://` listener; it does not test
+installing or managing a daemon service.
 
 ## Claude Code sessions (the dui plugin)
 

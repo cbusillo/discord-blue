@@ -88,6 +88,7 @@ class StockCodex:
     def __init__(self, codex_bin: str) -> None:
         self.codex_bin = codex_bin
         self.calls = 0
+        self.env: dict[str, str] = {}
         self.home = Path(tempfile.mkdtemp(prefix="dbx-", dir="/tmp"))
         self.work = self.home / "work"
         self.socket_path = self.home / "app-server-control" / "app-server-control.sock"
@@ -169,7 +170,7 @@ class StockCodex:
             json.dumps({"auth_mode": "chatgpt", "OPENAI_API_KEY": None, "tokens": tokens, "last_refresh": now})
         )
         (self.home / "auth.json").chmod(0o600)
-        env = {
+        self.env = {
             "PATH": "/usr/bin:/bin",
             "HOME": str(self.home),
             "CODEX_HOME": str(self.home),
@@ -179,7 +180,7 @@ class StockCodex:
         self.log = log = (self.home / "app-server.log").open("wb")
         self.process = await asyncio.create_subprocess_exec(
             "/usr/bin/sandbox-exec", "-p", SANDBOX_POLICY, self.codex_bin, "app-server", "--listen", "unix://",
-            cwd=self.work, env=env, stdin=asyncio.subprocess.DEVNULL, stdout=log, stderr=log,
+            cwd=self.work, env=self.env, stdin=asyncio.subprocess.DEVNULL, stdout=log, stderr=log,
         )  # fmt: skip
         for _ in range(400):
             if self.socket_path.exists():

@@ -57,13 +57,7 @@ async def native_tui(codex: StockCodex, *, remote: bool) -> AsyncIterator[asynci
 
     loop.add_reader(master, drain)
     args = ["--remote", "unix://"] if remote else []
-    env = {
-        "PATH": "/usr/bin:/bin",
-        "TERM": "xterm-256color",
-        "HOME": str(codex.home),
-        "CODEX_HOME": str(codex.home),
-        "CODEX_SQLITE_HOME": str(codex.home / "shared-sqlite"),
-    }
+    env = {**codex.env, "TERM": "xterm-256color"}
 
     def terminal_session() -> None:
         os.setsid()
