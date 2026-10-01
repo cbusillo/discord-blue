@@ -87,6 +87,21 @@ class DiscoveryIndexTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ack["type"], "hello_ack")
         self.assertNotEqual(ack["thread_id"], unreadable.id)
 
+    async def test_without_manage_threads_a_session_still_finds_its_joined_private_thread(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        hello = hello_for("joined")
+        joined = fake.add_thread("joined", marker=marker(hello), archived=True, locked=True, members={BOT_ID})
+        # Listing every private archived thread needs Manage Threads; the joined listing does not.
+        fake.faults.append(Fault("GET", "/channels/{channel}/threads/archived/private", times=1000, status=403))
+        async with scenario(fake) as running, aiohttp.ClientSession() as http:
+            websocket = await running.connect(http)
+            await websocket.send_json(hello)
+            ack = await websocket.receive_json(timeout=10)
+            await websocket.close()
+
+        self.assertEqual(ack["thread_id"], joined.id, "the session was given a new thread instead of its own")
+        self.assertEqual(len(fake.threads), 1)
+
 
 class DiscoveryIndexUnitTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_thread_this_bot_created_stays_known_while_listings_omit_it(self) -> None:

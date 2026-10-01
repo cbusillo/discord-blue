@@ -15,7 +15,7 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiohttp import ClientWebSocketResponse, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
@@ -2286,6 +2286,32 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(bridge, "is_operator", return_value=True):
                 await cog.route_thread_reply(cast(Any, reply))
             self.assertEqual((await websocket.receive_json(timeout=2))["text"], reply.content)
+
+    async def test_a_configured_operator_role_admits_only_members_who_hold_it(self) -> None:
+        def member(*role_names: str) -> MagicMock:
+            author = MagicMock(spec=bridge_module.discord.Member)
+            author.id, author.bot, author.roles = 123, False, [SimpleNamespace(name=name) for name in role_names]
+            return author
+
+        async with self.transport() as (bridge, thread, client):
+            websocket = await self.connect_transport(client)
+            bridge.bot.config.agent_session.enabled = True
+            bridge.bot.config.agent_session.operator_role_name = "code-operator"
+            cog = AgentSessionDoodad(bridge.bot)
+            cog.bridge = bridge
+            for message_id, author in (
+                (802, SimpleNamespace(id=123, bot=False)),  # A user outside the guild has no roles to check.
+                (803, member("everyone", "code-viewer")),
+                (804, member("code-operator")),
+            ):
+                reply = FakeReplyMessage(message_id, thread, f"Reply {message_id}")
+                thread.add_message(reply)
+                reply.author = cast(Any, author)
+                await cog.route_thread_reply(cast(Any, reply))
+
+            delivered = await websocket.receive_json(timeout=2)
+            self.assertEqual(delivered["text"], "Reply 804")
+            self.assertEqual(len(bridge.sessions.get("transport-session").pending_commands), 1)
 
     async def test_thread_reply_ack_clears_delivery_receipt(self) -> None:
         config = Config()
