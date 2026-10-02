@@ -296,7 +296,8 @@ discord-blue-codex-bridge --codex-home "${CODEX_HOME:-$HOME/.codex}"
 
 These commands are future-launch setup, not a procedure to restart an active
 bridge or convert running embedded sessions. Closing and resuming an existing
-session on a daemon is a Director-coordinated action.
+session on a daemon needs coordination with the Director (the person whose
+direction the agents follow).
 An installed, non-editable `uv tool` copy does not pick up repository changes
 automatically. Build the merged wheel (`uv build --wheel`) and install it
 (`uv tool install --force dist/discord_blue-0.2.0-py3-none-any.whl`) as part of

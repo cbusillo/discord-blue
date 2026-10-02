@@ -40,7 +40,9 @@ reconnect matching. `harness` names the agent (`claude` or `codex`); Discord
 shows its icon first in the thread name, `<icon> <repo> · <title>`, capped at
 100 characters. Without a title the name uses a non-default git branch, and
 otherwise just the repository. When another live session would have the same
-name, the branch and then a short session ID tell them apart. Every `hello`
+name, the branch and then a short session ID tell them apart. Launchplane automation
+origins use `Auto <repo>#<issue>` instead of a task title, with the harness icon
+when supplied. Every `hello`
 renames a reused thread whose name is out of date. Older servers ignore
 `harness`. Omit `origin` for an interactive
 session without an automation request. `session_id` must be stable across
@@ -255,19 +257,23 @@ When both are empty, current code applies no role restriction; see
 
 ## Launchplane provenance
 
-Map `AGENT_SESSION_ORIGIN` to `origin.kind`, and `AGENT_SESSION_REQUEST_ID`,
+For a client integrating Launchplane automation, map `AGENT_SESSION_ORIGIN` to
+`origin.kind`, and `AGENT_SESSION_REQUEST_ID`,
 `AGENT_SESSION_REPOSITORY`, `AGENT_SESSION_ISSUE_NUMBER`, and
 `AGENT_SESSION_ISSUE_URL` to their corresponding fields. Launchplane emits
 `AGENT_SESSION_ORIGIN=launchplane` and `AGENT_SESSION_SOURCE=agent-session`.
 Request IDs are opaque and may retain historical prefixes.
+The bundled Codex bridge and Claude channel do not populate `origin` from these
+environment variables.
 
 ## Integration acceptance
 
 Use real Codex and Claude Code sessions to verify hello acknowledgement, mirrored
 output, and reconnect without duplicate threads or repeated command execution.
 Exercise only each client's advertised controls: Codex supports reply, pause,
-status, command approvals and user input; the Claude channel supports replies
-when enabled, with permission decisions kept in the terminal. Neither current
+status, command approvals and user input; the Claude channel supports status,
+plus replies when the channel is enabled, with permission decisions kept in the
+terminal. Neither current
 client advertises new/end session or autonomous continuation controls. The Server
 controls table describes the protocol surface, not a promise that every client
 implements it. Unit/transport tests validate the server and local clients; live
