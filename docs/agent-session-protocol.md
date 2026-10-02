@@ -1,8 +1,10 @@
 # Remote agent session contract
 
-Discord Blue projects agent sessions into Discord threads. Codex Lab owns the
-agent process, session state, model calls, approval enforcement, and command
-execution. The bridge does not launch processes or inspect agent rollout files.
+Discord Blue projects agent sessions into Discord threads. The agent harness
+manages its process, session state, model calls, approval enforcement, and command
+execution. Local clients in this repository connect Codex app-server sessions and
+Claude Code channels to the bot. The server does not launch agent processes or
+inspect local transcripts; the Claude client reads its own session transcript.
 
 ## Connection and identity
 
@@ -17,7 +19,7 @@ The client sends JSON text messages. Start each connection with:
   "type": "hello",
   "session_id": "stable-agent-thread-id",
   "session_epoch": "current-session-instance-id",
-  "host_label": "Codex Lab",
+  "host_label": "Codex on example-host",
   "cwd": "/workspace/example",
   "branch": "feature/example",
   "pid": 123,
@@ -125,8 +127,8 @@ A failed notification operation does not prevent thread cleanup, and a failed
 or slow session does not terminate the heartbeat monitor.
 
 Failed Discord cleanup is retained for periodic retry in a bounded, deduplicated
-in-memory queue (256 records, up to five retry attempts). Maintenance runs every
-five minutes after the startup reconnect grace. For the first ten minutes after a
+in-memory queue (256 records, up to five retry attempts). Maintenance first runs
+after a 20-second startup delay, then every five minutes. For the first ten minutes after a
 start, it removes no thread or notification that no session has claimed, because
 sessions from before the start may still be reconnecting; it also leaves them
 alone while any attach is running. Successful steps are removed
@@ -166,7 +168,7 @@ Unknown strings are ignored, duplicates collapse, and `hello_ack` echoes the
 recognized list when capabilities were supplied. Legacy acknowledgements omit it.
 
 Capabilities apply to the current connection. They describe supported features;
-they do not grant authorization or replace operator and session identity checks.
+they do not grant authorization or replace session admin permission and identity checks.
 Discord filters actionable controls, preserves status indicators and local
 `/code status`, and checks every outbound action again at dispatch. Unsupported
 thread replies are handled with a visible notice and no queued reaction or
@@ -246,7 +248,10 @@ completion separate from command acceptance.
 Approvals use a separate message: `type: "approval_decision"`, `approval_id`,
 `session_id`, `session_epoch`, and `decision` (`approved` or `denied`). The
 agent retains final approval authority and acknowledges or rejects the decision.
-Discord operator-role checks restrict who can send replies and controls.
+Discord checks session admin permission using the legacy config key
+`agent_session.operator_role_name`, falling back to `discord.employee_role_name`.
+When both are empty, current code applies no role restriction; see
+[#135](https://github.com/cbusillo/discord-blue/issues/135).
 
 ## Launchplane provenance
 
@@ -258,7 +263,12 @@ Request IDs are opaque and may retain historical prefixes.
 
 ## Integration acceptance
 
-Use a real Codex Lab session to verify hello acknowledgement, mirrored output,
-reply, pause, new/end session, status, approvals, user input, and reconnect
-without duplicate threads or command execution. Unit/transport tests in this
-repository validate the server; they do not prove a Codex Lab client is shipped.
+Use real Codex and Claude Code sessions to verify hello acknowledgement, mirrored
+output, and reconnect without duplicate threads or repeated command execution.
+Exercise only each client's advertised controls: Codex supports reply, pause,
+status, command approvals and user input; the Claude channel supports replies
+when enabled, with permission decisions kept in the terminal. Neither current
+client advertises new/end session or autonomous continuation controls. The Server
+controls table describes the protocol surface, not a promise that every client
+implements it. Unit/transport tests validate the server and local clients; live
+integration acceptance is separate.

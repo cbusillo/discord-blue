@@ -5,7 +5,7 @@
 * **Python:** 3.13
 * **Env manager:** uv
 
-Use `uv run ...` for Python commands so local and Codex Lab runs share the
+Use `uv run ...` for Python commands so local development and CI use the
 same managed environment. After `uv sync`, IDEs may point at the repo-local
 `.venv/bin/python`; avoid hard-coding `/workspace/...` paths in repo guidance.
 
@@ -19,7 +19,7 @@ workflows, and cleanup policy.
 ## Discord command surfaces
 
 * Prefer Discord slash/app commands for all bot control surfaces. Do not add new
-  `!command` style message parsers for operator actions.
+  `!command` style message parsers for actions requiring admin permission.
 * Raw message handling is allowed only when the message content itself is the
   product input, such as agent session-thread replies that are forwarded to
   the local TUI.
