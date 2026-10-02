@@ -88,7 +88,7 @@ loaded_doodads = ["agent_session_doodad"]
 enabled = true
 token = "REPLACE_WITH_A_SHARED_SECRET"
 # channel_id = 123456789  # optional; defaults to discord.bot_channel_id
-operator_role_name = "Agent Admin"  # existing Discord role with admin permission for session controls
+operator_role_name = "Agent Admin"  # existing Discord role whose members may use session controls
 ```
 
 Use the same secret in the local client's token file. The WebSocket rejects an
