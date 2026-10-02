@@ -1,8 +1,9 @@
 """The agent-session bridge's Discord objects, backed by the real discord.py HTTP client.
 
 `HttpBot`, `HttpChannel` and `HttpThread` subclass the in-memory fakes, so the
-bridge's type checks still pass, but every Discord operation is a real
-`discord.http.HTTPClient` request against `FakeDiscord`. That puts discord.py's
+bridge's type checks still pass. Thread lifecycle, membership, discovery and
+message send/delete/history use real `discord.http.HTTPClient` requests against
+`FakeDiscord`; message edits and reactions remain in-memory fakes. That puts discord.py's
 own rate-limit buckets, 429 sleeps and 5xx retries between the bridge and the
 fake server. `get_channel` mirrors discord.py's cache: a thread is cached while a
 gateway event says it is open, and removed when an event says it is archived.

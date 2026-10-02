@@ -2,9 +2,14 @@
 
 Discord Blue is a basic Discord bot plugin system built with the **discord.py**
 library. It includes an agent-session bridge that connects Discord session
-threads to a local remote agent inbox.
+threads to local Codex app-server sessions and Claude Code channels.
 
-## LXC Installation
+## Standalone LXC/systemd installation
+
+This is the standalone source-install path supported by `discord-blue.service`.
+The repository's production workflow uses Launchplane/Dokploy containers instead;
+see [production deployment](#launchplanedokploy-production-deployment). Do not run
+both services against the same bot token or state directory.
 
 1. Update System Packages:
 
@@ -51,7 +56,7 @@ threads to a local remote agent inbox.
      /opt/discord-blue/.venv/bin/discord-blue
    ```
 
-   For the existing root-based install, migrate the generated config instead:
+   If migrating a root-based standalone install, copy its generated config instead:
 
    ```bash
    install -D -m 600 -o discord-blue -g discord-blue \
@@ -81,7 +86,16 @@ loaded_doodads = ["agent_session_doodad"]
 
 [agent_session]
 enabled = true
+token = "REPLACE_WITH_A_SHARED_SECRET"
+# channel_id = 123456789  # optional; defaults to discord.bot_channel_id
+operator_role_name = "Agent Admin"  # existing Discord role whose members may use session controls
 ```
+
+Use the same secret in the local client's token file. The WebSocket rejects an
+empty server token. `operator_role_name` is the current config key for the
+session admin permission; it falls back to `discord.employee_role_name`. If both
+are empty, current code allows controls without a role restriction (tracked in
+[#135](https://github.com/cbusillo/discord-blue/issues/135)).
 
 ## Development
 
@@ -105,8 +119,8 @@ uv run python -m unittest discover -s tests -q
 A `Dockerfile` is provided to build a containerized version of the bot. It
 uses the [`ghcr.io/astral-sh/uv:debian`](https://github.com/astral-sh/uv) base
 image so `uv` is already available for dependency installation. The container
-starts through a small entrypoint that aligns the non-root `discord-blue` user
-with the mounted `/var/lib/discord-blue` owner, then runs the bot from that home
+starts through a small entrypoint that prepares the mounted `/var/lib/discord-blue`
+directory for the `discord-blue` runtime user, then runs the bot from that home
 directory. That keeps the container compatible with the existing LXC/systemd
 state directory during migration.
 
@@ -116,7 +130,8 @@ Build the image:
 docker build -t discord-blue .
 ```
 
-Run the bot with the existing service state mounted:
+For a standalone systemd-to-container migration, stop `discord-blue.service`
+before running the bot with the existing service state mounted:
 
 ```bash
 docker run --rm \
@@ -125,9 +140,12 @@ docker run --rm \
   discord-blue
 ```
 
-Or use Docker Compose for a local smoke run:
+For a new local Compose volume, first complete the bot's interactive token,
+guild and channel setup, then stop the foreground bot before starting it detached:
 
 ```bash
+docker compose run --rm discord-blue
+# After setup, stop the foreground bot with Ctrl-C:
 docker compose up -d
 ```
 
@@ -220,7 +238,7 @@ yourself. Behaviour and limits:
   thread (after `thread_unload_delay_secs`, default 60) and reports `notLoaded`.
   The bridge then ends the Discord session and Discord Blue archives its thread
   with one "Session ended" line.
-- Joining does not clear a thread's goal. Each join sends the owner a read-only
+- Joining does not clear a thread's goal. Each join sends the TUI client a read-only
   goal snapshot: `thread/goal/updated`, or `thread/goal/cleared` when the thread
   has no goal.
 - Threads started with `--no-daemon`, `--profile` or most `-c` overrides run
@@ -236,7 +254,7 @@ yourself. Behaviour and limits:
   `--codex-home` once per home; these options override the configured socket.
   Each connection reconnects independently. Point only one bridge at each
   daemon. Keep the homes separate when they use different accounts, and do not
-  resume the same thread in two daemons at once. The operator's host label stays
+  resume the same thread in two daemons at once. The configured host label stays
   unchanged across home selection or ordering changes, so the server can find
   existing Discord threads after a restart. Account-home names are not exposed.
   An unexpected bridge failure retries with increasing delay (up to one minute),
@@ -279,7 +297,8 @@ discord-blue-codex-bridge --codex-home "${CODEX_HOME:-$HOME/.codex}"
 
 These commands are future-launch setup, not a procedure to restart an active
 bridge or convert running embedded sessions. Closing and resuming an existing
-session on a daemon is an owner-coordinated action.
+session on a daemon needs coordination with the Director (the person whose
+direction the agents follow).
 An installed, non-editable `uv tool` copy does not pick up repository changes
 automatically. Build the merged wheel (`uv build --wheel`) and install it
 (`uv tool install --force dist/discord_blue-0.2.0-py3-none-any.whl`) as part of
@@ -360,11 +379,17 @@ Behaviour and limits:
 - Background sessions claimed from the Claude Code daemon do not show their
   launch flags, so they are assumed to have the channel.
 
-## Launchplane/Dokploy migration target
+## Launchplane/Dokploy production deployment
 
 Production deploys run through Launchplane and Dokploy. The product workflow
 validates the repo, publishes an immutable GHCR image, and asks Launchplane to
 deploy that image to the registered Dokploy application on the Discord Blue LXC.
+
+A push to `main`, including a PR merge, publishes the image and requests a
+production deployment. Pull requests validate and build without publishing or
+requesting a deployment. A docs-only merge uses the same production path.
+Manual workflow runs on `main` publish without requesting deployment; pushes
+to `launchplane/train/**` validate and build without publishing.
 
 - CI proves the Docker image builds for every PR and push.
 - Production publishes both a digest and a `sha-<commit>` tag. The deploy request

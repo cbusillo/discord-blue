@@ -8,7 +8,7 @@
     {
       "name": "dui",
       "source": "./claude-plugin/dui",
-      "description": "Mirror each Claude Code session into its own Discord Blue thread, with replies and permission approvals"
+      "description": "Mirror each Claude Code session into its own Discord Blue thread, with channel replies and terminal permission decisions"
     }
   ]
 }
