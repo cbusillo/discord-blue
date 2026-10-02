@@ -119,8 +119,8 @@ uv run python -m unittest discover -s tests -q
 A `Dockerfile` is provided to build a containerized version of the bot. It
 uses the [`ghcr.io/astral-sh/uv:debian`](https://github.com/astral-sh/uv) base
 image so `uv` is already available for dependency installation. The container
-starts through a small entrypoint that aligns the non-root `discord-blue` user
-with the mounted `/var/lib/discord-blue` UID/GID, then runs the bot from that home
+starts through a small entrypoint that prepares the mounted `/var/lib/discord-blue`
+directory for the `discord-blue` runtime user, then runs the bot from that home
 directory. That keeps the container compatible with the existing LXC/systemd
 state directory during migration.
 
@@ -130,7 +130,8 @@ Build the image:
 docker build -t discord-blue .
 ```
 
-Run the bot with the existing service state mounted:
+For a standalone systemd-to-container migration, stop `discord-blue.service`
+before running the bot with the existing service state mounted:
 
 ```bash
 docker run --rm \
@@ -387,6 +388,8 @@ deploy that image to the registered Dokploy application on the Discord Blue LXC.
 A push to `main`, including a PR merge, publishes the image and requests a
 production deployment. Pull requests validate and build without publishing or
 requesting a deployment. A docs-only merge uses the same production path.
+Manual workflow runs on `main` publish without requesting deployment; pushes
+to `launchplane/train/**` validate and build without publishing.
 
 - CI proves the Docker image builds for every PR and push.
 - Production publishes both a digest and a `sha-<commit>` tag. The deploy request
