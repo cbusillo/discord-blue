@@ -19,7 +19,7 @@ workflows, and cleanup policy.
 ## Discord command surfaces
 
 * Prefer Discord slash/app commands for all bot control surfaces. Do not add new
-  `!command` style message parsers for actions requiring admin permission.
+  `!command` style message parsers for bot control actions.
 * Raw message handling is allowed only when the message content itself is the
   product input, such as agent session-thread replies that are forwarded to
   the local TUI.

@@ -40,9 +40,11 @@ reconnect matching. `harness` names the agent (`claude` or `codex`); Discord
 shows its icon first in the thread name, `<icon> <repo> · <title>`, capped at
 100 characters. Without a title the name uses a non-default git branch, and
 otherwise just the repository. When another live session would have the same
-name, the branch and then a short session ID tell them apart. Launchplane automation
-origins use `Auto <repo>#<issue>` instead of a task title, with the harness icon
-when supplied. Every `hello`
+name, the branch and then a short session ID tell them apart. Origins whose kind
+is `launchplane` or `agent_session` use `Auto <repo>#<issue>` when
+`origin.repository` is set; without it, they use the folder name from `cwd`.
+These automation names omit the task title and branch, and include the harness
+icon when supplied. Every `hello`
 renames a reused thread whose name is out of date. Older servers ignore
 `harness`. Omit `origin` for an interactive
 session without an automation request. `session_id` must be stable across
@@ -250,7 +252,7 @@ completion separate from command acceptance.
 Approvals use a separate message: `type: "approval_decision"`, `approval_id`,
 `session_id`, `session_epoch`, and `decision` (`approved` or `denied`). The
 agent retains final approval authority and acknowledges or rejects the decision.
-Discord checks session admin permission using the legacy config key
+Discord checks session admin permission using the current config key
 `agent_session.operator_role_name`, falling back to `discord.employee_role_name`.
 When both are empty, current code applies no role restriction; see
 [#135](https://github.com/cbusillo/discord-blue/issues/135).

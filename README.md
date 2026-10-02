@@ -9,7 +9,7 @@ threads to local Codex app-server sessions and Claude Code channels.
 This is the standalone source-install path supported by `discord-blue.service`.
 The repository's production workflow uses Launchplane/Dokploy containers instead;
 see [production deployment](#launchplanedokploy-production-deployment). Do not run
-both services against the same bot token and state directory.
+both services against the same bot token or state directory.
 
 1. Update System Packages:
 
