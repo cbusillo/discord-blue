@@ -19,7 +19,7 @@ from discord_blue.doodads.agent_session.protocol import REMOTE_ACTIONS, RemoteAp
 from discord_blue.doodads.agent_session.sessions import PendingRemoteApproval
 from tests.fakes_agent_prompts import prompt_fixture
 from tests import test_session_cleanup_transport as transport_tests
-from tests.fakes_agent_session import FakeInteraction, FakeReplyMessage
+from tests.fakes_agent_session import FakeInteraction, FakeReplyMessage, every_user_is_operator
 
 
 class CapabilityTests(unittest.IsolatedAsyncioTestCase):
@@ -258,6 +258,9 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CapabilityTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.enterContext(every_user_is_operator())
+
     async def test_malformed_hello_closes_before_thread_lookup(self) -> None:
         for invalid in (None, "reply", [1], ["reply"] * 33, ["x" * 65]):
             with self.subTest(invalid=invalid):
@@ -274,7 +277,6 @@ class CapabilityTransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reconnect_narrows_controls_and_rejects_prior_session_dispatch(self) -> None:
         async with transport_tests.CleanupTransportTests().transport() as (bridge, thread, client, _finished):
-            bridge.bot.config.discord.employee_role_name = ""
             old = await client.ws_connect(
                 bridge_module.AGENT_SESSION_CONNECT_PATH, headers={"Authorization": "Bearer cleanup-transport-test"}
             )
