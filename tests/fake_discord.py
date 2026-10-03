@@ -113,12 +113,13 @@ class Fault:
 
 @dataclass
 class Hold:
-    """Keep matching requests waiting, without taking effect, until `released` is set."""
+    """Keep matching requests waiting, without taking effect, until `released` is set; `landed` is set once one has."""
 
     method: str
     route: str
     match: Callable[[dict[str, str]], bool] = lambda _ids: True
     released: asyncio.Event = field(default_factory=asyncio.Event)
+    landed: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 # Adding a reaction. Discord rate-limits these per channel, so a bot's reactions show one at a time.
@@ -194,6 +195,7 @@ class FakeDiscord:
         ("DELETE", "/channels/{channel}/messages/{message}/reactions/{emoji}/{user}"),
         ("DELETE", "/channels/{channel}/messages/{message}/reactions"),
         ("GET", "/channels/{channel}/messages/{message}"),
+        ("PATCH", "/channels/{channel}/messages/{message}"),
         ("DELETE", "/channels/{channel}/messages/{message}"),
         ("GET", "/channels/{channel}/messages"),
         ("POST", "/channels/{channel}/messages"),
@@ -226,8 +228,15 @@ class FakeDiscord:
         delay = self.route_latency.get((method, template), self.latency)
         delay += sum(extra for m, r, match, extra in self.body_latency if m == method and r == template and match(body))
         await asyncio.sleep(delay)
-        for hold in [h for h in self.holds if h.method == method and h.route == template and h.match(ids)]:
+        held = [h for h in self.holds if h.method == method and h.route == template and h.match(ids)]
+        for hold in held:
             await hold.released.wait()
+        response = self.answer(method, template, ids, query, body)
+        for hold in held:
+            hold.landed.set()
+        return response
+
+    def answer(self, method: str, template: str, ids: dict[str, str], query: dict[str, str], body: Json) -> web.Response:
         fault = next((f for f in self.faults if f.method == method and f.route == template and f.match(ids) and f.body(body)), None)
         if fault is not None:
             fault.times -= 1
@@ -310,6 +319,8 @@ class FakeDiscord:
             if method == "DELETE":
                 messages.remove(found)
                 return 204, None
+            if method == "PATCH" and "content" in body:
+                found.content = str(body["content"])
             return 200, found.payload()
         if thread is None:
             return 200, {"id": str(PARENT_ID), "type": 0, "guild_id": str(GUILD_ID), "name": "agent-sessions"}

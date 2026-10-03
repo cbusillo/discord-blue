@@ -9,8 +9,10 @@ would produce. `running_cog` serves the agent-session cog's WebSocket on such a 
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import itertools
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -137,6 +139,20 @@ def hold_reaction(fake: FakeDiscord, emoji: str) -> Hold:
     hold = Hold(*ADD_REACTION, match=lambda ids: unquote(ids["emoji"]) == emoji)
     fake.holds.append(hold)
     return hold
+
+
+async def release_after_tap(hold: Hold, handled: Callable[[], bool]) -> None:
+    """Let the held reaction land after a tap's handler has had the head start it gets on Discord.
+
+    There the held request is slow (reactions are rate-limited per channel), so a handler that does not wait for it is
+    done first: `handled` turns true. A handler that waits for it is still waiting, so the head start is bounded.
+    """
+    with contextlib.suppress(TimeoutError):
+        async with asyncio.timeout(0.5):
+            while not handled():
+                await asyncio.sleep(0.02)
+    hold.released.set()
+    await asyncio.wait_for(hold.landed.wait(), 5)
 
 
 def offering(thread: FakeThreadState, emoji: str) -> FakeMessage | None:
