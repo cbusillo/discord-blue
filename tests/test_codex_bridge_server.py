@@ -51,8 +51,8 @@ class CodexBridgeServerTests(unittest.IsolatedAsyncioTestCase):
                 bridge = running.cog.bridge
 
                 def session_acknowledged() -> bool:
-                    session = bridge.sessions.get("root")
-                    return session is not None and session.acknowledged
+                    root = bridge.sessions.get("root")
+                    return root is not None and root.acknowledged
 
                 self.assertTrue(await until(session_acknowledged, 5), "the server never acknowledged the Codex session")
                 session = bridge.sessions.get("root")

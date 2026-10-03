@@ -196,7 +196,7 @@ class FakeDiscord:
         for route_method, template in self.ROUTES:
             if route_method != method:
                 continue
-            pattern = "^" + re.sub(r"\{(\w+)\}", r"(?P<\1>[^/]+)", template) + "$"
+            pattern = "^" + re.sub(r"\{(\w+)}", r"(?P<\1>[^/]+)", template) + "$"
             if matched := re.match(pattern, path):
                 return template, matched.groupdict()
         raise web.HTTPNotFound(text=f"unsupported route {method} /{path}")

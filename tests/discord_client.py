@@ -82,7 +82,7 @@ def guild_create(roles: dict[int, str], members: list[Json]) -> Json:
 @asynccontextmanager
 async def discord_client(fake: FakeDiscord, config: Config, roles: dict[int, str], members: list[Json]) -> AsyncIterator[BlueBot]:
     """A logged-in BlueBot whose REST requests go to `fake`; the guild is cached and no thread is."""
-    async with TestServer(fake.app(), host="127.0.0.1") as server:
+    async with TestServer(fake.app()) as server:
         with patch.object(Route, "BASE", f"http://127.0.0.1:{server.port}/api/v10"):
             bot = BlueBot(config)
             # What Client.login does, without its application lookup or setup_hook, which loads every doodad.
@@ -138,8 +138,12 @@ def offering(thread: FakeThreadState, emoji: str) -> FakeMessage | None:
 
 def message_create(bot: BlueBot, message: FakeMessage, author: Json) -> None:
     """Deliver MESSAGE_CREATE for `message`, sent by the guild member `author`."""
-    data = {**message.payload(), "guild_id": str(GUILD_ID), "author": author["user"]}
-    data["member"] = {key: value for key, value in author.items() if key != "user"}
+    data = {
+        **message.payload(),
+        "guild_id": str(GUILD_ID),
+        "author": author["user"],
+        "member": {key: value for key, value in author.items() if key != "user"},
+    }
     bot._connection.parse_message_create(cast(Any, data))
 
 
