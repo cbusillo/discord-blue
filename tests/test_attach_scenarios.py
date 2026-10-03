@@ -26,6 +26,7 @@ from discord_blue.config import AgentSessionConfig, Config, DiscordConfig
 from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.protocol import SessionHello
 from discord_blue.doodads.agent_session.threads import session_start_message
+from discord_blue.plugs.discord_plug import MAX_RATELIMIT_SLEEP_SECONDS
 from tests.discord_http import HttpBot, discord_bot, scaled_discord_sleeps
 from tests.fake_discord import BOT_ID, PARENT_ID, FakeDiscord, FakeThreadState, Fault
 from tests.fakes_agent_session import FakeTextChannel, FakeThread
@@ -301,3 +302,41 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.gather(sweep, return_exceptions=True)
 
         self.assertNotIn(thread.id, running.archived, "the startup sweep archived a thread whose session was reconnecting")
+
+    async def test_a_reattach_is_not_held_up_by_a_rename_discord_rate_limits_for_long(self) -> None:
+        """Once a thread's renames reach Discord's limit, Discord answers further renames with a 429 lasting minutes.
+        In #145 a reattach's reopen waited behind that limit, and every session failed to attach. A reopen is a
+        different edit, which Discord still accepts, so a session returning after its grace ran out must attach."""
+        fake = FakeDiscord(latency=0.002)
+        hello = hello_for("renamed-too-often")
+        thread = fake.add_thread("an old name", marker=marker(hello), archived=True, locked=True)
+        rename_limit = Fault(
+            "PATCH",
+            "/channels/{channel}",
+            times=1_000,
+            status=429,
+            retry_after=MAX_RATELIMIT_SLEEP_SECONDS * 30,
+            body=lambda body: "name" in body,
+        )
+        fake.faults.append(rename_limit)
+
+        def renames_sent() -> int:
+            return 1_000 - rename_limit.times
+
+        with patch.object(bridge_module, "SESSION_DISCONNECT_GRACE_SECONDS", 0.2):
+            async with scenario(fake) as running, aiohttp.ClientSession() as http:
+                first = await running.connect(http)
+                await first.send_json(hello)
+                await first.receive_json(timeout=10)
+                self.assertTrue(await until(lambda: renames_sent() > 0, timeout=5), "the stale name was never renamed")
+                await first.close()  # The client drops, as when a laptop sleeps, and its grace runs out.
+                await until(lambda: thread.archived, timeout=2)
+                second = await running.connect(http)
+                await second.send_json({**hello, "session_epoch": "e2"})
+                ack = await second.receive_json(timeout=3)  # 90 s at 1:30, the client's own hello timeout.
+                await asyncio.sleep(0.3)  # Room for any retry of the rename to go out.
+                await second.close()
+
+        self.assertEqual(ack.get("type"), "hello_ack")
+        self.assertFalse(thread.archived, "the reattached session's thread is still archived")
+        self.assertEqual(renames_sent(), 1, "the rename was sent again while Discord's rate limit still held")

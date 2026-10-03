@@ -20,8 +20,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import unquote
 
 from aiohttp import web
+from discord.utils import snowflake_time
 
 Json = dict[str, Any]
 BOT_ID = 999
@@ -36,9 +38,11 @@ class FakeMessage:
     channel_id: int
     content: str
     author_id: int = BOT_ID
+    # (emoji, user ID) for each reaction on the message.
+    reactions: list[tuple[str, int]] = field(default_factory=list)
 
     def payload(self) -> Json:
-        stamp = (EPOCH + timedelta(seconds=self.id)).isoformat()
+        stamp = snowflake_time(self.id).isoformat()
         author = {"id": str(self.author_id), "username": "bot", "discriminator": "0", "avatar": None}
         return {
             "id": str(self.id),
@@ -90,7 +94,10 @@ class FakeThreadState:
 
 @dataclass
 class Fault:
-    """Answer the next `times` matching requests with `status`; `applied` lets the request take effect first."""
+    """Answer the next `times` matching requests with `status`; `applied` lets the request take effect first.
+
+    `match` picks requests by route IDs, `body` by their JSON body (only renames, say).
+    """
 
     method: str
     route: str
@@ -100,6 +107,11 @@ class Fault:
     is_global: bool = False
     applied: bool = False
     match: Callable[[dict[str, str]], bool] = lambda _ids: True
+    body: Callable[[Json], bool] = lambda _body: True
+
+
+# Adding a reaction. Discord allows about one per quarter second per channel, so a bot's reactions show one by one.
+ADD_REACTION = ("PUT", "/channels/{channel}/messages/{message}/reactions/{emoji}/{user}")
 
 
 def respond(payload: object, status: int) -> web.Response:
@@ -119,6 +131,8 @@ class FakeDiscord:
         self.parent_messages: list[FakeMessage] = []
         self.faults: list[Fault] = []
         self.requests: list[tuple[str, str]] = []
+        # Each interaction's response (the JSON body of its callback), by interaction ID.
+        self.interaction_responses: dict[int, Json] = {}
         self.listeners: list[Callable[[FakeThreadState, bool], None]] = []
         self.ids = itertools.count(10_000)
         self.clock = itertools.count(1)
@@ -158,11 +172,15 @@ class FakeDiscord:
 
     ROUTES: tuple[tuple[str, str], ...] = (
         ("GET", "/users/@me"),
+        ("POST", "/interactions/{interaction}/{token}/callback"),
         ("GET", "/guilds/{guild}/threads/active"),
         ("GET", "/channels/{channel}/threads/archived/public"),
         ("GET", "/channels/{channel}/threads/archived/private"),
         ("GET", "/channels/{channel}/users/@me/threads/archived/private"),
         ("POST", "/channels/{channel}/threads"),
+        ("PUT", "/channels/{channel}/messages/{message}/reactions/{emoji}/{user}"),
+        ("DELETE", "/channels/{channel}/messages/{message}/reactions/{emoji}/{user}"),
+        ("DELETE", "/channels/{channel}/messages/{message}/reactions"),
         ("GET", "/channels/{channel}/messages/{message}"),
         ("DELETE", "/channels/{channel}/messages/{message}"),
         ("GET", "/channels/{channel}/messages"),
@@ -196,7 +214,7 @@ class FakeDiscord:
         delay = self.route_latency.get((method, template), self.latency)
         delay += sum(extra for m, r, match, extra in self.body_latency if m == method and r == template and match(body))
         await asyncio.sleep(delay)
-        fault = next((f for f in self.faults if f.method == method and f.route == template and f.match(ids)), None)
+        fault = next((f for f in self.faults if f.method == method and f.route == template and f.match(ids) and f.body(body)), None)
         if fault is not None:
             fault.times -= 1
             if fault.times <= 0:
@@ -228,6 +246,14 @@ class FakeDiscord:
         thread = self.threads.get(channel_id) if channel_id is not None else None
         if channel_id is not None and channel_id != PARENT_ID and thread is None:
             return 404, {"message": "Unknown Channel", "code": 10003}
+        if template == "/interactions/{interaction}/{token}/callback":
+            self.interaction_responses[int(ids["interaction"])] = body
+            interaction = {
+                "id": ids["interaction"],
+                "type": 2,
+                "response_message_ephemeral": bool(body["data"].get("flags", 0) & 64),
+            }
+            return 200, {"interaction": interaction}
         if template == "/users/@me":
             return 200, {"id": str(BOT_ID), "username": "bot", "discriminator": "0", "avatar": None, "bot": True}
         if template == "/guilds/{guild}/threads/active":
@@ -250,6 +276,19 @@ class FakeDiscord:
             return 200, message.payload()
         if template == "/channels/{channel}/messages":
             return 200, self.history(messages, query)
+        if template.startswith("/channels/{channel}/messages/{message}/reactions"):
+            reacted = next((m for m in messages if m.id == int(ids["message"])), None)
+            if reacted is None:
+                return 404, {"message": "Unknown Message", "code": 10008}
+            if "emoji" not in ids:
+                reacted.reactions.clear()
+                return 204, None
+            reaction = (unquote(ids["emoji"]), BOT_ID if ids["user"] == "@me" else int(ids["user"]))
+            if method == "PUT" and reaction not in reacted.reactions:
+                reacted.reactions.append(reaction)
+            elif method == "DELETE" and reaction in reacted.reactions:
+                reacted.reactions.remove(reaction)
+            return 204, None
         if template == "/channels/{channel}/messages/{message}":
             found = next((m for m in messages if m.id == int(ids["message"])), None)
             if found is None:
