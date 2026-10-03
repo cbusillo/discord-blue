@@ -167,15 +167,21 @@ class AgentSessionClient:
             try:
                 async with http.ws_connect(self.config.server_url, headers=headers, max_msg_size=1024 * 1024) as websocket:
                     self.websocket = websocket
-                    await self.send(websocket, self.hello(first=first))
-                    async with asyncio.timeout(self.config.hello_timeout_seconds):
-                        reply = await websocket.receive()
-                    if reply.type in CLOSED_MESSAGES:
-                        # The server says why it would not attach the session, such as a Discord thread it could not open.
-                        raise HelloRefused(f"code {websocket.close_code}: {str(reply.extra or 'no reason given')[:200]}")
-                    ack = json.loads(reply.data) if reply.type is aiohttp.WSMsgType.TEXT else None
-                    if not isinstance(ack, dict) or ack.get("type") != "hello_ack":
-                        raise ValueError("Discord Blue did not acknowledge the session")
+                    await self.send(websocket, {**self.hello(first=first), "client_features": ["hello_pending"]})
+                    while True:
+                        # A pending reply renews the inactivity deadline, rather than restarting the connection.
+                        # A silent or older server still times out normally; queued events wait until hello_ack.
+                        async with asyncio.timeout(self.config.hello_timeout_seconds):
+                            reply = await websocket.receive()
+                        if reply.type in CLOSED_MESSAGES:
+                            raise HelloRefused(f"code {websocket.close_code}: {str(reply.extra or 'no reason given')[:200]}")
+                        ack = json.loads(reply.data) if reply.type is aiohttp.WSMsgType.TEXT else None
+                        if isinstance(ack, dict) and ack.get("type") == "hello_pending" and self.is_current(ack):
+                            logger.info("Agent session %s waiting for a thread", self.session_id)
+                            continue
+                        if not isinstance(ack, dict) or ack.get("type") != "hello_ack":
+                            raise ValueError("Discord Blue did not acknowledge the session")
+                        break
                     features = ack.get("features")
                     self.server_features = (
                         frozenset(f for f in features if isinstance(f, str)) if isinstance(features, list) else frozenset()

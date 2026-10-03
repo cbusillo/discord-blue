@@ -56,7 +56,7 @@ from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
 from discord_blue.doodads.agent_session.thread_worker import RenameTarget, ThreadWorkers
 from discord_blue.doodads.agent_session.threads import SessionThread
 from discord_blue.doodads.agent_session.threads import auto_join_configured_users
-from discord_blue.doodads.agent_session.threads import create_session_thread
+from discord_blue.doodads.agent_session.threads import ThreadCreationStopped, create_session_thread
 from discord_blue.doodads.agent_session.threads import creation_token_suffix
 from discord_blue.doodads.agent_session.threads import new_creation_token
 from discord_blue.doodads.agent_session.threads import get_agent_session_channel
@@ -170,7 +170,10 @@ class ReactionWrites:
     latest: int = 0
 
 
-class BridgeStopping(Exception):
+HELLO_PENDING_INTERVAL_SECONDS = 15
+
+
+class BridgeStopping(ThreadCreationStopped):
     """The bridge is shutting down, so an attach does not start."""
 
 
@@ -381,7 +384,9 @@ class AgentSessionBridge:
         self._site: web.TCPSite | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
+        # One FIFO admission queue for attaches, including creation; a rate-limited create keeps its slot.
         self._session_attach_lock = asyncio.Lock()
+        self._creation_stopping = asyncio.Event()
         self._grace_tasks: set[asyncio.Task[None]] = set()
         # Every change to a session thread (reopen, join, members, notice, archive, leave, rename) goes through its
         # worker, one request at a time and never cancelled.
@@ -542,6 +547,7 @@ class AgentSessionBridge:
         if self._runner is None:
             return
         self._stopping = True
+        self._creation_stopping.set()
         for task in list(self._grace_tasks):
             task.cancel()
         await self.stop_background_task("maintenance", self._cleanup_task)
@@ -955,9 +961,30 @@ class AgentSessionBridge:
                     session = AgentSession(hello=hello, websocket=websocket)
                     self.sessions.register(session)
                     try:
-                        session_thread = await asyncio.shield(self.attach_task(hello, previous))
-                    except BridgeStopping:
+                        task = self.attach_task(hello, previous)
+                        if hello.hello_pending:
+                            # Wait without cancelling the attach or an in-flight discord.py request. Only the
+                            # current socket receives progress; events remain queued until the final ack.
+                            while not task.done():
+                                done, _ = await asyncio.wait({task}, timeout=HELLO_PENDING_INTERVAL_SECONDS)
+                                if done:
+                                    break
+                                if self.sessions.get(hello.session_id) is not session or websocket.closed:
+                                    raise ConnectionError("session left while waiting for a thread")
+                                await websocket.send_json(
+                                    {
+                                        "type": "hello_pending",
+                                        "session_id": hello.session_id,
+                                        "session_epoch": hello.session_epoch,
+                                        "message": "Waiting for a thread",
+                                    }
+                                )
+                        session_thread = await asyncio.shield(task)
+                    except ThreadCreationStopped:
                         await websocket.close(message=b"bridge shutdown", drain=False)
+                        break
+                    except ConnectionError:
+                        logger.info("Agent session %s left while waiting for a thread", hello.session_id)
                         break
                     except (discord.DiscordException, ValueError):
                         await websocket.close(message=b"unable to attach Discord thread", drain=False)
@@ -1061,8 +1088,8 @@ class AgentSessionBridge:
                 session_thread = await self.resume_thread_in_grace(previous, hello) or await self.find_or_create_session_thread(
                     hello
                 )
-            except (discord.DiscordException, ValueError, BridgeStopping) as exc:
-                if not isinstance(exc, BridgeStopping):
+            except (discord.DiscordException, ValueError, ThreadCreationStopped) as exc:
+                if not isinstance(exc, ThreadCreationStopped):
                     logger.warning(
                         "Unable to attach Discord thread for Agent session %s: %s",
                         session_id,
@@ -1180,7 +1207,11 @@ class AgentSessionBridge:
         if thread is None:
             token = new_creation_token()
             session_thread = await create_session_thread(
-                self.bot, hello, token=token, settle=partial(self.delete_creation_duplicates, token)
+                self.bot,
+                hello,
+                token=token,
+                settle=partial(self.delete_creation_duplicates, token),
+                stopping=self._creation_stopping,
             )
             self.discovery.add(session_thread.thread, [session_start_message(hello)])
             self.sessions.bind_thread(

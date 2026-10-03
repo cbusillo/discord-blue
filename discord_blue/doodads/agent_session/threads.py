@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
@@ -152,12 +153,17 @@ def tokened_thread_name(hello: SessionHello, token: str) -> str:
     return _truncate_thread_name(session_thread_name(hello), DISCORD_THREAD_NAME_LIMIT - _discord_length(suffix)) + suffix
 
 
+class ThreadCreationStopped(Exception):
+    """Shutdown interrupted a creation waiting for Discord's allowance."""
+
+
 async def create_session_thread(
     bot: BlueBot,
     hello: SessionHello,
     *,
     token: str | None = None,
     settle: Callable[[discord.Thread], Awaitable[None]] | None = None,
+    stopping: asyncio.Event | None = None,
 ) -> SessionThread:
     """Create the session's thread, let `settle` see it before anything is posted, then announce it.
 
@@ -165,10 +171,28 @@ async def create_session_thread(
     duplicate made by discord.py retrying the create can be told apart from other sessions' threads.
     """
     channel = await get_agent_session_channel(bot)
-    thread = await channel.create_thread(
-        name=tokened_thread_name(hello, token) if token else session_thread_name(hello),
-        auto_archive_duration=1440,
-    )
+    while True:
+        if stopping is not None and stopping.is_set():
+            raise ThreadCreationStopped
+        try:
+            thread = await channel.create_thread(
+                name=tokened_thread_name(hello, token) if token else session_thread_name(hello),
+                auto_archive_duration=1440,
+            )
+            break
+        except discord.RateLimited as exc:
+            # The bridge keeps its queue slot through the cooldown. Retry only creation, with the same token:
+            # retrying the announcements could create a second thread after a later request failed.
+            logger.info("Agent session %s waiting for a thread; retry after %.2f s", hello.session_id, exc.retry_after)
+            if stopping is None:
+                await asyncio.sleep(exc.retry_after)
+            else:
+                try:
+                    await asyncio.wait_for(stopping.wait(), timeout=exc.retry_after)
+                except TimeoutError:
+                    pass
+                else:
+                    raise ThreadCreationStopped from exc
     if settle is not None:
         await settle(thread)
     notification = await send_agent_session_message(channel, session_notification_message(hello, thread))
