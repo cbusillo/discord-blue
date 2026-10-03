@@ -1912,13 +1912,15 @@ class AgentSessionBridge:
             return
 
         message = await send_agent_session_message(channel, content[:DISCORD_MESSAGE_LIMIT])
-        await self.add_message_reactions(
-            message,
-            [REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY],
-        )
+        # Answerable from the moment it is posted: Discord shows the reactions one at a time, and a tap on the first
+        # one while the bot still adds the next must count.
         session.pending_approvals[approval.approval_id] = PendingRemoteApproval(
             thread_id=session.thread_id,
             message_id=message.id,
+        )
+        await self.add_message_reactions(
+            message,
+            [REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY],
         )
 
     async def handle_request_user_input(self, request: RemoteRequestUserInput) -> None:
@@ -2495,8 +2497,8 @@ class AgentSessionBridge:
             thread,
             self.format_waiting_for_direction(session),
         )
+        session.control_message_id = message.id  # Before its reactions, so a tap on the first one counts.
         await self.add_message_reactions(message, self.session_control_reactions(session))
-        session.control_message_id = message.id
 
     async def set_message_reaction(self, thread_id: int, message_id: int, reaction: str) -> None:
         channel = self.thread_channel(thread_id)
@@ -2565,11 +2567,11 @@ class AgentSessionBridge:
             channel,
             self.format_waiting_for_direction(session),
         )
+        session.control_message_id = message.id  # Before its reactions, so a tap on the first one counts.
         await self.add_message_reactions(
             message,
             self.session_control_reactions(session),
         )
-        session.control_message_id = message.id
 
     async def retire_user_input(self, session: AgentSession, pending: PendingRemoteUserInput, content: str) -> None:
         pending.retired = True
@@ -2685,17 +2687,19 @@ class AgentSessionBridge:
                 channel,
                 self.format_waiting_for_direction(session),
             )
-            await self.add_message_reactions(message, self.session_control_reactions(session))
         except discord.DiscordException:
             session.pending_control_confirmation = old_pending_control_confirmation
             session.control_status_reaction = old_control_status_reaction
             session.control_interruptions_enabled = old_control_interruptions_enabled
             return False
 
-        session.control_message_id = message.id
-        if old_control_message_id is not None and old_control_message_id != message.id:
-            self.rebind_session_control_commands(session, old_control_message_id, message.id)
-            await self.delete_session_message(session.thread_id, old_control_message_id)
+        session.control_message_id = message.id  # Before its reactions, so a tap on the first one counts.
+        replaced = old_control_message_id if old_control_message_id != message.id else None
+        if replaced is not None:
+            self.rebind_session_control_commands(session, replaced, message.id)
+        await self.add_message_reactions(message, self.session_control_reactions(session))
+        if replaced is not None:
+            await self.delete_session_message(session.thread_id, replaced)
         return True
 
     @staticmethod
@@ -3186,8 +3190,8 @@ class AgentSessionBridge:
             thread,
             self.format_waiting_for_direction(session),
         )
+        session.control_message_id = message.id  # Before its reactions, so a tap on the first one counts.
         await self.add_message_reactions(message, self.session_control_reactions(session))
-        session.control_message_id = message.id
 
     def _authorized(self, request: web.Request) -> bool:
         token = self.bot.config.agent_session.token
