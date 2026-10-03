@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
+from urllib.parse import unquote
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
@@ -27,7 +28,7 @@ from discord.utils import time_snowflake
 from discord_blue.config import AgentSessionConfig, Config, DiscordConfig
 from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 from discord_blue.plugs.discord_plug import BlueBot
-from tests.fake_discord import BOT_ID, EPOCH, GUILD_ID, PARENT_ID, FakeDiscord, FakeMessage, FakeThreadState
+from tests.fake_discord import ADD_REACTION, BOT_ID, EPOCH, GUILD_ID, PARENT_ID, FakeDiscord, FakeMessage, FakeThreadState, Hold
 
 Json = dict[str, Any]
 TOKEN = "cog-token"
@@ -129,6 +130,13 @@ async def running_cog(fake: FakeDiscord) -> AsyncIterator[RunningCog]:
 def sent_now(channel_id: int, content: str, author_id: int) -> FakeMessage:
     """A message posted now: the bridge drops replies older than the session's attach."""
     return FakeMessage(snowflake(), channel_id, content, author_id=author_id)
+
+
+def hold_reaction(fake: FakeDiscord, emoji: str) -> Hold:
+    """Hold the bot's `emoji` reactions back until released: the moment a tap lands while the bot still adds it."""
+    hold = Hold(*ADD_REACTION, match=lambda ids: unquote(ids["emoji"]) == emoji)
+    fake.holds.append(hold)
+    return hold
 
 
 def offering(thread: FakeThreadState, emoji: str) -> FakeMessage | None:

@@ -18,8 +18,18 @@ import aiohttp
 from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.doodads.agent_session import bridge as bridge_module
-from tests.discord_client import OPERATOR, OPERATOR_ID, TOKEN, message_create, offering, reaction_add, running_cog, sent_now
-from tests.fake_discord import ADD_REACTION, FakeDiscord, FakeThreadState
+from tests.discord_client import (
+    OPERATOR,
+    OPERATOR_ID,
+    TOKEN,
+    hold_reaction,
+    message_create,
+    offering,
+    reaction_add,
+    running_cog,
+    sent_now,
+)
+from tests.fake_discord import FakeDiscord, FakeThreadState
 from tests.test_attach_scenarios import until
 from tests.test_codex_bridge import FakeRpc, thread
 
@@ -33,7 +43,7 @@ def contents(discord_thread: FakeThreadState) -> list[str]:
 class CodexBridgeServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_codex_session_round_trips_through_the_real_server(self) -> None:
         fake = FakeDiscord(latency=0.002)
-        fake.route_latency[ADD_REACTION] = 0.1  # The bot's reactions show one by one, as Discord's rate limit spaces them.
+        deny_held = hold_reaction(fake, bridge_module.REACTION_APPROVAL_DENY)
         rpc = FakeRpc(thread("root"))
         async with running_cog(fake) as running, aiohttp.ClientSession() as http:
             config = BridgeConfig(
@@ -90,6 +100,7 @@ class CodexBridgeServerTests(unittest.IsolatedAsyncioTestCase):
                 reaction_add(running.bot, discord_thread.id, approval_message.id, approve, OPERATOR)
                 decided = await until(lambda: bool(rpc.responses), 5)
             finally:
+                deny_held.released.set()
                 await codex.detach_all()
 
         self.assertTrue(answered, f"Codex's final answer never reached the thread: {contents(discord_thread)}")

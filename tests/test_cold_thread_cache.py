@@ -23,13 +23,14 @@ from tests.discord_client import (
     OPERATOR,
     OPERATOR_ID,
     TOKEN,
+    hold_reaction,
     message_create,
     offering,
     reaction_add,
     running_cog,
     sent_now,
 )
-from tests.fake_discord import ADD_REACTION, BOT_ID, FakeDiscord
+from tests.fake_discord import BOT_ID, FakeDiscord
 from tests.test_attach_scenarios import hello_for, marker, until
 
 Json = dict[str, Any]
@@ -80,7 +81,7 @@ class ColdThreadCacheTests(unittest.IsolatedAsyncioTestCase):
         """A prompt typed in the TUI posts fresh session controls. The bot adds them one at a time, and an operator
         who taps pause as soon as it shows must not be ignored because the bot is still adding end-session."""
         fake = FakeDiscord(latency=0.002)
-        fake.route_latency[ADD_REACTION] = 0.1  # The bot's reactions show one by one, as Discord's rate limit spaces them.
+        end_held = hold_reaction(fake, bridge_module.REACTION_CONTROL_END)
         hello = hello_for("fresh-controls")
         thread = fake.add_thread("fresh-controls", marker=marker(hello), archived=True, locked=True)
         async with running_cog(fake) as running, aiohttp.ClientSession() as http:
@@ -94,7 +95,10 @@ class ColdThreadCacheTests(unittest.IsolatedAsyncioTestCase):
             controls = offering(thread, pause)
             assert controls is not None
             reaction_add(running.bot, thread.id, controls.id, pause, OPERATOR)
-            paused = await next_command(websocket, "pause_current_turn")
+            try:
+                paused = await next_command(websocket, "pause_current_turn")
+            finally:
+                end_held.released.set()
             await websocket.close()
 
         self.assertEqual(paused["issued_by"], str(OPERATOR_ID))

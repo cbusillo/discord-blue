@@ -6,8 +6,9 @@ agent-session bridge uses. Requests take a configurable latency and apply at the
 end of it, whether or not the client is still waiting: a request cancelled on
 the client side still lands, as it does on Discord. Faults are scripted per
 route: rate limits (route or global, with `retry_after`) and 5xx responses,
-optionally after the request already took effect. Every state change is
-reported to a gateway listener after a delay, like a gateway event.
+optionally after the request already took effect. A hold keeps matching
+requests waiting until the test releases them. Every state change is reported
+to a gateway listener after a delay, like a gateway event.
 """
 
 from __future__ import annotations
@@ -110,7 +111,17 @@ class Fault:
     body: Callable[[Json], bool] = lambda _body: True
 
 
-# Adding a reaction. Discord allows about one per quarter second per channel, so a bot's reactions show one by one.
+@dataclass
+class Hold:
+    """Keep matching requests waiting, without taking effect, until `released` is set."""
+
+    method: str
+    route: str
+    match: Callable[[dict[str, str]], bool] = lambda _ids: True
+    released: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+# Adding a reaction. Discord rate-limits these per channel, so a bot's reactions show one at a time.
 ADD_REACTION = ("PUT", "/channels/{channel}/messages/{message}/reactions/{emoji}/{user}")
 
 
@@ -130,6 +141,7 @@ class FakeDiscord:
         self.deleted: set[int] = set()
         self.parent_messages: list[FakeMessage] = []
         self.faults: list[Fault] = []
+        self.holds: list[Hold] = []
         self.requests: list[tuple[str, str]] = []
         # Each interaction's response (the JSON body of its callback), by interaction ID.
         self.interaction_responses: dict[int, Json] = {}
@@ -214,6 +226,8 @@ class FakeDiscord:
         delay = self.route_latency.get((method, template), self.latency)
         delay += sum(extra for m, r, match, extra in self.body_latency if m == method and r == template and match(body))
         await asyncio.sleep(delay)
+        for hold in [h for h in self.holds if h.method == method and h.route == template and h.match(ids)]:
+            await hold.released.wait()
         fault = next((f for f in self.faults if f.method == method and f.route == template and f.match(ids) and f.body(body)), None)
         if fault is not None:
             fault.times -= 1
