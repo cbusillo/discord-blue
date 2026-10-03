@@ -960,8 +960,8 @@ class AgentSessionBridge:
                     previous = self.sessions.get(hello.session_id)
                     session = AgentSession(hello=hello, websocket=websocket)
                     self.sessions.register(session)
+                    task = self.attach_task(hello, previous)
                     try:
-                        task = self.attach_task(hello, previous)
                         if hello.hello_pending:
                             # Wait without cancelling the attach or an in-flight discord.py request. Only the
                             # current socket receives progress; events remain queued until the final ack.
