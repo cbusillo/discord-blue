@@ -54,7 +54,8 @@ Clients may advertise `"client_features": ["hello_pending"]` in `hello`. While a
 is queued, the server sends `hello_pending` every 15 seconds with the session ID,
 epoch, and `"message": "Waiting for a thread"`. Each matching reply renews the
 client's hello inactivity deadline. Events stay queued until `hello_ack`; a
-silent server still times out. Older clients receive only the final ack and
+silent server still times out. Configure `hello_timeout_seconds` above the
+15-second pending interval (the default is 300 seconds). Older clients receive only the final ack and
 retain their existing deadline, so update the local bridges for long bursts.
 
 Thread creations share the bridge's FIFO attach queue. A `RateLimited` on

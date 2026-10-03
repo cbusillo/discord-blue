@@ -985,6 +985,11 @@ class AgentSessionBridge:
                         break
                     except ConnectionError:
                         logger.info("Agent session %s left while waiting for a thread", hello.session_id)
+                        if self.sessions.get(hello.session_id) is session:
+                            # A dropped socket still owns this attach. Let it bind before end_connection decides
+                            # between grace and finalization; otherwise it would archive the just-created thread.
+                            with suppress(discord.DiscordException, ValueError, ThreadCreationStopped):
+                                await asyncio.shield(task)
                         break
                     except (discord.DiscordException, ValueError):
                         await websocket.close(message=b"unable to attach Discord thread", drain=False)

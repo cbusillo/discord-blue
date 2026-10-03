@@ -7,13 +7,16 @@ import time
 import unittest
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import cast
 from unittest.mock import patch
 
 import aiohttp
 
 from discord_blue.agent_client import AgentSessionClient, Json
 from discord_blue.doodads.agent_session import bridge as bridge_module
+from tests.discord_http import HttpChannel
 from tests.fake_discord import FakeDiscord, Fault
+from tests.fakes_agent_session import FakeThread
 from tests.test_attach_scenarios import HOST, TOKEN, hello_for, scenario, until
 
 CREATE = ("POST", "/channels/{channel}/threads")
@@ -47,9 +50,10 @@ class ThreadCreationQueueTests(unittest.IsolatedAsyncioTestCase):
         attempts: list[float] = []
         async with scenario(fake) as running, aiohttp.ClientSession() as http:
             # Scale the max sleep threshold too, so real discord.py raises RateLimited rather than sleeping.
-            original = running.bot.parent.create_thread
+            parent = cast(HttpChannel, running.bot.parent)
+            original = parent.create_thread
 
-            async def create(**kwargs: object) -> object:
+            async def create(**kwargs: object) -> FakeThread:
                 attempts.append(time.monotonic())
                 with patch.object(running.bot.http, "max_ratelimit_timeout", 0.05):
                     return await original(**kwargs)
@@ -58,7 +62,7 @@ class ThreadCreationQueueTests(unittest.IsolatedAsyncioTestCase):
             client.publish("user_message", message="Queued while waiting")
             with (
                 patch.object(bridge_module, "HELLO_PENDING_INTERVAL_SECONDS", 0.04),
-                patch.object(running.bot.parent, "create_thread", create),
+                patch.object(parent, "create_thread", create),
             ):
                 task = asyncio.create_task(client.run(http))
                 try:
@@ -85,16 +89,17 @@ class ThreadCreationQueueTests(unittest.IsolatedAsyncioTestCase):
         hellos = [hello_for(f"burst-{n}", client_features=["hello_pending"]) for n in range(7)]
 
         # A two-creation window: sessions 2, 4, and 6 hit the next window's limit once each.
-        def matches(number: int) -> Callable[[Json], bool]:
-            return lambda body: f"burst-{number} " in body.get("name", "")
+        def matches(window_start: int) -> Callable[[Json], bool]:
+            return lambda body: f"burst-{window_start} " in body.get("name", "")
 
         for number in (2, 4, 6):
             fake.faults.append(Fault(*CREATE, status=429, retry_after=0.2, body=matches(number)))
         active, peak = 0, 0
         async with scenario(fake) as running, aiohttp.ClientSession() as http:
-            original = running.bot.parent.create_thread
+            parent = cast(HttpChannel, running.bot.parent)
+            original = parent.create_thread
 
-            async def create(**kwargs: object) -> object:
+            async def create(**kwargs: object) -> FakeThread:
                 nonlocal active, peak
                 active += 1
                 peak = max(peak, active)
@@ -106,15 +111,15 @@ class ThreadCreationQueueTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch.object(bridge_module, "HELLO_PENDING_INTERVAL_SECONDS", 0.04),
-                patch.object(running.bot.parent, "create_thread", create),
+                patch.object(parent, "create_thread", create),
             ):
                 sockets = [await running.connect(http) for _ in hellos]
                 for websocket, hello in zip(sockets, hellos, strict=True):
                     await websocket.send_json(hello)
 
-                async def acknowledged(websocket: aiohttp.ClientWebSocketResponse) -> Json:
+                async def acknowledged(socket: aiohttp.ClientWebSocketResponse) -> Json:
                     while True:
-                        message = await websocket.receive_json(timeout=5)
+                        message = await socket.receive_json(timeout=5)
                         if message["type"] == "hello_ack":
                             return message
                         self.assertEqual(message["type"], "hello_pending")
@@ -128,6 +133,35 @@ class ThreadCreationQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fake.threads), len(hellos))
         self.assertEqual(fake.requests.count(CREATE), len(hellos) + 3)
         self.assertTrue(all(len(running.threads_marked_for(hello)) == 1 for hello in hellos))
+
+    async def test_a_socket_lost_during_cooldown_enters_grace_after_the_thread_is_bound(self) -> None:
+        fake = FakeDiscord()
+        fake.faults.append(Fault(*CREATE, status=429, retry_after=0.5))
+        async with scenario(fake) as running:
+            parent = cast(HttpChannel, running.bot.parent)
+            original = parent.create_thread
+
+            async def create(**kwargs: object) -> FakeThread:
+                with patch.object(running.bot.http, "max_ratelimit_timeout", 0.05):
+                    return await original(**kwargs)
+
+            with (
+                patch.object(parent, "create_thread", create),
+                patch.object(bridge_module, "HELLO_PENDING_INTERVAL_SECONDS", 0.04),
+            ):
+                async with aiohttp.ClientSession() as http:
+                    socket = await running.connect(http)
+                    await socket.send_json(hello_for("drops-pending", client_features=["hello_pending"]))
+                    self.assertEqual((await socket.receive_json(timeout=2))["type"], "hello_pending")
+
+                # Closing the HTTP session loses the transport, rather than waiting for a WebSocket close handshake.
+                def in_grace() -> bool:
+                    session = running.bridge.sessions.get("drops-pending")
+                    return session is not None and session.thread_id is not None and session.grace_task is not None
+
+                self.assertTrue(await until(in_grace, 3), "the dropped socket bypassed grace and finalized the new thread")
+                self.assertEqual(running.archived, [])
+                self.assertEqual(len(fake.threads), 1)
 
     async def test_shutdown_wakes_a_long_creation_cooldown_without_retrying(self) -> None:
         fake = FakeDiscord()
