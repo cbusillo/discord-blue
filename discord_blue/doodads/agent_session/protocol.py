@@ -83,6 +83,8 @@ class SessionHello:
     title: str | None = None
     # Which agent the session runs, such as "claude" or "codex"; Discord shows its icon in the thread name.
     harness: str | None = None
+    # Opt-in: older clients expect hello_ack as the first reply.
+    hello_pending: bool = False
 
     def supports(self, action: str) -> bool:
         return action in REMOTE_ACTIONS and (self.capabilities is None or action in self.capabilities)
@@ -99,6 +101,7 @@ class SessionHello:
             branch=str(payload["branch"]) if payload.get("branch") else None,
             pid=int(payload.get("pid") or 0),
             capabilities=parse_capabilities(payload),
+            hello_pending=isinstance(payload.get("client_features"), list) and "hello_pending" in payload["client_features"],
             origin=origin,
             assistant_message=str(payload["assistant_message"]) if payload.get("assistant_message") else None,
             title=str(payload["title"]) if payload.get("title") else None,

@@ -218,6 +218,9 @@ token_file = "~/.config/discord-blue/codex-bridge.token"  # mode 600; or set AGE
 # hello_timeout_seconds = 300  # how long to wait for Discord Blue to attach the thread
 ```
 
+Keep `hello_timeout_seconds` above the server's 15-second pending-reply interval
+(default 300 seconds) so a thread-creation cooldown keeps the connection waiting.
+
 Run it with `uv run discord-blue-codex-bridge`, or install
 [the launchd template](docs/launchd/com.shinycomputers.discord-blue-codex-bridge.plist)
 yourself. Behaviour and limits:

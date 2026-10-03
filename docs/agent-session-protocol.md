@@ -50,6 +50,21 @@ renames a reused thread whose name is out of date. Older servers ignore
 `harness`. Omit `origin` for an interactive
 session without an automation request. `session_id` must be stable across
 reconnections; `session_epoch` identifies the current running session instance.
+Clients may advertise `"client_features": ["hello_pending"]` in `hello`. While attachment
+is queued, the server sends `hello_pending` every 15 seconds with the session ID,
+epoch, and `"message": "Waiting for a thread"`. Each matching reply renews the
+client's hello inactivity deadline. Events stay queued until `hello_ack`; a
+silent server still times out. Configure `hello_timeout_seconds` above the
+15-second pending interval (the default is 300 seconds). Older clients receive only the final ack and
+retain their existing deadline, so update the local bridges for long bursts.
+
+Thread creations share the bridge's FIFO attach queue. A `RateLimited` on
+`create_thread` keeps the attach and socket alive and retries creation after
+Discord's `retry_after`, with the same creation token. Announcements are not
+retried as creations. Shutdown wakes a cooldown wait without cancelling a
+Discord request. The queue retains the existing attach and cleanup ownership
+guards. Reuse, notifications, and backfill still share this admission queue.
+
 The server responds with `{"type":"hello_ack","thread_id":12345,"features":["command_text"]}`
 after attaching the Discord thread. `features` lists what the server supports
 beyond the base protocol; a client must not rely on a feature the server did not
