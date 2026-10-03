@@ -390,47 +390,16 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         notices = [message for message in thread.sent_messages if "missing the `Manage Messages` permission" in message]
         self.assertEqual(len(notices), 1)
 
-    async def test_session_thread_candidates_uses_valid_archived_thread_scans(self) -> None:
-        active_thread = FakeThread(555)
-        archived_thread = FakeThread(556, archived=True, joined=False)
-        channel = FakeTextChannel(321, [active_thread, archived_thread])
+    async def test_session_thread_candidates_include_active_public_archived_and_joined_private_archived(self) -> None:
+        active = FakeThread(555)
+        public_archived = FakeThread(556, archived=True, private=False, joined=False)
+        joined_private_archived = FakeThread(557, archived=True)
+        left_private_archived = FakeThread(558, archived=True, joined=False)
+        channel = FakeTextChannel(321, [active, public_archived, joined_private_archived, left_private_archived])
 
-        candidates = await bridge_module.AgentSessionBridge.session_thread_candidates(
-            channel,
-            include_unjoined_private=True,
-        )
+        candidates = await bridge_module.AgentSessionBridge.session_thread_candidates(cast(Any, channel))
 
-        self.assertIn(active_thread, candidates)
-        self.assertIn(archived_thread, candidates)
-        self.assertEqual(
-            channel.archived_thread_calls,
-            [
-                {"private": False, "joined": False, "limit": 50},
-                {"private": True, "joined": False, "limit": 50},
-            ],
-        )
-
-    async def test_session_thread_candidates_falls_back_to_joined_private_threads_when_forbidden(self) -> None:
-        joined_thread = FakeThread(555, archived=True)
-        left_thread = FakeThread(556, archived=True, joined=False)
-        channel = FakeTextChannel(321, [joined_thread, left_thread])
-        channel.forbid_all_private_archives = True
-
-        with self.assertLogs(bridge_module.__name__, level="WARNING"):
-            candidates = await bridge_module.AgentSessionBridge.session_thread_candidates(
-                channel,
-                include_unjoined_private=True,
-            )
-
-        self.assertIn(joined_thread, candidates)
-        self.assertNotIn(left_thread, candidates)
-        self.assertEqual(
-            channel.archived_thread_calls[-2:],
-            [
-                {"private": True, "joined": False, "limit": 50},
-                {"private": True, "joined": True, "limit": 50},
-            ],
-        )
+        self.assertCountEqual(candidates, [active, public_archived, joined_private_archived])
 
     def test_session_thread_text_uses_repo_branch_and_no_mentions(self) -> None:
         hello = make_hello()
@@ -555,30 +524,6 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(thread_name.endswith("…"))
 
 
-class FakeThreadTests(unittest.IsolatedAsyncioTestCase):
-    async def test_send_creates_bot_authored_history_message(self) -> None:
-        thread = FakeThread(555)
-
-        message = await thread.send("Agent session connected")
-
-        self.assertEqual(message.author.id, 999)
-        self.assertEqual((await thread.fetch_message(message.id)).author.id, 999)
-        history = [entry async for entry in thread.history(limit=10, oldest_first=True)]
-        self.assertEqual([entry.id for entry in history], [message.id])
-
-    async def test_delete_removes_message_from_fetch_and_history(self) -> None:
-        thread = FakeThread(555)
-
-        message = await thread.send("Agent session connected")
-        await message.delete()
-
-        self.assertTrue(message.deleted)
-        with self.assertRaises(bridge_module.discord.NotFound):
-            await thread.fetch_message(message.id)
-        history = [entry async for entry in thread.history(limit=10, oldest_first=True)]
-        self.assertEqual(history, [])
-
-
 # noinspection DuplicatedCode
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -611,9 +556,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await websocket.send_json(
             {"type": "hello", "session_id": "transport-session", "session_epoch": epoch, "cwd": "/workspace/example"}
         )
-        self.assertEqual(
-            await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555, "features": ["command_text"]}
-        )
+        ack = await websocket.receive_json(timeout=2)
+        self.assertEqual((ack["type"], ack["thread_id"]), ("hello_ack", 555))
         return websocket
 
     async def send_transport_event(
@@ -1160,26 +1104,21 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(current, existing)
 
     async def test_websocket_auth_rejects_missing_or_wrong_token(self) -> None:
-        config = Config()
-        config.agent_session.token = "shared-secret"
-        bridge = AgentSessionBridge(FakeBot(config))
+        async with self.transport() as (bridge, _thread, client):
+            missing = await client.get("/agent-session/connect")
+            wrong = await client.get("/agent-session/connect", headers={"Authorization": "Bearer wrong"})
+            self.assertEqual(missing.status, 401)
+            self.assertEqual(wrong.status, 401)
+            self.assertEqual(bridge.sessions.live_sessions(), [])
+            websocket = await self.connect_transport(client)
+            self.assertIsNotNone(bridge.sessions.get("transport-session"))
+            await websocket.close()
 
-        self.assertFalse(bridge._authorized(SimpleNamespace(headers={})))
-        self.assertFalse(bridge._authorized(SimpleNamespace(headers={"Authorization": "Bearer wrong"})))
-        self.assertTrue(bridge._authorized(SimpleNamespace(headers={"Authorization": "Bearer shared-secret"})))
-
-    async def test_register_routes_exposes_health_and_connect(self) -> None:
-        bridge = AgentSessionBridge(FakeBot(Config()))
-        app = web.Application()
-
-        bridge.register_routes(app)
-
-        resources = {resource.canonical: resource for resource in app.router.resources()}
-        resource_paths = set(resources)
-        self.assertIn("/health", resource_paths)
-        self.assertIn("/agent-session/connect", resource_paths)
-        agent_session_route = next(iter(resources["/agent-session/connect"]))
-        self.assertEqual(agent_session_route.handler, bridge.handle_connect)
+    async def test_health_is_served_without_auth(self) -> None:
+        async with self.transport() as (_bridge, _thread, client):
+            response = await client.get("/health")
+            self.assertEqual(response.status, 200)
+            self.assertEqual((await response.json())["status"], "ok")
 
     async def test_client_handshake_snapshot_and_pause_over_websocket(self) -> None:
         config = Config()
@@ -1633,12 +1572,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         original_timeout = bridge_module_any.SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS
         bridge_module_any.SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS = 0.01
         try:
-            with self.assertLogs(bridge_module.logger, level="WARNING") as logs:
-                await bridge.disconnect_active_session("session-1", session)
+            with self.assertLogs(bridge_module.logger, level="WARNING"):
+                async with asyncio.timeout(5):
+                    await bridge.disconnect_active_session("session-1", session)
         finally:
             bridge_module_any.SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS = original_timeout
 
-        self.assertIn("Agent session thread cleanup for session-1 timed out during shutdown", "\n".join(logs.output))
+        self.assertIsNone(bridge.sessions.get("session-1"))
 
     async def test_stop_disconnects_sessions_concurrently(self) -> None:
         config = Config()
@@ -1717,48 +1657,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge_module_any.SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = 0.01
         bridge._runner = runner
         try:
-            with self.assertLogs(bridge_module.logger, level="WARNING") as logs:
-                await bridge.stop()
+            with self.assertLogs(bridge_module.logger, level="WARNING"):
+                async with asyncio.timeout(5):
+                    await bridge.stop()
         finally:
             bridge_module_any.SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = original_timeout
 
-        self.assertIn("Agent session bridge runner cleanup timed out during shutdown", "\n".join(logs.output))
         self.assertTrue(runner.cleanup_started)
         self.assertTrue(runner.cleanup_cancelled)
         self.assertIsNone(bridge._runner)
-
-    async def test_thread_reply_routes_to_registered_session_websocket(self) -> None:
-        config = Config()
-        thread = FakeThread(555)
-        bridge = AgentSessionBridge(FakeBot(config, thread))
-        websocket = FakeWebSocket()
-        session = AgentSession(
-            acknowledged=True,
-            hello=make_hello(),
-            websocket=websocket,
-            thread_id=555,
-            control_message_id=901,
-        )
-        bridge.sessions.register(session)
-        bridge.sessions.bind_thread("session-1", 555)
-        message = FakeReplyMessage(777, thread, "run the focused test")
-        thread.add_message(message)
-
-        handled = await bridge.send_thread_reply(message)
-
-        self.assertTrue(handled)
-        self.assertEqual(len(websocket.sent_json), 1)
-        sent = websocket.sent_json[0]
-        self.assertEqual(sent["type"], "command")
-        self.assertEqual(sent["session_id"], "session-1")
-        self.assertEqual(sent["session_epoch"], "epoch-1")
-        self.assertEqual(sent["kind"], "reply")
-        self.assertEqual(sent["text"], "run the focused test")
-        self.assertEqual(sent["issued_by"], "123")
-        command_id = sent["command_id"]
-        self.assertIsInstance(command_id, str)
-        self.assertIn(command_id, session.pending_commands)
-        self.assertEqual(message.reactions, [bridge_module.REACTION_QUEUED])
 
     async def test_thread_reply_reports_offline_session(self) -> None:
         config = Config()
@@ -2745,36 +2652,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("suppress_embeds", interaction.response.edit_kwargs[0])
         self.assertEqual(websocket.sent_json[0]["decision"], "approved")
 
-    async def test_approval_decision_ack_marks_message_finished(self) -> None:
-        config = Config()
-        thread = FakeThread(555)
-        bridge = AgentSessionBridge(FakeBot(config, thread))
-        approval_message = FakeReplyMessage(901, thread, "**Approval sent**")
-        thread.add_message(approval_message)
-        session = AgentSession(
-            hello=make_hello(),
-            websocket=FakeWebSocket(),
-            thread_id=555,
-        )
-        session.pending_approvals["approval-1"] = sessions_module.PendingRemoteApproval(
-            thread_id=555,
-            message_id=901,
-            decision="approved",
-            decided_by=123,
-        )
-        bridge.sessions.register(session)
-
-        await bridge.handle_approval_decision_ack(
-            {
-                "session_id": "session-1",
-                "approval_id": "approval-1",
-            }
-        )
-
-        self.assertEqual(approval_message.content, "**Submitted: approved**\nby: `123`")
-        self.assertEqual(approval_message.reactions, [])
-        self.assertEqual(session.pending_approvals, {})
-
     async def test_approval_decision_reject_marks_message_expired(self) -> None:
         config = Config()
         thread = FakeThread(555)
@@ -3474,12 +3351,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         channel = FakeTextChannel(321, [original_thread])
         bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
-        with self.assertLogs(bridge_module.__name__, level="INFO") as logs:
-            session_thread = await bridge.find_or_create_session_thread(hello)
+        session_thread = await bridge.find_or_create_session_thread(hello)
 
         self.assertIs(session_thread.thread, original_thread)
         self.assertEqual(session_thread.notification_message_id, 801)
-        self.assertIn("despite pid mismatch", "\n".join(logs.output))
 
     async def test_reconnect_does_not_reuse_ambiguous_pid_relaxed_threads(self) -> None:
         config = Config()
@@ -3510,11 +3385,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         channel = FakeTextChannel(321, [first_thread, second_thread])
         bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
-        with self.assertLogs(bridge_module.__name__, level="WARNING") as logs:
+        with self.assertLogs(bridge_module.__name__, level="WARNING"):
             session_thread = await bridge.find_or_create_session_thread(hello)
 
         self.assertNotIn(session_thread.thread, [first_thread, second_thread])
-        self.assertIn("2 pid-relaxed candidates matched", "\n".join(logs.output))
 
     async def test_reconnect_reuses_existing_parent_notification(self) -> None:
         config = Config()

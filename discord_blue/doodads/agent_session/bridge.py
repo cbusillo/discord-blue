@@ -1412,11 +1412,7 @@ class AgentSessionBridge:
         return "\n".join(lines[:-1])
 
     @staticmethod
-    async def session_thread_candidates(
-        channel: discord.TextChannel,
-        *,
-        include_unjoined_private: bool = False,
-    ) -> list[discord.Thread]:
+    async def session_thread_candidates(channel: discord.TextChannel) -> list[discord.Thread]:
         candidates = list(channel.threads)
         try:
             async for thread in channel.archived_threads(
@@ -1427,37 +1423,15 @@ class AgentSessionBridge:
                 candidates.append(thread)
         except (discord.DiscordException, ValueError):
             logger.warning("Unable to scan public archived Agent session threads")
-        if not include_unjoined_private:
-            try:
-                async for thread in channel.archived_threads(
-                    private=True,
-                    joined=True,
-                    limit=50,
-                ):
-                    candidates.append(thread)
-            except (discord.DiscordException, ValueError):
-                logger.warning("Unable to scan joined private archived Agent session threads")
-            return candidates
         try:
             async for thread in channel.archived_threads(
                 private=True,
-                joined=False,
+                joined=True,
                 limit=50,
             ):
                 candidates.append(thread)
-        except discord.Forbidden:
-            logger.warning("Unable to scan all private archived Agent session threads; falling back to joined private threads")
-            try:
-                async for thread in channel.archived_threads(
-                    private=True,
-                    joined=True,
-                    limit=50,
-                ):
-                    candidates.append(thread)
-            except (discord.DiscordException, ValueError):
-                logger.warning("Unable to scan joined private archived Agent session threads")
         except (discord.DiscordException, ValueError):
-            logger.warning("Unable to scan private archived Agent session threads")
+            logger.warning("Unable to scan joined private archived Agent session threads")
         return candidates
 
     async def score_session_thread(self, thread: discord.Thread) -> tuple[int, int, int]:

@@ -147,7 +147,8 @@ class AppServerClientTests(unittest.IsolatedAsyncioTestCase):
             return websocket
 
         async with unix_server(handler) as socket_path:
-            async with AppServerClient(socket_path, timeout=0.05) as client:
+            async with AppServerClient(socket_path) as client:
+                client._timeout = 0.05  # Only the request should time out; a loaded host can take longer to connect.
                 with self.assertRaisesRegex(TransportError, "timed out"):
                     await client.request("thread/start", {})
                 with self.assertRaisesRegex(TransportError, "timed out"):
@@ -306,7 +307,8 @@ class AppServerClientTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.Event().wait()
 
         async with unix_server(handler) as socket_path:
-            async with AppServerClient(socket_path, timeout=0.01) as client:
+            async with AppServerClient(socket_path) as client:
+                client._timeout = 0.01  # Only the send should time out; a loaded host can take longer to connect.
                 with patch.object(ClientWebSocketResponse, "send_json", side_effect=stall_send):
                     with self.assertRaisesRegex(TransportError, "send timed out"):
                         await client.respond("request-1", {})

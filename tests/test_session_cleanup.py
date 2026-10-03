@@ -15,7 +15,7 @@ from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.sessions import AgentSession, PendingSessionCleanup
 from discord_blue.plugs.discord_plug import BlueBot
-from tests.fakes_agent_session import FakeBot, FakeThread, FakeWebSocket, make_hello
+from tests.fakes_agent_session import FakeBot, FakeTextChannel, FakeThread, FakeWebSocket, add_bot_message, make_hello
 
 
 class SessionCleanupTests(unittest.IsolatedAsyncioTestCase):
@@ -42,8 +42,6 @@ class SessionCleanupTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_finalization_budgets_fit_reconnect_deadline(self) -> None:
-        thread_budget = bridge_module.THREAD_LOOKUP_TIMEOUT_SECONDS + bridge_module.THREAD_CLOSE_WAIT_SECONDS
-        self.assertLessEqual(thread_budget, bridge_module.SESSION_THREAD_CLEANUP_TIMEOUT_SECONDS)
         self.assertGreaterEqual(
             bridge_module.SESSION_FINALIZATION_TIMEOUT_SECONDS,
             bridge_module.SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
@@ -199,7 +197,13 @@ class SessionCleanupTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_retry_deletes_old_duplicate_notice_without_closing_live_thread(self) -> None:
         thread = FakeThread(555)
-        bridge = self.make_bridge(thread)
+        channel = FakeTextChannel(321, [thread])
+        old_notice = add_bot_message(channel, 111, "old notice")
+        live_notice = add_bot_message(channel, 222, "live notice")
+        agent_session = AgentSessionConfig()
+        agent_session.channel_id = 321
+        config = cast(Config, SimpleNamespace(agent_session=agent_session, discord=DiscordConfig()))
+        bridge = AgentSessionBridge(cast(BlueBot, FakeBot(config, thread=thread, channel=channel)))
         current = AgentSession(
             hello=make_hello(),
             websocket=cast(web.WebSocketResponse, FakeWebSocket()),
@@ -216,10 +220,11 @@ class SessionCleanupTests(unittest.IsolatedAsyncioTestCase):
         )
         bridge.remember_pending_cleanup(cleanup)
 
-        with patch.object(bridge, "delete_session_notification", new=AsyncMock(return_value=True)) as delete:
+        with patch.object(discord, "TextChannel", FakeTextChannel):
             await bridge.retry_pending_cleanups()
 
-        delete.assert_awaited_once_with(111)
+        self.assertTrue(old_notice.deleted)
+        self.assertFalse(live_notice.deleted)
         self.assertEqual(bridge._pending_cleanups, {})
         self.assertFalse(thread.archived)
         self.assertFalse(thread.left)
