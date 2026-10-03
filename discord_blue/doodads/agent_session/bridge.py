@@ -434,6 +434,11 @@ class AgentSessionBridge:
             self.bot.config.agent_session.listen_host,
             self.bot.config.agent_session.listen_port,
         )
+        if not self.operator_role_name():
+            logger.warning(
+                "No operator role is configured (agent_session.operator_role_name or discord.employee_role_name):"
+                " approvals, session controls and thread replies are refused for everyone"
+            )
         self._cleanup_task = asyncio.create_task(self.cleanup_stale_sessions())
         self._heartbeat_task = asyncio.create_task(self.monitor_heartbeats())
 
@@ -3037,10 +3042,13 @@ class AgentSessionBridge:
             return None
         return fetched if isinstance(fetched, discord.Thread) else None
 
+    def operator_role_name(self) -> str:
+        return self.bot.config.agent_session.operator_role_name or self.bot.config.discord.employee_role_name
+
     def is_operator(self, user: discord.User | discord.Member) -> bool:
-        role_name = self.bot.config.agent_session.operator_role_name or self.bot.config.discord.employee_role_name
+        role_name = self.operator_role_name()
         if not role_name:
-            return True
+            return False
         if not isinstance(user, discord.Member):
             return False
         return any(role.name == role_name for role in user.roles)
