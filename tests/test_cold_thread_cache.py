@@ -27,6 +27,7 @@ from tests.discord_client import (
     message_create,
     offering,
     reaction_add,
+    release_after_tap,
     running_cog,
     sent_now,
 )
@@ -95,13 +96,53 @@ class ColdThreadCacheTests(unittest.IsolatedAsyncioTestCase):
             controls = offering(thread, pause)
             assert controls is not None
             reaction_add(running.bot, thread.id, controls.id, pause, OPERATOR)
+            queued = (bridge_module.REACTION_QUEUED, BOT_ID)
             try:
                 paused = await next_command(websocket, "pause_current_turn")
+                # Then the end-session reaction the bot was adding lands; the controls must still show only queued.
+                await release_after_tap(end_held, lambda: queued in controls.reactions)
+                await until(lambda: queued in controls.reactions, 5)
+                final_reactions = list(controls.reactions)
             finally:
                 end_held.released.set()
             await websocket.close()
 
         self.assertEqual(paused["issued_by"], str(OPERATOR_ID))
+        self.assertEqual(final_reactions, [queued], "the bot's remaining controls landed after the tap was handled")
+
+    async def test_an_approval_answered_as_soon_as_it_shows_offers_nothing_more(self) -> None:
+        """The bot adds approve, then deny. An operator who approves as soon as approve shows gets the approval sent
+        and its reactions cleared; the deny the bot was still adding must not land on the answered approval."""
+        fake = FakeDiscord(latency=0.002)
+        deny_held = hold_reaction(fake, bridge_module.REACTION_APPROVAL_DENY)
+        hello = hello_for("early-approval")
+        thread = fake.add_thread("early-approval", marker=marker(hello), archived=True, locked=True)
+        async with running_cog(fake) as running, aiohttp.ClientSession() as http:
+            websocket = await http.ws_connect(running.url, headers={"Authorization": f"Bearer {TOKEN}"})
+            await websocket.send_json(hello)
+            await websocket.receive_json(timeout=10)
+            request = {"type": "approval_request", "session_id": "early-approval", "session_epoch": "e1", "approval_id": "a1"}
+            await websocket.send_json({**request, "command": ["make", "test"], "cwd": "/w/early-approval"})
+            approve = bridge_module.REACTION_APPROVAL_APPROVE
+            self.assertTrue(await until(lambda: offering(thread, approve) is not None, 5), "no approval was offered")
+            approval = offering(thread, approve)
+            assert approval is not None
+
+            def answered() -> bool:
+                return "Approval sent" in approval.content and not approval.reactions
+
+            reaction_add(running.bot, thread.id, approval.id, approve, OPERATOR)
+            try:
+                decision = await websocket.receive_json(timeout=5)
+                await release_after_tap(deny_held, answered)
+                await until(answered, 5)
+                final_reactions = list(approval.reactions)
+            finally:
+                deny_held.released.set()
+            await websocket.close()
+
+        self.assertEqual((decision["type"], decision["decision"]), ("approval_decision", "approved"))
+        self.assertEqual(final_reactions, [], "the bot's deny landed on the answered approval")
 
 
 if __name__ == "__main__":

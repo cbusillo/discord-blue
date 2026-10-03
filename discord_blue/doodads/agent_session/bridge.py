@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import json
 import logging
 import re
@@ -159,6 +160,14 @@ class CreationCheck:
     parent_id: int | None
     guild: discord.Guild
     attempts: int = 0
+
+
+@dataclasses.dataclass(slots=True)
+class ReactionWrites:
+    """The bot's reaction changes to one message: one request at a time, and the latest change supersedes the rest."""
+
+    lock: asyncio.Lock = dataclasses.field(default_factory=asyncio.Lock)
+    latest: int = 0
 
 
 class BridgeStopping(Exception):
@@ -394,6 +403,8 @@ class AgentSessionBridge:
         self._attach_tasks: dict[str, asyncio.Task[SessionThread]] = {}
         # Each attached thread as the attach resolved it, for handlers while discord.py's cache lacks it.
         self._attached_threads: dict[int, discord.Thread] = {}
+        # By message ID, while the bot is changing that message's reactions.
+        self._reaction_writes: dict[int, ReactionWrites] = {}
         self._finalizing_cleanups: set[tuple[str, str, int | None]] = set()
         self._monitor_started_at = time.monotonic()
         self._monitor_last_progress = self._monitor_started_at
@@ -3200,21 +3211,54 @@ class AgentSessionBridge:
         expected = f"Bearer {token}"
         return request.headers.get("Authorization") == expected
 
-    @staticmethod
     async def add_message_reactions(
+        self,
         message: discord.Message,
         reactions: list[str],
     ) -> None:
-        for reaction in reactions:
-            try:
-                await message.add_reaction(reaction)
-            except discord.DiscordException:
-                logger.warning("Unable to add Agent session reaction %s to %s", reaction, message.id)
+        await self.write_message_reactions(message, reactions)
 
-    @staticmethod
-    async def clear_message_reactions(message: discord.Message) -> None:
-        with suppress(discord.DiscordException):
-            await message.clear_reactions()
+    async def clear_message_reactions(self, message: discord.Message) -> None:
+        await self.write_message_reactions(message, [], clear=True)
+
+    async def write_message_reactions(
+        self,
+        message: discord.Message,
+        reactions: list[str],
+        *,
+        clear: bool = False,
+        remove_user_reaction: tuple[str, discord.User | discord.Member] | None = None,
+    ) -> None:
+        """Change the bot's reactions on `message`, superseding any change still under way.
+
+        The bot adds reactions one request at a time, and an operator can tap the first while the rest are still
+        coming. The handler's change must be the last word: it waits for a request already in flight, which would
+        otherwise land after it, and the superseded change sends nothing more.
+        """
+        writes = self._reaction_writes.setdefault(message.id, ReactionWrites())
+        writes.latest += 1
+        mine = writes.latest
+        # (request, reaction to name if it fails); only a failed add is worth a warning.
+        steps: list[tuple[Callable[[], Awaitable[None]], str | None]] = []
+        if remove_user_reaction is not None:
+            emoji, user = remove_user_reaction
+            steps.append((lambda: message.remove_reaction(emoji, user), None))
+        if clear:
+            steps.append((message.clear_reactions, None))
+        steps.extend((functools.partial(message.add_reaction, reaction), reaction) for reaction in reactions)
+        try:
+            for request, added in steps:
+                async with writes.lock:
+                    if writes.latest != mine:
+                        return
+                    try:
+                        await request()
+                    except discord.DiscordException:
+                        if added is not None:
+                            logger.warning("Unable to add Agent session reaction %s to %s", added, message.id)
+        finally:
+            if writes.latest == mine and self._reaction_writes.get(message.id) is writes:
+                del self._reaction_writes[message.id]
 
     @staticmethod
     async def remove_message_reaction(
@@ -3239,13 +3283,8 @@ class AgentSessionBridge:
     ) -> bool:
         try:
             message = await thread.fetch_message(message_id)
-            if remove_user_reaction is not None:
-                reaction, user = remove_user_reaction
-                with suppress(discord.DiscordException):
-                    await message.remove_reaction(reaction, user)
-            await self.clear_message_reactions(message)
-            await self.add_message_reactions(message, reactions)
-            return True
         except discord.DiscordException:
             logger.warning("Unable to replace Agent session reactions on %s", message_id)
             return False
+        await self.write_message_reactions(message, reactions, clear=True, remove_user_reaction=remove_user_reaction)
+        return True
