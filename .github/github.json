@@ -34,7 +34,16 @@
     "inspection": {
       "tool": "jetbrains",
       "ide": "PyCharm",
-      "scopePreference": ["changed_files", "directory", "whole_project"]
+      "scopePreference": ["changed_files", "directory", "whole_project"],
+      "prepare": {
+        "python": {
+          "version": "3.13",
+          "moduleName": "discord-blue",
+          "testRoots": ["tests"],
+          "sync": true,
+          "requiredGeneratedState": [".venv", ".idea"]
+        }
+      }
     },
     "docsRequiredWhen": [
       "behavior changes",

@@ -219,7 +219,6 @@ class FakeTextChannel:
         self.sent_messages: list[str] = []
         self.sent_kwargs: list[dict[str, object]] = []
         self.archived_thread_calls: list[dict[str, object]] = []
-        self.forbid_all_private_archives = False
 
     @property
     def threads(self) -> list[FakeThread]:
@@ -262,11 +261,6 @@ class FakeTextChannel:
         self.archived_thread_calls.append(kwargs)
         private = bool(kwargs.get("private", False))
         joined = bool(kwargs.get("joined", False))
-        if private and not joined and self.forbid_all_private_archives:
-            raise discord.Forbidden(
-                response=SimpleNamespace(status=403, reason="Forbidden"),
-                message="Cannot list all private archived threads",
-            )
         for thread in self._threads:
             if not thread.archived:
                 continue

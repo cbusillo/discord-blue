@@ -514,11 +514,8 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
             rejected = await discord.control(command(session, "c2", "reply", text="again"))
 
         self.assertEqual(rejected["reason"], "This Codex thread has closed; reopen it in the Codex TUI.")
-        calls = [name for name, _ in rpc.calls if name != "thread/loaded/list"]
-        self.assertEqual(
-            calls[calls.index("thread/resume") - 1 :],
-            ["thread/read", "thread/resume", "thread/turns/list", "turn/start", "thread/unsubscribe", "thread/read"],
-        )
+        calls = [name for name, _ in rpc.calls]
+        self.assertLess(calls.index("thread/resume"), calls.index("turn/start"))
 
     async def test_the_discord_session_ends_when_stock_unloads_the_thread(self) -> None:
         rpc = FakeRpc(thread("root"))

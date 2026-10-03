@@ -6,3 +6,7 @@
 # Datasource local storage ignored files
 /dataSources/
 /dataSources.local.xml
+# Machine-specific project files; the inspection preparer generates them per checkout
+/misc.xml
+/modules.xml
+/*.iml

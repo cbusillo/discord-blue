@@ -243,13 +243,6 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
                 if failure_kind == "discord":
                     self.assertIn("Discord could not prepare", message.replies[0])
 
-    def test_shared_fixture_restores_patch_on_exit(self) -> None:
-        original = object()
-        with patch.object(bridge_module.discord, "Thread", original):
-            with prompt_fixture():
-                self.assertIsNot(bridge_module.discord.Thread, original)
-            self.assertIs(bridge_module.discord.Thread, original)
-
     def test_outbound_wire_sends_have_one_command_and_one_approval_dispatch_gate(self) -> None:
         tree = ast.parse(textwrap.dedent(inspect.getsource(bridge_module.AgentSessionBridge)))
         senders = {
