@@ -41,6 +41,10 @@ class LiveSession:
         await asyncio.sleep(0.05)  # Room for a command frame that should not be sent to arrive.
         return dict(self.fake.interaction_responses[interaction_id]["data"])
 
+    async def sent_more_than(self, count: int) -> bool:
+        """Whether the server sends the session another frame within a couple of seconds."""
+        return await until(lambda: len(self.frames) > count, timeout=2)
+
 
 @contextlib.asynccontextmanager
 async def live_session() -> AsyncIterator[LiveSession]:
@@ -71,11 +75,9 @@ class SlashCommandGateTests(unittest.IsolatedAsyncioTestCase):
         async with live_session() as live:
             for name in COMMANDS:
                 with self.subTest(command=name):
-                    before = len(live.frames)
+                    sent = len(live.frames)
                     response = await live.run(OPERATOR, name)
-                    reached = SESSION_ID in str(response.get("content")) or await until(
-                        lambda count=before: len(live.frames) > count, 2
-                    )
+                    reached = SESSION_ID in str(response.get("content")) or await live.sent_more_than(sent)
                     self.assertTrue(reached, f"/code {name} did nothing for an operator: {response}")
 
     async def test_a_bystander_is_answered_privately_and_reaches_nothing(self) -> None:
