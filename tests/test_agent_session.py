@@ -2248,9 +2248,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         ):
             reply = FakeReplyMessage(message_id, thread, f"Reply {message_id}")
             thread.add_message(reply)
-            reply.author = cast(Any, author)
+            reply.author = author
             await cog.route_thread_reply(cast(Any, reply))
-            self.assertFalse(await bridge.handle_thread_reaction(cast(Any, thread), 901, "✅", cast(Any, author)))
+            self.assertFalse(await bridge.handle_thread_reaction(cast(Any, thread), 901, "✅", author))
 
         self.assertEqual(websocket.sent_json, [])
         self.assertEqual(session.pending_commands, {})
