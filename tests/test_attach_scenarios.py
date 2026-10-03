@@ -76,7 +76,6 @@ async def scenario(fake: FakeDiscord, **agent_session: object) -> AsyncIterator[
     config = cast(Config, SimpleNamespace(agent_session=AgentSessionConfig(), discord=DiscordConfig()))
     config.agent_session.token = TOKEN
     config.agent_session.channel_id = PARENT_ID
-    config.discord.employee_role_name = ""
     for key, value in agent_session.items():
         setattr(config.agent_session, key, value)
     with (

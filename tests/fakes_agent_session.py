@@ -1,16 +1,40 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Protocol, TYPE_CHECKING
+from unittest.mock import patch
 
 import discord
 
+from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.protocol import SessionHello
 
 if TYPE_CHECKING:
     from discord_blue.config import Config
+
+
+@contextmanager
+def every_user_is_operator() -> Iterator[None]:
+    """Admit every fake user through the operator gate, for tests of what an operator's action does.
+
+    Fake users are not guild members and hold no roles, so the real gate refuses them. The gate itself is tested
+    against real roles (test_slash_command_gates, and the operator-role tests in test_agent_session).
+    """
+    with patch.object(AgentSessionBridge, "is_operator", return_value=True):
+        yield
+
+
+_REAL_IS_OPERATOR = AgentSessionBridge.is_operator
+
+
+@contextmanager
+def real_operator_gate() -> Iterator[None]:
+    """Restore the real operator gate inside a test that otherwise admits every user."""
+    with patch.object(AgentSessionBridge, "is_operator", _REAL_IS_OPERATOR):
+        yield
 
 
 class UserLike(Protocol):

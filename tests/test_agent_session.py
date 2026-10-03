@@ -28,6 +28,8 @@ from tests.fakes_agent_session import FakeTextChannel
 from tests.fakes_agent_session import FakeThread
 from tests.fakes_agent_session import FakeWebSocket
 from tests.fakes_agent_session import add_bot_message
+from tests.fakes_agent_session import every_user_is_operator
+from tests.fakes_agent_session import real_operator_gate
 from tests.fakes_agent_session import make_hello
 from tests.test_claude_channel import IDENTITY as CLAUDE_IDENTITY
 from tests.test_claude_channel import FakeClaudeCode
@@ -528,6 +530,7 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         write_default_config()
+        self.enterContext(every_user_is_operator())
         self.original_thread_type = bridge_module.discord.Thread
         self.original_text_channel_type = bridge_module.discord.TextChannel
         bridge_module.discord.Thread = FakeThread
@@ -541,7 +544,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def transport(self) -> AsyncIterator[tuple[Any, FakeThread, TestClient]]:
         config = Config()
         config.agent_session.token = "transport-test-token"
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         app = web.Application()
@@ -861,7 +863,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         config.agent_session.token = "transport-test-token"
         config.agent_session.channel_id = 321
-        config.discord.employee_role_name = ""
         hello = make_hello()
         other_hello = make_hello()
         other_hello.session_id = "other-session"
@@ -1123,7 +1124,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_client_handshake_snapshot_and_pause_over_websocket(self) -> None:
         config = Config()
         config.agent_session.token = "transport-test-token"
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         app = web.Application()
@@ -1689,7 +1689,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_continue_autonomously_routes_to_registered_session_websocket(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
@@ -1717,7 +1716,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_continue_autonomously_reports_reject_in_thread(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
@@ -1744,7 +1742,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_continue_autonomously_reports_default_reject_reason_for_empty_reason(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
@@ -1772,7 +1769,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_new_session_routes_to_registered_session_websocket(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
@@ -1801,7 +1797,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_go_ahead_interaction_replies_ephemerally(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
@@ -1820,7 +1815,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_go_ahead_interaction_preserves_the_control_anchor(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
@@ -2059,7 +2053,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_continue_reaction_reuses_control_message_for_status_feedback(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
@@ -2092,7 +2085,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_thread_reply_shows_active_control_anchor(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
@@ -2194,12 +2186,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 await cog.route_thread_reply(cast(Any, reply))
             self.assertEqual((await websocket.receive_json(timeout=2))["text"], reply.content)
 
-    async def test_a_configured_operator_role_admits_only_members_who_hold_it(self) -> None:
-        def member(*role_names: str) -> MagicMock:
-            author = MagicMock(spec=bridge_module.discord.Member)
-            author.id, author.bot, author.roles = 123, False, [SimpleNamespace(name=name) for name in role_names]
-            return author
+    @staticmethod
+    def member(*role_names: str) -> MagicMock:
+        author = MagicMock(spec=bridge_module.discord.Member)
+        author.id, author.bot, author.roles = 123, False, [SimpleNamespace(name=name) for name in role_names]
+        return author
 
+    async def test_a_configured_operator_role_admits_only_members_who_hold_it(self) -> None:
+        self.enterContext(real_operator_gate())
+        member = self.member
         async with self.transport() as (bridge, thread, client):
             websocket = await self.connect_transport(client)
             bridge.bot.config.agent_session.enabled = True
@@ -2220,9 +2215,62 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(delivered["text"], "Reply 804")
             self.assertEqual(len(bridge.sessions.get("transport-session").pending_commands), 1)
 
+    async def test_with_no_operator_role_configured_nobody_can_reply_or_approve(self) -> None:
+        self.enterContext(real_operator_gate())
+        config = Config()
+        config.agent_session.operator_role_name = ""
+        config.discord.employee_role_name = ""
+        thread = FakeThread(555)
+        bridge = AgentSessionBridge(FakeBot(config, thread))
+        config.agent_session.enabled = True
+        cog = AgentSessionDoodad(bridge.bot)
+        cog.bridge = bridge
+        websocket = FakeWebSocket()
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+        await bridge.handle_approval_request(
+            RemoteApprovalRequest(
+                approval_id="approval-1",
+                call_id="call-1",
+                turn_id="turn-1",
+                session_id="session-1",
+                session_epoch="epoch-1",
+                command=["git", "status"],
+                cwd="/repo",
+                reason="Need approval",
+            )
+        )
+
+        for message_id, author in (
+            (802, SimpleNamespace(id=123, bot=False)),
+            (803, self.member("everyone", "employee", "code-operator")),
+        ):
+            reply = FakeReplyMessage(message_id, thread, f"Reply {message_id}")
+            thread.add_message(reply)
+            reply.author = author
+            await cog.route_thread_reply(cast(Any, reply))
+            self.assertFalse(await bridge.handle_thread_reaction(cast(Any, thread), 901, "✅", author))
+
+        self.assertEqual(websocket.sent_json, [])
+        self.assertEqual(session.pending_commands, {})
+        self.assertIn("approval-1", session.pending_approvals)
+
+    async def test_starting_with_no_operator_role_configured_warns_that_everyone_is_refused(self) -> None:
+        for operator_role, employee_role, warns in (("", "", True), ("code-operator", "", False), ("", "employee", False)):
+            with self.subTest(operator_role=operator_role, employee_role=employee_role):
+                config = Config()
+                config.agent_session.listen_host, config.agent_session.listen_port = "127.0.0.1", 0
+                config.agent_session.operator_role_name = operator_role
+                config.discord.employee_role_name = employee_role
+                bridge = AgentSessionBridge(FakeBot(config, FakeThread(555)))
+                with self.assertLogs(bridge_module.logger, "INFO") as logs:
+                    await bridge.start()
+                await bridge.stop()
+                self.assertEqual(any("No operator role is configured" in line for line in logs.output), warns)
+
     async def test_thread_reply_ack_clears_delivery_receipt(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
@@ -2258,7 +2306,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_thread_reply_turn_complete_moves_controls_after_assistant(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
@@ -2306,7 +2353,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_turn_complete_clears_recovered_rejected_reply_reaction(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
@@ -2459,7 +2505,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pause_reaction_queues_remote_command(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
@@ -2492,7 +2537,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_pause_command_routes_to_registered_session_websocket(self) -> None:
         config = Config()
         config.agent_session.enabled = True
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         doodad = AgentSessionDoodad(cast(Any, FakeBot(config, thread)))
         websocket = FakeWebSocket()
@@ -2511,7 +2555,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_end_session_reaction_requires_confirmation(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
@@ -2554,7 +2597,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_end_session_confirmation_cancel_restores_controls(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
@@ -2593,7 +2635,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_approval_reaction_edits_message_pending_state(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
@@ -2630,7 +2671,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_approval_interaction_does_not_suppress_embeds_on_edit(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
@@ -2813,7 +2853,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_request_user_input_submit_sends_call_id(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         websocket = FakeWebSocket()
         bridge = AgentSessionBridge(FakeBot(config, thread))
@@ -2863,7 +2902,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_request_user_input_cancel_sends_empty_response(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         websocket = FakeWebSocket()
         bridge = AgentSessionBridge(FakeBot(config, thread))
@@ -3134,7 +3172,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_session_status_summary_uses_last_status(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         session = AgentSession(
@@ -3169,7 +3206,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_session_status_summary_marks_agent_session_origin(self) -> None:
         config = Config()
-        config.discord.employee_role_name = ""
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         hello = SessionHello(

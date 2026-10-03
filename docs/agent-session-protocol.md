@@ -255,8 +255,8 @@ Approvals use a separate message: `type: "approval_decision"`, `approval_id`,
 agent retains final approval authority and acknowledges or rejects the decision.
 Discord checks session admin permission using the current config key
 `agent_session.operator_role_name`, falling back to `discord.employee_role_name`.
-When both are empty, current code applies no role restriction; see
-[#135](https://github.com/cbusillo/discord-blue/issues/135).
+When both are empty, nobody holds session admin permission: every decision is
+refused, and the bridge logs a warning at startup.
 
 ## Launchplane provenance
 

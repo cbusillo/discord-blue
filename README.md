@@ -94,8 +94,8 @@ operator_role_name = "Agent Admin"  # existing Discord role whose members may us
 Use the same secret in the local client's token file. The WebSocket rejects an
 empty server token. `operator_role_name` is the current config key for the
 session admin permission; it falls back to `discord.employee_role_name`. If both
-are empty, current code allows controls without a role restriction (tracked in
-[#135](https://github.com/cbusillo/discord-blue/issues/135)).
+are empty, nobody can reply, approve, or use session controls, and the bridge
+logs a warning when it starts.
 
 ## Development
 

@@ -11,14 +11,13 @@ from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.protocol import RemoteRequestUserInput, RequestUserInputQuestion
 from discord_blue.doodads.agent_session.sessions import AgentSession
 from discord_blue.plugs.discord_plug import BlueBot
-from tests.fakes_agent_session import FakeBot, FakeThread, FakeWebSocket, make_hello
+from tests.fakes_agent_session import FakeBot, FakeThread, FakeWebSocket, every_user_is_operator, make_hello
 
 
 class PromptFixture:
     def __init__(self) -> None:
         self.thread = FakeThread(555)
         config = cast(Config, SimpleNamespace(agent_session=AgentSessionConfig(), discord=DiscordConfig()))
-        config.discord.employee_role_name = ""
         self.bridge = bridge_module.AgentSessionBridge(cast(BlueBot, FakeBot(config, thread=self.thread)))
         self.socket = FakeWebSocket()
         self.session = AgentSession(hello=make_hello(), websocket=cast(Any, self.socket), thread_id=555)
@@ -42,5 +41,5 @@ class PromptFixture:
 
 @contextmanager
 def prompt_fixture() -> Iterator[PromptFixture]:
-    with patch.object(bridge_module.discord, "Thread", FakeThread):
+    with patch.object(bridge_module.discord, "Thread", FakeThread), every_user_is_operator():
         yield PromptFixture()
