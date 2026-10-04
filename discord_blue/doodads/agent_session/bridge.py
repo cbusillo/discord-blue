@@ -22,6 +22,7 @@ from aiohttp import WSMsgType, web
 
 from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
 from discord_blue.doodads.agent_session.chunks import format_assistant_messages
+from discord_blue.doodads.agent_session.formatting import advance_code_fence
 from discord_blue.doodads.agent_session.formatting import WAITING_FOR_DIRECTION
 from discord_blue.doodads.agent_session.formatting import format_user_message
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
@@ -66,6 +67,61 @@ from discord_blue.doodads.agent_session.threads import session_thread_name
 from discord_blue.doodads.agent_session.threads import session_start_message
 from discord_blue.health import health_payload
 from discord_blue.plugs.discord_plug import BlueBot
+
+# Only harness envelopes at the start of a line are presentation markup. Inline examples and
+# arbitrary XML remain conversation text. A clipped envelope can end at the end of the message.
+INJECTED_BLOCK = re.compile(
+    r"^[ \t]*<(system-reminder|task-notification|agent-message|channel)\b[^<>]*>"
+    r"(.*?)(?:</\1>|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+TASK_METADATA = re.compile(r"<(task-id|tool-use-id|output-file)>.*?(?:</\1>|\Z)", re.DOTALL)
+TASK_FIELDS = re.compile(r"</?(?:status|summary|note|event)>")
+
+
+def filter_injected_tags(text: str) -> str:
+    """Render known harness envelopes as conversation, without altering fenced code examples."""
+
+    def render(envelope: re.Match[str]) -> str:
+        tag, body = envelope.group(1, 2)
+        if tag == "system-reminder":
+            return ""
+        if tag == "task-notification":
+            body = TASK_FIELDS.sub("", TASK_METADATA.sub("", body)).strip()
+            return f"Task notification:\n{body}" if body else ""
+        if tag == "agent-message":
+            return f"Agent message:\n{body.strip()}"
+        return body.strip()
+
+    # Mark complete fenced regions first. A fence inside an envelope belongs to its body;
+    # only the location of the opening envelope decides whether to render it.
+    protected: list[tuple[int, int]] = []
+    fence = None
+    offset = start = 0
+    for line in text.splitlines(keepends=True):
+        next_fence = advance_code_fence(line.rstrip("\r\n"), fence)
+        if fence is None and next_fence is not None:
+            start = offset
+        offset += len(line)
+        if fence is not None and next_fence is None:
+            protected.append((start, offset))
+        fence = next_fence
+    if fence is not None:
+        protected.append((start, len(text)))
+
+    output: list[str] = []
+    position = copied = region = 0
+    while match := INJECTED_BLOCK.search(text, position):
+        while region < len(protected) and protected[region][1] <= match.start():
+            region += 1
+        if region < len(protected) and protected[region][0] <= match.start():
+            position = protected[region][1]
+            continue
+        output.extend((text[copied : match.start()], render(match)))
+        copied = position = match.end()
+    output.append(text[copied:])
+    return "".join(output).strip()
+
 
 logger = logging.getLogger(__name__)
 REPLY_BEFORE_RECONNECT = (
@@ -1508,7 +1564,7 @@ class AgentSessionBridge:
         assistant_message = hello.assistant_message
         if assistant_message is None:
             return
-        for message in format_assistant_messages(assistant_message):
+        for message in format_assistant_messages(filter_injected_tags(assistant_message)):
             await send_assistant_message(thread, message)
 
     def is_bot_assistant_message(self, message: discord.Message) -> bool:
@@ -2458,7 +2514,8 @@ class AgentSessionBridge:
         if user_message.session_epoch != session.session_epoch:
             logger.warning("Agent session user message for stale session epoch: %s", user_message.session_id)
             return
-        if not user_message.message.strip():
+        message = filter_injected_tags(user_message.message)
+        if not message:
             return
         channel = self.thread_channel(session.thread_id)
         if not isinstance(channel, discord.Thread):
@@ -2466,7 +2523,7 @@ class AgentSessionBridge:
 
         await send_agent_session_message(
             channel,
-            self.format_user_message_notice(user_message.message)[:DISCORD_MESSAGE_LIMIT],
+            self.format_user_message_notice(message)[:DISCORD_MESSAGE_LIMIT],
         )
         await self.spawn_session_controls(
             session,
@@ -2593,7 +2650,7 @@ class AgentSessionBridge:
         channel = self.thread_channel(thread_id)
         if not isinstance(channel, discord.Thread):
             return
-        for message in format_assistant_messages(text):
+        for message in format_assistant_messages(filter_injected_tags(text)):
             await send_assistant_message(channel, message)
 
     async def post_session_controls(self, session: AgentSession) -> None:
