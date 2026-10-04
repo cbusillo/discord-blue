@@ -173,7 +173,13 @@ it has no assistant message. The server recognises its own assistant messages by
 an invisible trailing marker, which it removes from every other message it
 posts, or by the `**Assistant**` label older messages carry. It converts
 Markdown tables outside code fences into bullet lists unless that would make
-them much longer, and posts at most ten messages per answer. It is not a transcript replay protocol. A new chat
+them much longer, and posts at most ten messages per answer. Before posting
+user messages, completed answers or reconnect snapshots, the bridge removes
+injected system-reminder blocks, renders task notifications without internal
+IDs, output-file paths or usage metadata, and unwraps channel and agent-message envelopes. Agent
+reports keep their text, including any model-output authority warning. This
+applies to known envelopes at the start of a line; ordinary XML, inline tag
+examples and fenced code are preserved. It is not a transcript replay protocol. A new chat
 gets a new session ID. The client must reject controls for stale epochs and avoid
 executing a repeated command ID twice.
 
