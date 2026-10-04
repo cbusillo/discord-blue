@@ -176,7 +176,7 @@ Markdown tables outside code fences into bullet lists unless that would make
 them much longer, and posts at most ten messages per answer. Before posting
 user messages, completed answers or reconnect snapshots, the bridge removes
 injected system-reminder blocks, renders task notifications without internal
-IDs or output-file paths, and unwraps channel and agent-message envelopes. Agent
+IDs, output-file paths or usage metadata, and unwraps channel and agent-message envelopes. Agent
 reports keep their text, including any model-output authority warning. This
 applies to known envelopes at the start of a line; ordinary XML, inline tag
 examples and fenced code are preserved. It is not a transcript replay protocol. A new chat

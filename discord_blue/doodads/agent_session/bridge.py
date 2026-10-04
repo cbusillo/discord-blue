@@ -71,20 +71,21 @@ from discord_blue.plugs.discord_plug import BlueBot
 # Only complete harness envelopes at the start of a prose line are presentation markup.
 # Inline examples, indented code and arbitrary XML remain conversation text.
 INJECTED_BLOCK = re.compile(
-    r"[ ]{0,3}<(system-reminder|task-notification|agent-message|channel)(?=[\s>])[^<>]*>"
-    r"([ \t]*\r?\n.*?|[^\r\n]*?)</\1>",
-    re.DOTALL,
+    r" {0,3}<(system-reminder|task-notification|agent-message|channel)(?=[\s>])[^<>]*>"
+    r"(?:([ \t]*\r?\n.*?)^ {0,3}</\1>|([^\r\n]*?)</\1>)",
+    re.MULTILINE | re.DOTALL,
 )
-CLIPPED_REMINDER = re.compile(r"[ ]{0,3}<system-reminder>[ \t]*\r?\n")
-TASK_METADATA = re.compile(r"<(task-id|tool-use-id|output-file)>.*?(?:</\1>|\Z)", re.DOTALL)
-TASK_FIELDS = re.compile(r"</?(?:status|summary|note|event)>")
+CLIPPED_REMINDER = re.compile(r" {0,3}<system-reminder>[ \t]*\r?\n")
+TASK_METADATA = re.compile(r"<(task-id|tool-use-id|output-file|usage)>.*?(?:</\1>|\Z)", re.DOTALL)
+TASK_FIELDS = re.compile(r"</?(?:status|summary|note|event|result)>")
 
 
 def filter_injected_tags(text: str) -> str:
     """Render known harness envelopes as conversation, without altering fenced code examples."""
 
-    def render(envelope: re.Match[str]) -> str:
-        tag, body = envelope.group(1, 2)
+    def render(block: re.Match[str]) -> str:
+        tag = block.group(1)
+        body = block.group(2) if block.group(2) is not None else block.group(3)
         if tag == "system-reminder":
             return ""
         if tag == "task-notification":
@@ -104,8 +105,10 @@ def filter_injected_tags(text: str) -> str:
                 position = envelope.end()
                 # Envelope bodies are independent text, so their fences cannot hide later envelopes.
                 continue
-            if position == 0 and CLIPPED_REMINDER.match(text):
-                break  # A reminder-only hook payload clipped before its closing tag.
+            if CLIPPED_REMINDER.match(text, position) and (
+                position == 0 or text.endswith("\n[Truncated; see the Claude Code terminal.]")
+            ):
+                break  # A standalone reminder or the client's explicitly clipped reminder tail.
         newline = text.find("\n", position)
         end = len(text) if newline == -1 else newline + 1
         line = text[position:end]

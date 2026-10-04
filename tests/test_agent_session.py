@@ -3057,6 +3057,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 'Task notification:\nMonitor event: "PR watcher actions"\nSNAP head None actions []\n'
                 "Routine or benign output doesn't need a notification.",
             ),
+            (
+                "<task-notification>\n<task-id>agent-2</task-id>\n<status>completed</status>\n"
+                '<summary>Agent "Review PR" finished</summary>\n<result>All checks passed.</result>\n'
+                "<usage><subagent_tokens>42</subagent_tokens><tool_uses>3</tool_uses>"
+                "<duration_ms>100</duration_ms></usage>\n</task-notification>",
+                'Task notification:\ncompleted\nAgent "Review PR" finished\nAll checks passed.',
+            ),
             ('<channel source="plugin:dui:dui" command_id="command-1">\ngo,\n</channel>', "go,"),
             (
                 "Continue the answer.\n<system-reminder>\nYour previous response was interrupted mid-generation.\n"
@@ -3132,6 +3139,22 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge = AgentSessionBridge(FakeBot(Config(), thread))
         await bridge.post_assistant_message(555, answer)
         self.assertEqual(thread.sent_messages, [mark_assistant_message(answer)])
+
+    async def test_tag_discussion_does_not_close_inside_code(self) -> None:
+        answer = 'Searched for\n<system-reminder>\nin hooks.py:\n```python\nEND = "</system-reminder>"\n```\nDone.'
+        thread = FakeThread(555)
+        bridge = AgentSessionBridge(FakeBot(Config(), thread))
+        await bridge.post_assistant_message(555, answer)
+        self.assertEqual(thread.sent_messages, [mark_assistant_message(answer)])
+
+    async def test_clipped_reminder_tail_keeps_the_conversation(self) -> None:
+        from discord_blue.claude_channel.session import TEXT_LIMIT, clip
+
+        answer = clip("Continue.\n<system-reminder>\n" + "internal context " * TEXT_LIMIT)
+        thread = FakeThread(555)
+        bridge = AgentSessionBridge(FakeBot(Config(), thread))
+        await bridge.post_assistant_message(555, answer)
+        self.assertEqual(thread.sent_messages, [mark_assistant_message("Continue.")])
 
     async def test_reminder_fence_does_not_hide_later_envelopes(self) -> None:
         raw = '<system-reminder>\n```text\ninternal context\n</system-reminder>\n<channel source="example">go</channel>'
