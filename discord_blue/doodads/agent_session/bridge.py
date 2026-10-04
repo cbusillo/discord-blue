@@ -68,13 +68,14 @@ from discord_blue.doodads.agent_session.threads import session_start_message
 from discord_blue.health import health_payload
 from discord_blue.plugs.discord_plug import BlueBot
 
-# Only harness envelopes at the start of a line are presentation markup. Inline examples and
-# arbitrary XML remain conversation text. A clipped envelope can end at the end of the message.
+# Only complete harness envelopes at the start of a prose line are presentation markup.
+# Inline examples, indented code and arbitrary XML remain conversation text.
 INJECTED_BLOCK = re.compile(
-    r"^[ \t]*<(system-reminder|task-notification|agent-message|channel)\b[^<>]*>"
-    r"(.*?)(?:</\1>|\Z)",
-    re.MULTILINE | re.DOTALL,
+    r"[ ]{0,3}<(system-reminder|task-notification|agent-message|channel)(?=[\s>])[^<>]*>"
+    r"([ \t]*\r?\n.*?|[^\r\n]*?)</\1>",
+    re.DOTALL,
 )
+CLIPPED_REMINDER = re.compile(r"[ ]{0,3}<system-reminder>[ \t]*\r?\n")
 TASK_METADATA = re.compile(r"<(task-id|tool-use-id|output-file)>.*?(?:</\1>|\Z)", re.DOTALL)
 TASK_FIELDS = re.compile(r"</?(?:status|summary|note|event)>")
 
@@ -93,33 +94,24 @@ def filter_injected_tags(text: str) -> str:
             return f"Agent message:\n{body.strip()}"
         return body.strip()
 
-    # Mark complete fenced regions first. A fence inside an envelope belongs to its body;
-    # only the location of the opening envelope decides whether to render it.
-    protected: list[tuple[int, int]] = []
-    fence = None
-    offset = start = 0
-    for line in text.splitlines(keepends=True):
-        next_fence = advance_code_fence(line.rstrip("\r\n"), fence)
-        if fence is None and next_fence is not None:
-            start = offset
-        offset += len(line)
-        if fence is not None and next_fence is None:
-            protected.append((start, offset))
-        fence = next_fence
-    if fence is not None:
-        protected.append((start, len(text)))
-
     output: list[str] = []
-    position = copied = region = 0
-    while match := INJECTED_BLOCK.search(text, position):
-        while region < len(protected) and protected[region][1] <= match.start():
-            region += 1
-        if region < len(protected) and protected[region][0] <= match.start():
-            position = protected[region][1]
-            continue
-        output.extend((text[copied : match.start()], render(match)))
-        copied = position = match.end()
-    output.append(text[copied:])
+    fence = None
+    position = 0
+    while position < len(text):
+        if fence is None:
+            if envelope := INJECTED_BLOCK.match(text, position):
+                output.append(render(envelope))
+                position = envelope.end()
+                # Envelope bodies are independent text, so their fences cannot hide later envelopes.
+                continue
+            if position == 0 and CLIPPED_REMINDER.match(text):
+                break  # A reminder-only hook payload clipped before its closing tag.
+        newline = text.find("\n", position)
+        end = len(text) if newline == -1 else newline + 1
+        line = text[position:end]
+        fence = advance_code_fence(line.rstrip("\r\n"), fence)
+        output.append(line)
+        position = end
     return "".join(output).strip()
 
 

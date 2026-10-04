@@ -3092,7 +3092,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(recovered.sent_messages, [mark_assistant_message(expected)])
 
     async def test_reminder_only_messages_post_nothing(self) -> None:
-        for raw in ("<system-reminder>Internal context</system-reminder>", "<system-reminder>Clipped internal context"):
+        for raw in ("<system-reminder>Internal context</system-reminder>", "<system-reminder>\nClipped internal context"):
             with self.subTest(raw=raw):
                 thread = FakeThread(555)
                 bridge = AgentSessionBridge(FakeBot(Config(), thread))
@@ -3120,6 +3120,25 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge = AgentSessionBridge(FakeBot(Config(), thread))
         await bridge.post_assistant_message(555, answer)
         self.assertEqual(thread.sent_messages, [mark_assistant_message(answer)])
+
+    async def test_filter_preserves_prose_placeholders_and_indented_code(self) -> None:
+        answer = (
+            "Fixed the leak.\n<system-reminder> blocks are now dropped before posting.\nNext step.\n"
+            "<channel-id> must be numeric.\n<system-reminder-example> is a placeholder.\n"
+            '    <channel source="example">\n    go\n    </channel>\n'
+            "    <system-reminder>literal example</system-reminder>"
+        )
+        thread = FakeThread(555)
+        bridge = AgentSessionBridge(FakeBot(Config(), thread))
+        await bridge.post_assistant_message(555, answer)
+        self.assertEqual(thread.sent_messages, [mark_assistant_message(answer)])
+
+    async def test_reminder_fence_does_not_hide_later_envelopes(self) -> None:
+        raw = '<system-reminder>\n```text\ninternal context\n</system-reminder>\n<channel source="example">go</channel>'
+        thread = FakeThread(555)
+        bridge = AgentSessionBridge(FakeBot(Config(), thread))
+        await bridge.post_assistant_message(555, raw)
+        self.assertEqual(thread.sent_messages, [mark_assistant_message("go")])
 
     async def test_agent_envelope_keeps_fenced_report_and_following_conversation(self) -> None:
         raw = '<agent-message from="agent-1">\nReport:\n```text\nresults\n```\n</agent-message>\nNext step.'
