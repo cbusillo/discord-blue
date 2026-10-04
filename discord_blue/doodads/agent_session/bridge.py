@@ -82,7 +82,7 @@ TASK_FIELDS = re.compile(r"</?(?:status|summary|note|event|result)>")
 
 
 def filter_injected_tags(text: str) -> str:
-    """Render known harness envelopes as conversation, without altering fenced code examples."""
+    """Render envelopes from user-message input; assistant text already has known provenance."""
 
     def render(block: re.Match[str]) -> str:
         tag = block.group(1)
@@ -1559,7 +1559,7 @@ class AgentSessionBridge:
         assistant_message = hello.assistant_message
         if assistant_message is None:
             return
-        for message in format_assistant_messages(filter_injected_tags(assistant_message)):
+        for message in format_assistant_messages(assistant_message):
             await send_assistant_message(thread, message)
 
     def is_bot_assistant_message(self, message: discord.Message) -> bool:
@@ -2645,7 +2645,7 @@ class AgentSessionBridge:
         channel = self.thread_channel(thread_id)
         if not isinstance(channel, discord.Thread):
             return
-        for message in format_assistant_messages(filter_injected_tags(text)):
+        for message in format_assistant_messages(text):
             await send_assistant_message(channel, message)
 
     async def post_session_controls(self, session: AgentSession) -> None:

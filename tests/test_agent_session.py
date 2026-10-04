@@ -3042,6 +3042,45 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.control_message_id, 901)
         self.assertEqual(session.control_status_reaction, bridge_module.REACTION_COMPACTING)
 
+    async def test_assistant_tag_explanations_survive_completion_and_backfill(self) -> None:
+        from discord_blue.claude_channel.session import TEXT_LIMIT, clip
+
+        examples = (
+            "<system-reminder>\nAn injected context block. For example:\n"
+            "```xml\n<system-reminder>\nInternal context\n</system-reminder>\n```\nKeep the explanation.",
+            "<channel>text</channel> envelopes are unwrapped.\n"
+            "<task-notification>text</task-notification> reports background work.\n"
+            "<agent-message>text</agent-message> carries a hand-back.\n"
+            "<system-reminder>text</system-reminder> is hidden context.",
+            clip("Tag discussion:\n<system-reminder>\n" + "This literal tag marks injected context. " * TEXT_LIMIT),
+        )
+        for answer in examples:
+            with self.subTest(answer=answer[:100]):
+                thread = FakeThread(555)
+                bridge = AgentSessionBridge(FakeBot(Config(), thread))
+                session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
+                bridge.sessions.register(session)
+                await bridge.handle_session_status(
+                    "turn_complete",
+                    protocol_module.SessionStatus(
+                        session_id=session.session_id,
+                        session_epoch=session.session_epoch,
+                        message="Turn complete",
+                        assistant_message=answer,
+                    ),
+                )
+                completed = [message for message in thread.sent_messages if is_assistant_message(message)]
+                recovered = FakeThread(556)
+                hello = make_hello()
+                hello.assistant_message = answer
+                await bridge.backfill_latest_assistant_message(recovered, hello)
+                self.assertEqual(recovered.sent_messages, completed)
+                if len(answer) < TEXT_LIMIT:
+                    self.assertEqual(completed, [mark_assistant_message(answer)])
+                else:
+                    self.assertTrue(completed[0].startswith("Tag discussion:\n<system-reminder>\nThis literal tag"))
+                    self.assertTrue(all(len(message) <= bridge_module.DISCORD_MESSAGE_LIMIT for message in completed))
+
     async def test_injected_transcript_examples_are_plain_conversation(self) -> None:
         # Local Claude transcripts: d95ff8ce (task), 93610e3a (channel),
         # 83ddaece (reminder), 16c496f5 (agent hand-back). IDs/paths/report text are anonymized.
@@ -3095,13 +3134,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     protocol_module.UserMessage(session_id="session-1", session_epoch="epoch-1", message=raw)
                 )
                 self.assertEqual(thread.sent_messages[0], format_user_message(expected))
-                await bridge.post_assistant_message(555, raw)
-                self.assertEqual(thread.sent_messages[-1], mark_assistant_message(expected))
-                recovered = FakeThread(556)
-                hello = make_hello()
-                hello.assistant_message = raw
-                await bridge.backfill_latest_assistant_message(recovered, hello)
-                self.assertEqual(recovered.sent_messages, [mark_assistant_message(expected)])
 
     async def test_reminder_only_messages_post_nothing(self) -> None:
         for raw in ("<system-reminder>Internal context</system-reminder>", "<system-reminder>\nClipped internal context"):
@@ -3114,10 +3146,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 await bridge.handle_user_message(
                     protocol_module.UserMessage(session_id="session-1", session_epoch="epoch-1", message=raw)
                 )
-                await bridge.post_assistant_message(555, raw)
-                hello = make_hello()
-                hello.assistant_message = raw
-                await bridge.backfill_latest_assistant_message(thread, hello)
                 self.assertEqual(thread.sent_messages, [])
                 self.assertIsNone(session.control_message_id)
 
@@ -3155,27 +3183,37 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_clipped_reminder_tail_keeps_the_conversation(self) -> None:
         from discord_blue.claude_channel.session import TEXT_LIMIT, clip
 
-        answer = clip("Continue.\n<system-reminder>\n" + "internal context " * TEXT_LIMIT)
+        prompt = clip("Continue.\n<system-reminder>\n" + "internal context " * TEXT_LIMIT)
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(Config(), thread))
-        await bridge.post_assistant_message(555, answer)
-        self.assertEqual(thread.sent_messages, [mark_assistant_message("Continue.")])
+        session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
+        bridge.sessions.register(session)
+        await bridge.handle_user_message(
+            protocol_module.UserMessage(session_id=session.session_id, session_epoch=session.session_epoch, message=prompt)
+        )
+        self.assertEqual(thread.sent_messages[0], format_user_message("Continue."))
 
     async def test_reminder_fence_does_not_hide_later_envelopes(self) -> None:
         raw = '<system-reminder>\n```text\ninternal context\n</system-reminder>\n<channel source="example">go</channel>'
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(Config(), thread))
-        await bridge.post_assistant_message(555, raw)
-        self.assertEqual(thread.sent_messages, [mark_assistant_message("go")])
+        session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
+        bridge.sessions.register(session)
+        await bridge.handle_user_message(
+            protocol_module.UserMessage(session_id=session.session_id, session_epoch=session.session_epoch, message=raw)
+        )
+        self.assertEqual(thread.sent_messages[0], format_user_message("go"))
 
     async def test_agent_envelope_keeps_fenced_report_and_following_conversation(self) -> None:
         raw = '<agent-message from="agent-1">\nReport:\n```text\nresults\n```\n</agent-message>\nNext step.'
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(Config(), thread))
-        await bridge.post_assistant_message(555, raw)
-        self.assertEqual(
-            thread.sent_messages, [mark_assistant_message("Agent message:\nReport:\n```text\nresults\n```\nNext step.")]
+        session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
+        bridge.sessions.register(session)
+        await bridge.handle_user_message(
+            protocol_module.UserMessage(session_id=session.session_id, session_epoch=session.session_epoch, message=raw)
         )
+        self.assertEqual(thread.sent_messages[0], format_user_message("Agent message:\nReport:\n```text\nresults\n```\nNext step."))
 
     async def test_handle_user_message_formats_distinct_notice(self) -> None:
         config = Config()
