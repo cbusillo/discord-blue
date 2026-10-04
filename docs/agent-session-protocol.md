@@ -174,12 +174,17 @@ an invisible trailing marker, which it removes from every other message it
 posts, or by the `**Assistant**` label older messages carry. It converts
 Markdown tables outside code fences into bullet lists unless that would make
 them much longer, and posts at most ten messages per answer. Before posting
-user messages, completed answers or reconnect snapshots, the bridge removes
+user messages, the bridge removes
 injected system-reminder blocks, renders task notifications without internal
 IDs, output-file paths or usage metadata, and unwraps channel and agent-message envelopes. Agent
 reports keep their text, including any model-output authority warning. This
 applies to known envelopes at the start of a line; ordinary XML, inline tag
-examples and fenced code are preserved. It is not a transcript replay protocol. A new chat
+examples and fenced code are preserved. Completed assistant answers and Codex
+reconnect snapshots preserve literal tags: Claude supplies `last_assistant_message`
+from its Stop hook, and Codex supplies `agentMessage` items, so those fields are
+assistant-authored text rather than injected input. The user-message payload has
+no equivalent origin distinction; identical bare-tag explanations in that input
+remain ambiguous and are treated as envelopes. It is not a transcript replay protocol. A new chat
 gets a new session ID. The client must reject controls for stale epochs and avoid
 executing a repeated command ID twice.
 
