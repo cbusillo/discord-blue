@@ -179,7 +179,7 @@ injected system-reminder blocks, renders task notifications without internal
 IDs, output-file paths or usage metadata, and unwraps channel and agent-message envelopes. Agent
 reports keep their text, including any model-output authority warning. This
 applies to known envelopes at the start of a line; ordinary XML, inline tag
-examples and fenced code are preserved. Completed assistant answers and their
+examples and fenced code are preserved. Completed assistant answers and Codex
 reconnect snapshots preserve literal tags: Claude supplies `last_assistant_message`
 from its Stop hook, and Codex supplies `agentMessage` items, so those fields are
 assistant-authored text rather than injected input. The user-message payload has

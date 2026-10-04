@@ -3158,8 +3158,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(Config(), thread))
-        await bridge.post_assistant_message(555, answer)
-        self.assertEqual(thread.sent_messages, [mark_assistant_message(answer)])
+        session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
+        bridge.sessions.register(session)
+        await bridge.handle_user_message(
+            protocol_module.UserMessage(session_id=session.session_id, session_epoch=session.session_epoch, message=answer)
+        )
+        self.assertEqual(thread.sent_messages[0], format_user_message(answer))
 
     async def test_filter_preserves_prose_placeholders_and_indented_code(self) -> None:
         answer = (
@@ -3170,15 +3174,23 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(Config(), thread))
-        await bridge.post_assistant_message(555, answer)
-        self.assertEqual(thread.sent_messages, [mark_assistant_message(answer)])
+        session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
+        bridge.sessions.register(session)
+        await bridge.handle_user_message(
+            protocol_module.UserMessage(session_id=session.session_id, session_epoch=session.session_epoch, message=answer)
+        )
+        self.assertEqual(thread.sent_messages[0], format_user_message(answer))
 
     async def test_tag_discussion_does_not_close_inside_code(self) -> None:
         answer = 'Searched for\n<system-reminder>\nin hooks.py:\n```python\nEND = "</system-reminder>"\n```\nDone.'
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(Config(), thread))
-        await bridge.post_assistant_message(555, answer)
-        self.assertEqual(thread.sent_messages, [mark_assistant_message(answer)])
+        session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
+        bridge.sessions.register(session)
+        await bridge.handle_user_message(
+            protocol_module.UserMessage(session_id=session.session_id, session_epoch=session.session_epoch, message=answer)
+        )
+        self.assertEqual(thread.sent_messages[0], format_user_message(answer))
 
     async def test_clipped_reminder_tail_keeps_the_conversation(self) -> None:
         from discord_blue.claude_channel.session import TEXT_LIMIT, clip
