@@ -210,23 +210,23 @@ All session events carry `session_id` and `session_epoch`. Field shapes live in
 The bridge ignores events before `hello`, from a replaced connection, or with
 an ID or epoch that differs from the connection's current session.
 
-| Type | Additional fields / behavior |
-| --- | --- |
-| `heartbeat` | Keeps the connected session alive. |
-| `user_message` | `message`: text entered in the local session. |
-| `status_changed` | `message`: status text; `assistant_message` is optional. |
-| `turn_complete` | `message`, `assistant_message`: completed answer mirrored to Discord. |
-| `error` | `message`: user-visible error. |
-| `command_ack` | `command_id`: accepted for execution, not proof of completion. |
-| `command_reject` | `command_id`, `reason`: command could not be accepted. |
-| `approval_request` | `approval_id`, `call_id`, `turn_id`, `command` (argv list), `cwd`, optional `reason`, optional `command_text` (only when `hello_ack` lists it): the command exactly as the shell runs it. Discord shows `command_text` verbatim instead of the re-quoted argv, and keeps the request in the native TUI when it is longer than 1,600 characters, contains a code fence, or does not fit one message with its directory. |
-| `approval_decision_ack` | `approval_id`: decision submission acknowledged; Discord does not assert the winning outcome. |
-| `approval_resolved` | `approval_id`: retire matching approval with neutral Resolved text. |
-| `request_user_input_resolved` | `call_id`, `turn_id`: retire the exact matching input prompt with neutral Resolved text. |
-| `approval_decision_reject` | `approval_id`, `reason`: decision expired or rejected. |
-| `request_user_input` | `call_id`, `turn_id`, `questions`: question objects described below. |
-| `title_changed` | `title`: a title learned after `hello`, such as a new name or prompt; the thread is renamed in the background. Discord allows about two renames per thread in ten minutes, so the server renames only when the name changes, keeps only the latest pending name, and waits for the window to reopen. |
-| `notice` | `message`: plain text posted in the thread, such as why controls are unavailable. |
+| Type                          | Additional fields / behavior                                                                                                                                                                                                                                                                                                                                                                                           |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `heartbeat`                   | Keeps the connected session alive.                                                                                                                                                                                                                                                                                                                                                                                     |
+| `user_message`                | `message`: text entered in the local session.                                                                                                                                                                                                                                                                                                                                                                          |
+| `status_changed`              | `message`: status text; `assistant_message` is optional.                                                                                                                                                                                                                                                                                                                                                               |
+| `turn_complete`               | `message`, `assistant_message`: completed answer mirrored to Discord.                                                                                                                                                                                                                                                                                                                                                  |
+| `error`                       | `message`: user-visible error.                                                                                                                                                                                                                                                                                                                                                                                         |
+| `command_ack`                 | `command_id`: accepted for execution, not proof of completion.                                                                                                                                                                                                                                                                                                                                                         |
+| `command_reject`              | `command_id`, `reason`: command could not be accepted.                                                                                                                                                                                                                                                                                                                                                                 |
+| `approval_request`            | `approval_id`, `call_id`, `turn_id`, `command` (argv list), `cwd`, optional `reason`, optional `command_text` (only when `hello_ack` lists it): the command exactly as the shell runs it. Discord shows `command_text` verbatim instead of the re-quoted argv, and keeps the request in the native TUI when it is longer than 1,600 characters, contains a code fence, or does not fit one message with its directory. |
+| `approval_decision_ack`       | `approval_id`: decision submission acknowledged; Discord does not assert the winning outcome.                                                                                                                                                                                                                                                                                                                          |
+| `approval_resolved`           | `approval_id`: retire matching approval with neutral Resolved text.                                                                                                                                                                                                                                                                                                                                                    |
+| `request_user_input_resolved` | `call_id`, `turn_id`: retire the exact matching input prompt with neutral Resolved text.                                                                                                                                                                                                                                                                                                                               |
+| `approval_decision_reject`    | `approval_id`, `reason`: decision expired or rejected.                                                                                                                                                                                                                                                                                                                                                                 |
+| `request_user_input`          | `call_id`, `turn_id`, `questions`: question objects described below.                                                                                                                                                                                                                                                                                                                                                   |
+| `title_changed`               | `title`: a title learned after `hello`, such as a new name or prompt; the thread is renamed in the background. Discord allows about two renames per thread in ten minutes, so the server renames only when the name changes, keeps only the latest pending name, and waits for the window to reopen.                                                                                                                   |
+| `notice`                      | `message`: plain text posted in the thread, such as why controls are unavailable.                                                                                                                                                                                                                                                                                                                                      |
 
 Older bridges ignore these unknown resolution, title and notice events.
 
@@ -251,14 +251,14 @@ option reserved when Other is enabled. Keep client requests within those bounds.
 A command has `type: "command"`, `command_id`, `session_id`, `session_epoch`,
 `kind`, optional `text`, and `issued_by` (Discord user ID). Supported kinds:
 
-| Kind | Client action |
-| --- | --- |
-| `reply` | Deliver `text` to the active session. |
-| `continue_autonomously` | Continue until user involvement is required. |
-| `pause_current_turn` | Interrupt the current turn. |
-| `new_session` | Start a fresh chat in the same working directory. |
-| `end_session` | End/disconnect this session. |
-| `status_request` | Publish current session status. |
+| Kind                          | Client action                                                                                           |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `reply`                       | Deliver `text` to the active session.                                                                   |
+| `continue_autonomously`       | Continue until user involvement is required.                                                            |
+| `pause_current_turn`          | Interrupt the current turn.                                                                             |
+| `new_session`                 | Start a fresh chat in the same working directory.                                                       |
+| `end_session`                 | End/disconnect this session.                                                                            |
+| `status_request`              | Publish current session status.                                                                         |
 | `request_user_input_response` | Resolve `call_id` / `turn_id` using `response.answers`, mapping question IDs to `{"answers":["text"]}`. |
 
 Discord binds each question view to its session epoch, call ID, turn ID, and

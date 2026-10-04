@@ -54,6 +54,7 @@ from discord_blue.doodads.agent_session.sessions import (
     RejectedCommandMessage,
 )
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
+from discord_blue.doodads.agent_session.thread_worker import THREAD_CLOSE_STEPS
 from discord_blue.doodads.agent_session.thread_worker import RenameTarget, ThreadWorkers
 from discord_blue.doodads.agent_session.threads import SessionThread
 from discord_blue.doodads.agent_session.threads import auto_join_configured_users
@@ -1449,8 +1450,9 @@ class AgentSessionBridge:
             return matches[0]
         if matches:
             # Rare (an earlier duplicate): the thread with the most conversation wins, as before.
-            scores = [await self.score_session_thread(thread) for thread in matches]
-            return max(zip(scores, matches, strict=True), key=lambda pair: pair[0])[1]
+            scored_threads = [(await self.score_session_thread(thread), thread) for thread in matches]
+            _, thread = max(scored_threads, key=lambda pair: pair[0])
+            return thread
         if len(pid_relaxed_matches) == 1:
             thread = pid_relaxed_matches[0]
             logger.info(
@@ -1519,8 +1521,6 @@ class AgentSessionBridge:
         candidates = list(channel.threads)
         try:
             async for thread in channel.archived_threads(
-                private=False,
-                joined=False,
                 limit=50,
             ):
                 candidates.append(thread)
@@ -1664,9 +1664,10 @@ class AgentSessionBridge:
             return False
         # MESSAGE_CREATE can arrive before the reopened thread returns to discord.py's cache.
         # Its PartialMessageable still identifies the thread already bound by our acknowledged hello.
-        thread = self.thread_channel(message.channel.id)
-        if not isinstance(thread, discord.Thread):
+        channel = self.thread_channel(message.channel.id)
+        if not isinstance(channel, discord.Thread):
             return False
+        thread: discord.Thread = channel
         if session.websocket.closed:
             await message.reply("Agent session is offline; reply was not delivered.", mention_author=False)
             return True
@@ -1702,7 +1703,6 @@ class AgentSessionBridge:
             await self.set_message_reaction(thread.id, message.id, REACTION_QUEUED)
             await self.show_active_session_controls(session, thread, REACTION_QUEUED)
 
-        error = None
         delivered = False
         try:
             error = await self.dispatch_command(session, command, pending, before_send=show_queued)
@@ -2852,7 +2852,8 @@ class AgentSessionBridge:
         channel = self.thread_channel(thread_id)
         return channel if isinstance(channel, discord.Thread) else None
 
-    async def post_close_notice(self, thread: discord.Thread) -> None:
+    @staticmethod
+    async def post_close_notice(thread: discord.Thread) -> None:
         await send_agent_session_message(thread, SESSION_ENDED_NOTICE)
 
     def bot_user_id(self) -> int | None:
@@ -2875,7 +2876,7 @@ class AgentSessionBridge:
         if session.notification_message_id is not None or session.thread_id is not None:
             pending_steps.add("notification")
         if session.thread_id is not None:
-            pending_steps.update({"disconnect_notice", "members", "archive", "leave"})
+            pending_steps.update(THREAD_CLOSE_STEPS)
         return PendingSessionCleanup(
             session_id=session.session_id,
             session_epoch=session.session_epoch,
