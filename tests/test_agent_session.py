@@ -47,6 +47,7 @@ from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 
 if TYPE_CHECKING:
     from discord_blue.doodads.agent_session.bridge import AgentSessionBridge as SessionBridge
+    from discord_blue.doodads.agent_session.bridge import RequestUserInputView
     from discord_blue.doodads.agent_session.protocol import SessionHello as SessionHelloType
     from discord_blue.doodads.agent_session.sessions import AgentSession as AgentSessionType
     from discord_blue.doodads.agent_session.sessions import PendingSessionCleanup
@@ -550,7 +551,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         app = web.Application()
         bridge.register_routes(app)
         attachment = bridge_module.SessionThread(thread=thread, notification_message_id=None)
-        with patch.object(bridge, "find_or_create_session_thread", new=AsyncMock(return_value=attachment)):
+        with patch.object(cast("SessionBridge", bridge), "find_or_create_session_thread", new=AsyncMock(return_value=attachment)):
             async with TestClient(TestServer(app)) as client:
                 yield bridge, thread, client
 
@@ -563,16 +564,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((ack["type"], ack["thread_id"]), ("hello_ack", 555))
         return websocket
 
-    async def send_transport_event(
-        self, bridge: SessionBridge, websocket: ClientWebSocketResponse, payload: dict[str, object]
-    ) -> None:
+    @staticmethod
+    async def send_transport_event(bridge: SessionBridge, websocket: ClientWebSocketResponse, payload: dict[str, object]) -> None:
         # Observe completion of the real handler; no sleeps or mocked protocol processing.
         handled = asyncio.Event()
         handler = bridge.handle_command_ack
 
-        async def observe(payload: dict[str, object]) -> None:
-            await handler(payload)
-            if payload.get("command_id") == "transport-barrier":
+        async def observe(event: dict[str, object]) -> None:
+            await handler(event)
+            if event.get("command_id") == "transport-barrier":
                 handled.set()
 
         with patch.object(bridge, "handle_command_ack", new=observe):
@@ -702,7 +702,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(injected["content"], "for the second conversation")
         self.assertEqual(leftover, [])
 
-    async def wait_for_session(self, bridge: SessionBridge, session_id: str, *, not_epoch: str | None = None) -> AgentSessionType:
+    @staticmethod
+    async def wait_for_session(bridge: SessionBridge, session_id: str, *, not_epoch: str | None = None) -> AgentSessionType:
         async with asyncio.timeout(5):
             while True:
                 session = bridge.sessions.get(session_id)
@@ -826,13 +827,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                             ],
                         },
                     )
-                    view = cast(Any, thread.sent_views[-1])
+                    view = cast("RequestUserInputView", thread.sent_views[-1])
                     interaction = FakeInteraction(thread)
                     if cancel:
-                        await view.cancel(interaction)
+                        await view.cancel(cast(Any, interaction))
                     else:
                         view.set_answer("mode", "Safe")
-                        await view.submit(interaction)
+                        await view.submit(cast(Any, interaction))
                     response = await websocket.receive_json(timeout=2)
                     self.assertEqual(response["kind"], "request_user_input_response")
                     self.assertEqual(response["call_id"], "input-1")
@@ -900,8 +901,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         allow_cleanup = asyncio.Event()
         original_close = bridge.close_session_thread
 
-        async def connect(client: TestClient, session_hello: SessionHelloType) -> ClientWebSocketResponse:
-            ws = await client.ws_connect("/agent-session/connect", headers={"Authorization": "Bearer transport-test-token"})
+        async def connect(transport_client: TestClient, session_hello: SessionHelloType) -> ClientWebSocketResponse:
+            ws = await transport_client.ws_connect(
+                "/agent-session/connect", headers={"Authorization": "Bearer transport-test-token"}
+            )
             await ws.send_json(
                 {"type": "hello", **{key: value for key, value in asdict(session_hello).items() if key != "capabilities"}}
             )
@@ -925,7 +928,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                         await allow_cleanup.wait()
                     await original_close(session, cleanup)
 
-                with patch.object(bridge, "close_session_thread", side_effect=paused_close):
+                with patch.object(cast("SessionBridge", bridge), "close_session_thread", side_effect=paused_close):
                     # A clean end closes the thread at once; a bare drop would wait out the grace period instead.
                     await old.send_json(
                         {"type": "session_end", "session_id": hello.session_id, "session_epoch": hello.session_epoch}
@@ -1024,7 +1027,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         async def replace_second(_session: AgentSessionType, _cleanup: PendingSessionCleanup | None = None) -> None:
             bridge.sessions.register(replacement)
 
-        with patch.object(bridge, "close_session_thread", side_effect=replace_second) as cleanup:
+        with patch.object(cast("SessionBridge", bridge), "close_session_thread", side_effect=replace_second) as cleanup:
             await bridge.close_timed_out_sessions()
 
         self.assertEqual(cleanup.await_count, 1)
@@ -1144,7 +1147,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         app = web.Application()
         bridge.register_routes(app)
         attachment = bridge_module.SessionThread(thread=thread, notification_message_id=None)
-        with patch.object(bridge, "find_or_create_session_thread", new=AsyncMock(return_value=attachment)):
+        with patch.object(cast("SessionBridge", bridge), "find_or_create_session_thread", new=AsyncMock(return_value=attachment)):
             async with TestClient(TestServer(app)) as client:
                 unauthorized = await client.get("/agent-session/connect")
                 self.assertEqual(unauthorized.status, 401)
@@ -1326,7 +1329,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             websocket=FakeWebSocket(),
         )
         bridge.sessions.register(session)
-        original_notification_thread_id = AgentSessionBridge.notification_thread_id
+        original_notification_thread_id = cast("type[SessionBridge]", AgentSessionBridge).notification_thread_id
 
         def bind_during_cleanup(content: str) -> int | None:
             thread_id = original_notification_thread_id(content)
@@ -1334,7 +1337,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 bridge.sessions.bind_thread("session-1", 555)
             return thread_id
 
-        with patch.object(AgentSessionBridge, "notification_thread_id", side_effect=bind_during_cleanup):
+        with patch.object(
+            cast("type[SessionBridge]", AgentSessionBridge), "notification_thread_id", side_effect=bind_during_cleanup
+        ):
             await bridge.cleanup_stale_session_notifications()
 
         self.assertFalse(live_notice.deleted)
@@ -2157,7 +2162,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 entered.set()
                 await release.wait()
 
-            with patch.object(bridge, "backfill_latest_assistant_message", new=stalled_backfill):
+            with patch.object(cast("SessionBridge", bridge), "backfill_latest_assistant_message", new=stalled_backfill):
                 connecting = asyncio.create_task(self.connect_transport(client))
                 try:
                     await asyncio.wait_for(entered.wait(), 2)
@@ -2193,11 +2198,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             thread.add_message(reply)
             reply.channel = cast(Any, SimpleNamespace(id=thread.id))
             reply.author = SimpleNamespace(id=123, bot=False)
-            with patch.object(bridge, "is_operator", return_value=False):
+            with patch.object(cast("SessionBridge", bridge), "is_operator", return_value=False):
                 await cog.route_thread_reply(cast(Any, reply))
             self.assertEqual(reply.reactions, [])
             self.assertEqual(bridge.sessions.get("transport-session").pending_commands, {})
-            with patch.object(bridge, "is_operator", return_value=True):
+            with patch.object(cast("SessionBridge", bridge), "is_operator", return_value=True):
                 await cog.route_thread_reply(cast(Any, reply))
             self.assertEqual((await websocket.receive_json(timeout=2))["text"], reply.content)
 
@@ -2223,7 +2228,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             ):
                 reply = FakeReplyMessage(message_id, thread, f"Reply {message_id}")
                 thread.add_message(reply)
-                reply.author = cast(Any, author)
+                reply.author = author
                 await cog.route_thread_reply(cast(Any, reply))
 
             delivered = await websocket.receive_json(timeout=2)
@@ -2904,7 +2909,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         view = cast(Any, thread.sent_views[0])
         view.set_answer("mode", "Safe")
         interaction = FakeInteraction(thread)
-        await view.submit(interaction)
+        await view.submit(cast(Any, interaction))
 
         self.assertEqual(websocket.sent_json[0]["call_id"], "call-1")
         self.assertEqual(websocket.sent_json[0]["turn_id"], "turn-1")
@@ -2952,7 +2957,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         view = cast(Any, thread.sent_views[0])
         interaction = FakeInteraction(thread)
-        await view.cancel(interaction)
+        await view.cancel(cast(Any, interaction))
 
         self.assertEqual(websocket.sent_json[0]["kind"], "request_user_input_response")
         self.assertEqual(websocket.sent_json[0]["call_id"], "call-1")
