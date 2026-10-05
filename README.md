@@ -99,6 +99,12 @@ logs a warning when it starts.
 
 ## Development
 
+The owner's [overall DIRECTION.md](https://github.com/cbusillo/direction/blob/HEAD/DIRECTION.md)
+governs this repository; there is no separate repository DIRECTION.md.
+[AGENTS.md](AGENTS.md) is the only agent-instruction file and points to the
+maintained execution and review procedures. Repository workflow facts and
+validation commands live in [.github/github.json](.github/github.json).
+
 Install the managed Python environment:
 
 ```bash
@@ -393,6 +399,11 @@ production deployment. Pull requests validate and build without publishing or
 requesting a deployment. A docs-only merge uses the same production path.
 Manual workflow runs on `main` publish without requesting deployment; pushes
 to `launchplane/train/**` validate and build without publishing.
+
+This describes the wiring in [.github/workflows/main.yml](.github/workflows/main.yml).
+A merge's deployment request is separate from a confirmed production deployment;
+green CI proves validation and image build, not the running version. Release
+authority follows the [overall direction](https://github.com/cbusillo/direction/blob/HEAD/DIRECTION.md).
 
 - CI proves the Docker image builds for every PR and push.
 - Production publishes both a digest and a `sha-<commit>` tag. The deploy request
