@@ -9,11 +9,8 @@ file owns purpose, work order, stop boundaries, and retired concepts.
 AGENTS.md is the repository's only agent-instruction file. Keep product setup
 and behavior in README.md and `docs/`, and durable work tracking in GitHub issues.
 
-Follow the maintained [executing loop](https://github.com/cbusillo/codex-skills/blob/main/skills/references/executing-loop.md):
-use `github-plan` for issue context, ownership checks, and claims before creating
-a linked task worktree; use `github` for task branches, bot commits and pushes,
-PRs, and authorized landing. Use `.github/github.json` for repository validation
-and workflow facts, and the `github` skill for merge method and train routing.
+Follow the maintained [executing loop](https://github.com/cbusillo/codex-skills/blob/main/skills/references/executing-loop.md)
+and load each step's owning skill for repository work.
 
 Use `model-review` for changes to AGENTS.md and whenever the maintained
 [reviews by another model](https://github.com/cbusillo/codex-skills/blob/main/skills/references/model-review.md)
