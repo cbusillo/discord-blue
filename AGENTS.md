@@ -1,5 +1,22 @@
 # Project Coding Agent Guide - Discord Blue
 
+## Direction and execution
+
+Read the owner's [overall DIRECTION.md](https://github.com/cbusillo/direction/blob/HEAD/DIRECTION.md)
+before working here. This repository has no separate DIRECTION.md; the overall
+file owns purpose, work order, stop boundaries, and retired concepts.
+
+AGENTS.md is the repository's only agent-instruction file. Keep product setup
+and behavior in README.md and `docs/`, and durable work tracking in GitHub issues.
+
+Follow the maintained [executing loop](https://github.com/cbusillo/codex-skills/blob/main/skills/references/executing-loop.md)
+and load each step's owning skill for repository work.
+
+Use `model-review` for changes to AGENTS.md and whenever the maintained
+[reviews by another model](https://github.com/cbusillo/codex-skills/blob/main/skills/references/model-review.md)
+criteria call for it. That reference also owns how findings are weighed.
+The review supplies evidence; reviewer approval is not a merge or completion gate.
+
 ## Runtime
 
 * **Python:** 3.13

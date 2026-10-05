@@ -4,6 +4,9 @@ Discord Blue is a basic Discord bot plugin system built with the **discord.py**
 library. It includes an agent-session bridge that connects Discord session
 threads to local Codex app-server sessions and Claude Code channels.
 
+Chris Busillo (the Director) uses Discord Blue for his own agent sessions and
+is its Client.
+
 ## Standalone LXC/systemd installation
 
 This is the standalone source-install path supported by `discord-blue.service`.
@@ -98,6 +101,12 @@ are empty, nobody can reply, approve, or use session controls, and the bridge
 logs a warning when it starts.
 
 ## Development
+
+The owner's [overall DIRECTION.md](https://github.com/cbusillo/direction/blob/HEAD/DIRECTION.md)
+governs this repository; there is no separate repository DIRECTION.md.
+[AGENTS.md](AGENTS.md) is the only agent-instruction file and points to the
+maintained execution and review procedures. Repository workflow facts and
+validation commands live in [.github/github.json](.github/github.json).
 
 Install the managed Python environment:
 
@@ -393,6 +402,13 @@ production deployment. Pull requests validate and build without publishing or
 requesting a deployment. A docs-only merge uses the same production path.
 Manual workflow runs on `main` publish without requesting deployment; pushes
 to `launchplane/train/**` validate and build without publishing.
+
+This describes the wiring in [.github/workflows/main.yml](.github/workflows/main.yml).
+A merge's deployment request is separate from a confirmed production deployment;
+the required `ci-gate` proves validation and image build. The separate
+`launchplane-deploy` job succeeds only when Launchplane reports a passing deploy.
+Consult the [overall direction](https://github.com/cbusillo/direction/blob/HEAD/DIRECTION.md)
+for release authority before production work.
 
 - CI proves the Docker image builds for every PR and push.
 - Production publishes both a digest and a `sha-<commit>` tag. The deploy request
