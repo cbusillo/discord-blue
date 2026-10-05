@@ -12,13 +12,12 @@ and behavior in README.md and `docs/`, and durable work tracking in GitHub issue
 Follow the maintained [executing loop](https://github.com/cbusillo/codex-skills/blob/main/skills/references/executing-loop.md):
 use `github-plan` for issue context, ownership checks, and claims before creating
 a linked task worktree; use `github` for task branches, bot commits and pushes,
-PRs, and authorized landing. `.github/github.json` records the repository's
-validation and landing facts. The current path is a normal merge commit after
-green CI; no Launchplane merge train is enabled here.
+PRs, and authorized landing. Use `.github/github.json` for repository validation
+and workflow facts, and the `github` skill for merge method and train routing.
 
-Changes to these instructions or execution, approval, safety, credential, or
-destructive-helper guidance get a review through `model-review`. Weigh its
-findings under [reviews by another model](https://github.com/cbusillo/codex-skills/blob/main/skills/references/model-review.md).
+Use `model-review` for changes to AGENTS.md and whenever the maintained
+[reviews by another model](https://github.com/cbusillo/codex-skills/blob/main/skills/references/model-review.md)
+criteria call for it. That reference also owns how findings are weighed.
 The review supplies evidence; reviewer approval is not a merge or completion gate.
 
 ## Runtime

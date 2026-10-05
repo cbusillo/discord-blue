@@ -4,6 +4,8 @@ Discord Blue is a basic Discord bot plugin system built with the **discord.py**
 library. It includes an agent-session bridge that connects Discord session
 threads to local Codex app-server sessions and Claude Code channels.
 
+Discord Blue serves the Director's own agent sessions; the Director is its Client.
+
 ## Standalone LXC/systemd installation
 
 This is the standalone source-install path supported by `discord-blue.service`.
@@ -402,8 +404,9 @@ to `launchplane/train/**` validate and build without publishing.
 
 This describes the wiring in [.github/workflows/main.yml](.github/workflows/main.yml).
 A merge's deployment request is separate from a confirmed production deployment;
-green CI proves validation and image build, not the running version. Release
-authority follows the [overall direction](https://github.com/cbusillo/direction/blob/HEAD/DIRECTION.md).
+the required `ci-gate` proves validation and image build. The separate
+`launchplane-deploy` job succeeds only when Launchplane reports a passing deploy.
+Release authority follows the [overall direction](https://github.com/cbusillo/direction/blob/HEAD/DIRECTION.md).
 
 - CI proves the Docker image builds for every PR and push.
 - Production publishes both a digest and a `sha-<commit>` tag. The deploy request
