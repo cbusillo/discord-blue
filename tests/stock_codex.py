@@ -53,6 +53,23 @@ def synthetic_token(account: str) -> str:
 
 def model_output(last_user: str, has_tool_output: bool, n: int) -> dict[str, Any]:
     """RUN asks for an escalated command, ASK calls request_user_input, anything else replies."""
+    if "PATCH" in last_user and not has_tool_output:
+        patch = "*** Begin Patch\n*** Add File: patched.txt\n+approved patch\n*** End Patch"
+        return {
+            "type": "function_call",
+            "id": f"fc-{n}",
+            "call_id": f"call-{n}",
+            "name": "exec_command",
+            "arguments": json.dumps({"cmd": "apply_patch <<'PATCH'\n" + patch + "\nPATCH"}),
+        }
+    if "PERMISSIONS" in last_user and not has_tool_output:
+        return {
+            "type": "function_call",
+            "id": f"fc-{n}",
+            "call_id": f"call-{n}",
+            "name": "request_permissions",
+            "arguments": json.dumps({"permissions": {"network": {"enabled": True}}, "justification": "stock test"}),
+        }
     if "RUN" in last_user and not has_tool_output:
         args: dict[str, Any] = {
             "cmd": "touch approved.txt",
@@ -88,8 +105,9 @@ class StockCodex:
     def __init__(self, codex_bin: str) -> None:
         self.codex_bin = codex_bin
         self.calls = 0
+        self.tool_outputs: list[dict[str, Any]] = []
         self.env: dict[str, str] = {}
-        self.home = Path(tempfile.mkdtemp(prefix="dbx-", dir="/tmp"))
+        self.home = Path(tempfile.mkdtemp(prefix="dbx-", dir="/tmp")).resolve()
         self.work = self.home / "work"
         self.socket_path = self.home / "app-server-control" / "app-server-control.sock"
         self.process: asyncio.subprocess.Process | None = None
@@ -105,7 +123,10 @@ class StockCodex:
             if item.get("type") == "message" and item.get("role") == "user":
                 texts = [c["text"] for c in item.get("content", []) if c.get("type") == "input_text"]
                 last_user, has_output = (texts[-1], False) if texts else (last_user, has_output)
-            has_output = has_output or item.get("type") == "function_call_output"
+            has_output = has_output or item.get("type") in {"function_call_output", "custom_tool_call_output"}
+        self.tool_outputs.extend(
+            i for i in payload.get("input", []) if i.get("type") in {"function_call_output", "custom_tool_call_output"}
+        )
         self.calls += 1
         item = model_output(last_user, has_output, self.calls)
         delay = 2.0 if "SLOW" in last_user else 0.01
@@ -162,7 +183,8 @@ class StockCodex:
             'wire_api = "responses"\nsupports_websockets = false\n'
             f'[model_providers.fake.auth]\ncommand = "{sys.executable}"\nargs = ["{self.home / "token.py"}"]\n'
             "timeout_ms = 5000\nrefresh_interval_ms = 1\n"
-            "[analytics]\nenabled = false\n[feedback]\nenabled = false\n[features]\nremote_control = false\napps = false\n"
+            "[analytics]\nenabled = false\n[feedback]\nenabled = false\n"
+            "[features]\nremote_control = false\napps = false\nrequest_permissions_tool = true\n"
         )
         tokens = {"access_token": token, "id_token": token, "refresh_token": "x", "account_id": "test"}
         now = datetime.datetime.now(datetime.UTC).isoformat()

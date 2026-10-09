@@ -300,10 +300,30 @@ environment variables.
 Use real Codex and Claude Code sessions to verify hello acknowledgement, mirrored
 output, and reconnect without duplicate threads or repeated command execution.
 Exercise only each client's advertised controls: Codex supports reply, pause,
-status, command approvals and user input; the Claude channel supports status,
+status, command/file-change/turn-scoped permission approvals, new sessions and user input; the Claude channel supports status,
 plus replies when the channel is enabled, with permission decisions kept in the
-terminal. Neither current
-client advertises new/end session or autonomous continuation controls. The Server
+terminal. Neither client advertises end-session or autonomous continuation controls;
+new-session is supported by Codex only. The Server
 controls table describes the protocol surface, not a promise that every client
 implements it. Unit/transport tests validate the server and local clients; live
 integration acceptance is separate.
+
+
+### Full-content approvals
+
+Servers advertising the additive hello_ack feature approval_content accept
+approval_request with approval_kind (file_change or permissions) and
+content_text instead of command/command_text. content_text is a complete JSON
+snapshot, shown inside one code fence with no truncation. It includes the
+request's thread, turn and item identities plus all file changes or permission
+scope. Permissions approval grants for this turn only. Requests that exceed
+Discord's message limit, contain a code fence, or have unknown scope stay in
+the native TUI without approve/deny reactions. Older servers are never sent
+these prompts. The existing approval_decision, acknowledgement and resolution
+messages bind to an opaque approval_id for that exact snapshot and session
+epoch. A changed patch invalidates the old prompt.
+
+The Codex bridge supports new_session through /code new in an existing Codex
+thread: that thread's cwd selects the repository. It calls thread/start with
+cwd only, then mirrors the new thread; its first substantive prompt supplies the title. It does not change the
+daemon's configured trust, sandbox or approval policy.

@@ -7,6 +7,7 @@ live daemon: the server gets a temporary home, synthetic auth and a fake model.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import unittest
@@ -153,11 +154,94 @@ async def eventually(condition: Callable[[], bool], seconds: float = 30) -> None
 
 @unittest.skipUnless(CODEX_BIN and sys.platform == "darwin", "set CODEX_BIN to a stock codex binary (macOS sandbox-exec)")
 class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_slice_two_approvals_and_new_session(self) -> None:
+        discord = FakeDiscordBlue(sorted(SERVER_FEATURES))
+        app = web.Application()
+        app.router.add_get("/agent-session/connect", discord.connect)
+        async with StockCodex(CODEX_BIN) as codex, TestServer(app) as server:
+            tui = TuiStandIn(codex.socket_path)
+            await tui.start()
+            thread_id = (await tui.rpc.request("thread/start", {"cwd": str(codex.work)}))["thread"]["id"]
+            await tui.turn(thread_id, "initial prompt")
+            config = BridgeConfig(f"ws://127.0.0.1:{server.port}/agent-session/connect", TOKEN, codex.socket_path, "test")
+            bridge = GatedBridge(config)
+            running = asyncio.create_task(bridge.run())
+            try:
+                hello = await discord.next("hello")
+                ids = {"session_id": thread_id, "session_epoch": hello["session_epoch"]}
+                # Stock replays the request ID but does not expose the pending patch in history.
+                # Without item/started, the safe behavior is to leave that request with the TUI.
+                bridge.gate.clear()
+                mark = len(tui.notes)
+                replay_turn = asyncio.create_task(tui.turn(thread_id, "PATCH"))
+                replay = await tui.wait_for("item/fileChange/requestApproval", mark)
+                bridge.gate.set()
+                while True:
+                    notice = await discord.next("status_changed", timeout=30)
+                    if notice.get("message") == "Waiting on a decision in the Codex TUI":
+                        break
+                self.assertFalse(bridge.sessions[thread_id].approvals)
+                await tui.rpc.respond(replay["id"], {"decision": "decline"})
+                await replay_turn
+                self.assertFalse((codex.work / "patched.txt").exists())
+                for action, kind, verdict in (
+                    ("PATCH", "file_change", "denied"),
+                    ("PATCH", "file_change", "approved"),
+                    ("PERMISSIONS", "permissions", "denied"),
+                    ("PERMISSIONS", "permissions", "approved"),
+                ):
+                    mark = len(tui.notes)
+                    await bridge.sessions[thread_id].subscribe()
+                    turn = asyncio.create_task(tui.turn(thread_id, action))
+                    approval = await discord.next("approval_request", timeout=30)
+                    self.assertEqual(approval["approval_kind"], kind)
+                    self.assertIn("patched.txt" if kind == "file_change" else "network", approval["content_text"])
+                    decision = {"type": "approval_decision", "approval_id": approval["approval_id"], "decision": verdict, **ids}
+                    self.assertEqual((await discord.control(decision))["type"], "approval_decision_ack")
+                    await turn
+                    await tui.wait_for("serverRequest/resolved", mark)
+                    if kind == "file_change" and verdict == "denied":
+                        self.assertFalse((codex.work / "patched.txt").exists())
+                    if kind == "permissions":
+                        granted = json.loads(codex.tool_outputs[-1]["output"])["permissions"]
+                        self.assertEqual(bool((granted.get("network") or {}).get("enabled")), verdict == "approved")
+                self.assertEqual((codex.work / "patched.txt").read_text(), "approved patch\n")
+                new = {"type": "command", "command_id": "new", "kind": "new_session", **ids}
+                response = await discord.control(new)
+                self.assertEqual(response["type"], "command_ack", repr(response))
+                created = await discord.next("hello", timeout=30)
+                self.assertNotEqual(created["session_id"], thread_id)
+                loaded = (await tui.rpc.request("thread/loaded/list", {}))["data"]
+                self.assertIn(created["session_id"], loaded)
+                readback = (await tui.rpc.request("thread/read", {"threadId": created["session_id"]}))["thread"]
+                self.assertEqual(readback["cwd"], str(codex.work))
+                reply = {
+                    "type": "command",
+                    "command_id": "reply-new",
+                    "kind": "reply",
+                    "text": "new session reply",
+                    "session_id": created["session_id"],
+                    "session_epoch": created["session_epoch"],
+                }
+                self.assertEqual((await discord.control(reply))["type"], "command_ack")
+                while True:
+                    done = await discord.next("turn_complete", timeout=30)
+                    if done["session_id"] == created["session_id"]:
+                        self.assertIn("new session reply", done["assistant_message"])
+                        break
+            finally:
+                running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
+                if tui.drainer is not None:
+                    tui.drainer.cancel()
+                await tui.rpc.close()
+                await discord.close()
+
     async def test_explicit_remote_mirrors_the_native_tui_with_reasoning_override(self) -> None:
         discord = FakeDiscordBlue(sorted(SERVER_FEATURES))
         app = web.Application()
         app.router.add_get("/agent-session/connect", discord.connect)
-        async with StockCodex(CODEX_BIN) as codex, TestServer(app, host="127.0.0.1") as server:
+        async with StockCodex(CODEX_BIN) as codex, TestServer(app) as server:
             with (codex.home / "config.toml").open("a") as config_file:
                 config_file.write(f'\n[projects."{codex.work.resolve()}"]\ntrust_level = "trusted"\n')
             config = BridgeConfig(
@@ -196,7 +280,7 @@ class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
         discord = FakeDiscordBlue(sorted(SERVER_FEATURES))
         app = web.Application()
         app.router.add_get("/agent-session/connect", discord.connect)
-        async with StockCodex(CODEX_BIN) as codex, TestServer(app, host="127.0.0.1") as server:
+        async with StockCodex(CODEX_BIN) as codex, TestServer(app) as server:
             tui = TuiStandIn(codex.socket_path)
             await tui.start()
             thread_id = (await tui.rpc.request("thread/start", {"cwd": str(codex.work)}))["thread"]["id"]

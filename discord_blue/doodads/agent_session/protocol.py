@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
+
 
 # Discord shows at most this many characters of an approval's shell-joined command.
 # Clients must not offer a Discord approval for a command longer than this.
@@ -11,12 +13,26 @@ APPROVAL_COMMAND_DISPLAY_LIMIT = 1600
 
 # What this server supports beyond the base protocol, listed in hello_ack as `features`. A client must not
 # rely on a feature the server did not list: an older server ignores it.
-SERVER_FEATURES = frozenset({"command_text"})
+SERVER_FEATURES: frozenset[str] = frozenset({"command_text", "approval_content"})
 
 
 def command_text_displayable(text: str) -> bool:
     """Whether Discord can show this raw shell command verbatim and whole inside a code fence."""
     return bool(text) and len(text) <= APPROVAL_COMMAND_DISPLAY_LIMIT and "```" not in text
+
+
+def format_content_approval(kind: str, text: str) -> str:
+    label = {"file_change": "File change", "permissions": "Permissions (this turn only)"}.get(kind, "Unsupported")
+    return f"**{label} approval requested**\nQuick review: `✅` approve · `✖️` deny\n\n```json\n{text}\n```"
+
+
+def approval_content_displayable(kind: str, text: str) -> bool:
+    return (
+        kind in {"file_change", "permissions"}
+        and bool(text)
+        and "```" not in text
+        and len(format_content_approval(kind, text).encode("utf-16-le")) // 2 <= DISCORD_MESSAGE_LIMIT
+    )
 
 
 # Actions a client can accept; omitted capabilities retain the legacy contract.
@@ -218,6 +234,9 @@ class RemoteApprovalRequest:
     # re-quoting an argv can change what the shell does.
     command_text: str | None = None
 
+    approval_kind: str = "command"
+    content_text: str | None = None
+
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "RemoteApprovalRequest":
         command = payload.get("command")
@@ -233,6 +252,8 @@ class RemoteApprovalRequest:
             cwd=str(payload.get("cwd") or ""),
             reason=str(payload["reason"]) if payload.get("reason") is not None else None,
             command_text=payload["command_text"] if isinstance(payload.get("command_text"), str) else None,
+            approval_kind=str(payload.get("approval_kind") or "command"),
+            content_text=payload["content_text"] if isinstance(payload.get("content_text"), str) else None,
         )
 
 

@@ -1166,7 +1166,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(
                         await websocket.receive_json(timeout=2),
-                        {"type": "hello_ack", "thread_id": 555, "features": ["command_text"]},
+                        {"type": "hello_ack", "thread_id": 555, "features": sorted(protocol_module.SERVER_FEATURES)},
                     )
                     self.assertEqual(thread.sent_messages, [mark_assistant_message("Last answer")])
                     await bridge.send_pause_current_turn(thread, FakeInteraction(thread).user)
@@ -2030,6 +2030,42 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(thread.sent_views[0])
         approval_message = await thread.fetch_message(901)
         self.assertEqual(approval_message.reactions, ["✅", "✖️"])
+
+    async def test_content_approvals_are_never_truncated_or_fall_back_to_commands(self) -> None:
+        for kind, content, answerable in (
+            ("file_change", '{"changes": ["whole patch"]}', True),
+            ("permissions", '{"network": {"enabled": true}}', True),
+            ("file_change", "x" * bridge_module.DISCORD_MESSAGE_LIMIT, False),
+            ("permissions", chr(96) * 3, False),
+            ("file_change", None, False),
+            ("future_kind", "{}", False),
+        ):
+            with self.subTest(kind=kind, content=content):
+                thread = FakeThread(555)
+                bridge = AgentSessionBridge(FakeBot(Config(), thread))
+                session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
+                bridge.sessions.register(session)
+                bridge.sessions.bind_thread("session-1", 555)
+                await bridge.handle_approval_request(
+                    RemoteApprovalRequest(
+                        approval_id="a",
+                        call_id="c",
+                        turn_id="t",
+                        session_id="session-1",
+                        session_epoch="epoch-1",
+                        command=[],
+                        cwd="",
+                        reason=None,
+                        approval_kind=kind,
+                        content_text=content,
+                    )
+                )
+                self.assertEqual(bool(session.pending_approvals), answerable)
+                if answerable:
+                    self.assertIn(content, thread.sent_messages[0])
+                    self.assertLessEqual(len(thread.sent_messages[0].encode("utf-16-le")) // 2, bridge_module.DISCORD_MESSAGE_LIMIT)
+                else:
+                    self.assertIn("native TUI", thread.sent_messages[0])
 
     async def test_an_approval_shows_the_raw_command_verbatim_or_stays_in_the_tui(self) -> None:
         # shlex.join would show this as a literal string, while the shell runs the substitution.

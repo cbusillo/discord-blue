@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from discord_blue.doodads.agent_session.protocol import SERVER_FEATURES
+
 import asyncio
 import ast
 import inspect
@@ -310,7 +312,7 @@ class CapabilityTransportTests(unittest.IsolatedAsyncioTestCase):
             )
             await websocket.send_json(transport_tests.CleanupTransportTests.hello())
             self.assertEqual(
-                await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555, "features": ["command_text"]}
+                await websocket.receive_json(timeout=2), {"type": "hello_ack", "thread_id": 555, "features": sorted(SERVER_FEATURES)}
             )
             await websocket.close()
 
@@ -324,7 +326,7 @@ class CapabilityTransportTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 await websocket.receive_json(timeout=2),
-                {"type": "hello_ack", "thread_id": 555, "features": ["command_text"], "capabilities": ["reply"]},
+                {"type": "hello_ack", "thread_id": 555, "features": sorted(SERVER_FEATURES), "capabilities": ["reply"]},
             )
             self.assertEqual(bridge.sessions.get("cleanup-session").hello.capabilities, frozenset({"reply"}))  # type: ignore[union-attr]
             await websocket.close()

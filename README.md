@@ -208,13 +208,23 @@ don't count, as a name or a prompt), else a non-default git branch. Labels are
 short, cut at a word boundary. Renaming the Codex thread renames the Discord
 thread. The bridge mirrors user messages, turn starts, completed turns with the
 final answer, interrupts and errors. From Discord you can reply (stock starts a
-turn or steers the running one), pause, ask for status, answer command approvals,
+turn or steers the running one), pause, ask for status, answer command, file-change and permission approvals,
 and answer `request_user_input` prompts. A command approval shows Codex's
 command exactly as the shell will run it; one Discord cannot show whole stays
 in the TUI. The bridge answers a Codex request only
 after an explicit Discord decision. The first answer wins, so the TUI can still
-answer. File-change, permission and other requests stay in the TUI. Continue,
-new session and end session are not advertised.
+answer. File-change approvals show the full proposed changes, including paths,
+change kinds and diffs; permissions show the full request and grant only for
+the current turn. Oversized or fenced content, unknown fields, unavailable
+patches and session-wide file grants stay in the TUI. A changed patch retires
+its Discord prompt. MCP elicitation and other requests stay in the TUI.
+Continue and end session are not advertised.
+
+To choose a repository for a new session, use the existing Codex Discord thread
+for that repository, then run /code new there. Stock starts a fresh thread in
+that exact folder with its configured trust and permissions; the bridge mirrors it, and its first substantive prompt supplies its title. Reply in the new Discord thread to start work. The bridge keeps
+its own new threads subscribed while running, so they stay available without
+an open TUI. Daemon reconnects rediscover them if they remain loaded.
 
 Configure `~/.config/discord-blue/codex-bridge.toml`:
 
@@ -241,7 +251,7 @@ yourself. Behaviour and limits:
   before stock records it, so the bridge reads a busy, unnamed thread again for
   about 15 seconds, and also joins when a thread is named. The bridge log
   records every thread it does not join, with the reason.
-- The bridge subscribes to a thread (`thread/resume`, no config overrides, which
+- For TUI-owned threads, the bridge subscribes to a thread (`thread/resume`, no config overrides, which
   can restart an idle thread cold) only while a turn runs, a prompt is pending,
   or a Discord reply arrives. It unsubscribes when the turn ends. Stock
   broadcasts status changes to every client, so the bridge rejoins when a turn
