@@ -19,6 +19,7 @@ from typing import Any
 import aiohttp
 
 from discord_blue.codex_bridge.config import BridgeConfig
+from discord_blue.codex_bridge.approvals import FILE_APPROVAL
 from discord_blue.codex_bridge.rpc import AppServerClient, RpcError, TransportError
 from discord_blue.codex_bridge.session import Rejected, Rpc, ThreadSession, latest_turn
 
@@ -37,7 +38,6 @@ QUIET_NOTIFICATIONS = [
     "item/commandExecution/outputDelta",
     "item/commandExecution/terminalInteraction",
     "item/fileChange/outputDelta",
-    "item/fileChange/patchUpdated",
     "item/mcpToolCall/progress",
     "command/exec/outputDelta",
     "process/outputDelta",
@@ -59,6 +59,8 @@ class CodexBridge:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.retries: dict[str, asyncio.Task[None]] = {}
         self.joining: set[str] = set()
+        self.join_events: dict[str, asyncio.Event] = {}
+        self.owned_threads: set[str] = set()
         # The newest status change that arrived while a retried join was reading its thread, applied once it joins.
         self.late_status: dict[str, Json] = {}
 
@@ -100,6 +102,28 @@ class CodexBridge:
         session = self.sessions.get(thread_id)
         if "id" in message:
             if session is not None:
+                if method == FILE_APPROVAL and (str(params.get("turnId")), str(params.get("itemId"))) not in session.file_items:
+                    # Pending requests replay on subscribe even if item/started preceded the join.
+                    # Read the exact turn's full items, never a filesystem diff or a summary preview.
+                    cursor = None
+                    try:
+                        for _ in range(10):
+                            page = await session.rpc.request(
+                                "thread/items/list",
+                                {
+                                    "threadId": thread_id,
+                                    "turnId": params.get("turnId"),
+                                    "limit": 100,
+                                    "cursor": cursor,
+                                },
+                            )
+                            for entry in page.get("data") or []:
+                                if entry.get("turnId") == params.get("turnId"):
+                                    session.on_file_item(str(entry["turnId"]), entry.get("item") or {})
+                            if not (cursor := page.get("nextCursor")):
+                                break
+                    except RpcError:
+                        pass  # Missing full content keeps the request local.
                 session.on_request(message["id"], method, params)
             return
         if method == "thread/started":
@@ -123,7 +147,15 @@ class CodexBridge:
             session.rename(params.get("threadName"))
         elif method == "turn/started":
             session.on_turn_started(str((params.get("turn") or {}).get("id")))
+        elif method == "item/started":
+            session.on_file_item(str(params.get("turnId")), params.get("item") or {})
+        elif method == "item/fileChange/patchUpdated":
+            session.on_file_item(
+                str(params.get("turnId")),
+                {"type": "fileChange", "id": params.get("itemId"), "status": "inProgress", "changes": params.get("changes")},
+            )
         elif method == "item/completed":
+            session.on_file_item(str(params.get("turnId")), params.get("item") or {})
             session.on_item_completed(str(params.get("turnId")), params.get("item") or {})
         elif method == "turn/completed":
             session.on_turn_completed(params.get("turn") or {})
@@ -132,12 +164,29 @@ class CodexBridge:
             session.on_resolved(params.get("requestId"))  # type: ignore[arg-type]
             await session.release()
 
+    async def start_session(self, cwd: str) -> None:
+        assert self.rpc is not None
+        # Stock applies its configured permissions and trust policy; no sandbox or approval overrides.
+        result = await self.rpc.request("thread/start", {"cwd": cwd})
+        thread_id = result["thread"]["id"]
+        self.owned_threads.add(thread_id)
+        await self.rpc.request("thread/name/set", {"threadId": thread_id, "name": "New Discord session"})
+        if pending := self.join_events.get(thread_id):
+            await pending.wait()
+        await self.join(thread_id)
+        session = self.sessions.get(thread_id)
+        if session is None:
+            raise Rejected("Codex started the session but it could not be mirrored; check the Codex TUI before retrying.")
+        session.owned = True
+        await session.subscribe()
+
     async def join(self, thread_id: str) -> None:
         """Open a Discord session for a loaded root thread; subscribe only if it is busy."""
         if not thread_id or thread_id in self.sessions or thread_id in self.joining or self.rpc is None:
             return
         rpc = self.rpc
         self.joining.add(thread_id)
+        self.join_events[thread_id] = asyncio.Event()
         self.late_status.pop(thread_id, None)
         try:
             thread = (await rpc.request("thread/read", {"threadId": thread_id}))["thread"]
@@ -154,10 +203,13 @@ class CodexBridge:
             return
         finally:
             self.joining.discard(thread_id)
+            self.join_events.pop(thread_id).set()
             late = self.late_status.pop(thread_id, None)
         if thread_id in self.sessions or rpc is not self.rpc:
             return
-        session = ThreadSession(self.config, rpc, thread, latest_turn(page))
+        session = ThreadSession(
+            self.config, rpc, thread, latest_turn(page), start_session=self.start_session, owned=thread_id in self.owned_threads
+        )
         assert self.http is not None
         self.sessions[thread_id] = session
         self.tasks[thread_id] = asyncio.create_task(session.run(self.http), name=f"codex-bridge-{thread_id}")

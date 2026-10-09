@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from discord_blue.doodads.agent_session.protocol import approval_content_displayable, format_content_approval
+
 import asyncio
 import dataclasses
 import functools
@@ -1998,6 +2000,12 @@ class AgentSessionBridge:
                 session.thread_id, "Action required in the native TUI; this client does not support answering from Discord."
             )
             return
+        if approval.approval_kind != "command" or approval.content_text is not None:
+            if approval.content_text is None or not approval_content_displayable(approval.approval_kind, approval.content_text):
+                await self.post_thread_notice(
+                    session.thread_id, "Action required in the native TUI; Discord cannot show this request in full."
+                )
+                return
         content = self.format_approval_request(approval)
         if approval.command_text is not None and (
             not command_text_displayable(approval.command_text)
@@ -3167,6 +3175,8 @@ class AgentSessionBridge:
     @staticmethod
     def format_approval_request(approval: RemoteApprovalRequest) -> str:
         """The approval message, untruncated; a raw command_text is shown verbatim instead of the re-quoted argv."""
+        if approval.content_text is not None:
+            return format_content_approval(approval.approval_kind, approval.content_text)
         if approval.command_text is not None:
             command = approval.command_text
         else:

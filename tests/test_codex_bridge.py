@@ -56,6 +56,12 @@ class FakeRpc:
         self.calls.append((method, params))
         if method == "thread/loaded/list":
             return {"data": list(self.threads)}
+        if method == "thread/start":
+            created = thread("new-thread", cwd=(params or {})["cwd"], name=None, preview="")
+            self.threads["new-thread"] = created
+            return {"thread": created}
+        if method == "thread/name/set":
+            self.threads[str((params or {})["threadId"])]["name"] = (params or {})["name"]
         if method == "thread/read":
             return {"thread": self.threads[str((params or {})["threadId"])]}
         if method == "thread/turns/list":
@@ -309,7 +315,7 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
             await discord.next("hello")
             session = bridge.sessions["root"]
             for message in (
-                command(session, "a", "new_session"),
+                command(session, "a", "end_session"),
                 command(session, "b", "pause_current_turn"),
                 {**command(session, "c", "reply", text="hi"), "session_epoch": "old"},
             ):

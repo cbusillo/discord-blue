@@ -208,13 +208,24 @@ don't count, as a name or a prompt), else a non-default git branch. Labels are
 short, cut at a word boundary. Renaming the Codex thread renames the Discord
 thread. The bridge mirrors user messages, turn starts, completed turns with the
 final answer, interrupts and errors. From Discord you can reply (stock starts a
-turn or steers the running one), pause, ask for status, answer command approvals,
+turn or steers the running one), pause, ask for status, answer command, file-change and permission approvals,
 and answer `request_user_input` prompts. A command approval shows Codex's
 command exactly as the shell will run it; one Discord cannot show whole stays
 in the TUI. The bridge answers a Codex request only
 after an explicit Discord decision. The first answer wins, so the TUI can still
-answer. File-change, permission and other requests stay in the TUI. Continue,
-new session and end session are not advertised.
+answer. File-change approvals show the full proposed changes, including paths,
+change kinds and diffs; permissions show the full request and grant only for
+the current turn. Oversized or fenced content, unknown fields, unavailable
+patches and session-wide file grants stay in the TUI. A changed patch retires
+its Discord prompt. MCP elicitation and other requests stay in the TUI.
+Continue and end session are not advertised.
+
+To choose a repository for a new session, use the existing Codex Discord thread
+for that repository, then run /code new there. Stock starts a fresh thread in
+that exact folder with its configured trust and permissions; the bridge names
+and mirrors it. Reply in the new Discord thread to start work. The bridge keeps
+its own new threads subscribed while running, so they stay available without
+an open TUI. Daemon reconnects rediscover them if they remain loaded.
 
 Configure `~/.config/discord-blue/codex-bridge.toml`:
 

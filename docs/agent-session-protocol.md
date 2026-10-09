@@ -307,3 +307,23 @@ client advertises new/end session or autonomous continuation controls. The Serve
 controls table describes the protocol surface, not a promise that every client
 implements it. Unit/transport tests validate the server and local clients; live
 integration acceptance is separate.
+
+
+### Full-content approvals
+
+Servers advertising the additive hello_ack feature approval_content accept
+approval_request with approval_kind (file_change or permissions) and
+content_text instead of command/command_text. content_text is a complete JSON
+snapshot, shown inside one code fence with no truncation. It includes the
+request's thread, turn and item identities plus all file changes or permission
+scope. Permissions approval grants for this turn only. Requests that exceed
+Discord's message limit, contain a code fence, or have unknown scope stay in
+the native TUI without approve/deny reactions. Older servers are never sent
+these prompts. The existing approval_decision, acknowledgement and resolution
+messages bind to an opaque approval_id for that exact snapshot and session
+epoch. A changed patch invalidates the old prompt.
+
+The Codex bridge supports new_session through /code new in an existing Codex
+thread: that thread's cwd selects the repository. It calls thread/start with
+cwd only, then names and mirrors the new thread. It does not change the
+daemon's configured trust, sandbox or approval policy.

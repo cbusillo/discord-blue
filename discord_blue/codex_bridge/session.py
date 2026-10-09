@@ -18,10 +18,13 @@ import logging
 import shlex
 import uuid
 from collections import deque
+from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from typing import Any, Protocol
 
 from discord_blue.agent_client import AgentSessionClient, Rejected
 from discord_blue.codex_bridge.config import BridgeConfig
+from discord_blue.codex_bridge.approvals import FILE_APPROVAL, PERMISSIONS_APPROVAL, content_snapshot
 from discord_blue.codex_bridge.rpc import RequestId, RpcError, TransportError
 from discord_blue.doodads.agent_session.protocol import command_text_displayable
 from discord_blue.session_titles import SessionLabel
@@ -29,7 +32,7 @@ from discord_blue.session_titles import SessionLabel
 Json = dict[str, Any]
 logger = logging.getLogger(__name__)
 
-CAPABILITIES = ["approval_decision", "pause_current_turn", "reply", "request_user_input_response", "status_request"]
+CAPABILITIES = ["new_session", "approval_decision", "pause_current_turn", "reply", "request_user_input_response", "status_request"]
 COMMAND_APPROVAL = "item/commandExecution/requestApproval"
 USER_INPUT = "item/tool/requestUserInput"
 LOCAL_DECISIONS = {"item/fileChange/requestApproval", "item/permissions/requestApproval", "mcpServer/elicitation/request"}
@@ -109,10 +112,23 @@ class ThreadSession(AgentSessionClient):
     capabilities = CAPABILITIES
     command_errors = (RpcError, TransportError)
 
-    def __init__(self, config: BridgeConfig, rpc: Rpc, thread: Json, latest: Json) -> None:
+    def __init__(
+        self,
+        config: BridgeConfig,
+        rpc: Rpc,
+        thread: Json,
+        latest: Json,
+        *,
+        start_session: Callable[[str], Awaitable[None]] | None = None,
+        owned: bool = False,
+    ) -> None:
         super().__init__(config, thread["id"])
         self.config: BridgeConfig = config
         self.rpc = rpc
+        self.start_session = start_session
+        self.owned = owned
+        self.file_items: dict[tuple[str, str], Json] = {}
+        self.approval_responses: dict[RequestId, Json] = {}
         self.thread_id: str = thread["id"]
         self.cwd = str(thread.get("cwd") or "")
         self.branch = (thread.get("gitInfo") or {}).get("branch")
@@ -142,6 +158,21 @@ class ThreadSession(AgentSessionClient):
             return
         self.active_turn_id = turn_id
         self.publish("status_changed", message="Turn started")
+
+    def on_file_item(self, turn_id: str, item: Json) -> None:
+        if item.get("type") != "fileChange" or not item.get("id"):
+            return
+        key = (turn_id, str(item["id"]))
+        previous = self.file_items.get(key)
+        if previous is not None and previous != item:
+            # Never answer a changed patch using a decision on an older display.
+            for request_id, prompt in list(self.prompts.items()):
+                if prompt.get("approval_kind") == "file_change" and (prompt["turn_id"], prompt["call_id"]) == key:
+                    self.on_resolved(request_id)
+                    self.publish("notice", message="The patch changed; review this request in the Codex TUI.")
+        if len(self.file_items) >= SEEN_LIMIT and key not in self.file_items:
+            self.file_items.pop(next(iter(self.file_items)))
+        self.file_items[key] = deepcopy(item)
 
     def on_item_completed(self, turn_id: str, item: Json) -> None:
         if item_id := item.get("id"):
@@ -174,6 +205,7 @@ class ThreadSession(AgentSessionClient):
             return
         # The completed turn carries its summary items; they fill in anything missed before a join.
         for item in turn.get("items") or []:
+            self.on_file_item(turn_id, item)
             self.on_item_completed(turn_id, item)
         self.reported_turns.append(turn_id)
         parts = self.answers.pop(turn_id, [])
@@ -203,6 +235,7 @@ class ThreadSession(AgentSessionClient):
         if turn.get("status") == "inProgress":
             self.on_turn_started(turn_id)
             for item in turn.get("items") or []:
+                self.on_file_item(turn_id, item)
                 self.on_item_completed(turn_id, item)
         else:
             self.on_turn_completed(turn)
@@ -225,7 +258,7 @@ class ThreadSession(AgentSessionClient):
     async def release(self) -> None:
         """Leave the thread once nothing needs this connection, so it can unload when its TUI closes."""
         async with self.membership:
-            if not self.subscribed or self.active_turn_id is not None or self.prompts:
+            if self.owned or not self.subscribed or self.active_turn_id is not None or self.prompts:
                 return
             self.subscribed = False
             try:
@@ -253,6 +286,25 @@ class ThreadSession(AgentSessionClient):
                 cwd=str(params.get("cwd") or self.cwd),
                 reason=params.get("reason"),
             )
+        elif method in {FILE_APPROVAL, PERMISSIONS_APPROVAL}:
+            item = self.file_items.get((turn_id, str(params.get("itemId"))))
+            snapshot = content_snapshot(method, params, item, self.cwd)
+            if snapshot is None or self.server_features is None or "approval_content" not in self.server_features:
+                self.publish("status_changed", message="Waiting on a decision in the Codex TUI")
+                return
+            label, text, response = snapshot
+            # Every prompt has its own opaque ID, even when stock reuses an item ID.
+            approval_id = uuid.uuid4().hex
+            self.approvals[approval_id] = request_id
+            self.approval_responses[request_id] = response
+            self.prompts[request_id] = self.event(
+                "approval_request",
+                approval_id=approval_id,
+                call_id=params["itemId"],
+                turn_id=turn_id,
+                approval_kind=label,
+                content_text=text,
+            )
         elif method == USER_INPUT:
             call_id = str(params.get("itemId") or request_id)
             self.inputs[call_id] = request_id
@@ -269,6 +321,11 @@ class ThreadSession(AgentSessionClient):
         self.enqueue(self.prompts[request_id])
 
     def on_server_features(self) -> None:
+        if self.server_features is None or "approval_content" not in self.server_features:
+            for request_id, prompt in list(self.prompts.items()):
+                if prompt.get("content_text") is not None:
+                    self.on_resolved(request_id)
+                    self.publish("status_changed", message="Waiting on a decision in the Codex TUI")
         if self.server_features is not None and "command_text" not in self.server_features:
             self.keep_approvals_local()
 
@@ -284,6 +341,7 @@ class ThreadSession(AgentSessionClient):
         prompt = self.prompts.pop(request_id, None)
         if prompt is None:
             return
+        self.approval_responses.pop(request_id, None)
         self.approvals.pop(str(prompt.get("approval_id")), None)
         self.inputs.pop(str(prompt.get("call_id")), None)
         if request_id in self.answered:
@@ -316,6 +374,10 @@ class ThreadSession(AgentSessionClient):
             except RpcError:
                 await self.release()
                 raise
+        elif kind == "new_session":
+            if self.start_session is None or not self.cwd:
+                raise Rejected("This bridge cannot start a session in this folder.")
+            await self.start_session(self.cwd)
         elif kind == "pause_current_turn":
             if self.active_turn_id is None:
                 raise Rejected("There is no running turn to pause.")
@@ -352,7 +414,10 @@ class ThreadSession(AgentSessionClient):
         self.approvals.pop(approval_id)
         self.answered.add(request_id)
         try:
-            await self.rpc.respond(request_id, {"decision": decision})
+            response = self.approval_responses.pop(request_id, {"decision": decision})
+            if decision == "decline":
+                response = {"permissions": {}, "scope": "turn"} if "permissions" in response else {"decision": "decline"}
+            await self.rpc.respond(request_id, response)
         except TransportError:
             return {**reject, "reason": LOST_CODEX}
         return self.event("approval_decision_ack", approval_id=approval_id)

@@ -20,6 +20,7 @@ class FakeDiscordBlue:
         self.features = features
         self.received: asyncio.Queue[Json] = asyncio.Queue()
         self.sockets: list[web.WebSocketResponse] = []
+        self.session_sockets: dict[str, web.WebSocketResponse] = {}
 
     async def connect(self, request: web.Request) -> web.WebSocketResponse:
         if request.headers.get("Authorization") != f"Bearer {TOKEN}":
@@ -30,6 +31,7 @@ class FakeDiscordBlue:
         async for frame in websocket:
             message = frame.json()
             if message["type"] == "hello":
+                self.session_sockets[message["session_id"]] = websocket
                 ack: Json = {"type": "hello_ack", "thread_id": 1}
                 await websocket.send_json(ack if self.features is None else {**ack, "features": self.features})
             if message["type"] != "heartbeat":
@@ -47,5 +49,15 @@ class FakeDiscordBlue:
                 return message
 
     async def control(self, message: Json) -> Json:
-        await self.sockets[-1].send_json(message)
-        return await self.next(*RESPONSES)
+        websocket = self.session_sockets.get(str(message.get("session_id")), self.sockets[-1])
+        await websocket.send_json(message)
+        deferred = []
+        try:
+            while True:
+                event = await self.next()
+                if event["type"] in RESPONSES:
+                    return event
+                deferred.append(event)
+        finally:
+            for event in deferred:
+                self.received.put_nowait(event)
