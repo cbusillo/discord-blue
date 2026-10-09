@@ -300,10 +300,10 @@ environment variables.
 Use real Codex and Claude Code sessions to verify hello acknowledgement, mirrored
 output, and reconnect without duplicate threads or repeated command execution.
 Exercise only each client's advertised controls: Codex supports reply, pause,
-status, command approvals and user input; the Claude channel supports status,
+status, command/file-change/turn-scoped permission approvals, new sessions and user input; the Claude channel supports status,
 plus replies when the channel is enabled, with permission decisions kept in the
-terminal. Neither current
-client advertises new/end session or autonomous continuation controls. The Server
+terminal. Neither client advertises end-session or autonomous continuation controls;
+new-session is supported by Codex only. The Server
 controls table describes the protocol surface, not a promise that every client
 implements it. Unit/transport tests validate the server and local clients; live
 integration acceptance is separate.
@@ -325,5 +325,5 @@ epoch. A changed patch invalidates the old prompt.
 
 The Codex bridge supports new_session through /code new in an existing Codex
 thread: that thread's cwd selects the repository. It calls thread/start with
-cwd only, then names and mirrors the new thread. It does not change the
+cwd only, then mirrors the new thread; its first substantive prompt supplies the title. It does not change the
 daemon's configured trust, sandbox or approval policy.

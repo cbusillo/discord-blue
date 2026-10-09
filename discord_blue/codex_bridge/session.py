@@ -164,12 +164,17 @@ class ThreadSession(AgentSessionClient):
             return
         key = (turn_id, str(item["id"]))
         previous = self.file_items.get(key)
-        if previous is not None and previous != item:
-            # Never answer a changed patch using a decision on an older display.
+        completed = item.get("status") != "inProgress"
+        changed = previous is not None and previous.get("changes") != item.get("changes")
+        if completed or changed:
             for request_id, prompt in list(self.prompts.items()):
                 if prompt.get("approval_kind") == "file_change" and (prompt["turn_id"], prompt["call_id"]) == key:
                     self.on_resolved(request_id)
-                    self.publish("notice", message="The patch changed; review this request in the Codex TUI.")
+                    if changed and not completed:
+                        self.publish("notice", message="The patch changed; review this request in the Codex TUI.")
+        if completed:
+            self.file_items.pop(key, None)
+            return
         if len(self.file_items) >= SEEN_LIMIT and key not in self.file_items:
             self.file_items.pop(next(iter(self.file_items)))
         self.file_items[key] = deepcopy(item)
@@ -235,7 +240,7 @@ class ThreadSession(AgentSessionClient):
         if turn.get("status") == "inProgress":
             self.on_turn_started(turn_id)
             for item in turn.get("items") or []:
-                self.on_file_item(turn_id, item)
+                # Summary backfill is presentation-only, never an approval snapshot.
                 self.on_item_completed(turn_id, item)
         else:
             self.on_turn_completed(turn)
@@ -252,7 +257,10 @@ class ThreadSession(AgentSessionClient):
             # No config overrides: they can restart an idle thread cold. Stock replays pending requests.
             await self.rpc.request("thread/resume", {"threadId": self.thread_id, "excludeTurns": True})
             self.subscribed = True
-            page = await self.rpc.request("thread/turns/list", {"threadId": self.thread_id, "limit": 1, "itemsView": "summary"})
+            if self.owned and not thread.get("preview"):
+                page: Json = {"data": []}
+            else:
+                page = await self.rpc.request("thread/turns/list", {"threadId": self.thread_id, "limit": 1, "itemsView": "summary"})
         self.catch_up(latest_turn(page))
 
     async def release(self) -> None:
@@ -289,7 +297,7 @@ class ThreadSession(AgentSessionClient):
         elif method in {FILE_APPROVAL, PERMISSIONS_APPROVAL}:
             item = self.file_items.get((turn_id, str(params.get("itemId"))))
             snapshot = content_snapshot(method, params, item, self.cwd)
-            if snapshot is None or self.server_features is None or "approval_content" not in self.server_features:
+            if snapshot is None or (self.server_features is not None and "approval_content" not in self.server_features):
                 self.publish("status_changed", message="Waiting on a decision in the Codex TUI")
                 return
             label, text, response = snapshot
@@ -313,8 +321,7 @@ class ThreadSession(AgentSessionClient):
             ]
             self.prompts[request_id] = self.event("request_user_input", call_id=call_id, turn_id=turn_id, questions=questions)
         else:
-            # File-change, permissions, elicitation, scope-widening or undisplayable commands and all
-            # other requests stay local; never answer them here.
+            # Elicitation, unsupported scope and undisplayable requests stay local.
             if method in LOCAL_DECISIONS or method == COMMAND_APPROVAL:
                 self.publish("status_changed", message="Waiting on a decision in the Codex TUI")
             return

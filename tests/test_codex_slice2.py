@@ -150,6 +150,7 @@ class SliceTwoTests(unittest.IsolatedAsyncioTestCase):
         async with running_bridge(rpc) as (bridge, discord):
             await discord.next("hello")
             self.assertTrue(await until(lambda: bridge.sessions["root"].server_features is not None, 2))
+            bridge.sessions["root"].catch_up({"id": "turn", "status": "inProgress", "items": [file_item("+summary")]})
             await bridge.dispatch(
                 {
                     "id": 4,
@@ -160,6 +161,7 @@ class SliceTwoTests(unittest.IsolatedAsyncioTestCase):
             approval = await discord.next("approval_request")
             self.assertIn("+right", approval["content_text"])
             self.assertNotIn("+wrong", approval["content_text"])
+            self.assertNotIn("+summary", approval["content_text"])
             self.assertEqual((rpc.called("thread/items/list")[0] or {})["turnId"], "turn")
 
     async def test_unknown_permission_scope_and_stale_epoch_cannot_grant(self) -> None:
@@ -185,3 +187,78 @@ class SliceTwoTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(response["type"], "approval_decision_reject")
             self.assertEqual(rpc.responses, [])
+
+    async def test_pending_content_waits_for_negotiation_and_old_servers_drop_it(self) -> None:
+        from discord_blue.codex_bridge.config import BridgeConfig
+        from discord_blue.codex_bridge.session import ThreadSession
+        from pathlib import Path
+
+        for features in (frozenset({"approval_content", "command_text"}), frozenset({"command_text"})):
+            rpc = FakeRpc(thread("root"))
+            session = ThreadSession(
+                BridgeConfig("ws://127.0.0.1/agent-session/connect", "fake", Path("/unused"), "test"), rpc, thread("root"), {}
+            )
+            session.on_request(
+                1,
+                "item/permissions/requestApproval",
+                {
+                    "threadId": "root",
+                    "turnId": "turn",
+                    "itemId": "item",
+                    "cwd": "/work",
+                    "permissions": {"network": {"enabled": True}},
+                },
+            )
+            self.assertTrue(session.prompts)
+            self.assertEqual(rpc.responses, [])
+            session.server_features = features
+            session.on_server_features()
+            self.assertEqual(bool(session.prompts), "approval_content" in features)
+            self.assertEqual(bool(session.approvals), "approval_content" in features)
+
+    async def test_owned_idle_thread_resubscribes_after_reconnect_and_closure_prunes_it(self) -> None:
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            await bridge.start_session("/work")
+            await discord.next("hello")
+            await bridge.detach("new-thread")
+            await bridge.join("new-thread")
+            await discord.next("hello")
+            self.assertTrue(bridge.sessions["new-thread"].subscribed)
+            await bridge.dispatch({"method": "thread/closed", "params": {"threadId": "new-thread"}})
+            self.assertNotIn("new-thread", bridge.owned_threads)
+
+    async def test_completed_patch_is_removed_without_a_false_change_notice(self) -> None:
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            self.assertTrue(await until(lambda: bridge.sessions["root"].server_features is not None, 2))
+            session = bridge.sessions["root"]
+            item = file_item()
+            session.on_file_item("t", item)
+            session.on_request(1, "item/fileChange/requestApproval", {"threadId": "root", "turnId": "t", "itemId": "item"})
+            await discord.next("approval_request")
+            item["status"] = "completed"
+            session.on_file_item("t", item)
+            self.assertFalse(session.file_items)
+            self.assertFalse(session.approvals)
+            self.assertFalse(any(e["type"] == "notice" for e in session.outbox))
+
+    async def test_failed_new_session_setup_releases_its_subscription(self) -> None:
+        from discord_blue.codex_bridge.rpc import RpcError
+
+        class BrokenSetupRpc(FakeRpc):
+            async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+                if method == "thread/read" and (params or {}).get("threadId") == "new-thread":
+                    raise RpcError(-1)
+                return await super().request(method, params)
+
+        rpc = BrokenSetupRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            result = await discord.control(command(bridge.sessions["root"], "new", "new_session"))
+            self.assertEqual(result["type"], "command_reject")
+            self.assertIn("new-thread", result["reason"])
+            self.assertNotIn("new-thread", bridge.owned_threads)
+            self.assertIn({"threadId": "new-thread"}, rpc.called("thread/unsubscribe"))

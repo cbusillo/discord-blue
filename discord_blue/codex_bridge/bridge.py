@@ -61,6 +61,7 @@ class CodexBridge:
         self.joining: set[str] = set()
         self.join_events: dict[str, asyncio.Event] = {}
         self.owned_threads: set[str] = set()
+        self.creating_threads: set[str] = set()
         # The newest status change that arrived while a retried join was reading its thread, applied once it joins.
         self.late_status: dict[str, Json] = {}
 
@@ -100,6 +101,8 @@ class CodexBridge:
         assert isinstance(params, dict)
         thread_id = str(params.get("threadId") or "")
         session = self.sessions.get(thread_id)
+        if method == "thread/closed":
+            self.owned_threads.discard(thread_id)
         if "id" in message:
             if session is not None:
                 if method == FILE_APPROVAL and (str(params.get("turnId")), str(params.get("itemId"))) not in session.file_items:
@@ -107,22 +110,28 @@ class CodexBridge:
                     # Read the exact turn's full items, never a filesystem diff or a summary preview.
                     cursor = None
                     try:
-                        for _ in range(10):
-                            page = await session.rpc.request(
-                                "thread/items/list",
-                                {
-                                    "threadId": thread_id,
-                                    "turnId": params.get("turnId"),
-                                    "limit": 100,
-                                    "cursor": cursor,
-                                },
-                            )
-                            for entry in page.get("data") or []:
-                                if entry.get("turnId") == params.get("turnId"):
-                                    session.on_file_item(str(entry["turnId"]), entry.get("item") or {})
-                            if not (cursor := page.get("nextCursor")):
-                                break
-                    except RpcError:
+                        async with asyncio.timeout(5):
+                            for _ in range(10):
+                                page = await session.rpc.request(
+                                    "thread/items/list",
+                                    {
+                                        "threadId": thread_id,
+                                        "turnId": params.get("turnId"),
+                                        "limit": 100,
+                                        "cursor": cursor,
+                                        "sortDirection": "desc",
+                                    },
+                                )
+                                found = False
+                                for entry in page.get("data") or []:
+                                    item = entry.get("item") or {}
+                                    if entry.get("turnId") == params.get("turnId") and item.get("id") == params.get("itemId"):
+                                        session.on_file_item(str(entry["turnId"]), item)
+                                        found = True
+                                        break
+                                if found or not (cursor := page.get("nextCursor")):
+                                    break
+                    except (RpcError, TransportError, TimeoutError):
                         pass  # Missing full content keeps the request local.
                 session.on_request(message["id"], method, params)
             return
@@ -166,19 +175,31 @@ class CodexBridge:
 
     async def start_session(self, cwd: str) -> None:
         assert self.rpc is not None
+        rpc = self.rpc
         # Stock applies its configured permissions and trust policy; no sandbox or approval overrides.
-        result = await self.rpc.request("thread/start", {"cwd": cwd})
+        result = await rpc.request("thread/start", {"cwd": cwd})
         thread_id = result["thread"]["id"]
         self.owned_threads.add(thread_id)
-        await self.rpc.request("thread/name/set", {"threadId": thread_id, "name": "New Discord session"})
-        if pending := self.join_events.get(thread_id):
-            await pending.wait()
-        await self.join(thread_id)
-        session = self.sessions.get(thread_id)
-        if session is None:
-            raise Rejected("Codex started the session but it could not be mirrored; check the Codex TUI before retrying.")
-        session.owned = True
-        await session.subscribe()
+        self.creating_threads.add(thread_id)
+        try:
+            if pending := self.join_events.get(thread_id):
+                await pending.wait()
+            await self.join(thread_id)
+            session = self.sessions.get(thread_id)
+            if session is None:
+                raise Rejected("The new thread could not be mirrored.")
+            session.owned = True
+            session.subscribed = True  # thread/start already subscribed this RPC client.
+        except (Rejected, RpcError, TransportError):
+            self.owned_threads.discard(thread_id)
+            await self.detach(thread_id)
+            try:
+                await rpc.request("thread/unsubscribe", {"threadId": thread_id})
+            except (RpcError, TransportError):
+                logger.warning("Could not release unmirrored Codex thread %s", thread_id)
+            raise Rejected(f"Codex created thread {thread_id}, but setup failed; check the Codex TUI before retrying.") from None
+        finally:
+            self.creating_threads.discard(thread_id)
 
     async def join(self, thread_id: str) -> None:
         """Open a Discord session for a loaded root thread; subscribe only if it is busy."""
@@ -192,12 +213,16 @@ class CodexBridge:
             thread = (await rpc.request("thread/read", {"threadId": thread_id}))["thread"]
             busy = (thread.get("status") or {}).get("type") == "active"
             # Never load a thread from disk, and skip subagents and threads nobody has used yet.
-            if skip := self.skip_reason(thread):
+            skip = self.skip_reason(thread)
+            if skip and not (skip == UNNAMED and thread_id in self.owned_threads):
                 logger.info("Not joining Codex thread %s: %s", thread_id, skip)
                 if busy and skip == UNNAMED:
                     self.retry_join(thread_id)
                 return
-            page = await rpc.request("thread/turns/list", {"threadId": thread_id, "limit": 1, "itemsView": "summary"})
+            if thread_id in self.owned_threads and not thread.get("preview"):
+                page: Json = {"data": []}  # A new stock thread has no persisted turn history yet.
+            else:
+                page = await rpc.request("thread/turns/list", {"threadId": thread_id, "limit": 1, "itemsView": "summary"})
         except RpcError as exc:
             logger.info("Not joining Codex thread %s: %s", thread_id, exc)
             return
@@ -214,6 +239,10 @@ class CodexBridge:
         self.sessions[thread_id] = session
         self.tasks[thread_id] = asyncio.create_task(session.run(self.http), name=f"codex-bridge-{thread_id}")
         logger.info("Mirroring Codex thread %s (%s)", thread_id, session.label.current)
+        if thread_id in self.creating_threads:
+            session.subscribed = True
+        elif session.owned:
+            await self.subscribe(session)
         if late is not None:
             # Newer than the thread read. Applied before anything awaits, so a status that reaches the session later
             # queues behind it on the session's membership lock instead of being overtaken by it.
@@ -273,6 +302,8 @@ class CodexBridge:
     async def detach(self, thread_id: str, *, ended: bool = False) -> None:
         """Stop mirroring a thread. An ended thread closes in Discord now; otherwise (the daemon went away) it waits
         out Discord Blue's grace period for this bridge to reconnect."""
+        if ended:
+            self.owned_threads.discard(thread_id)
         session, task = self.sessions.pop(thread_id, None), self.tasks.pop(thread_id, None)
         if session is not None:
             await (session.end() if ended else session.stop())

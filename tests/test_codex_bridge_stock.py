@@ -164,11 +164,26 @@ class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
             thread_id = (await tui.rpc.request("thread/start", {"cwd": str(codex.work)}))["thread"]["id"]
             await tui.turn(thread_id, "initial prompt")
             config = BridgeConfig(f"ws://127.0.0.1:{server.port}/agent-session/connect", TOKEN, codex.socket_path, "test")
-            bridge = CodexBridge(config)
+            bridge = GatedBridge(config)
             running = asyncio.create_task(bridge.run())
             try:
                 hello = await discord.next("hello")
                 ids = {"session_id": thread_id, "session_epoch": hello["session_epoch"]}
+                # Stock replays the request ID but does not expose the pending patch in history.
+                # Without item/started, the safe behavior is to leave that request with the TUI.
+                bridge.gate.clear()
+                mark = len(tui.notes)
+                replay_turn = asyncio.create_task(tui.turn(thread_id, "PATCH"))
+                replay = await tui.wait_for("item/fileChange/requestApproval", mark)
+                bridge.gate.set()
+                while True:
+                    notice = await discord.next("status_changed", timeout=30)
+                    if notice.get("message") == "Waiting on a decision in the Codex TUI":
+                        break
+                self.assertFalse(bridge.sessions[thread_id].approvals)
+                await tui.rpc.respond(replay["id"], {"decision": "decline"})
+                await replay_turn
+                self.assertFalse((codex.work / "patched.txt").exists())
                 for action, kind, verdict in (
                     ("PATCH", "file_change", "denied"),
                     ("PATCH", "file_change", "approved"),
@@ -176,6 +191,7 @@ class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
                     ("PERMISSIONS", "permissions", "approved"),
                 ):
                     mark = len(tui.notes)
+                    await bridge.sessions[thread_id].subscribe()
                     turn = asyncio.create_task(tui.turn(thread_id, action))
                     approval = await discord.next("approval_request", timeout=30)
                     self.assertEqual(approval["approval_kind"], kind)
