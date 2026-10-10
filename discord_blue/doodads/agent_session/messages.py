@@ -5,6 +5,7 @@ import logging
 
 import discord
 
+from discord_blue.doodads.agent_session.cards import notice_card
 from discord_blue.doodads.agent_session.formatting import strip_assistant_markers
 
 logger = logging.getLogger(__name__)
@@ -100,4 +101,12 @@ async def notify_missing_manage_messages(destination: discord.abc.Messageable) -
 
 
 async def edit_agent_session_message(message: discord.Message, *, content: str) -> discord.Message:
+    if message_uses_components_v2(message):
+        return await message.edit(content=None, allowed_mentions=agent_session_allowed_mentions(), view=notice_card(content))
     return await message.edit(content=strip_assistant_markers(content), allowed_mentions=agent_session_allowed_mentions(), view=None)
+
+
+def message_uses_components_v2(message: discord.Message) -> bool:
+    return bool(getattr(getattr(message, "flags", None), "is_components_v2", False)) or any(
+        isinstance(component, discord.Container) for component in getattr(message, "components", [])
+    )

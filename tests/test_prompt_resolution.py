@@ -9,6 +9,7 @@ from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.protocol import RemoteApprovalRequest
 from tests.fakes_agent_prompts import prompt_fixture
 from tests import test_session_cleanup_transport as transport_tests
+from tests.fakes_agent_session import assert_no_controls, visible_message_text
 from tests.fakes_agent_session import FakeInteraction
 
 
@@ -49,8 +50,8 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
             await self.bridge.handle_prompt_resolved(kind, self.event(kind, **fields))
             self.assertEqual(len(input_message.edits) + len(approval_message.edits), edits)
         for message in (input_message, approval_message):
-            self.assertEqual(message.content, "**Resolved**")
-            self.assertIsNone(message.edit_kwargs[-1]["view"])
+            self.assertEqual(visible_message_text(message), "**Resolved**")
+            assert_no_controls(message)
             self.assertEqual(message.reactions, [])
         self.assertEqual(self.socket.sent_json, [])
         self.assertEqual(self.session.pending_user_inputs, {})
@@ -91,7 +92,7 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
                 cast(Any, interaction), self.session.session_id, "approval", "approved", session_epoch=self.session.session_epoch
             )
         await self.bridge.handle_approval_decision_ack(self.event("approval_decision_ack", approval_id="approval"))
-        self.assertEqual(message.content, "**Resolved**")
+        self.assertEqual(visible_message_text(message), "**Resolved**")
         self.assertEqual(interaction.response.edits, [])
         self.assertIn("Decision sent", interaction.response.messages[0][0])
 
@@ -109,7 +110,7 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
         interaction = FakeInteraction(self.thread)
         with patch.object(self.socket, "send_json", new=send):
             await view.submit(cast(Any, interaction))
-        self.assertEqual(old_message.content, "**Resolved**")
+        self.assertEqual(visible_message_text(old_message), "**Resolved**")
         self.assertEqual(interaction.response.edits, [])
         self.assertEqual(self.session.pending_commands, {})
         newer = await self.fixture.prompt("call-2")
@@ -147,8 +148,8 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 release.set()
                 await asyncio.gather(edit_task, resolve)
-        self.assertEqual(message.content, "**Resolved**")
-        self.assertIsNone(message.edit_kwargs[-1]["view"])
+        self.assertEqual(visible_message_text(message), "**Resolved**")
+        assert_no_controls(message)
         stale = FakeInteraction(self.thread, message=message)
         await view.edit_answer(cast(Any, stale), "answer", "stale")
         self.assertEqual(stale.response.edits, [])
@@ -184,7 +185,7 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 release.set()
                 await asyncio.gather(click, resolve)
-        self.assertEqual(message.content, "**Resolved**")
+        self.assertEqual(visible_message_text(message), "**Resolved**")
         self.assertEqual(message.reactions, [])
 
     async def test_ack_already_waiting_on_ui_lock_cannot_repaint_resolved_input(self) -> None:
@@ -211,7 +212,7 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
             pending.ui_lock.release()
             await asyncio.gather(ack, resolve)
         reaction_spy.assert_not_awaited()
-        self.assertEqual(message.content, "**Resolved**")
+        self.assertEqual(visible_message_text(message), "**Resolved**")
         self.assertEqual(message.reactions, [])
 
     def test_ack_copy_describes_submission_without_asserting_winner(self) -> None:
@@ -286,7 +287,20 @@ class ResolutionTransportTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await websocket.send_json({**identity, "type": "approval_resolved", "approval_id": "approval"})
                 await websocket.send_json(
-                    {**identity, "type": "request_user_input", "call_id": "input", "turn_id": "turn", "questions": []}
+                    {
+                        **identity,
+                        "type": "request_user_input",
+                        "call_id": "input",
+                        "turn_id": "turn",
+                        "questions": [
+                            {
+                                "id": "answer",
+                                "header": "Answer",
+                                "question": "Choose",
+                                "options": [{"label": "Yes", "description": ""}],
+                            }
+                        ],
+                    }
                 )
                 await websocket.send_json({**identity, "type": "request_user_input_resolved", "call_id": "input", "turn_id": "turn"})
                 await asyncio.wait_for(done.wait(), 2)
@@ -294,7 +308,7 @@ class ResolutionTransportTests(unittest.IsolatedAsyncioTestCase):
             assert session is not None
             self.assertEqual(session.pending_approvals, {})
             self.assertEqual(session.pending_user_inputs, {})
-            messages = [message for message in thread._history if message.content]
+            messages = [message for message in thread._history if visible_message_text(message) == "**Resolved**"]
             self.assertEqual(len(messages), 2)
-            self.assertTrue(all(message.content == "**Resolved**" for message in messages))
+            self.assertTrue(all(visible_message_text(message) == "**Resolved**" for message in messages))
             await websocket.close()

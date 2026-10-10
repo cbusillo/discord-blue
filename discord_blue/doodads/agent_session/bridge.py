@@ -23,12 +23,13 @@ from typing import Literal, cast
 import discord
 from aiohttp import WSMsgType, web
 
-from discord_blue.doodads.agent_session.cards import STATUS_CARD_COMPONENT_ID, session_status_card
+from discord_blue.doodads.agent_session.cards import STATUS_CARD_COMPONENT_ID, notice_card, session_status_card
 from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
 from discord_blue.doodads.agent_session.chunks import format_assistant_messages
 from discord_blue.doodads.agent_session.formatting import advance_code_fence
 from discord_blue.doodads.agent_session.formatting import format_user_message
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
+from discord_blue.doodads.agent_session.formatting import strip_assistant_markers
 from discord_blue.doodads.agent_session.messages import edit_agent_session_message
 from discord_blue.doodads.agent_session.messages import agent_session_allowed_mentions
 from discord_blue.doodads.agent_session.messages import send_agent_session_message
@@ -234,7 +235,10 @@ class BridgeStopping(ThreadCreationStopped):
     """The bridge is shutting down, so an attach does not start."""
 
 
-class RequestUserInputSelect(discord.ui.Select[discord.ui.View]):
+MAX_INPUT_QUESTIONS = 5
+
+
+class RequestUserInputSelect(discord.ui.Select[discord.ui.LayoutView]):
     def __init__(
         self,
         parent_view: RequestUserInputView,
@@ -242,20 +246,12 @@ class RequestUserInputSelect(discord.ui.Select[discord.ui.View]):
     ) -> None:
         options = [
             discord.SelectOption(
-                label=option.label[:100],
-                value=option.label[:100],
+                label=f"{index + 1}. {option.label}"[:100],
+                value=str(index),
                 description=(option.description[:100] or None),
             )
-            for option in question.options[:25]
+            for index, option in enumerate(question.options)
         ]
-        if question.is_other and len(options) < 25:
-            options.append(
-                discord.SelectOption(
-                    label="Other...",
-                    value="__other__",
-                    description="Provide a custom answer",
-                )
-            )
         placeholder = (question.header or question.question or "Choose an answer")[:150]
         super().__init__(placeholder=placeholder, options=options)
         self.parent_view = parent_view
@@ -265,10 +261,8 @@ class RequestUserInputSelect(discord.ui.Select[discord.ui.View]):
         if not self.values:
             return
         value = self.values[0]
-        if value == "__other__":
-            await interaction.response.send_modal(RequestUserInputAnswerModal(self.parent_view, self.question))
-            return
-        await self.parent_view.edit_answer(interaction, self.question.id, value)
+        if value.isdecimal() and int(value) < len(self.question.options):
+            await self.parent_view.edit_answer(interaction, self.question.id, self.question.options[int(value)].label)
 
 
 class RequestUserInputAnswerModal(discord.ui.Modal):
@@ -285,7 +279,7 @@ class RequestUserInputAnswerModal(discord.ui.Modal):
             discord.ui.TextInput[RequestUserInputAnswerModal],
             discord.ui.TextInput(
                 label=(question.header or question.question or "Answer")[:45],
-                placeholder=(question.question or None),
+                placeholder=(question.question[:100] or None),
                 style=discord.TextStyle.paragraph if not question.options else discord.TextStyle.short,
                 max_length=1500,
             ),
@@ -296,13 +290,13 @@ class RequestUserInputAnswerModal(discord.ui.Modal):
         await self.parent_view.edit_answer(interaction, self.question.id, self.answer.value.strip())
 
 
-class RequestUserInputAnswerButton(discord.ui.Button[discord.ui.View]):
+class RequestUserInputAnswerButton(discord.ui.Button[discord.ui.LayoutView]):
     def __init__(
         self,
         parent_view: RequestUserInputView,
         question: RequestUserInputQuestion,
     ) -> None:
-        label = (question.header or question.question or "Answer")[:80]
+        label = "Other answer" if question.options and not question.is_secret else "Write answer"
         super().__init__(
             label=label,
             emoji="✏️",
@@ -314,16 +308,16 @@ class RequestUserInputAnswerButton(discord.ui.Button[discord.ui.View]):
         await interaction.response.send_modal(RequestUserInputAnswerModal(self.parent_view, self.question))
 
 
-class RequestUserInputSubmitButton(discord.ui.Button[discord.ui.View]):
+class RequestUserInputSubmitButton(discord.ui.Button[discord.ui.LayoutView]):
     def __init__(self, parent_view: RequestUserInputView) -> None:
-        super().__init__(label="Submit", style=discord.ButtonStyle.primary, emoji="✅")
+        super().__init__(label="Send answer", style=discord.ButtonStyle.primary, emoji="✅")
         self.parent_view = parent_view
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await self.parent_view.submit(cast(discord.Interaction[BlueBot], interaction))
 
 
-class RequestUserInputCancelButton(discord.ui.Button[discord.ui.View]):
+class RequestUserInputCancelButton(discord.ui.Button[discord.ui.LayoutView]):
     def __init__(self, parent_view: RequestUserInputView) -> None:
         super().__init__(label="Cancel", style=discord.ButtonStyle.danger, emoji="✖️")
         self.parent_view = parent_view
@@ -332,7 +326,7 @@ class RequestUserInputCancelButton(discord.ui.Button[discord.ui.View]):
         await self.parent_view.cancel(cast(discord.Interaction[BlueBot], interaction))
 
 
-class RequestUserInputView(discord.ui.View):
+class RequestUserInputView(discord.ui.LayoutView):
     def __init__(
         self,
         bridge: AgentSessionBridge,
@@ -346,13 +340,33 @@ class RequestUserInputView(discord.ui.View):
         self.answers: dict[str, str] = {}
         self.message_id: int | None = None
 
-        for question in request.questions[:4]:
-            if question.options:
-                self.add_item(RequestUserInputSelect(self, question))
-            else:
-                self.add_item(RequestUserInputAnswerButton(self, question))
-        self.add_item(RequestUserInputSubmitButton(self))
-        self.add_item(RequestUserInputCancelButton(self))
+        self.question_texts: dict[str, discord.ui.TextDisplay] = {}
+        children: list[discord.ui.Item[discord.ui.LayoutView]] = [
+            discord.ui.TextDisplay("### ⏸ Waiting on you\nChoose an answer for each question, then press **Send answer**."),
+        ]
+        for question in request.questions:
+            children.append(discord.ui.Separator())
+            text: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(self.question_text(question))
+            self.question_texts[question.id] = text
+            children.append(text)
+            if question.options and len(question.options) <= 25 and not question.is_secret:
+                children.append(discord.ui.ActionRow(RequestUserInputSelect(self, question)))
+            if not question.options or question.is_other or question.is_secret:
+                children.append(discord.ui.ActionRow(RequestUserInputAnswerButton(self, question)))
+        children.append(discord.ui.Separator())
+        children.append(discord.ui.ActionRow(RequestUserInputSubmitButton(self), RequestUserInputCancelButton(self)))
+        self.add_item(discord.ui.Container(*children, accent_color=0xF0B232))
+
+    def question_text(self, question: RequestUserInputQuestion) -> str:
+        answer = self.answers.get(question.id, "")
+        header = discord.utils.escape_markdown(question.header or question.id or "Question")[:80]
+        text = f"{'✅' if answer else '⬜'} **{header}**\n{question.question[:350]}"
+        if answer:
+            shown = "[hidden]" if question.is_secret else discord.utils.escape_markdown(answer)[:180]
+            text += f"\nSelected: {shown}"
+        elif question.is_secret:
+            text += "\nThis card hides your answer. Do not enter secrets in Discord."
+        return strip_assistant_markers(text)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return (
@@ -384,19 +398,23 @@ class RequestUserInputView(discord.ui.View):
                 return
             self.set_answer(question_id, answer)
             await interaction.response.edit_message(
-                content=self.format_prompt(),
+                content=None,
                 view=self,
                 allowed_mentions=agent_session_allowed_mentions(),
             )
 
     def set_answer(self, question_id: str, answer: str) -> None:
         self.answers[question_id] = answer
+        for question in self.request.questions:
+            if question.id == question_id:
+                self.question_texts[question_id].content = self.question_text(question)
+        for item in self.walk_children():
+            if isinstance(item, RequestUserInputSelect) and item.question.id == question_id:
+                for index, option in enumerate(item.options):
+                    option.default = item.question.options[index].label == answer
 
     def response_payload(self) -> dict[str, object]:
         return {"answers": {question.id: {"answers": [self.answers.get(question.id, "")]} for question in self.request.questions}}
-
-    def format_prompt(self) -> str:
-        return self.bridge.format_request_user_input(self.request, self.answers)
 
     async def submit(self, interaction: discord.Interaction[BlueBot]) -> None:
         missing = [
@@ -2331,10 +2349,18 @@ class AgentSessionBridge:
         if not isinstance(channel, discord.Thread):
             return
 
+        if (
+            not 1 <= len(request.questions) <= MAX_INPUT_QUESTIONS
+            or any(not q.id or len(q.options) > 25 for q in request.questions)
+            or len({q.id for q in request.questions}) != len(request.questions)
+        ):
+            await self.post_thread_notice(
+                session.thread_id, "Answer this prompt in the native TUI; it cannot fit usable Discord controls."
+            )
+            return
         view = self.request_user_input_view(session.session_id, request)
         message = await send_agent_session_message(
             channel,
-            self.format_request_user_input(request, {}),
             view=view,
         )
         view.message_id = message.id
@@ -2446,8 +2472,8 @@ class AgentSessionBridge:
                 )
                 return
             await interaction.response.edit_message(
-                content=self.format_request_user_input_pending(interaction.user, cancelled=cancelled),
-                view=None,
+                content=None,
+                view=notice_card(self.format_request_user_input_pending(interaction.user, cancelled=cancelled)),
                 allowed_mentions=agent_session_allowed_mentions(),
             )
 
@@ -3485,10 +3511,6 @@ class AgentSessionBridge:
         return RequestUserInputView(self, session_id, request)
 
     @staticmethod
-    def can_render_request_user_input_as_select(request: RemoteRequestUserInput) -> bool:
-        return len(request.questions) == 1 and bool(request.questions[0].options) and len(request.questions[0].options) <= 25
-
-    @staticmethod
     def format_approval_request(approval: RemoteApprovalRequest) -> str:
         """The approval message, untruncated; a raw command_text is shown verbatim instead of the re-quoted argv."""
         if approval.content_text is not None:
@@ -3522,33 +3544,6 @@ class AgentSessionBridge:
         label = f"Submitted: {decision}" if decision in {"approved", "denied"} else "Decision acknowledged"
         by = f"\nby: `{decided_by}`" if decided_by is not None else ""
         return f"**{label}**{by}"
-
-    @staticmethod
-    def format_request_user_input(
-        request: RemoteRequestUserInput,
-        answers: dict[str, str] | None = None,
-    ) -> str:
-        answers = answers or {}
-        parts = ["**Need input**", "Use the controls below, then press **Submit**."]
-        for question in request.questions:
-            header = question.header or question.id or "Question"
-            answer = answers.get(question.id, "").strip()
-            status = "✅" if answer else "⬜"
-            parts.extend(["", f"{status} **{header}**"])
-            if question.question:
-                parts.append(question.question)
-            if answer:
-                value = "[hidden]" if question.is_secret else answer
-                parts.append(f"Selected: `{value[:200]}`")
-            if question.options:
-                for option in question.options:
-                    line = f"- {option.label}"
-                    if option.description:
-                        line = f"{line}: {option.description}"
-                    parts.append(line[:200])
-            elif question.is_secret:
-                parts.append("Respond privately through the attached form.")
-        return "\n".join(parts)[:DISCORD_MESSAGE_LIMIT]
 
     @staticmethod
     def format_request_user_input_pending(

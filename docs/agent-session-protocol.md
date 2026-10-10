@@ -283,8 +283,16 @@ continue to describe accepted outbound actions, not incoming event support.
 Question objects carry `id`, `header`, `question`, `isOther`, `isSecret`, and
 `options` (objects with `label` and `description`). Do not send secrets through
 Discord; the existing form is not a secret-entry channel. The Discord form
-supports up to four questions and 25 select options per question, with one
-option reserved when Other is enabled. Keep client requests within those bounds.
+uses the same Components V2 cards as session status. Each question has a named
+picker or a write-answer form. Selecting an option updates the card; **Send
+answer** sends all answers together. **Cancel** returns an empty answer set.
+Option labels are returned in full even when Discord shortens their display.
+Other, when enabled, uses a separate form button and does not consume a picker
+option. Unsupported question counts, duplicate/empty IDs or more than 25 options
+stay in the native TUI rather than hiding controls. The renderer owns the question
+limit in `MAX_INPUT_QUESTIONS`. A normal thread reply starts or steers a turn; it
+does not answer a pending picker. Use the form for free text. Claude questions
+continue to stay in the Claude terminal because its channel has no answer path.
 
 ## Server controls
 

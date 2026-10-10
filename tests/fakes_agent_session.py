@@ -329,8 +329,8 @@ class FakeInteractionResponse:
     async def send_message(self, content: str, *, ephemeral: bool) -> None:
         self.messages.append((content, ephemeral))
 
-    async def edit_message(self, content: str, **kwargs: object) -> None:
-        self.edits.append((content, kwargs.get("view") is None))
+    async def edit_message(self, content: str | None, **kwargs: object) -> None:
+        self.edits.append((content or "", kwargs.get("view") is None))
         self.edit_kwargs.append(kwargs)
 
     async def send_modal(self, modal: object) -> None:
@@ -414,3 +414,20 @@ def add_bot_message(channel: FakeThread | FakeTextChannel, message_id: int, cont
     message = FakeReplyMessage(message_id, channel, content, author_id=999)
     channel.add_message(message)
     return message
+
+
+def visible_view_text(view: object) -> str:
+    if isinstance(view, discord.ui.LayoutView):
+        return "\n".join(item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay))
+    return ""
+
+
+def visible_message_text(message: FakeReplyMessage) -> str:
+    return message.content or visible_view_text(message.view)
+
+
+def assert_no_controls(message: FakeReplyMessage) -> None:
+    if isinstance(message.view, discord.ui.LayoutView):
+        assert not any(isinstance(item, (discord.ui.Select, discord.ui.Button)) for item in message.view.walk_children())
+    else:
+        assert message.view is None
