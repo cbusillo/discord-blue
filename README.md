@@ -317,6 +317,30 @@ discord-blue-codex-bridge --codex-home "${CODEX_HOME:-$HOME/.codex}"
 # discord-blue-codex-bridge --codex-home ~/.codex --codex-home /path/to/account-home
 ```
 
+For Supervisor accounts, use the same private account configuration as its
+launcher instead of copying home paths into the login item:
+
+```sh
+discord-blue-codex-bridge --supervisor-config ~/.code/skill-data/supervisor.toml
+```
+
+The bridge reads every `provider = "openai"` entry's `env.CODEX_HOME` from
+`[[accounts.account]]`, including accounts currently out of capacity. It does
+not run the capacity reader or open credential files. Changes to this list
+take effect on the next bridge restart. `--supervisor-config` and
+`--codex-home` are alternative selections; invalid or empty OpenAI mappings
+fail startup rather than silently selecting a default home.
+
+For each selected home, the bridge runs `codex app-server daemon start` once
+before connecting. Native start reuses an already running daemon; it does not
+bootstrap or restart it. Startup failures identify the home and exit code or
+error type without echoing provider output, and keep that home's reconnect
+loop running independently of the others. A start command is bounded to 60
+seconds. Later daemon loss uses the existing socket reconnect behavior; the
+bridge does not repeatedly start daemons. Without a home selection, the
+configured/default socket is preserved: standard account sockets identify a
+home for native start, while custom socket paths only reconnect.
+
 These commands are future-launch setup, not a procedure to restart an active
 bridge or convert running embedded sessions. Closing and resuming an existing
 session on a daemon needs coordination with the Director (the person whose
@@ -326,8 +350,11 @@ automatically. Build the merged wheel (`uv build --wheel`) and install it
 (`uv tool install --force dist/discord_blue-0.2.0-py3-none-any.whl`) as part of
 the next planned bridge launch, after the current bridge has stopped.
 `uv run discord-blue-codex-bridge` uses the checkout version instead.
-If launchd owns the bridge, put the `--codex-home` arguments in its existing
-`ProgramArguments` at the next planned launch; the template shows where. Do not
+If launchd owns the bridge, put `--supervisor-config` and the absolute path of
+the launcher's private config in its existing `ProgramArguments` at the next
+planned launch. Set `--codex-bin` to the absolute installed Codex executable
+because launchd has a minimal PATH; replace `CODEX_BIN` in the template. For
+standalone use, repeat `--codex-home` instead. Do not
 start an additional manual process against the same daemon.
 
 Run the stock end-to-end test with

@@ -6,7 +6,7 @@ import os
 import shlex
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from itertools import pairwise
@@ -624,6 +624,13 @@ class ConfigTests(unittest.TestCase):
 
 
 class MultiHomeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        # Normal tests must never start installed daemons or use real homes.
+        self.daemon = AsyncMock()
+        patcher = patch("discord_blue.codex_bridge.__main__.start_daemon", self.daemon)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_empty_home_is_rejected_instead_of_connecting_to_the_working_directory(self) -> None:
         for value in ("", "   "):
             with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
@@ -659,6 +666,7 @@ class MultiHomeTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.gather(task, return_exceptions=True)
             self.assertEqual(starts[socket_for_home(home / "broken")], 2)
             self.assertEqual(starts[socket_for_home(home / "healthy")], 1)
+            self.assertEqual(self.daemon.await_count, 2)  # Reconnect never restarts the daemon.
             self.assertTrue(all(str(home) not in label for label in labels.values()))
 
     async def test_persistent_failure_backs_off_and_logs_frames_without_provider_data(self) -> None:
@@ -789,3 +797,4 @@ class MultiHomeTests(unittest.IsolatedAsyncioTestCase):
         with patch("discord_blue.codex_bridge.__main__.CodexBridge", FakeBridge):
             await run_bridges(config, [])
         self.assertEqual(used, [config.socket_path])
+        self.daemon.assert_not_awaited()
