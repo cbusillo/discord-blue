@@ -184,7 +184,9 @@ class ClaudeSession(AgentSessionClient):
             self.turn_running = True
             if self.waiting_locally:
                 self.waiting_locally = False
-                self.publish("status_changed", message="Decision resolved; continuing the turn.")
+                self.publish(
+                    "status_changed", message="Approval status unconfirmed; tools are active. Check the Claude Code terminal."
+                )
         if event == "UserPromptSubmit":
             prompt = fields.get("prompt", "")
             echo = prompt.lstrip().startswith("<channel") and any(f'command_id="{c}"' in prompt for c in self.injected)

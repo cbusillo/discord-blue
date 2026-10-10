@@ -10,6 +10,9 @@ from aiohttp import web
 from discord_blue.doodads.agent_session.protocol import SessionHello
 
 
+DisplayState = Literal["working", "waiting", "done", "failed", "unknown"]
+
+
 @dataclass(slots=True)
 class PendingRemoteCommand:
     thread_id: int
@@ -17,6 +20,11 @@ class PendingRemoteCommand:
     kind: str
     reject_notice: str | None = None
     input_prompt: PendingRemoteUserInput | None = None
+    status_revision: int | None = None
+    previous_display_state: DisplayState = "waiting"
+    previous_status_message: str | None = None
+    previous_status_reaction: str | None = None
+    previous_interruptions_enabled: bool = False
 
 
 @dataclass(slots=True)
@@ -70,7 +78,8 @@ class AgentSession:
     rejected_command_messages: list[RejectedCommandMessage] = field(default_factory=list)
     active_command_id: str | None = None
     last_status_message: str | None = None
-    display_state: Literal["working", "waiting", "done", "failed"] = "waiting"
+    display_state: DisplayState = "waiting"
+    status_revision: int = 0
     control_card_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     control_status_reaction: str | None = None
     control_interruptions_enabled: bool = False

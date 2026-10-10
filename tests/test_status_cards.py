@@ -14,6 +14,7 @@ from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.cards import session_status_card
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
 from discord_blue.doodads.agent_session.protocol import SessionStatus, UserMessage
+from discord_blue.doodads.agent_session.sessions import AgentSession
 from tests.fakes_agent_prompts import prompt_fixture
 
 
@@ -185,14 +186,15 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
             {"session_id": self.session.session_id, "command_id": "reply", "reason": "Session busy"}
         )
         text = visible_text(await self.current_card())
-        self.assertIn("Failed", text)
-        self.assertIn("Session busy", text)
+        self.assertIn("Done", text)
+        self.assertIn("Reply not delivered: Session busy", self.thread.sent_messages)
         self.session.acknowledged = True
         reply = FakeReplyMessage(123, self.thread, "Try again")
         self.thread.add_message(reply)
         with patch.object(FakeWebSocket, "send_json", side_effect=OSError("lost socket")):
             await self.bridge.send_thread_reply(cast(discord.Message, reply))
-        self.assertIn("delivery could not be confirmed", visible_text(await self.current_card()))
+        self.assertIn("Done", visible_text(await self.current_card()))
+        self.assertIn("delivery could not be confirmed", reply.replies[0])
         self.assertNotIn("queued", visible_text(await self.current_card()))
 
     async def test_question_changes_existing_card_to_waiting(self) -> None:
@@ -201,3 +203,62 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         text = visible_text(await self.current_card())
         self.assertIn("Waiting on you", text)
         self.assertIn("question controls", text)
+
+    async def test_failed_fetch_keeps_connection_and_anchor(self) -> None:
+        await self.status("status_changed", "Turn started")
+        anchor = self.session.control_message_id
+        error = discord.Forbidden(cast(ClientResponse, SimpleNamespace(status=403, reason="Forbidden")), "denied")
+        with patch.object(type(self.thread), "fetch_message", side_effect=error):
+            await self.status("error", "Server error")
+        self.assertIs(self.bridge.sessions.get(self.session.session_id), self.session)
+        self.assertFalse(self.fixture.socket.closed)
+        self.assertEqual(self.session.control_message_id, anchor)
+        self.assertEqual(len(self.thread.sent_messages), 1)
+
+    async def test_rejected_pause_preserves_running_controls_and_newer_completion(self) -> None:
+        user = cast(discord.User, SimpleNamespace(id=123))
+        await self.bridge.handle_user_message(
+            UserMessage(session_id=self.session.session_id, session_epoch=self.session.session_epoch, message="Work on this")
+        )
+        await self.bridge.send_pause_current_turn(self.thread, user)
+        command = self.fixture.socket.sent_json[-1]
+        await self.bridge.handle_command_reject({**command, "reason": "Pause rejected"})
+        message = await self.thread.fetch_message(cast(int, self.session.control_message_id))
+        self.assertIn("Working", visible_text(await self.current_card()))
+        self.assertIn(bridge_module.REACTION_CONTROL_PAUSE, message.reactions)
+        await self.bridge.send_pause_current_turn(self.thread, user)
+        command = self.fixture.socket.sent_json[-1]
+        await self.status("turn_complete", "Waiting for direction")
+        await self.bridge.handle_command_reject({**command, "reason": "No running turn"})
+        self.assertIn("Done", visible_text(await self.current_card()))
+        self.assertNotIn("Failed", visible_text(await self.current_card()))
+
+    async def test_uncorrelated_claude_activity_does_not_claim_working_or_still_waiting(self) -> None:
+        await self.status("status_changed", "Claude Code is waiting for approval in the terminal (Bash)")
+        await self.status("status_changed", "Approval status unconfirmed; tools are active. Check the Claude Code terminal.")
+        text = visible_text(await self.current_card())
+        self.assertIn("Check terminal", text)
+        self.assertNotIn("Working", text)
+        self.assertNotIn("Waiting on you", text)
+
+    async def test_pause_tap_does_not_overwrite_ack_arriving_during_card_update(self) -> None:
+        await self.bridge.handle_user_message(
+            UserMessage(session_id=self.session.session_id, session_epoch=self.session.session_epoch, message="Work on this")
+        )
+        anchor = cast(int, self.session.control_message_id)
+        original = self.bridge.show_pending_control
+
+        async def update_and_ack(session: AgentSession, thread: discord.Thread, detail: str) -> None:
+            await original(session, thread, detail)
+            await self.bridge.handle_command_ack(self.fixture.socket.sent_json[-1])
+
+        with patch.object(self.bridge, "show_pending_control", new=update_and_ack):
+            await self.bridge.handle_thread_reaction(
+                cast(discord.Thread, self.thread),
+                anchor,
+                bridge_module.REACTION_CONTROL_PAUSE,
+                cast(discord.User, SimpleNamespace(id=123)),
+            )
+        message = await self.thread.fetch_message(anchor)
+        self.assertIn(bridge_module.REACTION_DELIVERED, message.reactions)
+        self.assertNotIn(bridge_module.REACTION_QUEUED, message.reactions)

@@ -21,6 +21,7 @@ def session_status_card(session: AgentSession, reactions: list[str]) -> discord.
         "waiting": ("⏸ Waiting on you", 0xF0B232),
         "done": ("✅ Done", 0x58BC8A),
         "failed": ("❌ Failed", 0xEF7279),
+        "unknown": ("⏸ Check terminal", 0xF0B232),
     }
     label, color = labels[state]
     identity = session_thread_name(session.hello)
@@ -31,6 +32,7 @@ def session_status_card(session: AgentSession, reactions: list[str]) -> discord.
             "waiting": "Reply in this thread when you are ready.",
             "done": "Reply to start the next turn.",
             "failed": "Check the native terminal for the error.",
+            "unknown": "Approval status is unconfirmed; check the native terminal.",
         }[state]
     )
     if session.pending_control_confirmation:

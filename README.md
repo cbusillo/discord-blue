@@ -477,4 +477,7 @@ component payloads; final typography and spacing are controlled by Discord.
 The update time makes stale cards visible. On a reconnect, the bridge replaces
 its latest marked status card in the recent thread history with a new anchor;
 old reaction controls remain inactive. Paused turns return to a waiting card,
-and terminal decision completion returns the card to working.
+and Codex decision completion returns the card to working. Claude permission
+previews have no tool-call identifier, so subsequent tool activity shows
+**Check terminal** until completion confirms the outcome; parallel tools cannot
+claim that an unrelated approval was resolved.

@@ -306,7 +306,7 @@ class LaunchTests(unittest.TestCase):
 
 
 class PermissionStatusTests(unittest.IsolatedAsyncioTestCase):
-    async def test_tool_completion_after_terminal_approval_returns_status_to_working(self) -> None:
+    async def test_parallel_tool_activity_does_not_claim_the_terminal_approval_is_resolved(self) -> None:
         async with running_channel() as (claude, discord):
             await claude.initialize()
             await discord.next("hello")
@@ -315,7 +315,7 @@ class PermissionStatusTests(unittest.IsolatedAsyncioTestCase):
             await discord.next("notice")
             await hook(claude, "PostToolUse")
             resumed = await discord.next("status_changed")
-            self.assertIn("continuing", resumed["message"])
+            self.assertIn("unconfirmed", resumed["message"])
             await hook(claude, "PostToolUse")  # No notification flood on every tool.
             await hook(claude, "Stop", last_assistant_message="Finished")
             self.assertEqual((await discord.next())["type"], "turn_complete")
