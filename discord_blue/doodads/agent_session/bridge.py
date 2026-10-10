@@ -236,6 +236,7 @@ class BridgeStopping(ThreadCreationStopped):
 
 
 MAX_INPUT_QUESTIONS = 5
+INPUT_ANSWER_PREVIEW_LIMIT = 180
 
 
 class RequestUserInputSelect(discord.ui.Select[discord.ui.LayoutView]):
@@ -359,10 +360,15 @@ class RequestUserInputView(discord.ui.LayoutView):
 
     def question_text(self, question: RequestUserInputQuestion) -> str:
         answer = self.answers.get(question.id, "")
-        header = discord.utils.escape_markdown(question.header or question.id or "Question")[:80]
-        text = f"{'✅' if answer else '⬜'} **{header}**\n{question.question[:350]}"
+        header = discord.utils.escape_markdown((question.header or question.id or "Question")[:80])
+        text = f"{'✅' if answer else '⬜'} **{header}**\n{question.question}"
+        if question.is_secret or any(len(o.label) > 96 or len(o.description) > 100 for o in question.options):
+            for index, option in enumerate(question.options):
+                text += f"\n{index + 1}. {option.label}"
+                if option.description:
+                    text += f": {option.description}"
         if answer:
-            shown = "[hidden]" if question.is_secret else discord.utils.escape_markdown(answer)[:180]
+            shown = "[hidden]" if question.is_secret else discord.utils.escape_markdown(answer[:INPUT_ANSWER_PREVIEW_LIMIT])
             text += f"\nSelected: {shown}"
         elif question.is_secret:
             text += "\nThis card hides your answer. Do not enter secrets in Discord."
@@ -410,8 +416,10 @@ class RequestUserInputView(discord.ui.LayoutView):
                 self.question_texts[question_id].content = self.question_text(question)
         for item in self.walk_children():
             if isinstance(item, RequestUserInputSelect) and item.question.id == question_id:
+                selected = False
                 for index, option in enumerate(item.options):
-                    option.default = item.question.options[index].label == answer
+                    option.default = not selected and item.question.options[index].label == answer
+                    selected = selected or option.default
 
     def response_payload(self) -> dict[str, object]:
         return {"answers": {question.id: {"answers": [self.answers.get(question.id, "")]} for question in self.request.questions}}
@@ -424,7 +432,7 @@ class RequestUserInputView(discord.ui.LayoutView):
         ]
         if missing:
             await interaction.response.send_message(
-                "Please answer before submitting: " + ", ".join(missing[:4]),
+                "Please answer before submitting: " + ", ".join(missing),
                 ephemeral=True,
             )
             return
@@ -2340,9 +2348,7 @@ class AgentSessionBridge:
         )
 
         if not session.hello.supports("request_user_input_response"):
-            await self.post_thread_notice(
-                session.thread_id, "Action required in the native TUI; this client does not support answering from Discord."
-            )
+            await self.user_input_stays_native(session)
             return
 
         channel = self.thread_channel(session.thread_id)
@@ -2354,11 +2360,14 @@ class AgentSessionBridge:
             or any(not q.id or len(q.options) > 25 for q in request.questions)
             or len({q.id for q in request.questions}) != len(request.questions)
         ):
-            await self.post_thread_notice(
-                session.thread_id, "Answer this prompt in the native TUI; it cannot fit usable Discord controls."
-            )
+            await self.user_input_stays_native(session)
             return
         view = self.request_user_input_view(session.session_id, request)
+        # Reserve space for every selection echo before offering an answerable card.
+        answer_budget = sum(len("\nSelected: ") + 2 * INPUT_ANSWER_PREVIEW_LIMIT for _ in request.questions)
+        if view.content_length() + answer_budget > 4000:
+            await self.user_input_stays_native(session)
+            return
         message = await send_agent_session_message(
             channel,
             view=view,
@@ -2374,6 +2383,16 @@ class AgentSessionBridge:
         session.display_state = "waiting"
         session.last_status_message = "Answer required. Use the question controls in this thread."
         await self.show_or_refresh_session_controls(session, channel)
+
+    async def user_input_stays_native(self, session: AgentSession) -> None:
+        session.status_revision += 1
+        session.display_state = "waiting"
+        session.last_status_message = "Answer required in the native TUI; this prompt cannot use Discord controls."
+        if session.thread_id is not None:
+            await self.post_thread_notice(session.thread_id, session.last_status_message)
+            channel = self.thread_channel(session.thread_id)
+            if isinstance(channel, discord.Thread):
+                await self.show_or_refresh_session_controls(session, channel)
 
     async def user_input_context(
         self,

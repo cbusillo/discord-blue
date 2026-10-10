@@ -107,6 +107,6 @@ async def edit_agent_session_message(message: discord.Message, *, content: str) 
 
 
 def message_uses_components_v2(message: discord.Message) -> bool:
-    return bool(getattr(getattr(message, "flags", None), "is_components_v2", False)) or any(
+    return bool(getattr(getattr(message, "flags", None), "components_v2", False)) or any(
         isinstance(component, discord.Container) for component in getattr(message, "components", [])
     )

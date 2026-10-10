@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any, cast
 
 import discord
+from discord_blue.doodads.agent_session.messages import edit_agent_session_message
 
 from discord_blue.doodads.agent_session.bridge import MAX_INPUT_QUESTIONS, RequestUserInputAnswerModal, RequestUserInputSelect
 from discord_blue.doodads.agent_session.protocol import (
@@ -52,6 +54,8 @@ class QuestionCardTests(unittest.IsolatedAsyncioTestCase):
         question = self.question()
         question.options = [RequestUserInputQuestionOption(prefix + suffix, "") for suffix in ("one", "two")]
         view = await self.post([question])
+        self.assertIn(prefix + "one", visible_view_text(view))
+        self.assertIn(prefix + "two", visible_view_text(view))
         select = next(item for item in view.walk_children() if isinstance(item, RequestUserInputSelect))
         # Simulate the Discord selection update, then call the actual callback.
         select._refresh_state(cast(Any, FakeInteraction(self.fixture.thread)), cast(Any, {"values": [select.options[1].value]}))
@@ -100,4 +104,47 @@ class QuestionCardTests(unittest.IsolatedAsyncioTestCase):
     async def test_oversized_prompt_stays_native_instead_of_hiding_questions(self) -> None:
         await self.post([self.question(str(index)) for index in range(MAX_INPUT_QUESTIONS + 1)])
         self.assertEqual(self.fixture.session.pending_user_inputs, {})
-        self.assertIn("native TUI", self.fixture.thread.sent_messages[-1])
+        self.assertEqual(self.fixture.session.display_state, "waiting")
+        self.assertTrue(any("native TUI" in visible_view_text(view) for view in self.fixture.thread.sent_views))
+
+    async def test_full_question_and_long_option_description_remain_visible(self) -> None:
+        question = self.question()
+        question.question = "Read this complete context. " * 20 + "Then choose a mode."
+        question.options[0].description = "Important choice context. " * 6
+        view = await self.post([question])
+        self.assertIn(question.question, visible_view_text(view))
+        self.assertIn(question.options[0].description, visible_view_text(view))
+
+    async def test_full_text_over_budget_stays_native(self) -> None:
+        question = self.question()
+        question.question = "Long context " * 400
+        await self.post([question])
+        self.assertEqual(self.fixture.session.pending_user_inputs, {})
+        self.assertEqual(self.fixture.session.display_state, "waiting")
+
+    async def test_secret_options_are_visible_but_answer_is_hidden(self) -> None:
+        question = replace(self.question(), is_secret=True)
+        view = await self.post([question])
+        self.assertIn("Fast", visible_view_text(view))
+        self.assertIn("Safe", visible_view_text(view))
+        cast(Any, view).set_answer(question.id, "Private custom answer")
+        self.assertNotIn("Private custom answer", visible_view_text(view))
+
+    async def test_duplicate_labels_mark_only_one_option_selected(self) -> None:
+        question = self.question()
+        question.options[1].label = question.options[0].label
+        view = await self.post([question])
+        cast(Any, view).set_answer(question.id, question.options[0].label)
+        select = next(item for item in view.walk_children() if isinstance(item, RequestUserInputSelect))
+        self.assertEqual(sum(option.default for option in select.options), 1)
+
+    async def test_v2_flag_keeps_a_message_without_components_valid_when_retired(self) -> None:
+        from tests.fakes_agent_session import FakeReplyMessage
+
+        message = FakeReplyMessage(99, self.fixture.thread)
+        flagged = cast(Any, message)
+        flagged.flags = SimpleNamespace(components_v2=True)
+        del flagged.components
+        await edit_agent_session_message(flagged, content="Resolved")
+        self.assertEqual(message.content, "")
+        self.assertEqual(visible_view_text(message.view), "Resolved")

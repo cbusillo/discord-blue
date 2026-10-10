@@ -15,7 +15,7 @@ STATUS_CARD_COMPONENT_ID = 213
 
 def notice_card(content: str) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=None)
-    view.add_item(discord.ui.Container(discord.ui.TextDisplay(strip_assistant_markers(content)), accent_color=0xF0B232))
+    view.add_item(discord.ui.Container(discord.ui.TextDisplay(strip_assistant_markers(content)), accent_color=0x4D4E56))
     return view
 
 
