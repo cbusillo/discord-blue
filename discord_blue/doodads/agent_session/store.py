@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import tempfile
+import time
 import weakref
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -87,6 +88,23 @@ class SessionStore:
         self._writer: asyncio.Task[None] | None = None
         self._closing = False
         self._lifecycle = asyncio.Lock()
+        self._queued_snapshot: dict[str, StoredSession] | None = None
+        self._writing_since: float | None = None
+
+    def unhealthy(self, stall_seconds: float) -> bool:
+        return (
+            self.error is not None
+            or (self._writer is not None and self._writer.done() and not self._closing)
+            or (self._writing_since is not None and time.monotonic() - self._writing_since > stall_seconds)
+        )
+
+    def enqueue_snapshot(self) -> None:
+        if self._queued_snapshot is None:
+            self._queued_snapshot = dict(self.records)
+            self._queue.put_nowait(self._queued_snapshot)
+        else:
+            self._queued_snapshot.clear()
+            self._queued_snapshot.update(self.records)
 
     async def start(self) -> None:
         async with self._lifecycle:
@@ -112,15 +130,15 @@ class SessionStore:
         if self._writer is None or self._closing:
             return  # Bridges served directly by transport tests have no persistent lifecycle.
         self.records[session_id] = record
-        self._queue.put_nowait(dict(self.records))
+        self.enqueue_snapshot()
 
     def forget(self, session_id: str) -> None:
         if self._writer is not None and not self._closing and self.records.pop(session_id, None) is not None:
-            self._queue.put_nowait(dict(self.records))
+            self.enqueue_snapshot()
 
     def retry_failed_write(self) -> None:
         if self.error is not None and self._writer is not None and not self._closing:
-            self._queue.put_nowait(dict(self.records))
+            self.enqueue_snapshot()
 
     async def flush(self) -> None:
         if self._writer is None:
@@ -130,7 +148,10 @@ class SessionStore:
             return
         barrier = asyncio.get_running_loop().create_future()
         self._queue.put_nowait(barrier)
-        await asyncio.shield(barrier)
+        writer = self._writer
+        await asyncio.wait({barrier, writer}, return_when=asyncio.FIRST_COMPLETED)
+        if writer.done():
+            writer.result()
         if self.error is not None:
             raise self.error
 
@@ -140,8 +161,12 @@ class SessionStore:
                 return
             self._closing = True
             self._queue.put_nowait(None)
-            await asyncio.shield(self._writer)
-            self._writer = None
+            try:
+                await asyncio.shield(self._writer)
+            finally:
+                self._writer = None
+                self._queue = asyncio.Queue()
+                self._queued_snapshot = None
 
     async def _write_loop(self) -> None:
         while True:
@@ -157,16 +182,21 @@ class SessionStore:
                     barriers.append(item)
                 else:
                     snapshot = item
+                    if item is self._queued_snapshot:
+                        self._queued_snapshot = None
                 if self._queue.empty():
                     break
                 item = self._queue.get_nowait()
             if snapshot is not None:
+                self._writing_since = time.monotonic()
                 try:
                     await asyncio.to_thread(self._write, snapshot)
                     self.error = None
                 except OSError as exc:
                     self.error = exc
                     logger.exception("Unable to persist Agent session store")
+                finally:
+                    self._writing_since = None
             for barrier in barriers:
                 if not barrier.done():
                     barrier.set_result(None)

@@ -602,7 +602,10 @@ class AgentSessionBridge:
                 + 5
             ),
         )
-        persistence = {"status": "unhealthy" if self.store.error is not None else "ok", "records": len(self.store.records)}
+        persistence = {
+            "status": "unhealthy" if self.store.unhealthy(MAINTENANCE_INTERVAL_SECONDS) else "ok",
+            "records": len(self.store.records),
+        }
         statuses = {heartbeat["status"], maintenance["status"], persistence["status"]}
         if "unhealthy" in statuses or "dead" in statuses:
             status = "dead"
@@ -760,9 +763,11 @@ class AgentSessionBridge:
                     self.save_session(removed, "closed")
                 return True
             except asyncio.CancelledError:
+                self.save_cleanup(fallback_cleanup)
                 self.remember_pending_cleanup(fallback_cleanup)
                 raise
             except Exception:
+                self.save_cleanup(fallback_cleanup)
                 self.remember_pending_cleanup(fallback_cleanup)
                 raise
             finally:
@@ -1360,6 +1365,11 @@ class AgentSessionBridge:
     async def validated_stored_thread(self, session_id: str, record: StoredSession) -> discord.Thread | None:
         try:
             thread = await self.bot.fetch_channel(record.thread_id)
+        except discord.Forbidden:
+            # Definite lost access makes this hint unusable. Discovery already skips forbidden candidates.
+            self.forget_stored_hint(session_id, record)
+            self.discovery.forget(record.thread_id)
+            return None
         except discord.NotFound:
             self.forget_stored_hint(session_id, record)
             self.discovery.forget(record.thread_id)

@@ -22,6 +22,24 @@ from tests.test_session_cleanup_failures import make_bridge
 
 
 class SessionStoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_crashed_writer_is_unhealthy_and_can_be_restarted(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            store = SessionStore(Path(home) / "agent-sessions.json")
+            await store.start()
+            record = StoredSession(123, None, "marker", "live", 0, time.time())
+            with patch.object(store, "_write", side_effect=RuntimeError("executor unavailable")):
+                store.put("session", record)
+                with self.assertRaises(RuntimeError):
+                    await asyncio.wait_for(store.flush(), 1)
+                self.assertTrue(store.unhealthy(bridge_module.MAINTENANCE_INTERVAL_SECONDS))
+                with self.assertRaises(RuntimeError):
+                    await store.close()
+            await store.start()
+            store.put("session", record)
+            await store.flush()
+            self.assertFalse(store.unhealthy(bridge_module.MAINTENANCE_INTERVAL_SECONDS))
+            await store.close()
+
     async def test_reloading_a_bridge_waits_for_its_previous_writer_to_finish(self) -> None:
         with tempfile.TemporaryDirectory() as home:
             path = Path(home) / "agent-sessions.json"
@@ -71,6 +89,7 @@ class SessionStoreTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(store, "_write", new=slow_write):
                 store.put("session", record)
                 await asyncio.wait_for(began.wait(), 2)
+                self.assertTrue(store.unhealthy(0), "a writer exceeding its progress budget was still healthy")
                 store.put("session", replace(record, status="grace", grace_until=time.time() + 300))
                 store.put("session", replace(record, status="closed"))
                 release.set()
@@ -112,6 +131,37 @@ class SessionStoreTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_forbidden_stored_hint_falls_back_to_discovery(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        hello = hello_for("lost-access")
+        old = fake.add_thread("lost-access", marker=marker(hello), members={BOT_ID})
+        with tempfile.TemporaryDirectory() as home:
+            path = Path(home) / "agent-sessions.json"
+            store = SessionStore(path)
+            await store.start()
+            store.put(hello["session_id"], StoredSession(old.id, None, marker(hello), "live", 0, time.time()))
+            await store.close()
+            async with (
+                scenario(fake, store_path=path, listen_host="127.0.0.1", listen_port=0) as running,
+                aiohttp.ClientSession() as http,
+            ):
+                await running.bridge.start()
+
+                def match(ids: dict[str, str]) -> bool:
+                    return int(ids["channel"]) == old.id
+
+                fake.faults.extend(
+                    [
+                        Fault("GET", "/channels/{channel}", times=10, status=403, match=match),
+                        Fault("GET", "/channels/{channel}/messages", times=10, status=403, match=match),
+                    ]
+                )
+                socket = await running.connect(http)
+                await socket.send_json(hello)
+                ack = await socket.receive_json(timeout=5)
+                self.assertNotEqual(ack["thread_id"], old.id)
+                await socket.close()
+
     async def test_a_slow_recovery_read_does_not_block_the_next_record_or_get_cancelled(self) -> None:
         fake = FakeDiscord(latency=0.002)
         first_hello, next_hello = hello_for("slow"), hello_for("ready")

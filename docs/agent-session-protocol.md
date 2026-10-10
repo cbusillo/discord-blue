@@ -125,6 +125,8 @@ after fsync; a reload waits for the previous writer to finish. Records contain
 recovery hints, not approval decisions, credentials, or replayable commands.
 Missing or corrupt state logs a fallback to discovery and is refilled by attaches.
 A write failure appears as an unhealthy store in `/health`.
+So does a crashed writer or a write stalled beyond the maintenance interval.
+Pending snapshots coalesce in memory, including while the volume is stalled.
 Maintenance retries a failed snapshot. Attach and shutdown bound their wait for
 the writer; a write already running finishes without cancellation.
 
@@ -135,6 +137,8 @@ stored deadline. Sweeps and thread workers leave these threads and notifications
 alone. A returning session fetches its thread and checks the parent, bot owner,
 and opening marker before reusing it; a missing notification is recreated.
 A deleted or mismatched hint falls back to the existing discovery rules.
+A hint Discord refuses with Forbidden also falls back; transient read errors
+fail the attach without treating the thread as absent.
 Expired startup records and interrupted closing records pass through the normal
 cleanup workers, with current ownership checked again; closed records are pruned
 after 30 days. Unrecorded threads retain the existing startup bootstrap hold.
