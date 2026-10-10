@@ -30,7 +30,7 @@ async def send_agent_session_message(
     destination: discord.abc.Messageable,
     content: str | None = None,
     *,
-    view: discord.ui.View | None = None,
+    view: discord.ui.View | discord.ui.LayoutView | None = None,
 ) -> discord.Message:
     """Post a bot message that is not an assistant answer; any assistant marker in its text is removed."""
     return await _send(destination, None if content is None else strip_assistant_markers(content), view=view)
@@ -45,8 +45,10 @@ async def _send(
     destination: discord.abc.Messageable,
     content: str | None,
     *,
-    view: discord.ui.View | None,
+    view: discord.ui.View | discord.ui.LayoutView | None,
 ) -> discord.Message:
+    if isinstance(view, discord.ui.LayoutView):
+        return await destination.send(view=view, allowed_mentions=agent_session_allowed_mentions(), silent=True)
     if can_suppress_embeds(destination):
         try:
             if view is None:

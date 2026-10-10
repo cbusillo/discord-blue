@@ -70,6 +70,8 @@ class AgentSession:
     rejected_command_messages: list[RejectedCommandMessage] = field(default_factory=list)
     active_command_id: str | None = None
     last_status_message: str | None = None
+    display_state: Literal["working", "waiting", "done", "failed"] = "waiting"
+    control_card_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     control_status_reaction: str | None = None
     control_interruptions_enabled: bool = False
     pending_control_confirmation: Literal["end_session"] | None = None

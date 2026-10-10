@@ -1874,7 +1874,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             thread.sent_messages,
             [
                 format_user_message("Run the quick path"),
-                WAITING_FOR_DIRECTION,
+                "",  # Components V2 carries visible text in the view.
             ],
         )
         self.assertEqual(session.control_message_id, 902)
@@ -1907,11 +1907,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             thread.sent_messages,
             [
                 mark_assistant_message("Done."),
-                WAITING_FOR_DIRECTION,
+                "",  # Components V2 carries visible text in the view.
             ],
         )
         self.assertIsNone(thread.sent_views[0])
-        self.assertIsNone(thread.sent_views[1])
+        self.assertIsInstance(thread.sent_views[1], bridge_module.discord.ui.LayoutView)
         control_message = await thread.fetch_message(902)
         self.assertEqual(control_message.reactions, ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"])
         self.assertEqual(session.control_message_id, 902)
@@ -2383,7 +2383,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             thread.sent_messages,
             [
                 mark_assistant_message("Done."),
-                WAITING_FOR_DIRECTION,
+                "",  # Components V2 carries visible text in the view.
             ],
         )
         new_control_message = await thread.fetch_message(902)
@@ -3271,7 +3271,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             thread.sent_messages,
             [
                 format_user_message("Run the quick path"),
-                WAITING_FOR_DIRECTION,
+                "",  # Components V2 carries visible text in the view.
             ],
         )
         control_message = await thread.fetch_message(902)
@@ -3322,9 +3322,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             thread.sent_messages,
             [
                 format_user_message("Run the quick path"),
-                WAITING_FOR_DIRECTION,
+                "",  # Components V2 carries visible text in the view.
                 mark_assistant_message("Done."),
-                WAITING_FOR_DIRECTION,
+                "",  # Components V2 carries visible text in the view.
             ],
         )
         control_message = await thread.fetch_message(904)

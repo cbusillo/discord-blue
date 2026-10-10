@@ -23,10 +23,10 @@ from typing import Literal, cast
 import discord
 from aiohttp import WSMsgType, web
 
+from discord_blue.doodads.agent_session.cards import session_status_card
 from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
 from discord_blue.doodads.agent_session.chunks import format_assistant_messages
 from discord_blue.doodads.agent_session.formatting import advance_code_fence
-from discord_blue.doodads.agent_session.formatting import WAITING_FOR_DIRECTION
 from discord_blue.doodads.agent_session.formatting import format_user_message
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
 from discord_blue.doodads.agent_session.messages import edit_agent_session_message
@@ -2706,6 +2706,14 @@ class AgentSessionBridge:
             logger.warning("Agent session status for stale session epoch: %s", status.session_id)
             return
         session.last_status_message = status.message
+        if message_type == "turn_complete":
+            session.display_state = "done"
+        elif message_type == "error" or (status.message or "").lower() == "turn aborted":
+            session.display_state = "failed"
+        elif "waiting" in (status.message or "").lower():
+            session.display_state = "waiting"
+        else:
+            session.display_state = "working"
 
         if message_type == "status_changed":
             status_message = (status.message or "").lower()
@@ -2768,6 +2776,8 @@ class AgentSessionBridge:
             channel,
             self.format_user_message_notice(message)[:DISCORD_MESSAGE_LIMIT],
         )
+        session.display_state = "working"
+        session.last_status_message = "Working on your request."
         await self.spawn_session_controls(
             session,
             reaction=REACTION_IN_PROGRESS,
@@ -2832,6 +2842,8 @@ class AgentSessionBridge:
         thread: discord.Thread,
         reaction: str,
     ) -> None:
+        session.display_state = "working"
+        session.last_status_message = "Your request is queued." if reaction == REACTION_QUEUED else "Working on your request."
         session.control_status_reaction = reaction
         session.control_interruptions_enabled = True
         await self.show_or_refresh_session_controls(session, thread)
@@ -2847,7 +2859,7 @@ class AgentSessionBridge:
                 return
         message = await send_agent_session_message(
             thread,
-            self.format_waiting_for_direction(session),
+            view=session_status_card(session, self.session_control_reactions(session)),
         )
         session.control_message_id = message.id  # Before its reactions, so a tap on the first one counts.
         await self.add_message_reactions(message, self.session_control_reactions(session))
@@ -2906,7 +2918,8 @@ class AgentSessionBridge:
         session.control_status_reaction = None
         session.control_interruptions_enabled = False
         if session.control_message_id is not None:
-            replaced = await self.replace_message_reactions(
+            replaced = await self.refresh_control_card(
+                session,
                 channel,
                 session.control_message_id,
                 self.session_control_reactions(session),
@@ -2917,7 +2930,7 @@ class AgentSessionBridge:
 
         message = await send_agent_session_message(
             channel,
-            self.format_waiting_for_direction(session),
+            view=session_status_card(session, self.session_control_reactions(session)),
         )
         session.control_message_id = message.id  # Before its reactions, so a tap on the first one counts.
         await self.add_message_reactions(
@@ -3037,7 +3050,7 @@ class AgentSessionBridge:
         try:
             message = await send_agent_session_message(
                 channel,
-                self.format_waiting_for_direction(session),
+                view=session_status_card(session, self.session_control_reactions(session)),
             )
         except discord.DiscordException:
             session.pending_control_confirmation = old_pending_control_confirmation
@@ -3510,10 +3523,6 @@ class AgentSessionBridge:
         return format_user_message(message)
 
     @staticmethod
-    def format_waiting_for_direction(_session: AgentSession) -> str:
-        return WAITING_FOR_DIRECTION
-
-    @staticmethod
     def session_control_reactions(session: AgentSession) -> list[str]:
         if session.pending_control_confirmation is not None and session.hello.supports("end_session"):
             return [REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY]
@@ -3548,6 +3557,33 @@ class AgentSessionBridge:
             if action is None or session.hello.supports(action)
         ]
 
+    async def refresh_control_card(
+        self,
+        session: AgentSession,
+        thread: discord.Thread,
+        message_id: int,
+        reactions: list[str],
+        *,
+        remove_user_reaction: tuple[str, discord.User | discord.Member] | None = None,
+    ) -> bool:
+        async with session.control_card_lock:
+            try:
+                message = await thread.fetch_message(message_id)
+                await message.edit(
+                    content=None,
+                    embeds=[],
+                    view=session_status_card(session, reactions),
+                    allowed_mentions=agent_session_allowed_mentions(),
+                )
+            except discord.NotFound:
+                return False
+            except discord.DiscordException:
+                # Retain a reachable anchor on an edit failure; don't duplicate it.
+                logger.warning("Unable to update Agent session status card %s", message_id)
+                return True
+            await self.write_message_reactions(message, reactions, clear=True, remove_user_reaction=remove_user_reaction)
+            return True
+
     async def refresh_session_controls(
         self,
         session: AgentSession,
@@ -3557,7 +3593,8 @@ class AgentSessionBridge:
     ) -> None:
         if session.control_message_id is None:
             return
-        replaced = await self.replace_message_reactions(
+        replaced = await self.refresh_control_card(
+            session,
             thread,
             session.control_message_id,
             self.session_control_reactions(session),
@@ -3568,7 +3605,7 @@ class AgentSessionBridge:
         session.control_message_id = None
         message = await send_agent_session_message(
             thread,
-            self.format_waiting_for_direction(session),
+            view=session_status_card(session, self.session_control_reactions(session)),
         )
         session.control_message_id = message.id  # Before its reactions, so a tap on the first one counts.
         await self.add_message_reactions(message, self.session_control_reactions(session))
