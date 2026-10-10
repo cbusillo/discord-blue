@@ -111,7 +111,11 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.session.pending_user_inputs, {})
         self.assertEqual(self.session.pending_approvals, {})
-        self.assertTrue(all(view is None for view in self.thread.sent_views))
+        for view in self.thread.sent_views:
+            if view is not None:
+                assert isinstance(view, discord.ui.LayoutView)
+                self.assertFalse(any(isinstance(item, (discord.ui.Select, discord.ui.Button)) for item in view.walk_children()))
+        self.assertEqual(self.session.display_state, "waiting")
         self.assertNotIn("private-command", " ".join(self.thread.sent_messages))
 
     async def test_end_confirmation_is_unreachable_and_stale_confirm_is_gated(self) -> None:

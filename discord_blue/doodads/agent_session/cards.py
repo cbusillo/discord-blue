@@ -8,13 +8,20 @@ import discord
 
 from discord_blue.doodads.agent_session.formatting import strip_assistant_markers
 from discord_blue.doodads.agent_session.sessions import AgentSession
-from discord_blue.doodads.agent_session.threads import session_thread_name
 
 
 STATUS_CARD_COMPONENT_ID = 213
 
 
+def notice_card(content: str) -> discord.ui.LayoutView:
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(discord.ui.TextDisplay(strip_assistant_markers(content)), accent_color=0x4D4E56))
+    return view
+
+
 def session_status_card(session: AgentSession, reactions: list[str]) -> discord.ui.LayoutView:
+    from discord_blue.doodads.agent_session.threads import session_thread_name
+
     state = session.display_state
     labels = {
         "working": ("🔄 Working", 0x758AFF),

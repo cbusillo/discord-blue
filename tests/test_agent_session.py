@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from aiohttp import ClientWebSocketResponse, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
 
+from tests.fakes_agent_session import visible_view_text
 from tests.fakes_agent_session import FakeBot
 from tests.test_session_cleanup_progress import wait_until
 from tests.fakes_agent_session import FakeInteraction
@@ -2837,16 +2838,16 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(len([content for content in thread.sent_messages if content]), 1)
-        self.assertIn("Build mode", thread.sent_messages[0])
-        self.assertIn("Choose a mode", thread.sent_messages[0])
+        self.assertEqual(thread.sent_messages[0], "")
+        self.assertIn("Build mode", visible_view_text(thread.sent_views[0]))
+        self.assertIn("Choose a mode", visible_view_text(thread.sent_views[0]))
         self.assertIsNotNone(thread.sent_views[0])
-        children = list(cast(Any, thread.sent_views[0]).children)
+        children = list(cast(Any, thread.sent_views[0]).walk_children())
         selects = [child for child in children if isinstance(child, bridge_module.discord.ui.Select)]
         buttons = [child for child in children if isinstance(child, bridge_module.discord.ui.Button)]
         self.assertEqual(len(selects), 1)
-        self.assertEqual([option.label for option in selects[0].options], ["Fast", "Safe"])
-        self.assertEqual([button.label for button in buttons], ["Submit", "Cancel"])
+        self.assertEqual([option.label for option in selects[0].options], ["1. Fast", "2. Safe"])
+        self.assertEqual([button.label for button in buttons], ["Send answer", "Cancel"])
         self.assertIn("call-1", session.pending_user_inputs)
 
     async def test_request_user_input_modal_prompt_uses_buttons(self) -> None:
@@ -2888,11 +2889,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        children = list(cast(Any, thread.sent_views[0]).children)
-        self.assertEqual(len(children), 4)
+        children = list(cast(Any, thread.sent_views[0]).walk_children())
         buttons = [child for child in children if isinstance(child, bridge_module.discord.ui.Button)]
-        self.assertEqual([button.label for button in buttons], ["Summary", "Token", "Submit", "Cancel"])
-        self.assertIn("Use the controls below", thread.sent_messages[0])
+        self.assertEqual([button.label for button in buttons], ["Write answer", "Write answer", "Send answer", "Cancel"])
+        self.assertIn("Send answer", visible_view_text(thread.sent_views[0]))
 
     async def test_request_user_input_submit_sends_call_id(self) -> None:
         config = Config()
@@ -2940,7 +2940,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             websocket.sent_json[0]["response"],
             {"answers": {"mode": {"answers": ["Safe"]}}},
         )
-        self.assertIn("Answer sent", interaction.response.edits[0][0])
+        self.assertIn("Answer sent", visible_view_text(interaction.response.edit_kwargs[0]["view"]))
         self.assertNotIn("suppress_embeds", interaction.response.edit_kwargs[0])
 
     async def test_request_user_input_cancel_sends_empty_response(self) -> None:
@@ -2986,7 +2986,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(websocket.sent_json[0]["call_id"], "call-1")
         self.assertEqual(websocket.sent_json[0]["turn_id"], "turn-1")
         self.assertEqual(websocket.sent_json[0]["response"], {"answers": {}})
-        self.assertIn("Answer cancelled", interaction.response.edits[0][0])
+        self.assertIn("Answer cancelled", visible_view_text(interaction.response.edit_kwargs[0]["view"]))
         self.assertNotIn("suppress_embeds", interaction.response.edit_kwargs[0])
 
     async def test_status_changed_preserves_contextual_controls_for_active_reply_command(self) -> None:
