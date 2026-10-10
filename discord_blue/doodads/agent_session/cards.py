@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import discord
 
 from discord_blue.doodads.agent_session.formatting import strip_assistant_markers
 from discord_blue.doodads.agent_session.sessions import AgentSession
 from discord_blue.doodads.agent_session.threads import session_thread_name
+
+
+STATUS_CARD_COMPONENT_ID = 213
 
 
 def session_status_card(session: AgentSession, reactions: list[str]) -> discord.ui.LayoutView:
@@ -45,6 +50,7 @@ def session_status_card(session: AgentSession, reactions: list[str]) -> discord.
     ]
     if actions and not session.pending_control_confirmation:
         children.append(discord.ui.TextDisplay(f"-# Tap a reaction: {actions}"))
+    children.append(discord.ui.TextDisplay(f"-# Updated <t:{int(datetime.now(UTC).timestamp())}:R>"))
     view = discord.ui.LayoutView(timeout=None)
-    view.add_item(discord.ui.Container(*children, accent_color=color))
+    view.add_item(discord.ui.Container(*children, accent_color=color, id=STATUS_CARD_COMPONENT_ID))
     return view

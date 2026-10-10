@@ -23,7 +23,7 @@ from typing import Literal, cast
 import discord
 from aiohttp import WSMsgType, web
 
-from discord_blue.doodads.agent_session.cards import session_status_card
+from discord_blue.doodads.agent_session.cards import STATUS_CARD_COMPONENT_ID, session_status_card
 from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
 from discord_blue.doodads.agent_session.chunks import format_assistant_messages
 from discord_blue.doodads.agent_session.formatting import advance_code_fence
@@ -1953,6 +1953,8 @@ class AgentSessionBridge:
             if queued and not delivered:
                 await self.clear_message_transient_reactions(thread.id, message.id)
                 if self.sessions.get(session.session_id) is session and session.control_status_reaction == REACTION_QUEUED:
+                    session.display_state = "failed"
+                    session.last_status_message = "Reply delivery could not be confirmed. Check the native terminal."
                     await self.post_session_controls(session)
         if error is not None:
             await message.reply(error, mention_author=False)
@@ -1989,6 +1991,7 @@ class AgentSessionBridge:
         )
         if error := await self.dispatch_command(session, command, pending):
             return error
+        await self.show_active_session_controls(session, channel, REACTION_QUEUED)
         return CONTINUE_AUTONOMOUSLY_DELIVERED
 
     async def send_pause_current_turn(
@@ -2022,6 +2025,9 @@ class AgentSessionBridge:
         )
         if error := await self.dispatch_command(session, command, pending):
             return error
+        await self.show_active_session_controls(session, channel, REACTION_QUEUED)
+        session.last_status_message = "Pause requested; waiting for the native session."
+        await self.refresh_session_controls(session, channel)
         return PAUSE_CURRENT_TURN_DELIVERED
 
     async def send_new_session(
@@ -2088,6 +2094,10 @@ class AgentSessionBridge:
         )
         if error := await self.dispatch_command(session, command, pending):
             return error
+        session.display_state = "working"
+        session.last_status_message = "Session end requested; waiting for the native session."
+        session.control_status_reaction = REACTION_QUEUED
+        await self.show_or_refresh_session_controls(session, channel)
         return "Asked the agent session to end this session."
 
     async def handle_go_ahead_interaction(
@@ -2179,6 +2189,8 @@ class AgentSessionBridge:
         if session.active_command_id == command_id:
             session.active_command_id = None
         if command is not None:
+            session.display_state = "failed"
+            session.last_status_message = self.payload_string(payload, "reason", "Request was rejected; check the native terminal.")
             await self.update_command_message_reaction(session, command, REACTION_REJECTED)
             if command.message_id is not None:
                 session.rejected_command_messages.append(
@@ -2187,6 +2199,7 @@ class AgentSessionBridge:
                         message_id=command.message_id,
                     )
                 )
+            await self.post_session_controls(session)
             if command.reject_notice is not None:
                 reason = self.payload_string(payload, "reason", "command was rejected")
                 await self.post_thread_notice(command.thread_id, f"{command.reject_notice}: {reason}")
@@ -2273,6 +2286,10 @@ class AgentSessionBridge:
             message,
             [REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY],
         )
+        session.display_state = "waiting"
+        session.last_status_message = "Approval required. Review the request in this thread."
+        if session.control_message_id is not None:
+            await self.show_or_refresh_session_controls(session, channel)
 
     async def handle_request_user_input(self, request: RemoteRequestUserInput) -> None:
         session = self.sessions.get(request.session_id)
@@ -2314,6 +2331,10 @@ class AgentSessionBridge:
             turn_id=request.turn_id,
             call_id=request.call_id,
         )
+        session.display_state = "waiting"
+        session.last_status_message = "Answer required. Use the question controls in this thread."
+        if session.control_message_id is not None:
+            await self.show_or_refresh_session_controls(session, channel)
 
     async def user_input_context(
         self,
@@ -2708,9 +2729,9 @@ class AgentSessionBridge:
         session.last_status_message = status.message
         if message_type == "turn_complete":
             session.display_state = "done"
-        elif message_type == "error" or (status.message or "").lower() == "turn aborted":
+        elif message_type == "error":
             session.display_state = "failed"
-        elif "waiting" in (status.message or "").lower():
+        elif "waiting" in (status.message or "").lower() or (status.message or "").lower() == "turn aborted":
             session.display_state = "waiting"
         else:
             session.display_state = "working"
@@ -2718,7 +2739,8 @@ class AgentSessionBridge:
         if message_type == "status_changed":
             status_message = (status.message or "").lower()
             if status_message == "turn aborted":
-                reaction = REACTION_REJECTED
+                await self.post_session_controls(session)
+                return
             elif "compact" in status_message:
                 reaction = REACTION_COMPACTING
             else:
@@ -2848,6 +2870,20 @@ class AgentSessionBridge:
         session.control_interruptions_enabled = True
         await self.show_or_refresh_session_controls(session, thread)
 
+    async def previous_status_card(self, thread: discord.Thread) -> int | None:
+        if self.bot.user is None:
+            return None
+        try:
+            async for message in thread.history(limit=50):
+                if message.author.id == self.bot.user.id and any(
+                    isinstance(component, discord.Container) and component.id == STATUS_CARD_COMPONENT_ID
+                    for component in getattr(message, "components", [])
+                ):
+                    return message.id
+        except discord.DiscordException:
+            logger.warning("Unable to recover Agent session status card in %s", thread.id)
+        return None
+
     async def show_or_refresh_session_controls(
         self,
         session: AgentSession,
@@ -2857,12 +2893,11 @@ class AgentSessionBridge:
             await self.refresh_session_controls(session, thread)
             if session.control_message_id is not None:
                 return
-        message = await send_agent_session_message(
-            thread,
-            view=session_status_card(session, self.session_control_reactions(session)),
+        await self.spawn_session_controls(
+            session,
+            reaction=session.control_status_reaction,
+            interruptions_enabled=session.control_interruptions_enabled,
         )
-        session.control_message_id = message.id  # Before its reactions, so a tap on the first one counts.
-        await self.add_message_reactions(message, self.session_control_reactions(session))
 
     async def set_message_reaction(self, thread_id: int, message_id: int, reaction: str) -> None:
         channel = self.thread_channel(thread_id)
@@ -2928,15 +2963,7 @@ class AgentSessionBridge:
                 return
             session.control_message_id = None
 
-        message = await send_agent_session_message(
-            channel,
-            view=session_status_card(session, self.session_control_reactions(session)),
-        )
-        session.control_message_id = message.id  # Before its reactions, so a tap on the first one counts.
-        await self.add_message_reactions(
-            message,
-            self.session_control_reactions(session),
-        )
+        await self.spawn_session_controls(session, reaction=None, interruptions_enabled=False)
 
     async def retire_user_input(self, session: AgentSession, pending: PendingRemoteUserInput, content: str) -> None:
         pending.retired = True
@@ -3039,6 +3066,8 @@ class AgentSessionBridge:
             return False
 
         old_control_message_id = session.control_message_id
+        if old_control_message_id is None:
+            old_control_message_id = await self.previous_status_card(channel)
         old_pending_control_confirmation = session.pending_control_confirmation
         old_control_status_reaction = session.control_status_reaction
         old_control_interruptions_enabled = session.control_interruptions_enabled
@@ -3580,7 +3609,6 @@ class AgentSessionBridge:
             except discord.DiscordException:
                 # Retain a reachable anchor on an edit failure; don't duplicate it.
                 logger.warning("Unable to update Agent session status card %s", message_id)
-                return True
             await self.write_message_reactions(message, reactions, clear=True, remove_user_reaction=remove_user_reaction)
             return True
 
@@ -3687,6 +3715,15 @@ class AgentSessionBridge:
         *,
         remove_user_reaction: tuple[str, discord.User | discord.Member] | None = None,
     ) -> bool:
+        session = self.sessions.get_by_thread(thread.id)
+        if session is not None and session.control_message_id == message_id:
+            return await self.refresh_control_card(
+                session,
+                thread,
+                message_id,
+                reactions,
+                remove_user_reaction=remove_user_reaction,
+            )
         try:
             message = await thread.fetch_message(message_id)
         except discord.DiscordException:

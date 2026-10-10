@@ -303,3 +303,19 @@ class LaunchTests(unittest.TestCase):
         for case, (lines, expected) in cases.items():
             with self.subTest(case):
                 self.assertIs(loaded_as_channel(lines), expected)
+
+
+class PermissionStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tool_completion_after_terminal_approval_returns_status_to_working(self) -> None:
+        async with running_channel() as (claude, discord):
+            await claude.initialize()
+            await discord.next("hello")
+            claude.send({"method": PERMISSION_REQUEST, "params": {"tool_name": "Bash"}})
+            await discord.next("status_changed")
+            await discord.next("notice")
+            await hook(claude, "PostToolUse")
+            resumed = await discord.next("status_changed")
+            self.assertIn("continuing", resumed["message"])
+            await hook(claude, "PostToolUse")  # No notification flood on every tool.
+            await hook(claude, "Stop", last_assistant_message="Finished")
+            self.assertEqual((await discord.next())["type"], "turn_complete")

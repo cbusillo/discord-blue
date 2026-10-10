@@ -71,6 +71,7 @@ class FakeReplyMessage:
         self.channel = channel
         self.content = content
         self.view: object = None
+        self.components: list[discord.Container] = []
         self.author = SimpleNamespace(id=author_id)
         self.reactions: list[str] = []
         self.replies: list[str] = []
@@ -97,6 +98,8 @@ class FakeReplyMessage:
     async def edit(self, content: str | None = None, **kwargs: object) -> None:
         self.content = content or ""
         self.view = kwargs.get("view")
+        if isinstance(self.view, discord.ui.LayoutView):
+            self.components = [discord.Container(data=component, state=None) for component in self.view.to_components()]
         self.edits.append((self.content, self.view is None))
         self.edit_kwargs.append(kwargs)
 
@@ -198,6 +201,8 @@ class FakeThread:
         )
         self.add_message(message)
         message.view = kwargs.get("view")
+        if isinstance(message.view, discord.ui.LayoutView):
+            message.components = [discord.Container(data=component, state=None) for component in message.view.to_components()]
         return message
 
     async def edit(self, **kwargs: object) -> None:

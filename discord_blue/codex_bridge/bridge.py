@@ -170,7 +170,7 @@ class CodexBridge:
             session.on_turn_completed(params.get("turn") or {})
             await session.release()
         elif method == "serverRequest/resolved":
-            session.on_resolved(params.get("requestId"))  # type: ignore[arg-type]
+            session.on_server_request_resolved(params.get("requestId"))  # type: ignore[arg-type]
             await session.release()
 
     async def start_session(self, cwd: str) -> None:

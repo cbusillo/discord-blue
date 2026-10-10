@@ -1741,7 +1741,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             thread.sent_messages,
-            ["Agent session could not go ahead: Auto Drive is already running"],
+            ["", "Agent session could not go ahead: Auto Drive is already running"],
         )
 
     async def test_continue_autonomously_reports_default_reject_reason_for_empty_reason(self) -> None:
@@ -1767,7 +1767,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             thread.sent_messages,
-            ["Agent session could not go ahead: command was rejected"],
+            ["", "Agent session could not go ahead: command was rejected"],
         )
         self.assertNotIn(command_id, session.pending_commands)
 

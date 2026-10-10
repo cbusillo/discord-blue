@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import unittest
-from typing import Any, cast
+from typing import cast
+from types import SimpleNamespace
+from aiohttp import ClientResponse
+from tests.fakes_agent_session import FakeReplyMessage
 from unittest.mock import patch
 
 import discord
 from discord.http import handle_message_parameters
 
+from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.cards import session_status_card
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
 from discord_blue.doodads.agent_session.protocol import SessionStatus, UserMessage
@@ -37,7 +41,9 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         message = await self.thread.fetch_message(cast(int, self.session.control_message_id))
         self.assertEqual(message.content, "")
         self.assertIsInstance(message.view, discord.ui.LayoutView)
-        return cast(discord.ui.LayoutView, message.view)
+        view = message.view
+        assert isinstance(view, discord.ui.LayoutView)
+        return view
 
     async def test_status_transitions_update_one_anchor_for_both_harnesses(self) -> None:
         for harness in ("codex", "claude"):
@@ -81,7 +87,8 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message.content, "")
         view = cast(discord.ui.LayoutView, edit["view"])
         with handle_message_parameters(content=None, embeds=[], view=view) as params:
-            payload = cast(dict[str, Any], params.payload)
+            assert params.payload is not None
+            payload = params.payload
             self.assertIsNone(payload["content"])
             self.assertEqual(payload["embeds"], [])
             self.assertTrue(payload["flags"] & discord.MessageFlags(components_v2=True).value)
@@ -96,7 +103,8 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         mentions = cast(discord.AllowedMentions, kwargs["allowed_mentions"])
         self.assertEqual(mentions.to_dict()["parse"], [])
         with handle_message_parameters(view=await self.current_card(), allowed_mentions=mentions) as params:
-            payload = cast(dict[str, Any], params.payload)
+            assert params.payload is not None
+            payload = params.payload
             self.assertNotIn("content", payload)
             self.assertNotIn("embeds", payload)
             self.assertTrue(payload["flags"] & discord.MessageFlags(components_v2=True).value)
@@ -118,11 +126,78 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
     async def test_edit_failure_keeps_anchor_and_retry_can_refresh(self) -> None:
         await self.bridge.post_session_controls(self.session)
         anchor = self.session.control_message_id
-        message = await self.thread.fetch_message(cast(int, anchor))
-        error = discord.Forbidden(cast(Any, type("Response", (), {"status": 403, "reason": "Forbidden"})()), "denied")
-        with patch.object(message, "edit", side_effect=error):
+        error = discord.Forbidden(cast(ClientResponse, SimpleNamespace(status=403, reason="Forbidden")), "denied")
+        with patch.object(FakeReplyMessage, "edit", side_effect=error):
             await self.status("error", "Try the terminal")
         self.assertEqual(self.session.control_message_id, anchor)
         self.assertEqual(len(self.thread.sent_messages), 1)
         await self.status("error", "Try the terminal")
         self.assertIn("Failed", visible_text(await self.current_card()))
+
+    async def test_pause_is_waiting_and_continue_refreshes_card(self) -> None:
+        await self.status("status_changed", "Turn aborted")
+        card = visible_text(await self.current_card())
+        self.assertIn("Waiting on you", card)
+        self.assertNotIn("Failed", card)
+        await self.bridge.send_continue_autonomously(self.thread, cast(discord.User, SimpleNamespace(id=123)))
+        self.assertIn("queued", visible_text(await self.current_card()))
+        self.assertIn("Working", visible_text(await self.current_card()))
+
+    async def test_edit_failure_still_updates_confirmation_reactions(self) -> None:
+        await self.bridge.post_session_controls(self.session)
+        message = await self.thread.fetch_message(cast(int, self.session.control_message_id))
+        self.session.pending_control_confirmation = "end_session"
+        error = discord.Forbidden(cast(ClientResponse, SimpleNamespace(status=403, reason="Forbidden")), "denied")
+        with patch.object(FakeReplyMessage, "edit", side_effect=error):
+            await self.bridge.refresh_session_controls(self.session, cast(discord.Thread, self.thread))
+        self.assertEqual(message.reactions, [bridge_module.REACTION_APPROVAL_APPROVE, bridge_module.REACTION_APPROVAL_DENY])
+
+    async def test_reconnect_replaces_old_card_without_reactivating_old_controls(self) -> None:
+        await self.status("status_changed", "Turn started")
+        old = await self.thread.fetch_message(cast(int, self.session.control_message_id))
+        self.session.control_message_id = None  # The replacement connection has no in-memory anchor.
+        await self.status("status_changed", "Waiting on a decision in the Codex TUI")
+        self.assertTrue(old.deleted)
+        self.assertNotEqual(self.session.control_message_id, old.id)
+        self.assertIn("Waiting on you", visible_text(await self.current_card()))
+        self.assertFalse(
+            await self.bridge.handle_thread_reaction(
+                cast(discord.Thread, self.thread), old.id, "⏸️", cast(discord.User, SimpleNamespace(id=123))
+            )
+        )
+
+    async def test_foreign_authored_card_is_never_replaced(self) -> None:
+        await self.status("status_changed", "Turn started")
+        old = await self.thread.fetch_message(cast(int, self.session.control_message_id))
+        old.author.id = 123
+        self.session.control_message_id = None
+        await self.status("status_changed", "Turn started")
+        self.assertFalse(old.deleted)
+        self.assertNotEqual(self.session.control_message_id, old.id)
+
+    async def test_rejected_and_undelivered_replies_do_not_look_queued(self) -> None:
+        from tests.fakes_agent_session import FakeWebSocket
+        from discord_blue.doodads.agent_session.sessions import PendingRemoteCommand
+
+        await self.status("turn_complete", "Waiting for direction")
+        self.session.pending_commands["reply"] = PendingRemoteCommand(self.thread.id, 123, "reply")
+        await self.bridge.handle_command_reject(
+            {"session_id": self.session.session_id, "command_id": "reply", "reason": "Session busy"}
+        )
+        text = visible_text(await self.current_card())
+        self.assertIn("Failed", text)
+        self.assertIn("Session busy", text)
+        self.session.acknowledged = True
+        reply = FakeReplyMessage(123, self.thread, "Try again")
+        self.thread.add_message(reply)
+        with patch.object(FakeWebSocket, "send_json", side_effect=OSError("lost socket")):
+            await self.bridge.send_thread_reply(cast(discord.Message, reply))
+        self.assertIn("delivery could not be confirmed", visible_text(await self.current_card()))
+        self.assertNotIn("queued", visible_text(await self.current_card()))
+
+    async def test_question_changes_existing_card_to_waiting(self) -> None:
+        await self.status("status_changed", "Turn started")
+        await self.fixture.prompt()
+        text = visible_text(await self.current_card())
+        self.assertIn("Waiting on you", text)
+        self.assertIn("question controls", text)
