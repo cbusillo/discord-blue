@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import tempfile
 import unittest
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -76,9 +77,11 @@ async def scenario(fake: FakeDiscord, **agent_session: object) -> AsyncIterator[
     config = cast(Config, SimpleNamespace(agent_session=AgentSessionConfig(), discord=DiscordConfig()))
     config.agent_session.token = TOKEN
     config.agent_session.channel_id = PARENT_ID
+    store_path = agent_session.pop("store_path", None)
     for key, value in agent_session.items():
         setattr(config.agent_session, key, value)
     with (
+        tempfile.TemporaryDirectory() as state_home,
         patch.object(bridge_module.discord, "Thread", FakeThread),
         patch.object(bridge_module.discord, "TextChannel", FakeTextChannel),
         scaled_discord_sleeps(0.01),
@@ -88,7 +91,10 @@ async def scenario(fake: FakeDiscord, **agent_session: object) -> AsyncIterator[
         ),
     ):
         async with discord_bot(fake, config) as bot:
-            bridge = bridge_module.AgentSessionBridge(bot)  # type: ignore[arg-type]
+            bridge = bridge_module.AgentSessionBridge(
+                cast(Any, bot),
+                store_path=cast(Path, store_path) if store_path is not None else Path(state_home) / "agent-sessions.json",
+            )
             app = web.Application()
             bridge.register_routes(app)
             # Served as production serves it: aiohttp's TestServer cancels handlers when a client disconnects, which
@@ -100,6 +106,8 @@ async def scenario(fake: FakeDiscord, **agent_session: object) -> AsyncIterator[
             try:
                 yield Scenario(fake, bot, bridge, f"ws://127.0.0.1:{runner.addresses[0][1]}/agent-session/connect")
             finally:
+                if bridge._runner is not None:
+                    await bridge.stop()
                 for grace in list(bridge._grace_tasks):
                     grace.cancel()
                 bridge.threads.stop()

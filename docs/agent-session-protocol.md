@@ -117,6 +117,41 @@ the next sweep, allowing other stale sessions to be cleaned up.
 
 ### Disconnect cleanup and recovery
 
+The bridge persists bound session IDs, thread and notification IDs, the session
+marker, lifecycle state, UTC grace deadlines and remaining cleanup steps in `$HOME/agent-sessions.json`.
+The production container's HOME is its existing `/var/lib/discord-blue` mount.
+One ordered writer per state path coalesces snapshots and replaces them atomically
+after fsync; a reload waits for the previous writer to finish. Records contain
+recovery hints, not approval decisions, credentials, or replayable commands.
+Missing or corrupt state logs a fallback to discovery and is refilled by attaches.
+A write failure appears as an unhealthy store in `/health`.
+So does a crashed writer or a write stalled beyond the maintenance interval.
+Pending snapshots coalesce in memory, including while the volume is stalled.
+Maintenance retries a failed snapshot. Attach and shutdown bound their wait for
+the writer; a write already running finishes without cancellation.
+
+Server shutdown keeps live threads, members and notifications intact and closes
+only their WebSockets. On startup, live, attaching and grace records receive
+at least a fresh disconnect-grace window (five minutes), preserving a longer
+stored deadline. Sweeps and thread workers leave these threads and notifications
+alone. A returning session fetches its thread and checks the parent, bot owner,
+and opening marker before reusing it; a missing notification is recreated.
+A deleted or mismatched hint falls back to the existing discovery rules.
+A hint Discord refuses with Forbidden also falls back; transient read errors
+fail the attach without treating the thread as absent.
+Expired startup records and interrupted closing records pass through the normal
+cleanup workers, with current ownership checked again; closed records are pruned
+after 30 days. Unrecorded threads retain the existing startup bootstrap hold.
+Recovery reads are bounded and failures are isolated per record. Completed close
+steps stay complete across recovery; exhausted cleanup follows the existing retry
+limit instead of repeatedly reopening a thread and posting another end notice.
+
+The first deployment of this version replaces an older server whose shutdown
+still archives threads. The new server refills the store; subsequent replacements
+use it. An older image ignores the file on rollback. Persistence covers bound
+threads; a crash before the binding record is saved still uses discovery and the
+existing creation-token reconciliation.
+
 The connection handler unregisters its session in a finalization path, including
 when a late `hello_ack` or event handler fails. Registry removal checks the actual
 connection object, so an older connection cannot unregister its replacement.

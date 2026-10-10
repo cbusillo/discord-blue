@@ -453,7 +453,7 @@ class ThreadWorkers:
             logger.debug("Agent session Discord request failed: %r", exc)
 
     def stop(self) -> None:
-        """At shutdown: drop wanted reopens and renames; closes still run, since ending sessions is shutdown's job.
+        """At shutdown: drop wanted reopens and renames; previously requested closes still finish.
 
         Nothing is cancelled. The bot, and its HTTP client, can outlive this bridge (a doodad reload), and a request
         cancelled during a global rate limit would leave every later request of that client waiting forever. For the

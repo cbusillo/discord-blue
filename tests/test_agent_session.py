@@ -1493,16 +1493,16 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(runner.cleaned)
         self.assertTrue(websocket.closed)
         self.assertEqual(websocket.close_messages, [b"bridge shutdown"])
-        self.assertTrue(notification.deleted)
-        self.assertTrue(thread.archived)
-        self.assertTrue(thread.locked)
-        self.assertTrue(thread.left)
-        self.assertEqual(thread.removed_user_ids, [111, 222])
+        self.assertFalse(notification.deleted)
+        self.assertFalse(thread.archived)
+        self.assertFalse(thread.locked)
+        self.assertFalse(thread.left)
+        self.assertEqual(thread.removed_user_ids, [])
         self.assertIsNone(bridge.sessions.get("session-1"))
         self.assertIsNone(bridge.sessions.get_by_thread(555))
         self.assertIsNone(bridge._runner)
 
-    async def test_stop_closes_thread_for_already_closed_websocket(self) -> None:
+    async def test_stop_preserves_thread_for_already_closed_websocket(self) -> None:
         config = Config()
         config.agent_session.channel_id = 321
         thread = FakeThread(555, members=[111, 999])
@@ -1532,11 +1532,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await bridge.stop()
 
         self.assertEqual(websocket.close_messages, [])
-        self.assertTrue(notification.deleted)
-        self.assertTrue(thread.archived)
-        self.assertTrue(thread.locked)
-        self.assertTrue(thread.left)
-        self.assertEqual(thread.removed_user_ids, [111])
+        self.assertFalse(notification.deleted)
+        self.assertFalse(thread.archived)
+        self.assertFalse(thread.locked)
+        self.assertFalse(thread.left)
+        self.assertEqual(thread.removed_user_ids, [])
         self.assertIsNone(bridge.sessions.get("session-1"))
         self.assertIsNone(bridge.sessions.get_by_thread(555))
 
@@ -1566,38 +1566,22 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await disconnect_task
 
         self.assertEqual(websocket.close_messages, [b"bridge shutdown"])
-        self.assertTrue(notification.deleted)
-        self.assertTrue(thread.archived)
-        self.assertTrue(thread.locked)
-        self.assertTrue(thread.left)
-        self.assertEqual(thread.removed_user_ids, [111])
+        self.assertFalse(notification.deleted)
+        self.assertFalse(thread.archived)
+        self.assertFalse(thread.locked)
+        self.assertFalse(thread.left)
+        self.assertEqual(thread.removed_user_ids, [])
         self.assertIsNone(bridge.sessions.get("session-1"))
         self.assertIsNone(bridge.sessions.get_by_thread(555))
 
-    async def test_disconnect_active_session_bounds_thread_cleanup(self) -> None:
+    async def test_shutdown_does_not_attempt_thread_cleanup(self) -> None:
         config = Config()
         bridge = AgentSessionBridge(FakeBot(config))
-        session = AgentSession(
-            hello=make_hello(),
-            websocket=FakeWebSocket(closed=True),
-            thread_id=555,
-        )
+        session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(closed=True), thread_id=555)
         bridge.sessions.register(session)
-
-        async def slow_close_thread(_session: object, _cleanup: object = None) -> None:
-            await asyncio.sleep(60)
-
-        bridge.close_session_thread = slow_close_thread  # type: ignore[method-assign]
-        bridge_module_any = cast(Any, bridge_module)
-        original_timeout = bridge_module_any.SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS
-        bridge_module_any.SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS = 0.01
-        try:
-            with self.assertLogs(bridge_module.logger, level="WARNING"):
-                async with asyncio.timeout(5):
-                    await bridge.disconnect_active_session("session-1", session)
-        finally:
-            bridge_module_any.SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS = original_timeout
-
+        with patch.object(bridge, "close_session_thread", new=AsyncMock()) as cleanup:
+            await bridge.disconnect_active_session("session-1", session)
+        cleanup.assert_not_awaited()
         self.assertIsNone(bridge.sessions.get("session-1"))
 
     async def test_stop_disconnects_sessions_concurrently(self) -> None:

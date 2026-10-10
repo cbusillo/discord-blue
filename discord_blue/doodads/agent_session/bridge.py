@@ -17,6 +17,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from functools import partial
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Literal, cast
 
 import discord
@@ -56,6 +57,7 @@ from discord_blue.doodads.agent_session.sessions import (
     RejectedCommandMessage,
 )
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
+from discord_blue.doodads.agent_session.store import SessionState, SessionStore, StoredSession
 from discord_blue.doodads.agent_session.thread_worker import THREAD_CLOSE_STEPS
 from discord_blue.doodads.agent_session.thread_worker import RenameTarget, ThreadWorkers
 from discord_blue.doodads.agent_session.threads import SessionThread
@@ -129,6 +131,7 @@ REPLY_BEFORE_RECONNECT = (
 # A connection that drops without a clean session_end (including a failed hello_ack) keeps its thread untouched
 # this long, so a reconnect resumes it without an archive, member changes or notices.
 SESSION_DISCONNECT_GRACE_SECONDS = 300
+SESSION_STORE_WAIT_TIMEOUT_SECONDS = 1
 SESSION_ENDED_NOTICE = "Session ended"
 
 STARTUP_RECONNECT_GRACE_SECONDS = 20
@@ -431,8 +434,10 @@ class RequestUserInputView(discord.ui.View):
 
 
 class AgentSessionBridge:
-    def __init__(self, bot: BlueBot) -> None:
+    def __init__(self, bot: BlueBot, *, store_path: Path | None = None) -> None:
         self.bot = bot
+        # The container sets HOME to its existing durable /var/lib/discord-blue mount.
+        self.store = SessionStore.for_path(store_path if store_path is not None else Path.home() / "agent-sessions.json")
         self.sessions = AgentSessionRegistry()
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -470,6 +475,7 @@ class AgentSessionBridge:
         self._monitor_has_run = False
         self._maintenance_last_progress = self._monitor_started_at
         self._maintenance_has_run = False
+
         self._stopping = False
 
     def session_lifecycle_lock(self, session_id: str) -> asyncio.Lock:
@@ -488,6 +494,27 @@ class AgentSessionBridge:
         self._monitor_has_run = False
         self._maintenance_last_progress = self._monitor_started_at
         self._maintenance_has_run = False
+
+        await self.store.start()
+        now = time.time()
+        for session_id, record in list(self.store.records.items()):
+            if record.status in {"attaching", "live", "grace"}:
+                self.store.put(
+                    session_id,
+                    dataclasses.replace(
+                        record,
+                        status="grace",
+                        grace_until=max(record.grace_until, now + SESSION_DISCONNECT_GRACE_SECONDS),
+                        updated_at=now,
+                    ),
+                )
+            elif record.status == "closed" and now - record.updated_at > timedelta(days=30).total_seconds():
+                self.store.forget(session_id)
+        logger.info(
+            "Loaded %s Agent session recovery records; reconnect grace is %s s",
+            len(self.store.records),
+            SESSION_DISCONNECT_GRACE_SECONDS,
+        )
 
         app = web.Application()
         self.register_routes(app)
@@ -575,18 +602,22 @@ class AgentSessionBridge:
                 + 5
             ),
         )
-        statuses = {heartbeat["status"], maintenance["status"]}
-        if "dead" in statuses:
+        persistence = {
+            "status": "unhealthy" if self.store.unhealthy(MAINTENANCE_INTERVAL_SECONDS) else "ok",
+            "records": len(self.store.records),
+        }
+        statuses = {heartbeat["status"], maintenance["status"], persistence["status"]}
+        if "unhealthy" in statuses or "dead" in statuses:
             status = "dead"
         elif "stalled" in statuses:
             status = "stalled"
-        elif statuses == {"stopped"}:
+        elif self._stopping:
             status = "stopped"
         elif "starting" in statuses:
             status = "starting"
         else:
             status = "ok"
-        return {"status": status, "heartbeat": heartbeat, "maintenance": maintenance}
+        return {"status": status, "heartbeat": heartbeat, "maintenance": maintenance, "store": persistence}
 
     def discord_ready(self) -> bool:
         if self.bot.user is None:
@@ -608,7 +639,7 @@ class AgentSessionBridge:
         self._cleanup_task = None
         await self.stop_background_task("heartbeat", self._heartbeat_task)
         self._heartbeat_task = None
-        # Queued attaches stop at the lock and put back the sessions they replaced, so shutdown ends those too. They
+        # Queued attaches stop at the lock and put back the sessions they replaced, so shutdown saves those too. They
         # are waited for, not cancelled: one may be sending a Discord request.
         if self._attach_tasks:
             await asyncio.wait(list(self._attach_tasks.values()), timeout=SHUTDOWN_ATTACH_SETTLE_SECONDS)
@@ -621,6 +652,10 @@ class AgentSessionBridge:
         finally:
             self._runner = None
             self._site = None
+            try:
+                await self.threads.bounded(self.store.close(), SESSION_STORE_WAIT_TIMEOUT_SECONDS)
+            except TimeoutError:
+                logger.warning("Agent session store is still flushing at shutdown")
 
     @staticmethod
     async def stop_background_task(name: str, task: asyncio.Task[None] | None) -> None:
@@ -635,10 +670,7 @@ class AgentSessionBridge:
         async with self._session_attach_lock:
             sessions = list(self.sessions.by_session.values())
 
-        close_tasks = [
-            asyncio.create_task(self.finalize_session(session, close_message=b"bridge shutdown", shutdown=True))
-            for session in sessions
-        ]
+        close_tasks = [asyncio.create_task(self.disconnect_active_session(session.session_id, session)) for session in sessions]
         results = await asyncio.gather(*close_tasks, return_exceptions=True)
         for session, result in zip(sessions, results, strict=True):
             if isinstance(result, BaseException):
@@ -646,7 +678,44 @@ class AgentSessionBridge:
 
     async def disconnect_active_session(self, session_id: str, session: AgentSession) -> None:
         del session_id
-        await self.finalize_session(session, close_message=b"bridge shutdown", shutdown=True)
+        if session.ended:
+            await self.finalize_session(session, close_message=b"bridge shutdown", shutdown=True)
+            return
+        async with self.session_lifecycle_lock(session.session_id):
+            if self.sessions.get(session.session_id) is not session:
+                return
+            self.save_session(session, "grace", grace_until=time.time() + SESSION_DISCONNECT_GRACE_SECONDS)
+            # Retain ownership until the socket closes: its handler's finally must not finalize this thread.
+            if not session.websocket.closed:
+                await self.close_session_websocket(
+                    session.session_id, session, message=b"bridge shutdown", timeout=SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
+                )
+            self.sessions.remove_if_current(session)
+            logger.info("Kept Agent session %s thread %s open for restart", session.session_id, session.thread_id)
+
+    def save_session(self, session: AgentSession, status: SessionState, *, grace_until: float = 0) -> None:
+        if session.thread_id is not None:
+            self.store.put(
+                session.session_id,
+                StoredSession(
+                    session.thread_id,
+                    session.notification_message_id,
+                    session_start_message(session.hello),
+                    status,
+                    grace_until,
+                    time.time(),
+                ),
+            )
+
+    def stored_thread_protected(self, thread_id: int) -> bool:
+        if self.sessions.get_by_thread(thread_id) is not None:
+            return False  # In-memory ownership already protects it, and its duplicate notices still need cleanup.
+        return any(
+            record.thread_id == thread_id
+            and record.status in {"attaching", "live", "grace"}
+            and (record.status != "grace" or record.grace_until > time.time())
+            for record in self.store.records.values()
+        )
 
     async def finalize_session(
         self,
@@ -664,6 +733,7 @@ class AgentSessionBridge:
                 self._attached_threads.pop(removed.thread_id, None)
 
             fallback_cleanup = self.pending_cleanup_for_session(removed)
+            self.save_session(removed, "closing")
             self._finalizing_cleanups.add(fallback_cleanup.key)
             try:
                 websocket_timeout = SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS if shutdown else SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
@@ -687,12 +757,17 @@ class AgentSessionBridge:
                     )
                     residual = fallback_cleanup
                 if residual is not None:
+                    self.save_cleanup(residual)
                     self.remember_pending_cleanup(residual)
+                else:
+                    self.save_session(removed, "closed")
                 return True
             except asyncio.CancelledError:
+                self.save_cleanup(fallback_cleanup)
                 self.remember_pending_cleanup(fallback_cleanup)
                 raise
             except Exception:
+                self.save_cleanup(fallback_cleanup)
                 self.remember_pending_cleanup(fallback_cleanup)
                 raise
             finally:
@@ -731,6 +806,8 @@ class AgentSessionBridge:
         while True:
             self.record_maintenance_progress()
             try:
+                self.store.retry_failed_write()
+                await self.recover_stored_cleanups()
                 await self.retry_pending_cleanups()
                 await self.retry_creation_checks()
                 if time.monotonic() - self._monitor_started_at >= STARTUP_SWEEP_HOLD_SECONDS:
@@ -834,7 +911,7 @@ class AgentSessionBridge:
             if thread_id is None:
                 await self.delete_discovered_notification(message, None)
                 continue
-            if self.threads.busy(thread_id):
+            if self.threads.busy(thread_id) or self.stored_thread_protected(thread_id):
                 continue
             session = self.sessions.get_by_thread(thread_id)
             if session is None:
@@ -856,6 +933,8 @@ class AgentSessionBridge:
                     # Only adopt if neither the connection nor its notice
                     # changed during discovery. Reconnect always wins.
                     current.notification_message_id = notices[0].id
+                    if record := self.store.records.get(current.session_id):
+                        self.save_session(current, record.status, grace_until=record.grace_until)
             for notice in notices:
                 self.record_maintenance_progress()
                 if self.threads.busy(thread_id):
@@ -866,7 +945,7 @@ class AgentSessionBridge:
                 await self.delete_discovered_notification(notice, thread_id)
 
     async def delete_discovered_notification(self, message: discord.Message, thread_id: int | None) -> None:
-        if self.attaching():
+        if self.attaching() or (thread_id is not None and self.stored_thread_protected(thread_id)):
             # A newly created thread can have a notice before bind_thread runs.
             return
         try:
@@ -911,7 +990,7 @@ class AgentSessionBridge:
             # notice each sweep. Explicit residual work is retried separately.
             if thread.archived and thread.locked:
                 continue
-            if thread.id in self.sessions.by_thread:
+            if thread.id in self.sessions.by_thread or self.stored_thread_protected(thread.id):
                 continue
             try:
                 matches = await self.threads.bounded(self.is_agent_session_session_thread(thread), 3)
@@ -922,6 +1001,7 @@ class AgentSessionBridge:
                 continue
             if (
                 self.threads.busy(thread.id)
+                or self.stored_thread_protected(thread.id)
                 or thread.id in self.sessions.by_thread
                 or self.attaching()
                 or self.has_pending_cleanup_for_thread(thread.id)
@@ -1072,6 +1152,8 @@ class AgentSessionBridge:
                     # Heartbeats start after the ack, so the watchdog's clock starts here too.
                     session.acknowledged = True
                     session.touch()
+                    if self.sessions.get(session.session_id) is session and not self._stopping:
+                        self.save_session(session, "live")
                     # Attached, acknowledged and outside every lock: bring the thread's name up to date in the
                     # background. The thread's worker coalesces and rate-limits; nothing here waits on Discord.
                     self.request_thread_name(session)
@@ -1165,6 +1247,17 @@ class AgentSessionBridge:
                 previous.grace_task.cancel()
             self.sessions.bind_thread(session_id, session_thread.thread.id, session_thread.notification_message_id)
             self._attached_threads[session_thread.thread.id] = session_thread.thread
+            current = self.sessions.get(session_id)
+            if current is not None:
+                self.save_session(current, "attaching")
+                try:
+                    await self.threads.bounded(self.store.flush(), SESSION_STORE_WAIT_TIMEOUT_SECONDS)
+                except TimeoutError:
+                    logger.info("Agent session %s attached while its recovery record is still flushing", session_id)
+                except OSError as exc:
+                    # The health endpoint reports the persistence failure; discovery still permits reconnects.
+                    self.store.error = exc
+                    logger.warning("Agent session %s attached without a durable recovery record", session_id)
             try:
                 await self.backfill_latest_assistant_message(session_thread.thread, hello)
             except Exception:
@@ -1180,6 +1273,9 @@ class AgentSessionBridge:
             with suppress(Exception):
                 await asyncio.wait_for(session.websocket.close(), timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS)
             return
+        if self._stopping and not session.ended:
+            # stop() saves and disconnects it; a server shutdown is not a session_end.
+            return
         if session.ended or session.thread_id is None:
             await self.finalize_session(session)
             return
@@ -1190,6 +1286,7 @@ class AgentSessionBridge:
 
     def start_grace(self, session: AgentSession) -> None:
         if session.grace_task is None:
+            self.save_session(session, "grace", grace_until=time.time() + SESSION_DISCONNECT_GRACE_SECONDS)
             session.grace_task = asyncio.create_task(self.expire_grace(session), name=f"agent-session-grace-{session.session_id}")
             self._grace_tasks.add(session.grace_task)
             session.grace_task.add_done_callback(self._grace_tasks.discard)
@@ -1216,7 +1313,7 @@ class AgentSessionBridge:
         Its connection may be open still (it is live again), closed and in grace (its timer still ends it), closed
         before its drop was handled (its grace starts now), or its grace may have run out while the reconnect waited,
         since the timer stands down for a replacement (it is ended now). During shutdown it is only put back: shutdown
-        ends every registered session once queued attaches have settled.
+        saves every registered session once queued attaches have settled.
         """
         if previous is None or previous.thread_id is None or self.sessions.get(previous.session_id) is not None:
             return
@@ -1261,7 +1358,150 @@ class AgentSessionBridge:
             self.discovery.forget(gone.thread_id)
             return await self.find_or_create_session_thread_once(hello)
 
+    def forget_stored_hint(self, session_id: str, record: StoredSession) -> None:
+        if self.store.records.get(session_id) is record:
+            self.store.forget(session_id)
+
+    async def validated_stored_thread(self, session_id: str, record: StoredSession) -> discord.Thread | None:
+        try:
+            thread = await self.bot.fetch_channel(record.thread_id)
+        except discord.Forbidden:
+            # Definite lost access makes this hint unusable. Discovery already skips forbidden candidates.
+            self.forget_stored_hint(session_id, record)
+            self.discovery.forget(record.thread_id)
+            return None
+        except discord.NotFound:
+            self.forget_stored_hint(session_id, record)
+            self.discovery.forget(record.thread_id)
+            return None
+        # Other Discord failures remain failures, not evidence permitting a duplicate creation.
+        parent_id = self.bot.config.agent_session.channel_id or self.bot.config.discord.bot_channel_id
+        if not isinstance(thread, discord.Thread) or thread.parent_id != parent_id or thread.owner_id != self.bot_user_id():
+            self.forget_stored_hint(session_id, record)
+            return None
+        opening = [
+            message.content
+            async for message in thread.history(limit=10, oldest_first=True)
+            if message.author.id == self.bot_user_id()
+        ]
+        expected = self.session_start_without_pid(record.marker)
+        if expected is None or not any(self.session_start_without_pid(message) == expected for message in opening):
+            self.forget_stored_hint(session_id, record)
+            return None
+        return thread
+
+    async def resume_stored_thread(self, hello: SessionHello) -> SessionThread | None:
+        record = self.store.records.get(hello.session_id)
+        if record is None:
+            return None
+        expected = self.session_start_without_pid(session_start_message(hello))
+        if self.session_start_without_pid(record.marker) != expected:
+            return None  # Retain the stored marker's session identity and metadata; PID changes are tolerated.
+        mapped = self.sessions.by_thread.get(record.thread_id)
+        if mapped is not None and mapped != hello.session_id:
+            return None
+        thread = await self.validated_stored_thread(hello.session_id, record)
+        if thread is None:
+            return None
+        self._attaching_threads[thread.id] += 1
+        try:
+            if thread.archived or thread.locked or self.threads.closing(thread.id) or record.status in {"closing", "closed"}:
+                thread = await self.threads.open(thread)
+            notification_id = record.notification_id
+            try:
+                channel = await get_agent_session_channel(self.bot)
+                if notification_id is not None:
+                    try:
+                        notification = await channel.fetch_message(notification_id)
+                        if (
+                            notification.author.id != self.bot_user_id()
+                            or self.notification_thread_id(notification.content) != thread.id
+                            or self.notification_going(notification_id)
+                        ):
+                            notification_id = None
+                    except discord.NotFound:
+                        notification_id = None
+                if notification_id is None:
+                    notification = await send_agent_session_message(channel, session_notification_message(hello, thread))
+                    notification_id = notification.id
+            except (discord.DiscordException, ValueError):
+                logger.warning("Unable to refresh Agent session notification for thread %s; attaching anyway", thread.id)
+            self.sessions.bind_thread(hello.session_id, thread.id, notification_id)
+            logger.info("Recovered Agent session %s from store in thread %s", hello.session_id, thread.id)
+            return SessionThread(thread=thread, notification_message_id=notification_id)
+        finally:
+            self._attaching_threads[thread.id] -= 1
+            if self._attaching_threads[thread.id] <= 0:
+                del self._attaching_threads[thread.id]
+
+    async def recover_stored_cleanups(self) -> None:
+        """Expire startup grace using the same ownership checks and workers as a disconnected socket."""
+        for session_id, record in list(self.store.records.items()):
+            if record.status != "closing" and not (record.status == "grace" and record.grace_until <= time.time()):
+                continue
+            if any(cleanup.session_id == session_id for cleanup in self._pending_cleanups.values()):
+                continue
+            try:
+                await self.recover_stored_cleanup(session_id, record)
+            except Exception:
+                logger.warning("Unable to recover Agent session cleanup %s; continuing maintenance", session_id, exc_info=True)
+                if self.store.records.get(session_id) is record and self.sessions.get(session_id) is None:
+                    attempts = record.recovery_attempts + 1
+                    self.store.put(
+                        session_id,
+                        dataclasses.replace(
+                            record,
+                            recovery_attempts=attempts,
+                            status="closed" if attempts >= PENDING_CLEANUP_MAX_ATTEMPTS else record.status,
+                            updated_at=time.time(),
+                        ),
+                    )
+
+    async def recover_stored_cleanup(self, session_id: str, record: StoredSession) -> None:
+        lock = self.session_lifecycle_lock(session_id)
+        if lock.locked() or self.attaching() or self.sessions.get(session_id) is not None:
+            return
+        async with lock:
+            if self.store.records.get(session_id) is not record or self.sessions.get(session_id) is not None:
+                return
+            thread = await self.threads.bounded(self.validated_stored_thread(session_id, record), THREAD_LOOKUP_TIMEOUT_SECONDS)
+            if thread is None:
+                return
+            notification_id = record.notification_id
+            if notification_id is not None:
+                try:
+                    channel = await get_agent_session_channel(self.bot)
+                    notification = await self.threads.bounded(
+                        channel.fetch_message(notification_id), SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS
+                    )
+                    if (
+                        notification.author.id != self.bot_user_id()
+                        or self.notification_thread_id(notification.content) != thread.id
+                    ):
+                        notification_id = None
+                except (discord.DiscordException, TimeoutError, ValueError):
+                    notification_id = None  # Notification cleanup remains best-effort; the thread can still close.
+            # A hello can register while the Discord reads run, then wait on this lock. Its newer intent wins.
+            if self.sessions.get(session_id) is not None or self.attaching():
+                return
+            self.store.put(session_id, dataclasses.replace(record, status="closing", updated_at=time.time()))
+            cleanup = PendingSessionCleanup(
+                session_id,
+                "restart",
+                record.thread_id,
+                notification_id,
+                set(record.pending_steps) if record.pending_steps is not None else {"notification", *THREAD_CLOSE_STEPS},
+            )
+            residual = await self.cleanup_session_artifacts(cleanup)
+            if residual is not None:
+                self.save_cleanup(residual)
+                self.remember_pending_cleanup(residual)
+            else:
+                self.store.put(session_id, dataclasses.replace(record, status="closed", updated_at=time.time()))
+
     async def find_or_create_session_thread_once(self, hello: SessionHello) -> SessionThread:
+        if stored := await self.resume_stored_thread(hello):
+            return stored
         thread = await self.find_existing_session_thread(hello)
         if thread is None:
             token = new_creation_token()
@@ -2849,7 +3089,11 @@ class AgentSessionBridge:
     # The thread workers' view of the bridge (ThreadHooks).
 
     def owned(self, thread_id: int) -> bool:
-        return thread_id in self._attaching_threads or self.sessions.get_by_thread(thread_id) is not None
+        return (
+            thread_id in self._attaching_threads
+            or self.sessions.get_by_thread(thread_id) is not None
+            or self.stored_thread_protected(thread_id)
+        )
 
     def rename_target(self, thread_id: int, epoch: str) -> RenameTarget | None:
         """The thread to rename, only while the session epoch that asked still owns it."""
@@ -2893,6 +3137,19 @@ class AgentSessionBridge:
             pending_steps=pending_steps,
         )
 
+    def save_cleanup(self, cleanup: PendingSessionCleanup, *, exhausted: bool = False) -> None:
+        record = self.store.records.get(cleanup.session_id)
+        if record is not None and record.status == "closing" and record.thread_id == cleanup.thread_id:
+            self.store.put(
+                cleanup.session_id,
+                dataclasses.replace(
+                    record,
+                    status="closed" if exhausted or not cleanup.pending_steps else "closing",
+                    pending_steps=tuple(sorted(cleanup.pending_steps)),
+                    updated_at=time.time(),
+                ),
+            )
+
     def remember_pending_cleanup(self, cleanup: PendingSessionCleanup) -> None:
         if not cleanup.pending_steps:
             return
@@ -2907,6 +3164,7 @@ class AgentSessionBridge:
             self._pending_cleanups[cleanup.key] = cleanup
             return
         if len(self._pending_cleanups) >= PENDING_CLEANUP_LIMIT:
+            self.save_cleanup(cleanup, exhausted=True)
             logger.warning(
                 "Dropping Agent session cleanup retry for %s/%s because the %s-record limit was reached; "
                 "periodic orphan reconciliation remains enabled",
@@ -2963,8 +3221,12 @@ class AgentSessionBridge:
                         cleanup.session_epoch,
                     )
                     residual = cleanup
+                self.save_cleanup(cleanup, exhausted=cleanup.attempts >= PENDING_CLEANUP_MAX_ATTEMPTS)
                 if residual is None and self._pending_cleanups.get(key) is cleanup:
                     self._pending_cleanups.pop(key, None)
+                    record = self.store.records.get(cleanup.session_id)
+                    if record is not None and record.status == "closing" and record.thread_id == cleanup.thread_id:
+                        self.store.put(cleanup.session_id, dataclasses.replace(record, status="closed", updated_at=time.time()))
                 elif cleanup.attempts >= PENDING_CLEANUP_MAX_ATTEMPTS:
                     if self._pending_cleanups.get(key) is cleanup:
                         self._pending_cleanups.pop(key, None)

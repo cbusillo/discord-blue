@@ -173,7 +173,7 @@ class AttachTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ack["thread_id"], thread.id)
         self.assertEqual(owner.thread_id if owner is not None else None, thread.id)
 
-    async def test_stopping_with_a_reconnect_queued_still_closes_the_old_sessions_thread(self) -> None:
+    async def test_stopping_with_a_reconnect_queued_keeps_the_old_sessions_thread_open(self) -> None:
         fake = FakeDiscord(latency=0.002)
         hello = hello_for("unlucky")
         thread = fake.add_thread("unlucky", marker=marker(hello), members={BOT_ID})
@@ -193,11 +193,11 @@ class AttachTaskTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.1)
             running.bridge._session_attach_lock.release()
             await asyncio.wait_for(stopping, timeout=15)
-            closed = await until(lambda: thread.archived, timeout=5)
+            closed = thread.archived
 
-        self.assertTrue(closed, "shutdown left the old session's thread open")
+        self.assertFalse(closed, "shutdown archived the old session's thread")
 
-    async def test_stopping_after_a_replaced_connection_drops_still_closes_its_thread(self) -> None:
+    async def test_stopping_after_a_replaced_connection_drops_keeps_its_thread_open(self) -> None:
         fake = FakeDiscord(latency=0.002)
         hello = hello_for("unlucky")
         thread = fake.add_thread("unlucky", marker=marker(hello), members={BOT_ID})
@@ -218,9 +218,9 @@ class AttachTaskTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.1)
             running.bridge._session_attach_lock.release()
             await asyncio.wait_for(stopping, timeout=15)
-            closed = await until(lambda: thread.archived, timeout=5)
+            closed = thread.archived
 
-        self.assertTrue(closed, "shutdown left the replaced connection's thread open")
+        self.assertFalse(closed, "shutdown archived the replaced connection's thread")
 
     async def test_a_replaced_connection_put_back_after_a_failed_attach_keeps_its_grace(self) -> None:
         fake = FakeDiscord(latency=0.002)
