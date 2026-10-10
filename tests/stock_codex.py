@@ -171,7 +171,7 @@ class StockCodex:
         await self.runner.setup()
         site = web.TCPSite(self.runner, "127.0.0.1", 0)
         await site.start()
-        backend = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"  # type: ignore[union-attr]
+        backend = f"http://127.0.0.1:{self.runner.addresses[0][1]}"
         self.work.mkdir()
         (self.home / "token.py").write_text(f"print({token!r})\n")
         (self.home / "config.toml").write_text(

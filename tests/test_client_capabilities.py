@@ -19,18 +19,18 @@ from aiohttp import WSMsgType
 from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.protocol import REMOTE_ACTIONS, RemoteApprovalRequest, RemoteRequestUserInput, SessionHello
 from discord_blue.doodads.agent_session.sessions import PendingRemoteApproval
-from tests.fakes_agent_prompts import prompt_fixture
+from tests.fakes_agent_prompts import PromptFixture, prompt_fixture
 from tests import test_session_cleanup_transport as transport_tests
 from tests.fakes_agent_session import FakeInteraction, FakeReplyMessage, every_user_is_operator
 
 
 class CapabilityTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        self.fixture = self.enterContext(prompt_fixture())
+        self.fixture: PromptFixture = self.enterContext(prompt_fixture())
         self.bridge, self.session = self.fixture.bridge, self.fixture.session
         self.session.acknowledged = True
         self.thread, self.socket = self.fixture.thread, self.fixture.socket
-        self.user = cast(Any, FakeInteraction(self.thread).user)
+        self.user = cast(discord.Member, FakeInteraction(self.thread).user)
 
     def restrict(self, *actions: str) -> None:
         self.session.hello = replace(self.session.hello, capabilities=frozenset(actions))
@@ -81,7 +81,7 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.handle_approval_interaction(
             cast(Any, button), self.session.session_id, "approval", "approved", session_epoch=self.session.session_epoch
         )
-        await self.bridge.handle_approval_reaction(self.session, cast(Any, self.thread), "approval", "✅", self.user)
+        await self.bridge.handle_approval_reaction(self.session, cast(discord.Thread, self.thread), "approval", "✅", self.user)
         self.assertIsNone(self.session.pending_approvals["approval"].decision)
         self.assertEqual(self.socket.sent_json, [])
         self.assertEqual(self.session.pending_commands, {})
@@ -119,10 +119,14 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
         control = FakeReplyMessage(950, self.thread)
         self.thread.add_message(control)
         self.session.control_message_id = control.id
-        await self.bridge.handle_session_control_reaction(self.session, cast(Any, self.thread), control.id, "⏹️", self.user)
+        await self.bridge.handle_session_control_reaction(
+            self.session, cast(discord.Thread, self.thread), control.id, "⏹️", self.user
+        )
         self.assertIsNone(self.session.pending_control_confirmation)
         self.session.pending_control_confirmation = "end_session"
-        await self.bridge.handle_pending_control_confirmation(self.session, cast(Any, self.thread), control.id, "✅", self.user)
+        await self.bridge.handle_pending_control_confirmation(
+            self.session, cast(discord.Thread, self.thread), control.id, "✅", self.user
+        )
         self.assertEqual(self.socket.sent_json, [])
         self.assertEqual(self.session.pending_commands, {})
         self.assertNotIn("⏳", control.reactions)
@@ -222,13 +226,13 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
                     session: AgentSession,
                     thread: discord.Thread,
                     reaction: str,
-                    original: Callable[[AgentSession, discord.Thread, str], Awaitable[None]] = original,
-                    failure_kind: str = failure_kind,
+                    original_call: Callable[[AgentSession, discord.Thread, str], Awaitable[None]] = original,
+                    failure: str = failure_kind,
                 ) -> None:
-                    await original(session, thread, reaction)
-                    if failure_kind == "closed":
+                    await original_call(session, thread, reaction)
+                    if failure == "closed":
                         self.socket.closed = True
-                    elif failure_kind == "discord":
+                    elif failure == "discord":
                         raise OSError("Discord I/O failed")
                     else:
                         raise RuntimeError("unexpected preparation failure")
@@ -299,7 +303,7 @@ class CapabilityTransportTests(unittest.IsolatedAsyncioTestCase):
             await bridge.post_session_controls(attached)
             self.assertEqual(bridge.session_control_reactions(attached), [bridge_module.REACTION_CONTROL_STATUS])
             self.assertIn("offline", cast(str, bridge.dispatch_error(prior, "reply")))
-            response = await bridge.send_continue_autonomously(thread, cast(Any, FakeInteraction(thread).user))
+            response = await bridge.send_continue_autonomously(thread, cast(discord.User, FakeInteraction(thread).user))
             self.assertIn("does not support", response)
             self.assertEqual(attached.pending_commands, {})
             await old.close()

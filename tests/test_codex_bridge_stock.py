@@ -62,7 +62,7 @@ async def native_tui(codex: StockCodex, *, remote: bool) -> AsyncIterator[asynci
 
     def terminal_session() -> None:
         os.setsid()
-        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+        fcntl.ioctl(0, termios.TIOCSCTTY)
 
     process = None
     try:
