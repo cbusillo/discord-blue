@@ -29,6 +29,7 @@ class SupervisorAccountTests(unittest.TestCase):
                 patch.dict(os.environ, {"AGENT_SESSION_TOKEN": "synthetic"}),
                 patch.object(sys, "argv", ["bridge", "--config", str(bridge_config), "--supervisor-config", str(source)]),
                 patch("discord_blue.codex_bridge.__main__.run_bridges", mirror),
+                patch("discord_blue.codex_bridge.__main__.logging.basicConfig"),
             ):
                 main()
             assert mirror.await_args is not None
@@ -88,7 +89,9 @@ class NativeStartupTests(unittest.IsolatedAsyncioTestCase):
             recorder.write_text(
                 f"#!{sys.executable}\n"
                 "import json, os, sys\n"
-                f"with open({str(record)!r}, 'a') as f: f.write(json.dumps([os.environ['CODEX_HOME'], sys.argv[1:]]) + '\\n')\n"
+                f"with open({str(record)!r}, 'a') as f: f.write(json.dumps([os.environ['CODEX_HOME'], sys.argv[1:], "
+                "{k: v for k, v in os.environ.items() if k.startswith(('OPENAI_', 'CODEX_', 'AZURE_OPENAI_', 'AGENT_SESSION_'))}])"
+                " + '\\n')\n"
                 "print('private-provider-data', file=sys.stderr)\n"
                 "sys.exit(9 if os.environ['CODEX_HOME'].endswith('/broken') else 0)\n"
             )
@@ -102,12 +105,26 @@ class NativeStartupTests(unittest.IsolatedAsyncioTestCase):
 
             homes = [base / "broken", base / "healthy"]
             config = BridgeConfig("ws://localhost/agent-session/connect", "fake", Path("/unused.sock"), "test")
-            with patch("discord_blue.codex_bridge.__main__.run_bridge", mirror), self.assertLogs(level="INFO") as logs:
+            with (
+                patch("discord_blue.codex_bridge.__main__.run_bridge", mirror),
+                patch.dict(
+                    os.environ,
+                    {
+                        "CODEX_SQLITE_HOME": str(base / "other-account"),
+                        "OPENAI_API_KEY": "synthetic-other-account",
+                        "CODEX_API_KEY": "synthetic-other-account",
+                        "AZURE_OPENAI_API_KEY": "synthetic-other-account",
+                        "OPENAI_BASE_URL": "https://unintended-provider.invalid",
+                        "AGENT_SESSION_TOKEN": "synthetic-bridge-secret",
+                    },
+                ),
+                self.assertLogs(level="INFO") as logs,
+            ):
                 await run_bridges(config, homes, str(recorder))
             self.assertEqual(mirrored, {socket_for_home(h) for h in homes})
             self.assertCountEqual(
                 [json.loads(line) for line in record.read_text().splitlines()],
-                [[str(h), ["app-server", "daemon", "start"]] for h in homes],
+                [[str(h), ["app-server", "daemon", "start"], {"CODEX_HOME": str(h)}] for h in homes],
             )
             self.assertIn("exit 9", "\n".join(logs.output))
             self.assertNotIn("private-provider-data", "\n".join(logs.output))

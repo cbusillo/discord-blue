@@ -341,6 +341,15 @@ bridge does not repeatedly start daemons. Without a home selection, the
 configured/default socket is preserved: standard account sockets identify a
 home for native start, while custom socket paths only reconnect.
 
+New daemons inherit the bridge's tool PATH, so set launchd's
+`EnvironmentVariables.PATH` to include your installed MCP/tool executables;
+the template includes common macOS locations. The bridge removes its session
+token and inherited `CODEX_*`, `OPENAI_*`, and `AZURE_OPENAI_*` overrides,
+then selects only the target `CODEX_HOME`. Each daemon uses that home's
+credentials/configuration. For intentional provider environment overrides,
+start the daemon separately with that home's intended environment before
+starting the bridge; native start reuses the running daemon unchanged.
+
 These commands are future-launch setup, not a procedure to restart an active
 bridge or convert running embedded sessions. Closing and resuming an existing
 session on a daemon needs coordination with the Director (the person whose

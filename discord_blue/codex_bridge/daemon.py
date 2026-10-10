@@ -5,8 +5,21 @@ import logging
 import os
 from pathlib import Path
 
+from discord_blue.codex_bridge.config import TOKEN_ENV
+
 logger = logging.getLogger(__name__)
 DAEMON_START_TIMEOUT_SECONDS = 60
+
+
+def daemon_environment(home: Path) -> dict[str, str]:
+    # The bridge is a client of each account, not a source of its credentials or provider routing.
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key != TOKEN_ENV and not key.startswith(("CODEX_", "OPENAI_", "AZURE_OPENAI_"))
+    }
+    env["CODEX_HOME"] = str(home)
+    return env
 
 
 async def start_daemon(home: Path, codex_bin: str) -> None:
@@ -18,7 +31,7 @@ async def start_daemon(home: Path, codex_bin: str) -> None:
             "app-server",
             "daemon",
             "start",
-            env={**os.environ, "CODEX_HOME": str(home)},
+            env=daemon_environment(home),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,

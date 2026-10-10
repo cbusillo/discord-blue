@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Template only. Replace REPO_DIR and HOME_DIR, then load it with launchctl yourself. -->
+<!-- Template only. Replace REPO_DIR, HOME_DIR and CODEX_BIN, then load it with launchctl yourself. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -17,6 +17,12 @@
   </array>
   <key>WorkingDirectory</key>
   <string>REPO_DIR</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Native daemons keep this PATH for MCP servers and child tools. Adjust it for your installed tools. -->
+    <key>PATH</key>
+    <string>HOME_DIR/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
