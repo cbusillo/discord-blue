@@ -34,7 +34,10 @@ class PromptFixture:
             ],
         )
         await self.bridge.handle_request_user_input(request)
-        view = cast(bridge_module.RequestUserInputView, self.thread.sent_views[-1])
+        view = cast(
+            bridge_module.RequestUserInputView,
+            next(view for view in reversed(self.thread.sent_views) if isinstance(view, bridge_module.RequestUserInputView)),
+        )
         view.set_answer("answer", "yes")
         return view
 

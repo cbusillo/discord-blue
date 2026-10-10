@@ -303,3 +303,41 @@ class LaunchTests(unittest.TestCase):
         for case, (lines, expected) in cases.items():
             with self.subTest(case):
                 self.assertIs(loaded_as_channel(lines), expected)
+
+
+class PermissionStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_parallel_tool_activity_does_not_claim_the_terminal_approval_is_resolved(self) -> None:
+        async with running_channel() as (claude, discord):
+            await claude.initialize()
+            await discord.next("hello")
+            claude.send({"method": PERMISSION_REQUEST, "params": {"tool_name": "Bash"}})
+            await discord.next("status_changed")
+            await discord.next("notice")
+            await hook(claude, "PostToolUse")
+            resumed = await discord.next("status_changed")
+            self.assertIn("unconfirmed", resumed["message"])
+            await hook(claude, "PostToolUse")  # No notification flood on every tool.
+            await hook(claude, "Stop", last_assistant_message="Finished")
+            self.assertEqual((await discord.next())["type"], "turn_complete")
+
+
+class InterruptedPermissionStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_remote_prompt_clears_an_old_terminal_approval_signal(self) -> None:
+        async with running_channel() as (claude, discord):
+            await claude.initialize()
+            hello = await discord.next("hello")
+            claude.send({"method": PERMISSION_REQUEST, "params": {"tool_name": "Bash"}})
+            await discord.next("status_changed")
+            await discord.next("notice")
+            await discord.control(command(hello, "cmd-next", "reply", text="new turn"))
+            await claude.notification(CHANNEL)
+            await hook(
+                claude,
+                "UserPromptSubmit",
+                prompt='<channel source="plugin:dui:dui" command_id="cmd-next">new turn</channel>',
+            )
+            started = await discord.next("status_changed")
+            self.assertIn("started", started["message"].lower())
+            await hook(claude, "PostToolUse")
+            await hook(claude, "Stop", last_assistant_message="Finished")
+            self.assertEqual((await discord.next())["type"], "turn_complete")
