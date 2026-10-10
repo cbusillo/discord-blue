@@ -7,7 +7,7 @@ import shlex
 import tempfile
 import unittest
 from unittest.mock import patch
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from itertools import pairwise
 from pathlib import Path
@@ -20,7 +20,8 @@ from aiohttp.test_utils import TestServer
 from discord_blue.codex_bridge.__main__ import FAILURE_RESET_SECONDS, codex_home, run_bridge, run_bridges
 from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.config import BridgeConfig, load_config, socket_for_home
-from discord_blue.codex_bridge.session import CAPABILITIES, TURN_DONE, ThreadSession
+from discord_blue.codex_bridge import session as session_module
+from discord_blue.codex_bridge.session import ThreadSession
 from discord_blue.doodads.agent_session.protocol import (
     APPROVAL_COMMAND_DISPLAY_LIMIT,
     REMOTE_ACTIONS,
@@ -42,7 +43,7 @@ def thread(thread_id: str, **fields: object) -> Json:
     return {**base, "status": {"type": "idle"}, **fields}
 
 
-CURRENT_FEATURES = sorted(SERVER_FEATURES)
+CURRENT_FEATURES: tuple[str, ...] = tuple(sorted(SERVER_FEATURES))
 
 
 class FakeRpc:
@@ -94,12 +95,12 @@ class HeldTurnsRpc(FakeRpc):
 
 @asynccontextmanager
 async def running_bridge(
-    rpc: FakeRpc, features: list[str] | None = CURRENT_FEATURES
+    rpc: FakeRpc, features: Sequence[str] | None = CURRENT_FEATURES
 ) -> AsyncIterator[tuple[CodexBridge, FakeDiscordBlue]]:
-    discord = FakeDiscordBlue(features)
+    discord = FakeDiscordBlue(list(features) if features is not None else None)
     app = web.Application()
     app.router.add_get("/agent-session/connect", discord.connect)
-    async with TestServer(app, host="127.0.0.1") as server, aiohttp.ClientSession() as http:
+    async with TestServer(app) as server, aiohttp.ClientSession() as http:
         url = f"ws://127.0.0.1:{server.port}/agent-session/connect"
         config = BridgeConfig(
             server_url=url,
@@ -152,9 +153,9 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
         parsed = SessionHello.from_payload(hellos["root"])
         self.assertEqual(
             (parsed.session_id, parsed.title, parsed.cwd, parsed.branch, parsed.assistant_message, parsed.capabilities),
-            ("root", "Fix the login bug", "/work/project", "fix/login", "Done.", frozenset(CAPABILITIES)),
+            ("root", "Fix the login bug", "/work/project", "fix/login", "Done.", frozenset(session_module.CAPABILITIES)),
         )
-        self.assertLess(frozenset(CAPABILITIES), REMOTE_ACTIONS)
+        self.assertLess(frozenset(session_module.CAPABILITIES), REMOTE_ACTIONS)
 
     async def test_codex_renames_and_substantial_prompts_retitle_the_thread(self) -> None:
         rpc = FakeRpc(thread("root", preview="Continue"))
@@ -331,7 +332,7 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
         rpc = FakeRpc(thread("root"))
         async with running_bridge(rpc) as (bridge, discord):
             await discord.next("hello")
-            for turn_id, status in (("t1", "completed"), ("t2", "interrupted")):
+            for turn_id, turn_status in (("t1", "completed"), ("t2", "interrupted")):
                 await bridge.dispatch({"method": "turn/started", "params": {"threadId": "root", "turn": {"id": turn_id}}})
                 for phase, text in (("commentary", "Looking."), ("final_answer", "Fixed it.")):
                     item = {"type": "agentMessage", "phase": phase, "text": text}
@@ -339,7 +340,7 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
                         {"method": "item/completed", "params": {"threadId": "root", "turnId": turn_id, "item": item}}
                     )
                 await bridge.dispatch(
-                    {"method": "turn/completed", "params": {"threadId": "root", "turn": {"id": turn_id, "status": status}}}
+                    {"method": "turn/completed", "params": {"threadId": "root", "turn": {"id": turn_id, "status": turn_status}}}
                 )
             events = [await discord.next() for _ in range(4)]
 
@@ -347,7 +348,7 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
             [(e["type"], e["message"], e.get("assistant_message")) for e in events],
             [
                 ("status_changed", "Turn started", None),
-                ("turn_complete", TURN_DONE, "Fixed it."),
+                ("turn_complete", session_module.TURN_DONE, "Fixed it."),
                 ("status_changed", "Turn started", None),
                 ("status_changed", "Turn aborted", None),
             ],
@@ -405,7 +406,7 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
             [
                 ("status_changed", "Turn started", None),
                 ("user_message", "typed in the TUI", None),
-                ("turn_complete", TURN_DONE, "Fixed it."),
+                ("turn_complete", session_module.TURN_DONE, "Fixed it."),
             ],
         )
         membership = [name for name, _ in rpc.calls if name in ("thread/resume", "thread/unsubscribe")]
@@ -549,7 +550,8 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConfigTests(unittest.TestCase):
-    def load(self, body: str, token: str | None = "t") -> BridgeConfig:
+    @staticmethod
+    def load(body: str, token: str | None = "t") -> BridgeConfig:
         with tempfile.TemporaryDirectory() as home:
             path = Path(home) / "bridge.toml"
             if token is not None:
@@ -635,9 +637,9 @@ class MultiHomeTests(unittest.IsolatedAsyncioTestCase):
         labels: dict[Path, str] = {}
 
         class FakeBridge:
-            def __init__(self, config: BridgeConfig) -> None:
-                self.path = config.socket_path
-                labels[self.path] = config.host_label
+            def __init__(self, bridge_config: BridgeConfig) -> None:
+                self.path = bridge_config.socket_path
+                labels[self.path] = bridge_config.host_label
 
             async def run(self) -> None:
                 starts[self.path] = starts.get(self.path, 0) + 1
@@ -724,8 +726,8 @@ class MultiHomeTests(unittest.IsolatedAsyncioTestCase):
         used: list[tuple[Path, str]] = []
 
         class FakeBridge:
-            def __init__(self, config: BridgeConfig) -> None:
-                used.append((config.socket_path, config.host_label))
+            def __init__(self, bridge_config: BridgeConfig) -> None:
+                used.append((bridge_config.socket_path, bridge_config.host_label))
 
             async def run(self) -> None:
                 return
@@ -747,8 +749,8 @@ class MultiHomeTests(unittest.IsolatedAsyncioTestCase):
         ready = asyncio.Event()
 
         class FakeBridge:
-            def __init__(self, config: BridgeConfig) -> None:
-                self.path = config.socket_path
+            def __init__(self, bridge_config: BridgeConfig) -> None:
+                self.path = bridge_config.socket_path
 
             async def run(self) -> None:
                 entered.add(self.path)
@@ -779,8 +781,8 @@ class MultiHomeTests(unittest.IsolatedAsyncioTestCase):
         used: list[Path] = []
 
         class FakeBridge:
-            def __init__(self, config: BridgeConfig) -> None:
-                used.append(config.socket_path)
+            def __init__(self, bridge_config: BridgeConfig) -> None:
+                used.append(bridge_config.socket_path)
 
             async def run(self) -> None:
                 return
