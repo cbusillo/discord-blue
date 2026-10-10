@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from collections.abc import AsyncIterator
 from typing import cast
 from unittest.mock import AsyncMock, patch
@@ -45,6 +47,13 @@ class Hooks:
 
 
 class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        patcher = patch.object(bridge_module.Path, "home", return_value=Path(home.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     async def test_a_reopen_asked_for_while_members_are_listed_removes_none_of_them(self) -> None:
         thread = FakeThread(555, members=[111, 222])
         workers = ThreadWorkers(Hooks())

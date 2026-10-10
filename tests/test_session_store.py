@@ -15,7 +15,7 @@ import aiohttp
 
 from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.store import SessionStore, StoredSession
-from tests.fake_discord import BOT_ID, FakeDiscord, Fault
+from tests.fake_discord import BOT_ID, PARENT_ID, FakeDiscord, FakeMessage, Fault
 from tests.test_attach_scenarios import hello_for, marker, scenario, until
 from tests.test_session_grace import CHURN, notices
 
@@ -74,13 +74,161 @@ class SessionStoreTests(unittest.IsolatedAsyncioTestCase):
                 store.put("session", record)
                 with self.assertRaises(OSError):
                     await store.flush()
-            store.put("session", replace(record, status="grace"))
+            store.retry_failed_write()
             await store.flush()
             self.assertIsNone(store.error)
             await store.close()
 
 
 class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_slow_recovery_read_does_not_block_the_next_record_or_get_cancelled(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        first_hello, next_hello = hello_for("slow"), hello_for("ready")
+        first = fake.add_thread("slow", marker=marker(first_hello), members={BOT_ID})
+        second = fake.add_thread("ready", marker=marker(next_hello), members={BOT_ID})
+        with tempfile.TemporaryDirectory() as home:
+            async with scenario(
+                fake, store_path=Path(home) / "agent-sessions.json", listen_host="127.0.0.1", listen_port=0
+            ) as running:
+                await running.bridge.start()
+                for hello, thread in ((first_hello, first), (next_hello, second)):
+                    running.bridge.store.put(
+                        hello["session_id"], StoredSession(thread.id, None, marker(hello), "closing", 0, time.time())
+                    )
+                release, completed = asyncio.Event(), asyncio.Event()
+                cancelled = False
+                original = running.bridge.validated_stored_thread
+
+                async def slow_read(session_id: str, record: StoredSession) -> object:
+                    nonlocal cancelled
+                    if session_id == "slow":
+                        try:
+                            await release.wait()
+                        except asyncio.CancelledError:
+                            cancelled = True
+                            raise
+                        completed.set()
+                    return await original(session_id, record)
+
+                try:
+                    with (
+                        patch.object(running.bridge, "validated_stored_thread", new=slow_read),
+                        patch.object(bridge_module, "THREAD_LOOKUP_TIMEOUT_SECONDS", 0.03),
+                    ):
+                        await asyncio.wait_for(running.bridge.recover_stored_cleanups(), 1)
+                    self.assertTrue(second.archived)
+                    self.assertFalse(cancelled)
+                finally:
+                    release.set()
+                    await asyncio.wait_for(completed.wait(), 1)
+
+    async def test_restart_retries_only_remaining_close_steps(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        hello = hello_for("partly-closed")
+        thread = fake.add_thread("partly-closed", marker=marker(hello), archived=True, locked=True, members={7})
+        thread.messages.append(FakeMessage(next(fake.ids), thread.id, bridge_module.SESSION_ENDED_NOTICE))
+        with tempfile.TemporaryDirectory() as home:
+            path = Path(home) / "agent-sessions.json"
+            store = SessionStore(path)
+            await store.start()
+            store.put(hello["session_id"], StoredSession(thread.id, None, marker(hello), "closing", 0, time.time(), ("members",)))
+            await store.close()
+            async with scenario(fake, store_path=path, listen_host="127.0.0.1", listen_port=0) as running:
+                await running.bridge.start()
+                await running.bridge.recover_stored_cleanups()
+                self.assertEqual(notices(thread), [bridge_module.SESSION_ENDED_NOTICE])
+                self.assertEqual(thread.members, set())
+                self.assertTrue(thread.archived and thread.locked)
+
+    async def test_a_stalled_store_flush_does_not_block_session_acknowledgements(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        hellos = [hello_for("first"), hello_for("next")]
+        for hello in hellos:
+            fake.add_thread(hello["session_id"], marker=marker(hello), members={BOT_ID})
+        with tempfile.TemporaryDirectory() as home:
+            async with (
+                scenario(fake, store_path=Path(home) / "agent-sessions.json", listen_host="127.0.0.1", listen_port=0) as running,
+                aiohttp.ClientSession() as http,
+            ):
+                await running.bridge.start()
+                release = asyncio.Event()
+
+                async def stalled_flush() -> None:
+                    await release.wait()
+
+                sockets = [await running.connect(http) for _ in hellos]
+                try:
+                    with (
+                        patch.object(running.bridge.store, "flush", new=stalled_flush),
+                        patch.object(bridge_module, "SESSION_STORE_WAIT_TIMEOUT_SECONDS", 0.03),
+                    ):
+                        for socket, hello in zip(sockets, hellos, strict=True):
+                            await socket.send_json(hello)
+                        acknowledgements = await asyncio.gather(*(socket.receive_json(timeout=1) for socket in sockets))
+                        self.assertTrue(all(ack["type"] == "hello_ack" for ack in acknowledgements))
+                finally:
+                    release.set()
+                    for socket in sockets:
+                        await socket.close()
+
+    async def test_an_exhausted_cleanup_does_not_reannounce_the_session_end(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        hello = hello_for("refused-member")
+        thread = fake.add_thread("refused-member", marker=marker(hello), members={BOT_ID, 7})
+        with tempfile.TemporaryDirectory() as home:
+            async with scenario(
+                fake, store_path=Path(home) / "agent-sessions.json", listen_host="127.0.0.1", listen_port=0
+            ) as running:
+                await running.bridge.start()
+                running.bridge.store.put(
+                    hello["session_id"], StoredSession(thread.id, None, marker(hello), "closing", 0, time.time())
+                )
+                fake.faults.append(Fault("DELETE", "/channels/{channel}/thread-members/{member}", times=100, status=403))
+                for _ in range(bridge_module.PENDING_CLEANUP_MAX_ATTEMPTS + 2):
+                    await running.bridge.recover_stored_cleanups()
+                    await running.bridge.retry_pending_cleanups()
+                self.assertEqual(notices(thread), [bridge_module.SESSION_ENDED_NOTICE])
+
+    async def test_a_forbidden_stored_thread_does_not_block_another_cleanup(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        bad, good = hello_for("bad"), hello_for("good")
+        first = fake.add_thread("bad", marker=marker(bad), members={BOT_ID})
+        second = fake.add_thread("good", marker=marker(good), members={BOT_ID})
+        with tempfile.TemporaryDirectory() as home:
+            async with scenario(
+                fake, store_path=Path(home) / "agent-sessions.json", listen_host="127.0.0.1", listen_port=0
+            ) as running:
+                await running.bridge.start()
+                for hello, thread in ((bad, first), (good, second)):
+                    running.bridge.store.put(
+                        hello["session_id"], StoredSession(thread.id, None, marker(hello), "closing", 0, time.time())
+                    )
+                fake.faults.append(
+                    Fault("GET", "/channels/{channel}", times=100, status=403, match=lambda ids: int(ids["channel"]) == first.id)
+                )
+                await running.bridge.recover_stored_cleanups()
+                self.assertTrue(second.archived)
+                self.assertFalse(first.archived)
+
+    async def test_duplicate_live_notifications_are_cleaned_with_persistence_enabled(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        hello = hello_for("notices")
+        fake.add_thread("notices", marker=marker(hello), members={BOT_ID})
+        with tempfile.TemporaryDirectory() as home:
+            async with (
+                scenario(fake, store_path=Path(home) / "agent-sessions.json", listen_host="127.0.0.1", listen_port=0) as running,
+                aiohttp.ClientSession() as http,
+            ):
+                await running.bridge.start()
+                socket = await running.connect(http)
+                await socket.send_json(hello)
+                await socket.receive_json(timeout=10)
+                notice = fake.parent_messages[0]
+                fake.parent_messages.append(FakeMessage(next(fake.ids), PARENT_ID, notice.content))
+                await running.bridge.cleanup_stale_session_notifications()
+                self.assertEqual([message.id for message in fake.parent_messages], [notice.id])
+                await socket.close()
+
     async def test_an_expired_hint_cannot_close_an_unrelated_thread(self) -> None:
         fake = FakeDiscord(latency=0.002)
         thread = fake.add_thread("other", marker=marker(hello_for("other")), members={BOT_ID})

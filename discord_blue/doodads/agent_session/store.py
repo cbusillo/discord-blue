@@ -10,7 +10,9 @@ import os
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args, cast
+
+from discord_blue.doodads.agent_session.sessions import CleanupStep
 
 logger = logging.getLogger(__name__)
 SessionState = Literal["attaching", "live", "grace", "closing", "closed"]
@@ -24,6 +26,7 @@ class StoredSession:
     status: SessionState
     grace_until: float
     updated_at: float
+    pending_steps: tuple[CleanupStep, ...] | None = None
 
     @classmethod
     def parse(cls, value: object) -> StoredSession:
@@ -44,7 +47,18 @@ class StoredSession:
             raise ValueError("invalid timestamps")
         if not math.isfinite(grace) or not math.isfinite(updated):
             raise ValueError("non-finite timestamps")
-        return cls(thread, notification, marker, status, float(grace), float(updated))
+        steps = value.get("pending_steps")
+        if steps is not None and (not isinstance(steps, list) or any(step not in get_args(CleanupStep) for step in steps)):
+            raise ValueError("invalid cleanup steps")
+        return cls(
+            thread,
+            notification,
+            marker,
+            status,
+            float(grace),
+            float(updated),
+            cast(tuple[CleanupStep, ...], tuple(steps)) if steps is not None else None,
+        )
 
 
 class SessionStore:
@@ -85,8 +99,15 @@ class SessionStore:
         if self._writer is not None and not self._closing and self.records.pop(session_id, None) is not None:
             self._queue.put_nowait(dict(self.records))
 
+    def retry_failed_write(self) -> None:
+        if self.error is not None and self._writer is not None and not self._closing:
+            self._queue.put_nowait(dict(self.records))
+
     async def flush(self) -> None:
         if self._writer is None:
+            return
+        if self._closing or self._writer.done():
+            await asyncio.shield(self._writer)
             return
         barrier = asyncio.get_running_loop().create_future()
         self._queue.put_nowait(barrier)
@@ -97,8 +118,9 @@ class SessionStore:
     async def close(self) -> None:
         if self._writer is None:
             return
-        self._closing = True
-        self._queue.put_nowait(None)
+        if not self._closing:
+            self._closing = True
+            self._queue.put_nowait(None)
         await asyncio.shield(self._writer)
         self._writer = None
 

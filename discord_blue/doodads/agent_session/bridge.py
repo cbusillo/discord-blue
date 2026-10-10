@@ -131,6 +131,7 @@ REPLY_BEFORE_RECONNECT = (
 # A connection that drops without a clean session_end (including a failed hello_ack) keeps its thread untouched
 # this long, so a reconnect resumes it without an archive, member changes or notices.
 SESSION_DISCONNECT_GRACE_SECONDS = 300
+SESSION_STORE_WAIT_TIMEOUT_SECONDS = 1
 SESSION_ENDED_NOTICE = "Session ended"
 
 STARTUP_RECONNECT_GRACE_SECONDS = 20
@@ -648,7 +649,10 @@ class AgentSessionBridge:
         finally:
             self._runner = None
             self._site = None
-            await self.store.close()
+            try:
+                await self.threads.bounded(self.store.close(), SESSION_STORE_WAIT_TIMEOUT_SECONDS)
+            except TimeoutError:
+                logger.warning("Agent session store is still flushing at shutdown")
 
     @staticmethod
     async def stop_background_task(name: str, task: asyncio.Task[None] | None) -> None:
@@ -701,6 +705,8 @@ class AgentSessionBridge:
             )
 
     def stored_thread_protected(self, thread_id: int) -> bool:
+        if self.sessions.get_by_thread(thread_id) is not None:
+            return False  # In-memory ownership already protects it, and its duplicate notices still need cleanup.
         return any(
             record.thread_id == thread_id
             and record.status in {"attaching", "live", "grace"}
@@ -748,6 +754,7 @@ class AgentSessionBridge:
                     )
                     residual = fallback_cleanup
                 if residual is not None:
+                    self.save_cleanup(residual)
                     self.remember_pending_cleanup(residual)
                 else:
                     self.save_session(removed, "closed")
@@ -794,6 +801,7 @@ class AgentSessionBridge:
         while True:
             self.record_maintenance_progress()
             try:
+                self.store.retry_failed_write()
                 await self.recover_stored_cleanups()
                 await self.retry_pending_cleanups()
                 await self.retry_creation_checks()
@@ -920,6 +928,8 @@ class AgentSessionBridge:
                     # Only adopt if neither the connection nor its notice
                     # changed during discovery. Reconnect always wins.
                     current.notification_message_id = notices[0].id
+                    if record := self.store.records.get(current.session_id):
+                        self.save_session(current, record.status, grace_until=record.grace_until)
             for notice in notices:
                 self.record_maintenance_progress()
                 if self.threads.busy(thread_id):
@@ -1235,9 +1245,10 @@ class AgentSessionBridge:
             if current is not None:
                 self.save_session(current, "attaching")
                 try:
-                    await self.store.flush()
-                except OSError:
+                    await self.threads.bounded(self.store.flush(), SESSION_STORE_WAIT_TIMEOUT_SECONDS)
+                except OSError as exc:
                     # The health endpoint reports the persistence failure; discovery still permits reconnects.
+                    self.store.error = exc
                     logger.warning("Agent session %s attached without a durable recovery record", session_id)
             try:
                 await self.backfill_latest_assistant_message(session_thread.thread, hello)
@@ -1339,17 +1350,21 @@ class AgentSessionBridge:
             self.discovery.forget(gone.thread_id)
             return await self.find_or_create_session_thread_once(hello)
 
+    def forget_stored_hint(self, session_id: str, record: StoredSession) -> None:
+        if self.store.records.get(session_id) is record:
+            self.store.forget(session_id)
+
     async def validated_stored_thread(self, session_id: str, record: StoredSession) -> discord.Thread | None:
         try:
             thread = await self.bot.fetch_channel(record.thread_id)
         except discord.NotFound:
-            self.store.forget(session_id)
+            self.forget_stored_hint(session_id, record)
             self.discovery.forget(record.thread_id)
             return None
         # Other Discord failures remain failures, not evidence permitting a duplicate creation.
         parent_id = self.bot.config.agent_session.channel_id or self.bot.config.discord.bot_channel_id
         if not isinstance(thread, discord.Thread) or thread.parent_id != parent_id or thread.owner_id != self.bot_user_id():
-            self.store.forget(session_id)
+            self.forget_stored_hint(session_id, record)
             return None
         opening = [
             message.content
@@ -1358,7 +1373,7 @@ class AgentSessionBridge:
         ]
         expected = self.session_start_without_pid(record.marker)
         if expected is None or not any(self.session_start_without_pid(message) == expected for message in opening):
-            self.store.forget(session_id)
+            self.forget_stored_hint(session_id, record)
             return None
         return thread
 
@@ -1377,7 +1392,7 @@ class AgentSessionBridge:
             return None
         self._attaching_threads[thread.id] += 1
         try:
-            if thread.archived or thread.locked or self.threads.closing(thread.id):
+            if thread.archived or thread.locked or self.threads.closing(thread.id) or record.status in {"closing", "closed"}:
                 thread = await self.threads.open(thread)
             notification_id = record.notification_id
             channel = await get_agent_session_channel(self.bot)
@@ -1410,40 +1425,53 @@ class AgentSessionBridge:
                 continue
             if any(cleanup.session_id == session_id for cleanup in self._pending_cleanups.values()):
                 continue
-            lock = self.session_lifecycle_lock(session_id)
-            if lock.locked() or self.attaching() or self.sessions.get(session_id) is not None:
-                continue
-            async with lock:
-                if self.store.records.get(session_id) is not record or self.sessions.get(session_id) is not None:
-                    continue
-                thread = await self.validated_stored_thread(session_id, record)
-                if thread is None:
-                    continue
-                notification_id = record.notification_id
-                if notification_id is not None:
-                    channel = await get_agent_session_channel(self.bot)
-                    try:
-                        notification = await channel.fetch_message(notification_id)
-                    except discord.NotFound:
-                        notification_id = None
-                    else:
-                        if (
-                            notification.author.id != self.bot_user_id()
-                            or self.notification_thread_id(notification.content) != thread.id
-                        ):
-                            notification_id = None
-                # A hello can register while the Discord reads run, then wait on this lock. Its newer intent wins.
-                if self.sessions.get(session_id) is not None or self.attaching():
-                    continue
-                self.store.put(session_id, dataclasses.replace(record, status="closing", updated_at=time.time()))
-                cleanup = PendingSessionCleanup(
-                    session_id, "restart", record.thread_id, notification_id, {"notification", *THREAD_CLOSE_STEPS}
-                )
-                residual = await self.cleanup_session_artifacts(cleanup)
-                if residual is not None:
-                    self.remember_pending_cleanup(residual)
+            try:
+                await self.recover_stored_cleanup(session_id, record)
+            except Exception:
+                logger.warning("Unable to recover Agent session cleanup %s; continuing maintenance", session_id, exc_info=True)
+
+    async def recover_stored_cleanup(self, session_id: str, record: StoredSession) -> None:
+        lock = self.session_lifecycle_lock(session_id)
+        if lock.locked() or self.attaching() or self.sessions.get(session_id) is not None:
+            return
+        async with lock:
+            if self.store.records.get(session_id) is not record or self.sessions.get(session_id) is not None:
+                return
+            thread = await self.threads.bounded(self.validated_stored_thread(session_id, record), THREAD_LOOKUP_TIMEOUT_SECONDS)
+            if thread is None:
+                return
+            notification_id = record.notification_id
+            if notification_id is not None:
+                channel = await get_agent_session_channel(self.bot)
+                try:
+                    notification = await self.threads.bounded(
+                        channel.fetch_message(notification_id), SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS
+                    )
+                except discord.NotFound:
+                    notification_id = None
                 else:
-                    self.store.put(session_id, dataclasses.replace(record, status="closed", updated_at=time.time()))
+                    if (
+                        notification.author.id != self.bot_user_id()
+                        or self.notification_thread_id(notification.content) != thread.id
+                    ):
+                        notification_id = None
+            # A hello can register while the Discord reads run, then wait on this lock. Its newer intent wins.
+            if self.sessions.get(session_id) is not None or self.attaching():
+                return
+            self.store.put(session_id, dataclasses.replace(record, status="closing", updated_at=time.time()))
+            cleanup = PendingSessionCleanup(
+                session_id,
+                "restart",
+                record.thread_id,
+                notification_id,
+                set(record.pending_steps) if record.pending_steps is not None else {"notification", *THREAD_CLOSE_STEPS},
+            )
+            residual = await self.cleanup_session_artifacts(cleanup)
+            if residual is not None:
+                self.save_cleanup(residual)
+                self.remember_pending_cleanup(residual)
+            else:
+                self.store.put(session_id, dataclasses.replace(record, status="closed", updated_at=time.time()))
 
     async def find_or_create_session_thread_once(self, hello: SessionHello) -> SessionThread:
         if stored := await self.resume_stored_thread(hello):
@@ -3083,6 +3111,19 @@ class AgentSessionBridge:
             pending_steps=pending_steps,
         )
 
+    def save_cleanup(self, cleanup: PendingSessionCleanup, *, exhausted: bool = False) -> None:
+        record = self.store.records.get(cleanup.session_id)
+        if record is not None and record.status == "closing" and record.thread_id == cleanup.thread_id:
+            self.store.put(
+                cleanup.session_id,
+                dataclasses.replace(
+                    record,
+                    status="closed" if exhausted or not cleanup.pending_steps else "closing",
+                    pending_steps=tuple(sorted(cleanup.pending_steps)),
+                    updated_at=time.time(),
+                ),
+            )
+
     def remember_pending_cleanup(self, cleanup: PendingSessionCleanup) -> None:
         if not cleanup.pending_steps:
             return
@@ -3097,6 +3138,7 @@ class AgentSessionBridge:
             self._pending_cleanups[cleanup.key] = cleanup
             return
         if len(self._pending_cleanups) >= PENDING_CLEANUP_LIMIT:
+            self.save_cleanup(cleanup, exhausted=True)
             logger.warning(
                 "Dropping Agent session cleanup retry for %s/%s because the %s-record limit was reached; "
                 "periodic orphan reconciliation remains enabled",
@@ -3153,6 +3195,7 @@ class AgentSessionBridge:
                         cleanup.session_epoch,
                     )
                     residual = cleanup
+                self.save_cleanup(cleanup, exhausted=cleanup.attempts >= PENDING_CLEANUP_MAX_ATTEMPTS)
                 if residual is None and self._pending_cleanups.get(key) is cleanup:
                     self._pending_cleanups.pop(key, None)
                     record = self.store.records.get(cleanup.session_id)
