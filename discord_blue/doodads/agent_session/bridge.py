@@ -1991,7 +1991,7 @@ class AgentSessionBridge:
         )
         if error := await self.dispatch_command(session, command, pending):
             return error
-        await self.show_active_session_controls(session, channel, REACTION_QUEUED)
+        await self.show_pending_control(session, channel, "Your request is queued.")
         return CONTINUE_AUTONOMOUSLY_DELIVERED
 
     async def send_pause_current_turn(
@@ -2025,9 +2025,7 @@ class AgentSessionBridge:
         )
         if error := await self.dispatch_command(session, command, pending):
             return error
-        await self.show_active_session_controls(session, channel, REACTION_QUEUED)
-        session.last_status_message = "Pause requested; waiting for the native session."
-        await self.refresh_session_controls(session, channel)
+        await self.show_pending_control(session, channel, "Pause requested; waiting for the native session.")
         return PAUSE_CURRENT_TURN_DELIVERED
 
     async def send_new_session(
@@ -2094,10 +2092,7 @@ class AgentSessionBridge:
         )
         if error := await self.dispatch_command(session, command, pending):
             return error
-        session.display_state = "working"
-        session.last_status_message = "Session end requested; waiting for the native session."
-        session.control_status_reaction = REACTION_QUEUED
-        await self.show_or_refresh_session_controls(session, channel)
+        await self.show_pending_control(session, channel, "Session end requested; waiting for the native session.")
         return "Asked the agent session to end this session."
 
     async def handle_go_ahead_interaction(
@@ -2869,6 +2864,16 @@ class AgentSessionBridge:
         session.control_status_reaction = reaction
         session.control_interruptions_enabled = True
         await self.show_or_refresh_session_controls(session, thread)
+
+    async def show_pending_control(self, session: AgentSession, thread: discord.Thread, detail: str) -> None:
+        session.display_state = "working"
+        session.last_status_message = detail
+        session.control_status_reaction = REACTION_QUEUED
+        session.control_interruptions_enabled = False
+        if session.control_message_id is not None:
+            await self.refresh_control_card(session, thread, session.control_message_id, [REACTION_QUEUED])
+        else:
+            await self.show_or_refresh_session_controls(session, thread)
 
     async def previous_status_card(self, thread: discord.Thread) -> int | None:
         if self.bot.user is None:
