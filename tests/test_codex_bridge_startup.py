@@ -16,7 +16,7 @@ from discord_blue.codex_bridge.daemon import start_daemon
 
 
 class SupervisorAccountTests(unittest.TestCase):
-    def test_cli_uses_supervisor_homes_instead_of_the_configured_socket(self) -> None:
+    def test_cli_adds_supervisor_homes_to_the_configured_socket(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             base = Path(root).resolve()
             source, bridge_config = base / "supervisor.toml", base / "bridge.toml"
@@ -34,6 +34,7 @@ class SupervisorAccountTests(unittest.TestCase):
                 main()
             assert mirror.await_args is not None
             self.assertEqual(mirror.await_args.args[1], [base / "account"])
+            self.assertTrue(mirror.await_args.kwargs["include_configured_socket"])
 
     def test_source_changes_add_and_remove_watched_homes_and_aliases_are_deduplicated(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -90,7 +91,8 @@ class NativeStartupTests(unittest.IsolatedAsyncioTestCase):
                 f"#!{sys.executable}\n"
                 "import json, os, sys\n"
                 f"with open({str(record)!r}, 'a') as f: f.write(json.dumps([os.environ['CODEX_HOME'], sys.argv[1:], "
-                "{k: v for k, v in os.environ.items() if k.startswith(('OPENAI_', 'CODEX_', 'AZURE_OPENAI_', 'AGENT_SESSION_'))}])"
+                "{k: v for k, v in os.environ.items() if k.startswith(('OPENAI_', 'CODEX_', 'AZURE_OPENAI_', 'AGENT_SESSION_'))},"
+                "os.environ.get('VIRTUAL_ENV'), os.environ['PATH'], os.getcwd()])"
                 " + '\\n')\n"
                 "print('private-provider-data', file=sys.stderr)\n"
                 "sys.exit(9 if os.environ['CODEX_HOME'].endswith('/broken') else 0)\n"
@@ -116,6 +118,9 @@ class NativeStartupTests(unittest.IsolatedAsyncioTestCase):
                         "AZURE_OPENAI_API_KEY": "synthetic-other-account",
                         "OPENAI_BASE_URL": "https://unintended-provider.invalid",
                         "AGENT_SESSION_TOKEN": "synthetic-bridge-secret",
+                        "HOME": str(base),
+                        "VIRTUAL_ENV": str(base / "bridge-venv"),
+                        "PATH": str(base / "bridge-venv" / "bin") + os.pathsep + "/usr/bin:/bin",
                     },
                 ),
                 self.assertLogs(level="INFO") as logs,
@@ -124,7 +129,10 @@ class NativeStartupTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(mirrored, {socket_for_home(h) for h in homes})
             self.assertCountEqual(
                 [json.loads(line) for line in record.read_text().splitlines()],
-                [[str(h), ["app-server", "daemon", "start"], {"CODEX_HOME": str(h)}] for h in homes],
+                [
+                    [str(h), ["app-server", "daemon", "start"], {"CODEX_HOME": str(h)}, None, "/usr/bin:/bin", str(base)]
+                    for h in homes
+                ],
             )
             self.assertIn("exit 9", "\n".join(logs.output))
             self.assertNotIn("private-provider-data", "\n".join(logs.output))

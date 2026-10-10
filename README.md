@@ -330,6 +330,9 @@ not run the capacity reader or open credential files. Changes to this list
 take effect on the next bridge restart. `--supervisor-config` and
 `--codex-home` are alternative selections; invalid or empty OpenAI mappings
 fail startup rather than silently selecting a default home.
+Supervisor homes are added alongside the bridge's configured/default socket,
+preserving existing standalone sessions. Duplicate sockets connect only once.
+Explicit `--codex-home` selections continue to override the configured socket.
 
 For each selected home, the bridge runs `codex app-server daemon start` once
 before connecting. Native start reuses an already running daemon; it does not
@@ -349,6 +352,12 @@ then selects only the target `CODEX_HOME`. Each daemon uses that home's
 credentials/configuration. For intentional provider environment overrides,
 start the daemon separately with that home's intended environment before
 starting the bridge; native start reuses the running daemon unchanged.
+The bridge also removes `VIRTUAL_ENV` and its tool directory from PATH and
+starts the command from the stable user home, so a daemon does not inherit
+the bridge's Python environment or hold a task worktree open.
+Other environment variables come from the bridge's launcher for the daemon's
+lifetime. Put any tool or MCP environment it needs in the login item's
+`EnvironmentVariables`; launchd does not load your terminal's shell profile.
 
 These commands are future-launch setup, not a procedure to restart an active
 bridge or convert running embedded sessions. Closing and resuming an existing

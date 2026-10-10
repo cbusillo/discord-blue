@@ -52,9 +52,14 @@ async def run_home(config: BridgeConfig, home: Path | None, codex_bin: str) -> N
     await run_bridge(config)
 
 
-async def run_bridges(config: BridgeConfig, homes: list[Path], codex_bin: str = "codex") -> None:
+async def run_bridges(
+    config: BridgeConfig, homes: list[Path], codex_bin: str = "codex", *, include_configured_socket: bool = False
+) -> None:
     # A connection failure is retried by its own bridge, without detaching other homes.
-    sockets = list(dict.fromkeys(socket_for_home(home.expanduser().resolve()) for home in homes)) if homes else [config.socket_path]
+    sockets = [socket_for_home(home.expanduser().resolve()) for home in homes]
+    if not sockets or include_configured_socket:
+        sockets.append(config.socket_path.expanduser().resolve() if include_configured_socket else config.socket_path)
+    sockets = list(dict.fromkeys(sockets))
     async with asyncio.TaskGroup() as group:
         for path in sockets:
             # Explicit custom sockets remain supported, but cannot identify a native daemon home.
@@ -87,7 +92,7 @@ def main() -> None:
         print(f"codex bridge config error: {exc}", file=sys.stderr)
         sys.exit(2)
     with suppress(KeyboardInterrupt):
-        asyncio.run(run_bridges(config, homes, args.codex_bin))
+        asyncio.run(run_bridges(config, homes, args.codex_bin, include_configured_socket=args.supervisor_config is not None))
 
 
 if __name__ == "__main__":

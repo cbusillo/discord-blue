@@ -798,3 +798,16 @@ class MultiHomeTests(unittest.IsolatedAsyncioTestCase):
             await run_bridges(config, [])
         self.assertEqual(used, [config.socket_path])
         self.daemon.assert_not_awaited()
+
+    async def test_supervisor_homes_preserve_the_configured_connection_without_duplicate_mirrors(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root).resolve()
+            primary, account = home / "primary", home / "account"
+            config = BridgeConfig("ws://localhost/agent-session/connect", TOKEN, socket_for_home(primary), "test")
+            mirror = AsyncMock()
+            with patch("discord_blue.codex_bridge.__main__.run_bridge", mirror):
+                await run_bridges(config, [account, primary], include_configured_socket=True)
+            self.assertCountEqual(
+                [call.args[0].socket_path for call in mirror.await_args_list], [socket_for_home(primary), socket_for_home(account)]
+            )
+            self.assertEqual(self.daemon.await_count, 2)

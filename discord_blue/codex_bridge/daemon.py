@@ -16,8 +16,11 @@ def daemon_environment(home: Path) -> dict[str, str]:
     env = {
         key: value
         for key, value in os.environ.items()
-        if key != TOKEN_ENV and not key.startswith(("CODEX_", "OPENAI_", "AZURE_OPENAI_"))
+        if key not in (TOKEN_ENV, "VIRTUAL_ENV") and not key.startswith(("CODEX_", "OPENAI_", "AZURE_OPENAI_"))
     }
+    if virtual_env := os.environ.get("VIRTUAL_ENV"):
+        directories = {str(Path(virtual_env) / directory) for directory in ("bin", "Scripts")}
+        env["PATH"] = os.pathsep.join(entry for entry in env.get("PATH", "").split(os.pathsep) if entry not in directories)
     env["CODEX_HOME"] = str(home)
     return env
 
@@ -32,6 +35,8 @@ async def start_daemon(home: Path, codex_bin: str) -> None:
             "daemon",
             "start",
             env=daemon_environment(home),
+            # Managed children can retain their launch cwd; never pin a task worktree or removable build volume.
+            cwd=Path.home(),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
