@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Template only. Replace REPO_DIR and HOME_DIR, then load it with launchctl yourself. -->
+<!-- Template only. Replace REPO_DIR, HOME_DIR and CODEX_BIN, then load it with launchctl yourself. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -10,12 +10,19 @@
     <string>REPO_DIR/.venv/bin/discord-blue-codex-bridge</string>
     <string>--config</string>
     <string>HOME_DIR/.config/discord-blue/codex-bridge.toml</string>
-    <!-- For multiple homes, append the codex-home option/home argument pairs
-         described in README here at the next planned launch. Do not start
-         a second bridge against the same daemon. -->
+    <string>--supervisor-config</string>
+    <string>HOME_DIR/.code/skill-data/supervisor.toml</string>
+    <string>--codex-bin</string>
+    <string>CODEX_BIN</string>
   </array>
   <key>WorkingDirectory</key>
   <string>REPO_DIR</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Native daemons keep this PATH for MCP servers and child tools. Adjust it for your installed tools. -->
+    <key>PATH</key>
+    <string>HOME_DIR/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
