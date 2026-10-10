@@ -129,6 +129,7 @@ class ThreadSession(AgentSessionClient):
         self.owned = owned
         self.file_items: dict[tuple[str, str], Json] = {}
         self.approval_responses: dict[RequestId, Json] = {}
+        self.local_decisions: set[RequestId] = set()
         self.thread_id: str = thread["id"]
         self.cwd = str(thread.get("cwd") or "")
         self.branch = (thread.get("gitInfo") or {}).get("branch")
@@ -220,6 +221,7 @@ class ThreadSession(AgentSessionClient):
         for request_id, prompt in list(self.prompts.items()):
             if prompt["turn_id"] == turn_id:
                 self.on_resolved(request_id)
+        self.local_decisions.clear()
         status = turn.get("status")
         if status == "completed":
             self.publish("turn_complete", message=TURN_DONE, assistant_message=final_answer(parts))
@@ -298,7 +300,7 @@ class ThreadSession(AgentSessionClient):
             item = self.file_items.get((turn_id, str(params.get("itemId"))))
             snapshot = content_snapshot(method, params, item, self.cwd)
             if snapshot is None or (self.server_features is not None and "approval_content" not in self.server_features):
-                self.publish("status_changed", message="Waiting on a decision in the Codex TUI")
+                self.wait_locally(request_id)
                 return
             label, text, response = snapshot
             # Every prompt has its own opaque ID, even when stock reuses an item ID.
@@ -323,7 +325,7 @@ class ThreadSession(AgentSessionClient):
         else:
             # Elicitation, unsupported scope and undisplayable requests stay local.
             if method in LOCAL_DECISIONS or method == COMMAND_APPROVAL:
-                self.publish("status_changed", message="Waiting on a decision in the Codex TUI")
+                self.wait_locally(request_id)
             return
         self.enqueue(self.prompts[request_id])
 
@@ -332,7 +334,7 @@ class ThreadSession(AgentSessionClient):
             for request_id, prompt in list(self.prompts.items()):
                 if prompt.get("content_text") is not None:
                     self.on_resolved(request_id)
-                    self.publish("status_changed", message="Waiting on a decision in the Codex TUI")
+                    self.wait_locally(request_id)
         if self.server_features is not None and "command_text" not in self.server_features:
             self.keep_approvals_local()
 
@@ -342,9 +344,20 @@ class ThreadSession(AgentSessionClient):
             if prompt["type"] == "approval_request":
                 del self.prompts[request_id]
                 self.approvals.pop(str(prompt["approval_id"]), None)
-                self.publish("status_changed", message="Waiting on a decision in the Codex TUI")
+                self.wait_locally(request_id)
+
+    def wait_locally(self, request_id: RequestId) -> None:
+        self.local_decisions.add(request_id)
+        self.publish("status_changed", message="Waiting on a decision in the Codex TUI")
+
+    def on_server_request_resolved(self, request_id: RequestId) -> None:
+        known = request_id in self.local_decisions or request_id in self.prompts
+        self.on_resolved(request_id)
+        if known and not self.local_decisions and not self.prompts:
+            self.publish("status_changed", message="Decision resolved; continuing the turn.")
 
     def on_resolved(self, request_id: RequestId) -> None:
+        self.local_decisions.discard(request_id)
         prompt = self.prompts.pop(request_id, None)
         if prompt is None:
             return

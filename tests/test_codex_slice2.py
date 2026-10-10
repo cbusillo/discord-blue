@@ -262,3 +262,21 @@ class SliceTwoTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("new-thread", result["reason"])
             self.assertNotIn("new-thread", bridge.owned_threads)
             self.assertIn({"threadId": "new-thread"}, rpc.called("thread/unsubscribe"))
+
+
+class LocalDecisionStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_decision_resolution_publishes_resumed_status(self) -> None:
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            session = bridge.sessions["root"]
+            session.on_request(
+                10, "item/commandExecution/requestApproval", {"threadId": "root", "turnId": "t", "itemId": "item", "command": None}
+            )
+            waiting = await discord.next("status_changed")
+            self.assertIn("Waiting", waiting["message"])
+            session.on_server_request_resolved(99)  # An unrelated resolution cannot clear the wait.
+            session.on_server_request_resolved(10)
+            resumed = await discord.next("status_changed")
+            self.assertIn("continuing", resumed["message"])
+            self.assertEqual(session.local_decisions, set())

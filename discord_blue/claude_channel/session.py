@@ -129,6 +129,7 @@ class ClaudeSession(AgentSessionClient):
         # Discord replies held while a turn runs: Claude Code queues channel messages and would deliver
         # them even after /clear or /resume switched conversations.
         self.turn_running = False
+        self.waiting_locally = False
         self.held: list[tuple[str, str]] = []
         # Replies this server injected; their prompts are already in Discord.
         self.injected: deque[str] = deque(maxlen=64)
@@ -152,6 +153,7 @@ class ClaudeSession(AgentSessionClient):
     async def on_permission_request(self, params: Json) -> None:
         # Never answered from here: the terminal dialog is the only place to approve or deny. Nothing else
         # from the request reaches Discord: Claude Code leaves some secrets in its preview unmasked.
+        self.waiting_locally = True
         self.publish("status_changed", message=waiting_message(params))
         # The thread also gets it as a message, since a status only changes the reaction.
         self.publish("notice", message=waiting_message(params))
@@ -180,6 +182,11 @@ class ClaudeSession(AgentSessionClient):
                 await self.switch_conversation(conversation)
         if event in RUNNING_EVENTS:
             self.turn_running = True
+            if self.waiting_locally:
+                self.waiting_locally = False
+                self.publish(
+                    "status_changed", message="Approval status unconfirmed; tools are active. Check the Claude Code terminal."
+                )
         if event == "UserPromptSubmit":
             prompt = fields.get("prompt", "")
             echo = prompt.lstrip().startswith("<channel") and any(f'command_id="{c}"' in prompt for c in self.injected)
@@ -189,6 +196,7 @@ class ClaudeSession(AgentSessionClient):
             if typed is not None and typed.strip():
                 self.publish("user_message", message=clip(typed))
         elif event == "Stop":
+            self.waiting_locally = False
             self.publish(
                 "turn_complete", message=TURN_DONE, assistant_message=clip(fields.get("last_assistant_message", "")) or None
             )
@@ -196,6 +204,7 @@ class ClaudeSession(AgentSessionClient):
             await self.retitle(fields)
             # Not idle yet: another plugin's Stop hook may still keep Claude working.
         elif event == "StopFailure":
+            self.waiting_locally = False
             self.publish("error", message="Claude Code ended the turn with an error; check the terminal.")
         elif event == "Notification":
             # idle_prompt: Claude Code has been waiting for input for about a minute, the only confirmed idle signal.
@@ -205,6 +214,7 @@ class ClaudeSession(AgentSessionClient):
 
     async def switch_conversation(self, conversation: str | None) -> None:
         """Start a new epoch so Discord controls meant for the previous conversation are rejected."""
+        self.waiting_locally = False
         self.epoch = uuid.uuid4().hex
         self.commands.clear()
         self.prompts.clear()

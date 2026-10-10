@@ -460,3 +460,24 @@ artwork: paired conversation bubbles and terminal chevrons. It is designed for
 Discord's circular avatar crop and checked at 32, 40 and 128 pixels.
 It is not applied to the bot or server. Session thread names use standard emoji:
 Claude uses the orange eight-pointed star (✴️), and Codex uses the blue diamond (🔷).
+
+## Session status cards
+
+Codex and Claude session threads use the same Components V2 status card:
+**Working**, **Waiting on you**, **Done**, or **Failed**. The card includes the
+session label, latest status detail, and a legend for the available reaction
+controls. A terminal-only approval names the native terminal in the waiting
+card. Ordinary status updates edit the existing card; prompts and answers keep
+controls next to the latest exchange. Status cards suppress notifications and
+mentions. Assistant answers remain separate so thread-history recovery can
+recognize them after a restart.
+
+[Local phone layout preview](docs/assets/dui/status-390.png) renders serialized
+component payloads; final typography and spacing are controlled by Discord.
+The update time makes stale cards visible. On a reconnect, the bridge replaces
+its latest marked status card in the recent thread history with a new anchor;
+old reaction controls remain inactive. Paused turns return to a waiting card,
+and Codex decision completion returns the card to working. Claude permission
+previews have no tool-call identifier, so subsequent tool activity shows
+**Check terminal** until completion confirms the outcome; parallel tools cannot
+claim that an unrelated approval was resolved.
