@@ -8,9 +8,10 @@ import logging
 import math
 import os
 import tempfile
+import weakref
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Literal, get_args, cast
+from typing import ClassVar, Literal, get_args, cast
 
 from discord_blue.doodads.agent_session.sessions import CleanupStep
 
@@ -27,6 +28,7 @@ class StoredSession:
     grace_until: float
     updated_at: float
     pending_steps: tuple[CleanupStep, ...] | None = None
+    recovery_attempts: int = 0
 
     @classmethod
     def parse(cls, value: object) -> StoredSession:
@@ -48,6 +50,9 @@ class StoredSession:
         if not math.isfinite(grace) or not math.isfinite(updated):
             raise ValueError("non-finite timestamps")
         steps = value.get("pending_steps")
+        attempts = value.get("recovery_attempts", 0)
+        if type(attempts) is not int or attempts < 0:
+            raise ValueError("invalid recovery attempts")
         if steps is not None and (not isinstance(steps, list) or any(step not in get_args(CleanupStep) for step in steps)):
             raise ValueError("invalid cleanup steps")
         return cls(
@@ -58,10 +63,22 @@ class StoredSession:
             float(grace),
             float(updated),
             cast(tuple[CleanupStep, ...], tuple(steps)) if steps is not None else None,
+            attempts,
         )
 
 
 class SessionStore:
+    _instances: ClassVar[weakref.WeakValueDictionary[Path, SessionStore]] = weakref.WeakValueDictionary()
+
+    @classmethod
+    def for_path(cls, path: Path) -> SessionStore:
+        path = path.resolve()
+        store = cls._instances.get(path)
+        if store is None:
+            store = cls(path)
+            cls._instances[path] = store
+        return store
+
     def __init__(self, path: Path) -> None:
         self.path = path
         self.records: dict[str, StoredSession] = {}
@@ -69,13 +86,15 @@ class SessionStore:
         self._queue: asyncio.Queue[dict[str, StoredSession] | asyncio.Future[None] | None] = asyncio.Queue()
         self._writer: asyncio.Task[None] | None = None
         self._closing = False
+        self._lifecycle = asyncio.Lock()
 
     async def start(self) -> None:
-        if self._writer is not None:
-            return
-        self.records = await asyncio.to_thread(self._read)
-        self._closing = False
-        self._writer = asyncio.create_task(self._write_loop(), name="agent-session-store-writer")
+        async with self._lifecycle:
+            if self._writer is not None:
+                return
+            self.records = await asyncio.to_thread(self._read)
+            self._closing = False
+            self._writer = asyncio.create_task(self._write_loop(), name="agent-session-store-writer")
 
     def _read(self) -> dict[str, StoredSession]:
         try:
@@ -116,29 +135,43 @@ class SessionStore:
             raise self.error
 
     async def close(self) -> None:
-        if self._writer is None:
-            return
-        if not self._closing:
+        async with self._lifecycle:
+            if self._writer is None:
+                return
             self._closing = True
             self._queue.put_nowait(None)
-        await asyncio.shield(self._writer)
-        self._writer = None
+            await asyncio.shield(self._writer)
+            self._writer = None
 
     async def _write_loop(self) -> None:
         while True:
             item = await self._queue.get()
-            if item is None:
+            snapshot = None
+            barriers = []
+            stopping = False
+            while True:
+                if item is None:
+                    stopping = True
+                    break
+                if isinstance(item, asyncio.Future):
+                    barriers.append(item)
+                else:
+                    snapshot = item
+                if self._queue.empty():
+                    break
+                item = self._queue.get_nowait()
+            if snapshot is not None:
+                try:
+                    await asyncio.to_thread(self._write, snapshot)
+                    self.error = None
+                except OSError as exc:
+                    self.error = exc
+                    logger.exception("Unable to persist Agent session store")
+            for barrier in barriers:
+                if not barrier.done():
+                    barrier.set_result(None)
+            if stopping:
                 return
-            if isinstance(item, asyncio.Future):
-                if not item.done():
-                    item.set_result(None)
-                continue
-            try:
-                await asyncio.to_thread(self._write, item)
-                self.error = None
-            except OSError as exc:
-                self.error = exc
-                logger.exception("Unable to persist Agent session store")
 
     def _write(self, records: dict[str, StoredSession]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

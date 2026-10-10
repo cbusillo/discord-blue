@@ -120,7 +120,8 @@ the next sweep, allowing other stale sessions to be cleaned up.
 The bridge persists bound session IDs, thread and notification IDs, the session
 marker, lifecycle state, UTC grace deadlines and remaining cleanup steps in `$HOME/agent-sessions.json`.
 The production container's HOME is its existing `/var/lib/discord-blue` mount.
-One ordered writer replaces an fsynced snapshot atomically; records contain
+One ordered writer per state path coalesces snapshots and replaces them atomically
+after fsync; a reload waits for the previous writer to finish. Records contain
 recovery hints, not approval decisions, credentials, or replayable commands.
 Missing or corrupt state logs a fallback to discovery and is refilled by attaches.
 A write failure appears as an unhealthy store in `/health`.

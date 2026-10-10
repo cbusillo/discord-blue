@@ -437,7 +437,7 @@ class AgentSessionBridge:
     def __init__(self, bot: BlueBot, *, store_path: Path | None = None) -> None:
         self.bot = bot
         # The container sets HOME to its existing durable /var/lib/discord-blue mount.
-        self.store = SessionStore(store_path if store_path is not None else Path.home() / "agent-sessions.json")
+        self.store = SessionStore.for_path(store_path if store_path is not None else Path.home() / "agent-sessions.json")
         self.sessions = AgentSessionRegistry()
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -1147,7 +1147,8 @@ class AgentSessionBridge:
                     # Heartbeats start after the ack, so the watchdog's clock starts here too.
                     session.acknowledged = True
                     session.touch()
-                    self.save_session(session, "live")
+                    if self.sessions.get(session.session_id) is session and not self._stopping:
+                        self.save_session(session, "live")
                     # Attached, acknowledged and outside every lock: bring the thread's name up to date in the
                     # background. The thread's worker coalesces and rate-limits; nothing here waits on Discord.
                     self.request_thread_name(session)
@@ -1246,6 +1247,8 @@ class AgentSessionBridge:
                 self.save_session(current, "attaching")
                 try:
                     await self.threads.bounded(self.store.flush(), SESSION_STORE_WAIT_TIMEOUT_SECONDS)
+                except TimeoutError:
+                    logger.info("Agent session %s attached while its recovery record is still flushing", session_id)
                 except OSError as exc:
                     # The health endpoint reports the persistence failure; discovery still permits reconnects.
                     self.store.error = exc
@@ -1383,7 +1386,7 @@ class AgentSessionBridge:
             return None
         expected = self.session_start_without_pid(session_start_message(hello))
         if self.session_start_without_pid(record.marker) != expected:
-            return None  # A hint cannot broaden the existing metadata-matching rules.
+            return None  # Retain the stored marker's session identity and metadata; PID changes are tolerated.
         mapped = self.sessions.by_thread.get(record.thread_id)
         if mapped is not None and mapped != hello.session_id:
             return None
@@ -1395,21 +1398,24 @@ class AgentSessionBridge:
             if thread.archived or thread.locked or self.threads.closing(thread.id) or record.status in {"closing", "closed"}:
                 thread = await self.threads.open(thread)
             notification_id = record.notification_id
-            channel = await get_agent_session_channel(self.bot)
-            if notification_id is not None:
-                try:
-                    notification = await channel.fetch_message(notification_id)
-                    if (
-                        notification.author.id != self.bot_user_id()
-                        or self.notification_thread_id(notification.content) != thread.id
-                        or self.notification_going(notification_id)
-                    ):
+            try:
+                channel = await get_agent_session_channel(self.bot)
+                if notification_id is not None:
+                    try:
+                        notification = await channel.fetch_message(notification_id)
+                        if (
+                            notification.author.id != self.bot_user_id()
+                            or self.notification_thread_id(notification.content) != thread.id
+                            or self.notification_going(notification_id)
+                        ):
+                            notification_id = None
+                    except discord.NotFound:
                         notification_id = None
-                except discord.NotFound:
-                    notification_id = None
-            if notification_id is None:
-                notification = await send_agent_session_message(channel, session_notification_message(hello, thread))
-                notification_id = notification.id
+                if notification_id is None:
+                    notification = await send_agent_session_message(channel, session_notification_message(hello, thread))
+                    notification_id = notification.id
+            except (discord.DiscordException, ValueError):
+                logger.warning("Unable to refresh Agent session notification for thread %s; attaching anyway", thread.id)
             self.sessions.bind_thread(hello.session_id, thread.id, notification_id)
             logger.info("Recovered Agent session %s from store in thread %s", hello.session_id, thread.id)
             return SessionThread(thread=thread, notification_message_id=notification_id)
@@ -1429,6 +1435,17 @@ class AgentSessionBridge:
                 await self.recover_stored_cleanup(session_id, record)
             except Exception:
                 logger.warning("Unable to recover Agent session cleanup %s; continuing maintenance", session_id, exc_info=True)
+                if self.store.records.get(session_id) is record and self.sessions.get(session_id) is None:
+                    attempts = record.recovery_attempts + 1
+                    self.store.put(
+                        session_id,
+                        dataclasses.replace(
+                            record,
+                            recovery_attempts=attempts,
+                            status="closed" if attempts >= PENDING_CLEANUP_MAX_ATTEMPTS else record.status,
+                            updated_at=time.time(),
+                        ),
+                    )
 
     async def recover_stored_cleanup(self, session_id: str, record: StoredSession) -> None:
         lock = self.session_lifecycle_lock(session_id)
@@ -1442,19 +1459,18 @@ class AgentSessionBridge:
                 return
             notification_id = record.notification_id
             if notification_id is not None:
-                channel = await get_agent_session_channel(self.bot)
                 try:
+                    channel = await get_agent_session_channel(self.bot)
                     notification = await self.threads.bounded(
                         channel.fetch_message(notification_id), SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS
                     )
-                except discord.NotFound:
-                    notification_id = None
-                else:
                     if (
                         notification.author.id != self.bot_user_id()
                         or self.notification_thread_id(notification.content) != thread.id
                     ):
                         notification_id = None
+                except (discord.DiscordException, TimeoutError, ValueError):
+                    notification_id = None  # Notification cleanup remains best-effort; the thread can still close.
             # A hello can register while the Discord reads run, then wait on this lock. Its newer intent wins.
             if self.sessions.get(session_id) is not None or self.attaching():
                 return
