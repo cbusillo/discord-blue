@@ -32,9 +32,10 @@ async def send_agent_session_message(
     content: str | None = None,
     *,
     view: discord.ui.View | discord.ui.LayoutView | None = None,
+    silent: bool | None = None,
 ) -> discord.Message:
     """Post a bot message that is not an assistant answer; any assistant marker in its text is removed."""
-    return await _send(destination, None if content is None else strip_assistant_markers(content), view=view)
+    return await _send(destination, None if content is None else strip_assistant_markers(content), view=view, silent=silent)
 
 
 async def send_assistant_message(destination: discord.abc.Messageable, message: str) -> discord.Message:
@@ -47,9 +48,12 @@ async def _send(
     content: str | None,
     *,
     view: discord.ui.View | discord.ui.LayoutView | None,
+    silent: bool | None = None,
 ) -> discord.Message:
     if isinstance(view, discord.ui.LayoutView):
-        return await destination.send(view=view, allowed_mentions=agent_session_allowed_mentions(), silent=True)
+        return await destination.send(
+            view=view, allowed_mentions=agent_session_allowed_mentions(), silent=True if silent is None else silent
+        )
     if can_suppress_embeds(destination):
         try:
             if view is None:
@@ -57,6 +61,7 @@ async def _send(
                     content,
                     allowed_mentions=agent_session_allowed_mentions(),
                     suppress_embeds=True,
+                    silent=False if silent is None else silent,
                 )
 
             return await destination.send(
@@ -64,6 +69,7 @@ async def _send(
                 allowed_mentions=agent_session_allowed_mentions(),
                 suppress_embeds=True,
                 view=view,
+                silent=False if silent is None else silent,
             )
         except discord.Forbidden:
             logger.warning("Unable to suppress Agent session embeds despite apparent Manage Messages permission")
@@ -72,12 +78,14 @@ async def _send(
         message = await destination.send(
             content,
             allowed_mentions=agent_session_allowed_mentions(),
+            silent=False if silent is None else silent,
         )
     else:
         message = await destination.send(
             content,
             allowed_mentions=agent_session_allowed_mentions(),
             view=view,
+            silent=False if silent is None else silent,
         )
 
     await notify_missing_manage_messages(destination)

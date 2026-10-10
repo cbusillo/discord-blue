@@ -350,9 +350,9 @@ class RequestUserInputView(discord.ui.LayoutView):
             text: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(self.question_text(question))
             self.question_texts[question.id] = text
             children.append(text)
-            if question.options and len(question.options) <= 25 and not question.is_secret:
+            if question.options:
                 children.append(discord.ui.ActionRow(RequestUserInputSelect(self, question)))
-            if not question.options or question.is_other or question.is_secret:
+            if not question.options or question.is_other:
                 children.append(discord.ui.ActionRow(RequestUserInputAnswerButton(self, question)))
         children.append(discord.ui.Separator())
         children.append(discord.ui.ActionRow(RequestUserInputSubmitButton(self), RequestUserInputCancelButton(self)))
@@ -418,7 +418,7 @@ class RequestUserInputView(discord.ui.LayoutView):
             if isinstance(item, RequestUserInputSelect) and item.question.id == question_id:
                 selected = False
                 for index, option in enumerate(item.options):
-                    option.default = not selected and item.question.options[index].label == answer
+                    option.default = not item.question.is_secret and not selected and item.question.options[index].label == answer
                     selected = selected or option.default
 
     def response_payload(self) -> dict[str, object]:
@@ -2371,6 +2371,7 @@ class AgentSessionBridge:
         message = await send_agent_session_message(
             channel,
             view=view,
+            silent=False,
         )
         view.message_id = message.id
         session.pending_user_inputs[request.call_id] = PendingRemoteUserInput(

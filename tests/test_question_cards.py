@@ -127,8 +127,27 @@ class QuestionCardTests(unittest.IsolatedAsyncioTestCase):
         view = await self.post([question])
         self.assertIn("Fast", visible_view_text(view))
         self.assertIn("Safe", visible_view_text(view))
+        select = next(item for item in view.walk_children() if isinstance(item, RequestUserInputSelect))
+        select._refresh_state(cast(Any, FakeInteraction(self.fixture.thread)), cast(Any, {"values": [select.options[1].value]}))
+        await select.callback(cast(Any, FakeInteraction(self.fixture.thread)))
+        self.assertIn("[hidden]", visible_view_text(view))
+        self.assertFalse(any(option.default for option in select.options))
+        await cast(Any, view).submit(cast(Any, FakeInteraction(self.fixture.thread)))
+        self.assertEqual(self.fixture.socket.sent_json[0]["response"], {"answers": {question.id: {"answers": ["Safe"]}}})
         cast(Any, view).set_answer(question.id, "Private custom answer")
         self.assertNotIn("Private custom answer", visible_view_text(view))
+
+    async def test_question_notification_is_not_suppressed_in_discord_payload(self) -> None:
+        from discord.http import handle_message_parameters
+
+        view = await self.post([self.question()])
+        kwargs = self.fixture.thread.sent_kwargs[0]
+        flags = discord.MessageFlags(suppress_notifications=cast(bool, kwargs["silent"]))
+        with handle_message_parameters(view=view, flags=flags) as parameters:
+            assert parameters.payload is not None
+            flags = discord.MessageFlags._from_value(parameters.payload["flags"])
+            self.assertFalse(flags.suppress_notifications)
+            self.assertTrue(flags.components_v2)
 
     async def test_duplicate_labels_mark_only_one_option_selected(self) -> None:
         question = self.question()
