@@ -7,12 +7,11 @@ name: Deploy to Production
     branches:
       - main
       - "launchplane/train/**"
-permissions:
-  contents: read
-  id-token: write
-  packages: write
+permissions: {}
 jobs:
   validate:
+    permissions:
+      contents: read
     runs-on:
       - self-hosted
       - chris-testing
@@ -41,8 +40,11 @@ jobs:
   image:
     needs: validate
     outputs:
-      image_reference: ${{ steps.push.outputs.image_reference }}
-      deploy_reference: ${{ steps.image.outputs.tag_sha }}
+      tag_sha: ${{ steps.image.outputs.tag_sha }}
+      tag_main: ${{ steps.image.outputs.tag_main }}
+      cache: ${{ steps.image.outputs.cache }}
+    permissions:
+      contents: read
     runs-on:
       - self-hosted
       - chris-testing
@@ -61,8 +63,35 @@ jobs:
             echo "cache=$image:buildcache"
           } >> "$GITHUB_OUTPUT"
         shell: bash
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build container image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: ${{ steps.image.outputs.tag_sha }}
+          cache-from: type=registry,ref=${{ steps.image.outputs.cache }}
+
+  publish:
+    needs: image
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_reference: ${{ steps.push.outputs.image_reference }}
+      deploy_reference: ${{ needs.image.outputs.tag_sha }}
+    runs-on:
+      - self-hosted
+      - chris-testing
+      - chris-testing-discord-blue
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
       - name: Log in to GHCR
-        if: github.ref == 'refs/heads/main'
         uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
@@ -75,23 +104,18 @@ jobs:
         with:
           context: .
           load: true
-          tags: ${{ steps.image.outputs.tag_sha }}
-          cache-from: type=registry,ref=${{ steps.image.outputs.cache }}
-          cache-to: >-
-            ${{ github.ref == 'refs/heads/main' &&
-              format('type=registry,ref={0},mode=max', steps.image.outputs.cache) || '' }}
+          tags: ${{ needs.image.outputs.tag_sha }}
+          cache-from: type=registry,ref=${{ needs.image.outputs.cache }}
+          cache-to: type=registry,ref=${{ needs.image.outputs.cache }},mode=max
       - name: Push container image
         id: push
-        if: github.ref == 'refs/heads/main'
         run: |
           set -euo pipefail
-          docker push ${{ steps.image.outputs.tag_sha }}
-          digest="$(docker inspect --format='{{index .RepoDigests 0}}' ${{ steps.image.outputs.tag_sha }})"
+          docker push ${{ needs.image.outputs.tag_sha }}
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' ${{ needs.image.outputs.tag_sha }})"
           echo "image_reference=$digest" >> "$GITHUB_OUTPUT"
-          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
-            docker tag ${{ steps.image.outputs.tag_sha }} ${{ steps.image.outputs.tag_main }}
-            docker push ${{ steps.image.outputs.tag_main }}
-          fi
+          docker tag ${{ needs.image.outputs.tag_sha }} ${{ needs.image.outputs.tag_main }}
+          docker push ${{ needs.image.outputs.tag_main }}
         shell: bash
 
   ci_gate:
@@ -100,6 +124,7 @@ jobs:
     needs:
       - validate
       - image
+      - publish
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -107,6 +132,10 @@ jobs:
         env:
           VALIDATE_RESULT: ${{ needs.validate.result }}
           IMAGE_RESULT: ${{ needs.image.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          PUBLISH_REQUIRED: >-
+            ${{ github.ref == 'refs/heads/main' &&
+              (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
         run: |
           set -euo pipefail
 
@@ -116,10 +145,18 @@ jobs:
             exit 1
           fi
 
+          if [ "$PUBLISH_REQUIRED" = "true" ] && [ "$PUBLISH_RESULT" != "success" ]; then
+            echo "publish=$PUBLISH_RESULT" >&2
+            exit 1
+          fi
+
           echo "Validation and image checks passed."
 
   launchplane-deploy:
-    needs: image
+    needs: publish
+    permissions:
+      contents: read
+      id-token: write
     if: >-
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main'
@@ -136,7 +173,7 @@ jobs:
         run: |
           set -euo pipefail
           : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_URL variable}"
-          : "${{ needs.image.outputs.image_reference }}"
+          : "${{ needs.publish.outputs.image_reference }}"
 
           audience="${LAUNCHPLANE_AUDIENCE:-}"
           if [ -z "$audience" ]; then
@@ -162,8 +199,8 @@ jobs:
 
           request_payload="$({
             jq -n \
-              --arg image_reference "${{ needs.image.outputs.image_reference }}" \
-              --arg deploy_reference "${{ needs.image.outputs.deploy_reference }}" \
+              --arg image_reference "${{ needs.publish.outputs.image_reference }}" \
+              --arg deploy_reference "${{ needs.publish.outputs.deploy_reference }}" \
               --arg source_git_ref "$GITHUB_SHA" \
               '{
                 schema_version: 1,

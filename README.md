@@ -420,12 +420,16 @@ the required `ci-gate` proves validation and image build. The separate
 Consult the [overall direction](https://github.com/cbusillo/direction/blob/HEAD/DIRECTION.md)
 for release authority before production work.
 
-- CI proves the Docker image builds for every PR and push.
+- CI proves the Docker image builds for every PR and push with read-only permissions.
+- A separate publishing job runs only on `main` pushes and manual `main` runs;
+  it alone has GHCR package-write permission. Only the main-push deploy job has
+  OIDC token-write permission. Pull-request jobs receive neither write permission.
 - Production publishes both a digest and a `sha-<commit>` tag. The deploy request
   uses the digest as `artifact_id` and the tag as `deploy_reference`, so Launchplane
   can retain immutable evidence while Dokploy pulls the matching provider tag.
 - The required `ci-gate` context fails closed unless both application
-  validation and the container image build succeed.
+  validation and the container image build succeed, plus publishing on runs that
+  publish an image.
 - The production LXC keeps `/var/lib/discord-blue` as the durable state mount.
 - The bridge saves session recovery hints in `$HOME/agent-sessions.json`
   (`/var/lib/discord-blue/agent-sessions.json` in the container). One writer
