@@ -179,7 +179,7 @@ curl http://127.0.0.1:8787/health
 bridge listener has started. The payload includes the `discord-blue` service
 name, package version, top-level status, Discord readiness component state, and
 agent-session bridge state. The bridge reports heartbeat/reconciliation progress
-and pending cleanup work. Closed WebSockets are excluded from the active-session
+and pending cleanup work, plus session-store health and its record count. Closed WebSockets are excluded from the active-session
 count. A failed or stalled monitor makes the enabled bridge unhealthy; Discord
 readiness alone is not sufficient for a healthy response. The protected WebSocket route
 is `/agent-session/connect` and requires the configured bearer token; `/health`
@@ -427,6 +427,13 @@ for release authority before production work.
 - The required `ci-gate` context fails closed unless both application
   validation and the container image build succeed.
 - The production LXC keeps `/var/lib/discord-blue` as the durable state mount.
+- The bridge saves session recovery hints in `$HOME/agent-sessions.json`
+  (`/var/lib/discord-blue/agent-sessions.json` in the container). One writer
+  atomically replaces the file. Shutdown closes sockets and keeps live threads
+  and their notifications open. On startup, stored sessions receive at least
+  five minutes to reconnect; a confirmed session end still archives immediately.
+  Missing or corrupt state falls back to Discord discovery. See the
+  [restart behavior](docs/agent-session-protocol.md#disconnect-cleanup-and-recovery) for recovery limits.
 - Dokploy pulls a versioned image and replaces the container.
 - Launchplane owns the deploy record, Dokploy mutation, and rollback decision.
 - This repo keeps source, image build inputs, tests, and smoke-check guidance.

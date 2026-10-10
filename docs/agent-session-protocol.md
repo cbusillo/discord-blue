@@ -117,6 +117,31 @@ the next sweep, allowing other stale sessions to be cleaned up.
 
 ### Disconnect cleanup and recovery
 
+The bridge persists bound session IDs, thread and notification IDs, the session
+marker, lifecycle state, and UTC grace deadlines in `$HOME/agent-sessions.json`.
+The production container's HOME is its existing `/var/lib/discord-blue` mount.
+One ordered writer replaces an fsynced snapshot atomically; records contain
+recovery hints, not approval decisions, credentials, or replayable commands.
+Missing or corrupt state logs a fallback to discovery and is refilled by attaches.
+A write failure appears as an unhealthy store in `/health`.
+
+Server shutdown keeps live threads, members and notifications intact and closes
+only their WebSockets. On startup, live, attaching and grace records receive
+at least a fresh disconnect-grace window (five minutes), preserving a longer
+stored deadline. Sweeps and thread workers leave these threads and notifications
+alone. A returning session fetches its thread and checks the parent, bot owner,
+and opening marker before reusing it; a missing notification is recreated.
+A deleted or mismatched hint falls back to the existing discovery rules.
+Expired startup records and interrupted closing records pass through the normal
+cleanup workers, with current ownership checked again; closed records are pruned
+after 30 days. Unrecorded threads retain the existing startup bootstrap hold.
+
+The first deployment of this version replaces an older server whose shutdown
+still archives threads. The new server refills the store; subsequent replacements
+use it. An older image ignores the file on rollback. Persistence covers bound
+threads; a crash before the binding record is saved still uses discovery and the
+existing creation-token reconciliation.
+
 The connection handler unregisters its session in a finalization path, including
 when a late `hello_ack` or event handler fails. Registry removal checks the actual
 connection object, so an older connection cannot unregister its replacement.
