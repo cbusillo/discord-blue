@@ -262,3 +262,40 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         message = await self.thread.fetch_message(anchor)
         self.assertIn(bridge_module.REACTION_DELIVERED, message.reactions)
         self.assertNotIn(bridge_module.REACTION_QUEUED, message.reactions)
+
+    async def test_reply_ack_updates_queued_detail_and_preserves_newer_native_status(self) -> None:
+        self.session.acknowledged = True
+        reply = FakeReplyMessage(123, self.thread, "Work on this")
+        self.thread.add_message(reply)
+        await self.bridge.send_thread_reply(cast(discord.Message, reply))
+        command = self.fixture.socket.sent_json[-1]
+        await self.bridge.handle_command_ack(command)
+        self.assertIn("delivered", visible_text(await self.current_card()))
+        self.assertNotIn("queued", visible_text(await self.current_card()))
+        await self.status("status_changed", "Waiting on a decision in the Codex TUI")
+        await self.bridge.handle_command_ack(command)
+        self.assertIn("Waiting on you", visible_text(await self.current_card()))
+
+    async def test_refresh_cannot_forget_a_new_anchor_published_during_fetch(self) -> None:
+        await self.status("status_changed", "Turn started")
+        old_id = cast(int, self.session.control_message_id)
+        original = self.thread.fetch_message
+        new_card = None
+
+        async def fetch(message_id: int) -> FakeReplyMessage:
+            nonlocal new_card
+            if message_id == old_id:
+                new_card = await self.thread.send(view=session_status_card(self.session, []))
+                self.session.control_message_id = new_card.id
+                self.thread.delete_message(old_id)
+            return await original(message_id)
+
+        with patch.object(self.thread, "fetch_message", new=fetch):
+            await self.bridge.refresh_session_controls(self.session, cast(discord.Thread, self.thread))
+        assert new_card is not None
+        self.assertEqual(self.session.control_message_id, new_card.id)
+        self.assertEqual(len(self.thread.sent_messages), 2)
+
+    async def test_replayed_question_creates_current_waiting_card_without_turn_start(self) -> None:
+        await self.fixture.prompt()
+        self.assertIn("Waiting on you", visible_text(await self.current_card()))

@@ -280,3 +280,19 @@ class LocalDecisionStatusTests(unittest.IsolatedAsyncioTestCase):
             resumed = await discord.next("status_changed")
             self.assertIn("continuing", resumed["message"])
             self.assertEqual(session.local_decisions, set())
+
+
+class ChangedPatchStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_changed_pending_patch_remains_tracked_until_terminal_resolution(self) -> None:
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            self.assertTrue(await until(lambda: bridge.sessions["root"].server_features is not None, 2))
+            session = bridge.sessions["root"]
+            session.on_file_item("t", file_item("+old"))
+            session.on_request(1, "item/fileChange/requestApproval", {"threadId": "root", "turnId": "t", "itemId": "item"})
+            await discord.next("approval_request")
+            session.on_file_item("t", file_item("+new"))
+            self.assertIn("Waiting", (await discord.next("status_changed"))["message"])
+            session.on_server_request_resolved(1)
+            self.assertIn("continuing", (await discord.next("status_changed"))["message"])

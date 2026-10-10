@@ -180,6 +180,9 @@ class ClaudeSession(AgentSessionClient):
                 self.publish("notice", message=f"This Claude Code session is now on conversation `{conversation}`.")
             else:
                 await self.switch_conversation(conversation)
+        if event == "UserPromptSubmit":
+            self.waiting_locally = False
+            self.publish("status_changed", message="Turn started")
         if event in RUNNING_EVENTS:
             self.turn_running = True
             if self.waiting_locally:

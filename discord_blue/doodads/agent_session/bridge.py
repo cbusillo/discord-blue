@@ -2174,6 +2174,9 @@ class AgentSessionBridge:
         if command is not None:
             session.active_command_id = command_id
             await self.update_command_message_reaction(session, command, REACTION_DELIVERED)
+            if command.kind == "reply" and command.status_revision == session.status_revision:
+                session.last_status_message = "Request delivered to the native session."
+                await self.update_control_anchor_status(session, command.thread_id, REACTION_DELIVERED)
 
     async def handle_command_reject(self, payload: dict[str, object]) -> None:
         command_context = self.command_context(payload)
@@ -2299,8 +2302,7 @@ class AgentSessionBridge:
         session.status_revision += 1
         session.display_state = "waiting"
         session.last_status_message = "Approval required. Review the request in this thread."
-        if session.control_message_id is not None:
-            await self.show_or_refresh_session_controls(session, channel)
+        await self.show_or_refresh_session_controls(session, channel)
 
     async def handle_request_user_input(self, request: RemoteRequestUserInput) -> None:
         session = self.sessions.get(request.session_id)
@@ -2345,8 +2347,7 @@ class AgentSessionBridge:
         session.status_revision += 1
         session.display_state = "waiting"
         session.last_status_message = "Answer required. Use the question controls in this thread."
-        if session.control_message_id is not None:
-            await self.show_or_refresh_session_controls(session, channel)
+        await self.show_or_refresh_session_controls(session, channel)
 
     async def user_input_context(
         self,
@@ -2963,13 +2964,14 @@ class AgentSessionBridge:
         session.control_status_reaction = None
         session.control_interruptions_enabled = False
         if session.control_message_id is not None:
+            refreshed_id = session.control_message_id
             replaced = await self.refresh_control_card(
                 session,
                 channel,
-                session.control_message_id,
+                refreshed_id,
                 self.session_control_reactions(session),
             )
-            if replaced:
+            if replaced or session.control_message_id != refreshed_id:
                 return
             session.control_message_id = None
 
@@ -3637,14 +3639,15 @@ class AgentSessionBridge:
     ) -> None:
         if session.control_message_id is None:
             return
+        refreshed_id = session.control_message_id
         replaced = await self.refresh_control_card(
             session,
             thread,
-            session.control_message_id,
+            refreshed_id,
             self.session_control_reactions(session),
             remove_user_reaction=remove_user_reaction,
         )
-        if replaced:
+        if replaced or session.control_message_id != refreshed_id:
             return
         session.control_message_id = None
         message = await send_agent_session_message(

@@ -294,6 +294,7 @@ class ResolutionTransportTests(unittest.IsolatedAsyncioTestCase):
             assert session is not None
             self.assertEqual(session.pending_approvals, {})
             self.assertEqual(session.pending_user_inputs, {})
-            messages = [await thread.fetch_message(901), await thread.fetch_message(902)]
+            messages = [message for message in thread._history if message.content]
+            self.assertEqual(len(messages), 2)
             self.assertTrue(all(message.content == "**Resolved**" for message in messages))
             await websocket.close()

@@ -172,6 +172,7 @@ class ThreadSession(AgentSessionClient):
                 if prompt.get("approval_kind") == "file_change" and (prompt["turn_id"], prompt["call_id"]) == key:
                     self.on_resolved(request_id)
                     if changed and not completed:
+                        self.wait_locally(request_id)
                         self.publish("notice", message="The patch changed; review this request in the Codex TUI.")
         if completed:
             self.file_items.pop(key, None)

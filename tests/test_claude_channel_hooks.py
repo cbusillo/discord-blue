@@ -319,3 +319,25 @@ class PermissionStatusTests(unittest.IsolatedAsyncioTestCase):
             await hook(claude, "PostToolUse")  # No notification flood on every tool.
             await hook(claude, "Stop", last_assistant_message="Finished")
             self.assertEqual((await discord.next())["type"], "turn_complete")
+
+
+class InterruptedPermissionStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_remote_prompt_clears_an_old_terminal_approval_signal(self) -> None:
+        async with running_channel() as (claude, discord):
+            await claude.initialize()
+            hello = await discord.next("hello")
+            claude.send({"method": PERMISSION_REQUEST, "params": {"tool_name": "Bash"}})
+            await discord.next("status_changed")
+            await discord.next("notice")
+            await discord.control(command(hello, "cmd-next", "reply", text="new turn"))
+            await claude.notification(CHANNEL)
+            await hook(
+                claude,
+                "UserPromptSubmit",
+                prompt='<channel source="plugin:dui:dui" command_id="cmd-next">new turn</channel>',
+            )
+            started = await discord.next("status_changed")
+            self.assertIn("started", started["message"].lower())
+            await hook(claude, "PostToolUse")
+            await hook(claude, "Stop", last_assistant_message="Finished")
+            self.assertEqual((await discord.next())["type"], "turn_complete")
