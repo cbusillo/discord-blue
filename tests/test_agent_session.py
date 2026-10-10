@@ -827,7 +827,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                             ],
                         },
                     )
-                    view = cast("RequestUserInputView", thread.sent_views[-1])
+                    view = cast(
+                        "RequestUserInputView",
+                        next(view for view in reversed(thread.sent_views) if isinstance(view, bridge_module.RequestUserInputView)),
+                    )
                     interaction = FakeInteraction(thread)
                     if cancel:
                         await view.cancel(cast(Any, interaction))
@@ -1741,7 +1744,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             thread.sent_messages,
-            ["Agent session could not go ahead: Auto Drive is already running"],
+            ["", "Agent session could not go ahead: Auto Drive is already running"],
         )
 
     async def test_continue_autonomously_reports_default_reject_reason_for_empty_reason(self) -> None:
@@ -1767,7 +1770,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             thread.sent_messages,
-            ["Agent session could not go ahead: command was rejected"],
+            ["", "Agent session could not go ahead: command was rejected"],
         )
         self.assertNotIn(command_id, session.pending_commands)
 
@@ -1874,7 +1877,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             thread.sent_messages,
             [
                 format_user_message("Run the quick path"),
-                WAITING_FOR_DIRECTION,
+                "",  # Components V2 carries visible text in the view.
             ],
         )
         self.assertEqual(session.control_message_id, 902)
@@ -1907,11 +1910,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             thread.sent_messages,
             [
                 mark_assistant_message("Done."),
-                WAITING_FOR_DIRECTION,
+                "",  # Components V2 carries visible text in the view.
             ],
         )
         self.assertIsNone(thread.sent_views[0])
-        self.assertIsNone(thread.sent_views[1])
+        self.assertIsInstance(thread.sent_views[1], bridge_module.discord.ui.LayoutView)
         control_message = await thread.fetch_message(902)
         self.assertEqual(control_message.reactions, ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"])
         self.assertEqual(session.control_message_id, 902)
@@ -2007,7 +2010,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(len(thread.sent_messages), 1)
+        self.assertEqual(len([content for content in thread.sent_messages if content]), 1)
         self.assertIn("Need approval", thread.sent_messages[0])
         self.assertIn("Quick review", thread.sent_messages[0])
         self.assertTrue(thread.sent_kwargs[0]["suppress_embeds"])
@@ -2081,7 +2084,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                         command_text=command_text,
                     )
                 )
-                [message] = thread.sent_messages
+                [message] = [content for content in thread.sent_messages if content]
                 session = bridge.sessions.get("session-1")
                 assert session is not None
                 if shown is None:
@@ -2338,7 +2341,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             control_message.reactions,
             [
-                bridge_module.REACTION_QUEUED,
+                bridge_module.REACTION_DELIVERED,
                 bridge_module.REACTION_CONTROL_PAUSE,
                 bridge_module.REACTION_CONTROL_END,
             ],
@@ -2383,7 +2386,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             thread.sent_messages,
             [
                 mark_assistant_message("Done."),
-                WAITING_FOR_DIRECTION,
+                "",  # Components V2 carries visible text in the view.
             ],
         )
         new_control_message = await thread.fetch_message(902)
@@ -2834,7 +2837,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(len(thread.sent_messages), 1)
+        self.assertEqual(len([content for content in thread.sent_messages if content]), 1)
         self.assertIn("Build mode", thread.sent_messages[0])
         self.assertIn("Choose a mode", thread.sent_messages[0])
         self.assertIsNotNone(thread.sent_views[0])
@@ -3271,7 +3274,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             thread.sent_messages,
             [
                 format_user_message("Run the quick path"),
-                WAITING_FOR_DIRECTION,
+                "",  # Components V2 carries visible text in the view.
             ],
         )
         control_message = await thread.fetch_message(902)
@@ -3322,9 +3325,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             thread.sent_messages,
             [
                 format_user_message("Run the quick path"),
-                WAITING_FOR_DIRECTION,
+                "",  # Components V2 carries visible text in the view.
                 mark_assistant_message("Done."),
-                WAITING_FOR_DIRECTION,
+                "",  # Components V2 carries visible text in the view.
             ],
         )
         control_message = await thread.fetch_message(904)
