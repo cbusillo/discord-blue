@@ -69,7 +69,6 @@
   "prWorkflow": {
     "mergePolicy": {
       "method": "merge",
-      "path": "GitHub pull request; this repository does not land through the Launchplane merge train",
       "requiredStatusChecks": ["ci-gate"],
       "strictStatusChecks": true,
       "requiredApprovals": 0,
