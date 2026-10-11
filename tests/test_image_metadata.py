@@ -24,6 +24,7 @@ class ImageMetadataTests(unittest.TestCase):
                 )
                 values = dict(line.split("=", 1) for line in output.read_text().splitlines())
                 published = image_metadata(source, repository)
+                self.assertEqual(published.image, published.image.lower())
                 self.assertEqual(values["existing"], "value")
                 self.assertEqual(values["image"], published.image)
                 self.assertEqual(values["tag_sha"], published.tag_sha)

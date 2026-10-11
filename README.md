@@ -485,7 +485,8 @@ for release authority before production work.
 - A separate publishing job runs only on `main` pushes and manual `main` runs;
   it alone has GHCR package-write permission. Only the main-push deploy job has
   OIDC token-write permission. Pull-request jobs receive neither write permission.
-- Production publishes both a digest and a `sha-<commit>` tag. The deploy request
+- Production publishes both a digest and a commit tag from
+  [the shared image metadata](scripts/image_metadata.py). The deploy request
   uses the digest as `artifact_id` and the tag as `deploy_reference`, so Launchplane
   can retain immutable evidence while Dokploy pulls the matching provider tag.
 - The required `ci-gate` context fails closed unless both application
