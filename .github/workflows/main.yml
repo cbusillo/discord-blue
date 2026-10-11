@@ -8,11 +8,27 @@ name: Deploy to Production
 permissions: {}
 jobs:
   publish:
+    timeout-minutes: 35
     permissions:
       contents: read
-      packages: write
-    uses: ./.github/workflows/build.yml
-    secrets: inherit
+      actions: read
+    outputs:
+      image_reference: ${{ steps.publication.outputs.image_reference }}
+      deploy_reference: ${{ steps.publication.outputs.deploy_reference }}
+    runs-on:
+      - self-hosted
+      - chris-testing
+      - chris-testing-discord-blue
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Read successful canonical Build publication
+        id: publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          "$HOME/.local/bin/uv" run --no-project --no-config --python 3.13 python -m scripts.build_publication
 
   launchplane-deploy:
     needs: publish

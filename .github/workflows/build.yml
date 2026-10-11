@@ -2,12 +2,6 @@
 name: Build
 "on":
   workflow_dispatch:
-  workflow_call:
-    outputs:
-      image_reference:
-        value: ${{ jobs.publish.outputs.image_reference }}
-      deploy_reference:
-        value: ${{ jobs.publish.outputs.deploy_reference }}
   pull_request:
   push:
     branches:
@@ -61,7 +55,7 @@ jobs:
       - name: Set image metadata
         id: image
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/discord-blue"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
           {
             echo "image=$image"
             echo "tag_sha=$image:sha-${GITHUB_SHA}"
@@ -87,9 +81,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-    outputs:
-      image_reference: ${{ steps.push.outputs.image_reference }}
-      deploy_reference: ${{ needs.image.outputs.tag_sha }}
     runs-on:
       - self-hosted
       - chris-testing

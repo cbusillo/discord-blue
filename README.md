@@ -461,11 +461,16 @@ Pull requests and `launchplane/train/**` pushes validate and build without
 publishing. Manual Build runs on `main` publish, but are not release provenance.
 
 The existing [production caller](.github/workflows/main.yml) also runs on main
-pushes, reusing Build before requesting a production deployment. This temporarily
-builds twice on main to preserve the caller's original push event and authentication
-contract. Its retirement remains coordinated with the service-owned release work
+pushes, waiting up to 30 minutes for the successful canonical Build for that exact
+commit and reading its current-attempt manifest before requesting deployment.
+It does not rebuild or publish another image, and preserves its original push
+event and authentication contract. Its retirement remains coordinated with the service-owned release work
 in [launchplane#2792](https://github.com/cbusillo/launchplane/issues/2792) and
 [launchplane#3019](https://github.com/cbusillo/launchplane/issues/3019).
+When retrying a main Build, use **Re-run all jobs** so the latest run attempt
+uploads its own manifest. Re-running only failed jobs can leave the latest
+attempt without the manifest required by Launchplane. Retry a failed legacy
+caller only after that Build succeeds.
 A merge's deployment request is separate from a confirmed production deployment;
 the required `ci-gate` proves validation and image build. The separate
 `launchplane-deploy` job succeeds only when Launchplane reports a passing deploy.
