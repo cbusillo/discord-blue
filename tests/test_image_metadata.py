@@ -16,6 +16,7 @@ class ImageMetadataTests(unittest.TestCase):
                 output.write_text("existing=value\n")
                 result = subprocess.run(
                     [sys.executable, "-m", "scripts.image_metadata"],
+                    cwd=Path(__file__).resolve().parents[1],
                     env={**os.environ, "GITHUB_REPOSITORY": repository, "GITHUB_SHA": source, "GITHUB_OUTPUT": str(output)},
                     capture_output=True,
                     text=True,
