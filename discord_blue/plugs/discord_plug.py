@@ -7,6 +7,7 @@ from discord.ext import commands
 from discord.ext.commands import Bot
 
 from discord_blue.config import Config
+from discord_blue.health import DiscordGatewayHealth
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=discord.Guild | discord.TextChannel)
@@ -21,13 +22,25 @@ class BlueBot(commands.Bot):
 
     def __init__(self, config: Config) -> None:
         self.config = config
+        self.gateway_health = DiscordGatewayHealth()
         intents = discord.Intents.all()
 
         super().__init__(
             command_prefix="!",
             intents=intents,
+            enable_debug_events=True,
             max_ratelimit_timeout=MAX_RATELIMIT_SLEEP_SECONDS,
         )
+
+    def dispatch(self, event_name: str, /, *args: object, **kwargs: object) -> None:
+        # Observe synchronously: queued callbacks must not revive proof after disconnect.
+        if event_name == "disconnect":
+            self.gateway_health.disconnect()
+        elif event_name == "socket_raw_receive" and args:
+            raw = args[0]
+            if isinstance(raw, str):
+                self.gateway_health.receive(raw)
+        super().dispatch(event_name, *args, **kwargs)
 
     async def setup_hook(self) -> None:
         await self.load_extension("discord_blue.doodads._doodad_setup")

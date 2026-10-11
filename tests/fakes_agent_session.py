@@ -11,6 +11,7 @@ import discord
 
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.protocol import SessionHello
+from discord_blue.health import DiscordGatewayHealth
 
 if TYPE_CHECKING:
     from discord_blue.config import Config
@@ -364,6 +365,9 @@ class FakeBot:
         self.fetch_channel_calls: list[int] = []
         self.closed = False
         self.ready = True
+        self.gateway_health = DiscordGatewayHealth()
+        self.gateway_health.receive('{"op":10,"d":{"heartbeat_interval":45000}}')
+        self.gateway_health.receive('{"op":11}')
 
     def is_closed(self) -> bool:
         return self.closed

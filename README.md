@@ -189,6 +189,15 @@ See [the remote session contract](docs/agent-session-protocol.md) for client
 integration. Discord Blue does not launch the agent or read local rollout files;
 the client provides session events and optional reconnect history.
 
+Discord health also requires a recent heartbeat ACK processed on the current
+gateway connection. Its freshness budget is twice the heartbeat interval supplied
+by Discord's HELLO: one interval for the next heartbeat and one for its ACK.
+Missing or expired ACK proof returns HTTP 503 even if the process is running.
+Reconnection clears old proof until the new connection receives an ACK. Quiet
+channels need no messages to stay healthy. The response exposes only cadence,
+ACK age and a bounded reason, never gateway payloads or credentials. This uses
+Discord's [gateway heartbeat protocol](https://github.com/discord/discord-api-docs/blob/main/developers/events/gateway.mdx).
+
 Launchplane may provide deployment identity through
 `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`. When set to a JSON object, Discord Blue
 parses it and includes it as the `runtime_identity` object in the health

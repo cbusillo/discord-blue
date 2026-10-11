@@ -571,18 +571,21 @@ class AgentSessionBridge:
 
     async def handle_health(self, _request: web.Request) -> web.Response:
         discord_ready = self.discord_ready()
+        gateway = self.bot.gateway_health.evidence(ready=discord_ready)
+        discord_healthy = gateway["status"] == "ok"
         monitor = self.agent_session_monitor_health()
         monitor_healthy = not self.bot.config.agent_session.enabled or monitor["status"] not in {"dead", "stalled"}
         return web.json_response(
             health_payload(
-                discord_status="ok" if discord_ready else "unhealthy",
+                discord_status="ok" if discord_healthy else "unhealthy",
+                discord_gateway=gateway,
                 agent_session_enabled=self.bot.config.agent_session.enabled,
                 active_agent_sessions=len(self.sessions.live_sessions()),
                 disconnected_agent_sessions=len(self.sessions.disconnected_sessions()),
                 pending_agent_session_cleanups=len(self._pending_cleanups),
                 agent_session_monitor=monitor,
             ),
-            status=200 if discord_ready and monitor_healthy else 503,
+            status=200 if discord_healthy and monitor_healthy else 503,
         )
 
     def background_task_health(
