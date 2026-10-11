@@ -56,13 +56,8 @@ jobs:
       - name: Set image metadata
         id: image
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          {
-            echo "image=$image"
-            echo "tag_sha=$image:sha-${GITHUB_SHA}"
-            echo "tag_main=$image:main"
-            echo "cache=$image:buildcache"
-          } >> "$GITHUB_OUTPUT"
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          "$HOME/.local/bin/uv" run --no-project --no-config --python 3.13 python -m scripts.image_metadata
         shell: bash
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
@@ -114,7 +109,7 @@ jobs:
           IMAGE_REFERENCE: ${{ needs.image.outputs.image_repository }}@${{ steps.push.outputs.digest }}
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
-          "$HOME/.local/bin/uv" run --no-project --no-config --python 3.13 python scripts/artifact_manifest.py
+          "$HOME/.local/bin/uv" run --no-project --no-config --python 3.13 python -m scripts.artifact_manifest
       - name: Upload artifact manifest
         uses: actions/upload-artifact@v7
         with:

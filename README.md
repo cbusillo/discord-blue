@@ -461,8 +461,9 @@ Pull requests and `launchplane/train/**` pushes validate and build without
 publishing. Manual Build runs on `main` publish, but are not release provenance.
 
 The existing [production caller](.github/workflows/main.yml) also runs on main
-pushes, waiting up to 30 minutes for the successful canonical Build for that exact
-commit and reading its current-attempt manifest before requesting deployment.
+pushes, using the bounded wait in [the publication reader](scripts/build_publication.py)
+for the successful canonical Build for that exact commit and reading its
+current-attempt manifest before requesting deployment.
 It does not rebuild or publish another image, and preserves its original push
 event and authentication contract. Its retirement remains coordinated with the service-owned release work
 in [launchplane#2792](https://github.com/cbusillo/launchplane/issues/2792) and

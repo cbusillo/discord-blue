@@ -11,6 +11,7 @@ from collections.abc import Callable
 from urllib.parse import urlencode
 
 from scripts.artifact_manifest import publication_identity
+from scripts.image_metadata import image_metadata
 
 
 def read_publication(
@@ -62,7 +63,7 @@ def read_publication(
         raise ValueError("Build manifest does not bind the requested source")
     image_reference = f"{manifest['image']['repository']}@{manifest['image']['digest']}"
     publication_identity(source_commit, repository, image_reference)
-    return image_reference, f"{manifest['image']['repository']}:sha-{source_commit}"
+    return image_reference, image_metadata(source_commit, repository).tag_sha
 
 
 def github_read(path: str) -> bytes:
