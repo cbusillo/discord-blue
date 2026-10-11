@@ -146,6 +146,7 @@ class HealthEndpointTests(unittest.IsolatedAsyncioTestCase):
                 bot.ready, bot.closed = True, False
                 bot.gateway_health.receive('{"op":10,"d":{"heartbeat_interval":20000}}')
                 bot.gateway_health.receive('{"op":11}')
+                bot.gateway_health.receive('{"op":0,"t":"READY"}')
             with patch("discord_blue.health.time.monotonic", return_value=139):
                 response = await bridge.handle_health(make_mocked_request("GET", "/health"))
                 self.assertEqual(response.status, 200)  # Quiet channel: ACKs suffice.
@@ -184,6 +185,8 @@ class HealthEndpointTests(unittest.IsolatedAsyncioTestCase):
                 await socket.received_message('{"op":10,"d":{"heartbeat_interval":30000}}')
                 self.assertEqual(bot.gateway_health.evidence(ready=True)["status"], "unhealthy")
                 await socket.received_message('{"op":11}')
+                self.assertEqual(bot.gateway_health.evidence(ready=True)["status"], "unhealthy")
+                bot.dispatch("socket_raw_receive", '{"op":0,"t":"READY"}')
                 self.assertEqual(bot.gateway_health.evidence(ready=True)["status"], "ok")
                 bot.dispatch("disconnect")
                 self.assertEqual(bot.gateway_health.evidence(ready=True)["status"], "unhealthy")
@@ -191,6 +194,8 @@ class HealthEndpointTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(bot.gateway_health.evidence(ready=True)["status"], "unhealthy")
                 await socket.received_message('{"op":10,"d":{"heartbeat_interval":30000}}')
                 await socket.received_message('{"op":11}')
+                self.assertEqual(bot.gateway_health.evidence(ready=True)["status"], "unhealthy")
+                bot.dispatch("socket_raw_receive", '{"op":0,"t":"RESUMED"}')
                 self.assertEqual(bot.gateway_health.evidence(ready=True)["status"], "ok")
                 # The next HELLO cannot inherit the previous connection's ACK.
                 await socket.received_message('{"op":10,"d":{"heartbeat_interval":30000}}')
@@ -204,6 +209,7 @@ class GatewayHealthTests(unittest.TestCase):
                 health = DiscordGatewayHealth()
                 health.receive('{"op":10,"d":{"heartbeat_interval":45000}}')
                 health.receive('{"op":11}')
+                health.receive('{"op":0,"t":"READY"}')
                 self.assertEqual(health.evidence(ready=True)["status"], "ok")
                 health.receive(reset)
                 health.receive('{"op":11}')

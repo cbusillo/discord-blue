@@ -368,6 +368,7 @@ class FakeBot:
         self.gateway_health = DiscordGatewayHealth()
         self.gateway_health.receive('{"op":10,"d":{"heartbeat_interval":45000}}')
         self.gateway_health.receive('{"op":11}')
+        self.gateway_health.receive('{"op":0,"t":"READY"}')
 
     def is_closed(self) -> bool:
         return self.closed

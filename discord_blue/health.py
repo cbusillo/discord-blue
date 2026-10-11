@@ -18,10 +18,12 @@ class DiscordGatewayHealth:
     def __init__(self) -> None:
         self.interval: float | None = None
         self.last_ack: float | None = None
+        self.session_started = False
 
     def disconnect(self) -> None:
         self.interval = None
         self.last_ack = None
+        self.session_started = False
 
     def receive(self, raw: str) -> None:
         try:
@@ -41,13 +43,21 @@ class DiscordGatewayHealth:
             self.disconnect()
         elif opcode == 11 and self.interval is not None:
             self.last_ack = time.monotonic()
+        elif opcode == 0 and event.get("t") in ("READY", "RESUMED") and self.interval is not None:
+            self.session_started = True
 
     def evidence(self, *, ready: bool) -> dict[str, Any]:
         age = None if self.last_ack is None else max(0.0, time.monotonic() - self.last_ack)
         # One interval to send the next heartbeat, one to receive its ACK.
         budget = None if self.interval is None else self.interval * 2
         reason = (
-            "not_ready" if not ready else "unproved" if age is None or budget is None else "stale" if age > budget else "recent_ack"
+            "not_ready"
+            if not ready or not self.session_started
+            else "unproved"
+            if age is None or budget is None
+            else "stale"
+            if age > budget
+            else "recent_ack"
         )
         return {
             "status": "ok" if reason == "recent_ack" else "unhealthy",
