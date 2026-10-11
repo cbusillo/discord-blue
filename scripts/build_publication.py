@@ -88,11 +88,11 @@ def github_read(path: str) -> bytes:
 
 
 if __name__ == "__main__":
-    image_reference, deploy_reference = read_publication(
+    published_image_reference, published_deploy_reference = read_publication(
         repository=os.environ["GITHUB_REPOSITORY"],
         repository_id=int(os.environ["GITHUB_REPOSITORY_ID"]),
         source_commit=os.environ["GITHUB_SHA"],
         read=github_read,
     )
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-        output.write(f"image_reference={image_reference}\ndeploy_reference={deploy_reference}\n")
+        output.write(f"image_reference={published_image_reference}\ndeploy_reference={published_deploy_reference}\n")
