@@ -11,6 +11,7 @@ from collections.abc import Callable
 from urllib.parse import urlencode
 
 from scripts.artifact_manifest import publication_identity
+from scripts.image_metadata import image_metadata
 
 
 def read_publication(
@@ -62,7 +63,7 @@ def read_publication(
         raise ValueError("Build manifest does not bind the requested source")
     image_reference = f"{manifest['image']['repository']}@{manifest['image']['digest']}"
     publication_identity(source_commit, repository, image_reference)
-    return image_reference, f"{manifest['image']['repository']}:sha-{source_commit}"
+    return image_reference, image_metadata(source_commit, repository).tag_sha
 
 
 def github_read(path: str) -> bytes:
@@ -87,11 +88,11 @@ def github_read(path: str) -> bytes:
 
 
 if __name__ == "__main__":
-    image_reference, deploy_reference = read_publication(
+    published_image_reference, published_deploy_reference = read_publication(
         repository=os.environ["GITHUB_REPOSITORY"],
         repository_id=int(os.environ["GITHUB_REPOSITORY_ID"]),
         source_commit=os.environ["GITHUB_SHA"],
         read=github_read,
     )
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-        output.write(f"image_reference={image_reference}\ndeploy_reference={deploy_reference}\n")
+        output.write(f"image_reference={published_image_reference}\ndeploy_reference={published_deploy_reference}\n")
