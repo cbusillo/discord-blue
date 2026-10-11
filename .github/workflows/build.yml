@@ -40,6 +40,7 @@ jobs:
   image:
     needs: validate
     outputs:
+      image_repository: ${{ steps.image.outputs.image }}
       tag_sha: ${{ steps.image.outputs.tag_sha }}
       tag_main: ${{ steps.image.outputs.tag_main }}
       cache: ${{ steps.image.outputs.cache }}
@@ -96,28 +97,21 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
-      - name: Build container image
+      - name: Build and publish container image
+        id: push
         uses: docker/build-push-action@v7
         with:
           context: .
-          load: true
-          tags: ${{ needs.image.outputs.tag_sha }}
+          push: true
+          tags: |
+            ${{ needs.image.outputs.tag_sha }}
+            ${{ needs.image.outputs.tag_main }}
           cache-from: type=registry,ref=${{ needs.image.outputs.cache }}
           cache-to: type=registry,ref=${{ needs.image.outputs.cache }},mode=max
-      - name: Push container image
-        id: push
-        run: |
-          set -euo pipefail
-          docker push ${{ needs.image.outputs.tag_sha }}
-          digest="$(docker inspect --format='{{index .RepoDigests 0}}' ${{ needs.image.outputs.tag_sha }})"
-          echo "image_reference=$digest" >> "$GITHUB_OUTPUT"
-          docker tag ${{ needs.image.outputs.tag_sha }} ${{ needs.image.outputs.tag_main }}
-          docker push ${{ needs.image.outputs.tag_main }}
-        shell: bash
       - name: Write artifact manifest
         env:
           SOURCE_COMMIT: ${{ github.sha }}
-          IMAGE_REFERENCE: ${{ steps.push.outputs.image_reference }}
+          IMAGE_REFERENCE: ${{ needs.image.outputs.image_repository }}@${{ steps.push.outputs.digest }}
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           "$HOME/.local/bin/uv" run --no-project --no-config --python 3.13 python scripts/artifact_manifest.py
