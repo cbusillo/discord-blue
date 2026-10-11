@@ -1,5 +1,6 @@
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -7,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.artifact_manifest import write_manifest
-from scripts.build_publication import read_publication
+from scripts.build_publication import github_read, read_publication
 
 
 class BuildPublicationTests(unittest.TestCase):
@@ -99,3 +100,20 @@ class BuildPublicationTests(unittest.TestCase):
             )
         self.assertEqual(result[0], self.image)
         self.assertEqual(len([path for path in self.reads if "/workflows/" in path]), 2)
+
+    def test_transient_api_failure_retries_without_exposing_provider_output(self) -> None:
+        failed = subprocess.CompletedProcess([], 1, b"", b"gh: temporary failure (HTTP 502)")
+        succeeded = subprocess.CompletedProcess([], 0, b"publication", b"")
+        with (
+            patch("scripts.build_publication.subprocess.run", side_effect=[failed, succeeded]) as request,
+            patch("scripts.build_publication.time.sleep"),
+        ):
+            self.assertEqual(github_read("repos/example/site"), b"publication")
+        self.assertEqual(request.call_count, 2)
+
+    def test_auth_refusal_is_not_retried_and_only_status_is_reported(self) -> None:
+        failed = subprocess.CompletedProcess([], 1, b"", b"gh: private response body (HTTP 403)")
+        with patch("scripts.build_publication.subprocess.run", return_value=failed) as request:
+            with self.assertRaisesRegex(RuntimeError, "HTTP 403$"):
+                github_read("repos/example/site")
+        self.assertEqual(request.call_count, 1)

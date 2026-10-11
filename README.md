@@ -470,7 +470,10 @@ in [launchplane#2792](https://github.com/cbusillo/launchplane/issues/2792) and
 When retrying a main Build, use **Re-run all jobs** so the latest run attempt
 uploads its own manifest. Re-running only failed jobs can leave the latest
 attempt without the manifest required by Launchplane. Retry a failed legacy
-caller only after that Build succeeds.
+caller only after that Build succeeds. Rebuilding republishes the SHA tag;
+release qualification must use the latest attempt's digest, not earlier evidence.
+The read-only caller wait uses a GitHub-hosted runner so it cannot occupy the
+self-hosted runners needed by Build.
 A merge's deployment request is separate from a confirmed production deployment;
 the required `ci-gate` proves validation and image build. The separate
 `launchplane-deploy` job succeeds only when Launchplane reports a passing deploy.

@@ -15,10 +15,7 @@ jobs:
     outputs:
       image_reference: ${{ steps.publication.outputs.image_reference }}
       deploy_reference: ${{ steps.publication.outputs.deploy_reference }}
-    runs-on:
-      - self-hosted
-      - chris-testing
-      - chris-testing-discord-blue
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7

@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import re
 import subprocess
 import time
 import zipfile
@@ -66,7 +67,23 @@ def read_publication(
 
 def github_read(path: str) -> bytes:
     """Use the runner's built-in gh client and scoped token without echoing it."""
-    return subprocess.run(["gh", "api", path], check=True, capture_output=True, timeout=60).stdout
+    for attempt in range(3):
+        try:
+            result = subprocess.run(["gh", "api", path], capture_output=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            reason = "timeout"
+            retryable = True
+        else:
+            if result.returncode == 0:
+                return result.stdout
+            match = re.search(rb"HTTP (\d{3})", result.stderr)
+            status = int(match[1]) if match else None
+            reason = f"HTTP {status}" if status else "gh request failure"
+            retryable = status in {429, 500, 502, 503, 504} or b"secondary rate limit" in result.stderr.lower()
+        if not retryable or attempt == 2:
+            raise RuntimeError(f"GitHub publication read failed: {reason}")
+        time.sleep(2**attempt)
+    raise AssertionError("unreachable")
 
 
 if __name__ == "__main__":
