@@ -4,7 +4,7 @@
   "docs": {
     "overview": "README.md",
     "agentInstructions": "AGENTS.md",
-    "workflow": ".github/workflows/main.yml",
+    "workflow": ".github/workflows/build.yml",
     "packageManifest": "pyproject.toml",
     "lockfile": "uv.lock",
     "dockerfile": "Dockerfile",
@@ -61,6 +61,7 @@
     ]
   },
   "importantWorkflows": [
+    "Build",
     "Deploy to Production",
     "CodeQL",
     "Dependency Graph",

@@ -452,13 +452,28 @@ Production deploys run through Launchplane and Dokploy. The product workflow
 validates the repo, publishes an immutable GHCR image, and asks Launchplane to
 deploy that image to the registered Dokploy application on the Discord Blue LXC.
 
-A push to `main`, including a PR merge, publishes the image and requests a
-production deployment. Pull requests validate and build without publishing or
-requesting a deployment. A docs-only merge uses the same production path.
-Manual workflow runs on `main` publish without requesting deployment; pushes
-to `launchplane/train/**` validate and build without publishing.
+A push to `main`, including a PR merge, runs the canonical
+[Build workflow](.github/workflows/build.yml). It validates, builds and publishes
+the image, then uploads `artifact-manifest-<run_attempt>` binding the source
+commit to the immutable registry digest. Launchplane reads that successful push
+run under its [artifact provenance contract](https://github.com/cbusillo/launchplane/blob/main/docs/artifact-provenance.md).
+Pull requests and `launchplane/train/**` pushes validate and build without
+publishing. Manual Build runs on `main` publish, but are not release provenance.
 
-This describes the wiring in [.github/workflows/main.yml](.github/workflows/main.yml).
+The existing [production caller](.github/workflows/main.yml) also runs on main
+pushes, waiting up to 30 minutes for the successful canonical Build for that exact
+commit and reading its current-attempt manifest before requesting deployment.
+It does not rebuild or publish another image, and preserves its original push
+event and authentication contract. Its retirement remains coordinated with the service-owned release work
+in [launchplane#2792](https://github.com/cbusillo/launchplane/issues/2792) and
+[launchplane#3019](https://github.com/cbusillo/launchplane/issues/3019).
+When retrying a main Build, use **Re-run all jobs** so the latest run attempt
+uploads its own manifest. Re-running only failed jobs can leave the latest
+attempt without the manifest required by Launchplane. Retry a failed legacy
+caller only after that Build succeeds. Rebuilding republishes the SHA tag;
+release qualification must use the latest attempt's digest, not earlier evidence.
+The read-only caller wait uses a GitHub-hosted runner so it cannot occupy the
+self-hosted runners needed by Build.
 A merge's deployment request is separate from a confirmed production deployment;
 the required `ci-gate` proves validation and image build. The separate
 `launchplane-deploy` job succeeds only when Launchplane reports a passing deploy.
@@ -474,7 +489,7 @@ for release authority before production work.
   can retain immutable evidence while Dokploy pulls the matching provider tag.
 - The required `ci-gate` context fails closed unless both application
   validation and the container image build succeed, plus publishing on runs that
-  publish an image.
+  publish an image, including its manifest upload.
 - The production LXC keeps `/var/lib/discord-blue` as the durable state mount.
 - The bridge saves session recovery hints in `$HOME/agent-sessions.json`
   (`/var/lib/discord-blue/agent-sessions.json` in the container). One writer
