@@ -9,12 +9,14 @@ from unittest.mock import patch
 
 from scripts.artifact_manifest import write_manifest
 from scripts.build_publication import github_read, read_publication
+from scripts.image_metadata import image_metadata
 
 
 class BuildPublicationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.commit = "a" * 40
-        self.image = "ghcr.io/cbusillo/discord-blue@sha256:" + "b" * 64
+        self.published = image_metadata(self.commit, "CBusillo/Discord-Blue")
+        self.image = self.published.image + "@sha256:" + "b" * 64
         self.build_run = {
             "id": 7,
             "run_attempt": 2,
@@ -53,7 +55,7 @@ class BuildPublicationTests(unittest.TestCase):
         )
 
     def test_reads_exact_successful_run_and_attempt(self) -> None:
-        self.assertEqual(self.publication(), (self.image, f"ghcr.io/cbusillo/discord-blue:sha-{self.commit}"))
+        self.assertEqual(self.publication(), (self.image, self.published.tag_sha))
         self.assertIn("/runs/7/artifacts", self.reads[1])
         self.assertTrue(self.reads[2].endswith("/artifacts/11/zip"))
 

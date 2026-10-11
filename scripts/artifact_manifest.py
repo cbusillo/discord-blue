@@ -5,6 +5,8 @@ import os
 import re
 from pathlib import Path
 
+from scripts.image_metadata import image_metadata
+
 
 def write_manifest(*, source_commit: str, repository: str, image_reference: str, destination: Path) -> None:
     """Refuse missing publication evidence before writing a manifest."""
@@ -20,9 +22,7 @@ def write_manifest(*, source_commit: str, repository: str, image_reference: str,
 
 def publication_identity(source_commit: str, repository: str, image_reference: str) -> tuple[str, str]:
     """Validate the identity shared by publication and legacy delivery."""
-    if re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
-        raise ValueError("Publication requires an exact source commit")
-    image_repository = f"ghcr.io/{repository.lower()}"
+    image_repository = image_metadata(source_commit, repository).image
     image, separator, digest = image_reference.partition("@")
     if not separator or image != image_repository or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
         raise ValueError("Publication requires the repository's immutable image digest")
