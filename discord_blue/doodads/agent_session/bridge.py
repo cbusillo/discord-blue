@@ -25,7 +25,6 @@ from aiohttp import WSMsgType, web
 
 from discord_blue.doodads.agent_session.cards import STATUS_CARD_COMPONENT_ID, notice_card, session_status_card
 from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
-from discord_blue.doodads.agent_session.chunks import format_assistant_messages
 from discord_blue.doodads.agent_session.formatting import advance_code_fence
 from discord_blue.doodads.agent_session.formatting import format_user_message
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
@@ -1827,12 +1826,21 @@ class AgentSessionBridge:
         assistant_message = hello.assistant_message
         if assistant_message is None:
             return
-        for message in format_assistant_messages(assistant_message):
-            await send_assistant_message(thread, message)
+        await send_assistant_message(thread, assistant_message)
 
     def is_bot_assistant_message(self, message: discord.Message) -> bool:
         bot_user = self.bot.user
-        return bot_user is not None and message.author.id == bot_user.id and is_assistant_message(message.content)
+        if bot_user is None or message.author.id != bot_user.id:
+            return False
+        if is_assistant_message(message.content):
+            return True
+        # Discord stores V2 text in components, with empty message.content.
+        return any(
+            isinstance(child, discord.TextDisplay) and is_assistant_message(child.content)
+            for component in message.components
+            if isinstance(component, discord.Container)
+            for child in component.children
+        )
 
     async def thread_has_assistant_message(self, thread: discord.Thread) -> bool:
         try:
@@ -2152,18 +2160,6 @@ class AgentSessionBridge:
             self.session_status_summary(interaction.channel, interaction.user),
             ephemeral=True,
         )
-
-    def active_sessions_summary(self) -> str:
-        sessions = self.sessions.live_sessions()
-        if not sessions:
-            return "No live agent sessions."
-
-        lines = ["Live agent sessions:"]
-        for session in sessions:
-            title = session_thread_name(session.hello)
-            thread = f" <#{session.thread_id}>" if session.thread_id is not None else ""
-            lines.append(f"- `{title}` (online, {session.hello.host_label}){thread}")
-        return "\n".join(lines)
 
     def session_status_summary(
         self,
@@ -2997,8 +2993,7 @@ class AgentSessionBridge:
         channel = self.thread_channel(thread_id)
         if not isinstance(channel, discord.Thread):
             return
-        for message in format_assistant_messages(text):
-            await send_assistant_message(channel, message)
+        await send_assistant_message(channel, text)
 
     async def post_session_controls(self, session: AgentSession) -> None:
         if session.thread_id is None:

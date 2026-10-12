@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from io import BytesIO
 
 import discord
 
-from discord_blue.doodads.agent_session.cards import notice_card
+from discord_blue.doodads.agent_session.cards import assistant_answer_card, notice_card
 from discord_blue.doodads.agent_session.formatting import strip_assistant_markers
 
 logger = logging.getLogger(__name__)
@@ -39,8 +40,15 @@ async def send_agent_session_message(
 
 
 async def send_assistant_message(destination: discord.abc.Messageable, message: str) -> discord.Message:
-    """Post one message from `chunks.format_assistant_messages`, which already fits and carries its marker."""
-    return await _send(destination, message, view=None)
+    """Post a compact answer; long answers retain their full Markdown in an explicit file component."""
+    view, attached = assistant_answer_card(message)
+    if attached:
+        file = discord.File(BytesIO(strip_assistant_markers(message).encode()), filename="answer.md")
+        try:
+            return await destination.send(file=file, view=view, allowed_mentions=agent_session_allowed_mentions(), silent=False)
+        finally:
+            file.close()
+    return await destination.send(view=view, allowed_mentions=agent_session_allowed_mentions(), silent=False)
 
 
 async def _send(

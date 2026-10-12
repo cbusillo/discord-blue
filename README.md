@@ -198,6 +198,20 @@ objects so the response remains parseable and non-secret. Optional
 `LAUNCHPLANE_SOURCE_GIT_REF` and `LAUNCHPLANE_IMAGE_REFERENCE` values are also
 echoed when present.
 
+## Session answers and dashboard
+
+Both harnesses render final answers in a compact Components V2 card. Long
+answers show a code-fence-balanced preview and an **answer.md** file with the
+complete original Markdown. Short answers need no attachment. Answers still
+notify normally and cannot ping people or roles. Restart recovery recognizes
+both new answer cards and older text answers, so it does not repost them.
+
+`/code active` shows operators a private dashboard snapshot, with sessions
+waiting on you first, then uncertain or failed sessions, working sessions and
+completed sessions. Each attached session has an **Open thread** button.
+Disconnected sessions are excluded. Large lists arrive as numbered pages;
+run the command again for a fresh snapshot.
+
 ## Codex bridge (runs on the Mac next to Codex)
 
 `discord-blue-codex-bridge` attaches to the stock Codex app-server daemon as one
