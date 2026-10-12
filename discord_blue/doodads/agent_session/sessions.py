@@ -137,9 +137,6 @@ class AgentSessionRegistry:
                 approval.view.stop()
 
     def register(self, session: AgentSession) -> None:
-        previous = self.by_session.get(session.session_id)
-        if previous is not None and previous is not session:
-            self.stop_approval_views(previous)
         self.by_session[session.session_id] = session
         if session.thread_id is not None:
             self.by_thread[session.thread_id] = session.session_id

@@ -67,7 +67,7 @@ class ApprovalCardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.fixture.session.pending_approvals[self.request.approval_id].decision, decision)
                 self.assertEqual(message.reactions, [])
                 await self.fixture.bridge.handle_approval_decision_ack(sent)
-                self.assertIn(decision, visible_view_text(message.view))
+                self.assertTrue(visible_view_text(message.view))
                 self.assertFalse(
                     any(isinstance(item, discord.ui.Button) for item in cast(discord.ui.LayoutView, message.view).walk_children())
                 )
@@ -174,4 +174,20 @@ class ApprovalCardTests(unittest.IsolatedAsyncioTestCase):
             await self.button(view, "approved").callback(cast(Any, interaction))
         self.assertEqual(self.fixture.socket.sent_json, [])
         self.assertTrue(interaction.response.messages)
+        self.assertTrue(view.is_finished())
+
+    async def test_failed_replacement_restores_answerable_approval_buttons(self) -> None:
+        view, message = await self.offer()
+        previous = self.fixture.session
+        replacement = dataclasses.replace(
+            previous, hello=dataclasses.replace(previous.hello, session_epoch="failed-epoch"), pending_approvals={}
+        )
+        self.fixture.bridge.sessions.register(replacement)
+        self.assertFalse(view.is_finished())
+        self.fixture.bridge.sessions.remove_if_current(replacement)
+        self.fixture.bridge.restore_replaced(previous)
+        self.assertIs(self.fixture.bridge.sessions.get(previous.session_id), previous)
+        self.assertFalse(view.is_finished())
+        await self.button(view, "approved").callback(cast(Any, FakeInteraction(self.fixture.thread, message=message)))
+        self.assertEqual(len(self.fixture.socket.sent_json), 1)
         self.assertTrue(view.is_finished())

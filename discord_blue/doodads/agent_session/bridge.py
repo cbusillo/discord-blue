@@ -1302,6 +1302,9 @@ class AgentSessionBridge:
                     self.sessions.remove_if_current(current)
                 self.restore_replaced(previous)
                 raise
+            if previous is not None:
+                # Provisional replacement can fail and restore this connection, so only retire its views after attach succeeds.
+                self.sessions.stop_approval_views(previous)
             if previous is not None and previous.grace_task is not None:
                 # Only now: had the attach failed, the old session's timer still closes its thread.
                 previous.grace_task.cancel()
