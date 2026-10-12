@@ -138,6 +138,7 @@ class FakeThread:
         self.sent_messages: list[str] = []
         self.sent_views: list[object] = []
         self.sent_files: list[bytes] = []
+        self.sent_filenames: list[str] = []
         self.sent_kwargs: list[dict[str, object]] = []
         self.send_raises = False
         self.send_failures_remaining = 0
@@ -211,6 +212,7 @@ class FakeThread:
         file = kwargs.get("file")
         if isinstance(file, discord.File):
             self.sent_files.append(file.fp.read())
+            self.sent_filenames.append(file.filename)
             file.fp.seek(0)
         self.sent_views.append(kwargs.get("view"))
         self.sent_kwargs.append(kwargs)

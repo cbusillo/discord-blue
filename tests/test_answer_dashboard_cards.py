@@ -10,7 +10,12 @@ from unittest.mock import AsyncMock
 import discord
 from discord.http import handle_message_parameters
 
-from discord_blue.doodads.agent_session.cards import ANSWER_PREVIEW_LIMIT, DASHBOARD_PAGE_SIZE, active_session_cards
+from discord_blue.doodads.agent_session.cards import (
+    ANSWER_PREVIEW_LIMIT,
+    ANSWER_PREVIEW_LINE_LIMIT,
+    DASHBOARD_PAGE_SIZE,
+    active_session_cards,
+)
 from discord_blue.doodads.agent_session.formatting import is_assistant_message, mark_assistant_message
 from discord_blue.doodads.agent_session.protocol import SessionStatus
 from discord_blue.doodads.agent_session.sessions import AgentSession
@@ -61,7 +66,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                     if len(answer) > ANSWER_PREVIEW_LIMIT:
                         self.assertEqual(thread.sent_files, [answer.encode()])
                         self.assertEqual(len(files), 1)
-                        self.assertIn("answer.md", files[0].media.url)
+                        self.assertEqual(files[0].media.url, f"attachment://{thread.sent_filenames[0]}")
                         self.assertLess(len(text_in(view)), len(answer))
                     else:
                         self.assertFalse(files)
@@ -71,11 +76,29 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                     await bridge.backfill_latest_assistant_message(cast(discord.Thread, thread), session.hello)
                     self.assertEqual(len(thread.sent_messages), posted, "V2 history must prevent duplicate backfill")
 
+    async def test_blank_answers_do_not_send_or_notify_and_line_dense_answers_stay_compact(self) -> None:
+        with prompt_fixture() as fixture:
+            for answer in ("", "  ", "\n", mark_assistant_message("  ")):
+                await fixture.bridge.post_assistant_message(fixture.thread.id, answer)
+                fixture.session.hello.assistant_message = answer
+                await fixture.bridge.backfill_latest_assistant_message(cast(discord.Thread, fixture.thread), fixture.session.hello)
+            self.assertFalse(fixture.thread.sent_messages)
+            answer = "short line\n" * (ANSWER_PREVIEW_LINE_LIMIT + 1)
+            await fixture.bridge.post_assistant_message(fixture.thread.id, answer)
+            self.assertEqual(fixture.thread.sent_files, [answer.encode()])
+            self.assertLess(len(fixture.thread.sent_messages[0].splitlines()), len(answer.splitlines()))
+
     async def test_only_bot_authored_cards_count_as_answers_in_history(self) -> None:
         with prompt_fixture() as fixture:
             await fixture.bridge.post_assistant_message(fixture.thread.id, "Answer from the agent")
             message = await fixture.thread.fetch_message(901)
             self.assertEqual(message.content, "")
+            self.assertTrue(fixture.bridge.is_bot_assistant_message(cast(discord.Message, message)))
+            # A Discord readback that normalizes invisible text still retains the card ID.
+            for container in message.components:
+                for child in container.children:
+                    if isinstance(child, discord.TextDisplay):
+                        child.content = child.content.replace(mark_assistant_message(""), "")
             self.assertTrue(fixture.bridge.is_bot_assistant_message(cast(discord.Message, message)))
             message.author.id = 123
             self.assertFalse(fixture.bridge.is_bot_assistant_message(cast(discord.Message, message)))

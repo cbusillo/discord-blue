@@ -13,6 +13,8 @@ from discord_blue.doodads.agent_session.sessions import AgentSession
 
 
 STATUS_CARD_COMPONENT_ID = 213
+ANSWER_CARD_COMPONENT_ID = 214
+ANSWER_FILENAME = "answer.md"
 ANSWER_PREVIEW_LIMIT = 1600
 ANSWER_PREVIEW_LINE_LIMIT = 12
 DASHBOARD_PAGE_SIZE = 8
@@ -39,11 +41,11 @@ def assistant_answer_card(text: str) -> tuple[discord.ui.LayoutView, bool]:
         children.extend(
             [
                 discord.ui.TextDisplay("-# Preview above · Full answer attached below"),
-                discord.ui.File("attachment://answer.md"),
+                discord.ui.File(f"attachment://{ANSWER_FILENAME}"),
             ]
         )
     view = discord.ui.LayoutView(timeout=None)
-    view.add_item(discord.ui.Container(*children, accent_color=STATUS_LABELS["done"][1]))
+    view.add_item(discord.ui.Container(*children, accent_color=STATUS_LABELS["done"][1], id=ANSWER_CARD_COMPONENT_ID))
     return view, long_answer
 
 

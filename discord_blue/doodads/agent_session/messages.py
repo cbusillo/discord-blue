@@ -6,8 +6,8 @@ from io import BytesIO
 
 import discord
 
-from discord_blue.doodads.agent_session.cards import assistant_answer_card, notice_card
-from discord_blue.doodads.agent_session.formatting import strip_assistant_markers
+from discord_blue.doodads.agent_session.cards import ANSWER_FILENAME, assistant_answer_card, notice_card
+from discord_blue.doodads.agent_session.formatting import ASSISTANT_MESSAGE_MARKER, strip_assistant_markers
 
 logger = logging.getLogger(__name__)
 MISSING_MANAGE_MESSAGES_DESTINATIONS: set[int] = set()
@@ -39,11 +39,13 @@ async def send_agent_session_message(
     return await _send(destination, None if content is None else strip_assistant_markers(content), view=view, silent=silent)
 
 
-async def send_assistant_message(destination: discord.abc.Messageable, message: str) -> discord.Message:
+async def send_assistant_message(destination: discord.abc.Messageable, message: str) -> discord.Message | None:
     """Post a compact answer; long answers retain their full Markdown in an explicit file component."""
+    if not strip_assistant_markers(message.replace(ASSISTANT_MESSAGE_MARKER, "")).strip():
+        return None
     view, attached = assistant_answer_card(message)
     if attached:
-        file = discord.File(BytesIO(strip_assistant_markers(message).encode()), filename="answer.md")
+        file = discord.File(BytesIO(strip_assistant_markers(message).encode()), filename=ANSWER_FILENAME)
         try:
             return await destination.send(file=file, view=view, allowed_mentions=agent_session_allowed_mentions(), silent=False)
         finally:

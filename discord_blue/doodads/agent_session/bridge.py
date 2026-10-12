@@ -23,7 +23,12 @@ from typing import Literal, cast
 import discord
 from aiohttp import WSMsgType, web
 
-from discord_blue.doodads.agent_session.cards import STATUS_CARD_COMPONENT_ID, notice_card, session_status_card
+from discord_blue.doodads.agent_session.cards import (
+    ANSWER_CARD_COMPONENT_ID,
+    STATUS_CARD_COMPONENT_ID,
+    notice_card,
+    session_status_card,
+)
 from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
 from discord_blue.doodads.agent_session.formatting import advance_code_fence
 from discord_blue.doodads.agent_session.formatting import format_user_message
@@ -1834,7 +1839,11 @@ class AgentSessionBridge:
             return False
         if is_assistant_message(message.content):
             return True
-        # Discord stores V2 text in components, with empty message.content.
+        if any(
+            isinstance(component, discord.Container) and component.id == ANSWER_CARD_COMPONENT_ID for component in message.components
+        ):
+            return True
+        # Also recognize marked cards from before the explicit component ID.
         return any(
             isinstance(child, discord.TextDisplay) and is_assistant_message(child.content)
             for component in message.components

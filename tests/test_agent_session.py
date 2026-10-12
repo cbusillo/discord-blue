@@ -1945,7 +1945,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         assistant_messages = [message for message in thread.sent_messages if is_assistant_message(message)]
         self.assertEqual(len(assistant_messages), 1)
-        self.assertEqual(thread.sent_files, [assistant_message.encode("utf-8")])
+        self.assertEqual(thread.sent_files, [assistant_message.encode()])
         for message in assistant_messages:
             self.assertLessEqual(len(message), bridge_module.DISCORD_MESSAGE_LIMIT)
             body = message.removesuffix(mark_assistant_message(""))
@@ -1979,14 +1979,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         assistant_messages = [message for message in thread.sent_messages if is_assistant_message(message)]
         self.assertEqual(len(assistant_messages), 1)
-        self.assertEqual(thread.sent_files, [assistant_message.encode("utf-8")])
+        self.assertEqual(thread.sent_files, [assistant_message.encode()])
         for message in assistant_messages:
             self.assertLessEqual(len(message), bridge_module.DISCORD_MESSAGE_LIMIT)
             self.assertNotIn("Assistant", message)
         posted = "\n".join(assistant_messages)
         self.assertGreater(posted.count("- **`field_"), 0)
         self.assertNotIn("| `field_", posted)
-        self.assertIn(fenced, thread.sent_files[0].decode("utf-8"))
+        self.assertIn(fenced, thread.sent_files[0].decode())
 
     async def test_approval_request_posts_compact_reactions(self) -> None:
         config = Config()
@@ -3717,7 +3717,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         posted = list(thread.sent_messages)
         self.assertEqual(len(posted), 1)
-        self.assertEqual(thread.sent_files, [answer.encode("utf-8")])
+        self.assertEqual(thread.sent_files, [answer.encode()])
         for message in posted:
             self.assertLessEqual(len(message), bridge_module.DISCORD_MESSAGE_LIMIT)
             self.assertTrue(is_assistant_message(message))
