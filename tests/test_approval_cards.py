@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import unittest
 from typing import Any, cast
@@ -8,7 +9,7 @@ from unittest.mock import patch
 import discord
 
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge, ApprovalButton, ApprovalView
-from discord_blue.doodads.agent_session.protocol import RemoteApprovalRequest
+from discord_blue.doodads.agent_session.protocol import RemoteApprovalDecision, RemoteApprovalRequest
 from tests.fakes_agent_prompts import prompt_fixture
 from tests.fakes_agent_session import FakeInteraction, FakeReplyMessage, FakeThread, visible_view_text
 
@@ -50,14 +51,15 @@ class ApprovalCardTests(unittest.IsolatedAsyncioTestCase):
                 [sent] = self.fixture.socket.sent_json
                 self.assertEqual(
                     sent,
-                    {
-                        "type": "approval_decision",
-                        "approval_id": self.request.approval_id,
-                        "session_id": self.request.session_id,
-                        "session_epoch": self.request.session_epoch,
-                        "decision": decision,
-                    },
+                    RemoteApprovalDecision(
+                        approval_id=self.request.approval_id,
+                        session_id=self.request.session_id,
+                        session_epoch=self.request.session_epoch,
+                        decision=decision,
+                    ).to_message(),
                 )
+                self.assertTrue(interaction.response.deferred)
+                self.assertTrue(view.is_finished())
                 self.assertEqual(interaction.response.edits[0][0], "")
                 replacement = cast(discord.ui.LayoutView, interaction.response.edit_kwargs[0]["view"])
                 self.assertFalse(any(isinstance(item, discord.ui.Button) for item in replacement.walk_children()))
@@ -111,3 +113,65 @@ class ApprovalCardTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await self.button(view, "approved").callback(cast(Any, FakeInteraction(self.fixture.thread, message=message)))
                 self.assertEqual(self.fixture.socket.sent_json, [])
+
+    async def test_slow_delivery_is_acknowledged_before_native_resolution_waits(self) -> None:
+        view, message = await self.offer()
+        interaction = FakeInteraction(self.fixture.thread, message=message)
+        sending, release = asyncio.Event(), asyncio.Event()
+        original = self.fixture.socket.send_json
+
+        async def send(payload: dict[str, object]) -> None:
+            sending.set()
+            await release.wait()
+            await original(payload)
+
+        with patch.object(self.fixture.socket, "send_json", new=send):
+            click = asyncio.create_task(self.button(view, "approved").callback(cast(Any, interaction)))
+            try:
+                await asyncio.wait_for(sending.wait(), 1)
+                self.assertTrue(interaction.response.deferred)
+                await self.fixture.bridge.handle_prompt_resolved(
+                    "approval_resolved",
+                    {
+                        "session_id": self.request.session_id,
+                        "session_epoch": self.request.session_epoch,
+                        "approval_id": self.request.approval_id,
+                    },
+                )
+                self.assertTrue(view.is_finished())
+            finally:
+                release.set()
+                await click
+        self.assertTrue(interaction.response.messages)
+        self.assertEqual(interaction.response.edits, [])
+        self.assertEqual(len(self.fixture.socket.sent_json), 1)
+
+    async def test_replaced_requests_and_removed_sessions_release_their_button_views(self) -> None:
+        old, _ = await self.offer()
+        current, _ = await self.offer()
+        self.assertTrue(old.is_finished())
+        self.assertFalse(current.is_finished())
+        self.fixture.bridge.sessions.remove(self.fixture.session.session_id)
+        self.assertTrue(current.is_finished())
+
+    async def test_native_resolution_during_defer_prevents_dispatch(self) -> None:
+        view, message = await self.offer()
+        interaction = FakeInteraction(self.fixture.thread, message=message)
+        original = interaction.response.defer
+
+        async def defer() -> None:
+            await original()
+            await self.fixture.bridge.handle_prompt_resolved(
+                "approval_resolved",
+                {
+                    "session_id": self.request.session_id,
+                    "session_epoch": self.request.session_epoch,
+                    "approval_id": self.request.approval_id,
+                },
+            )
+
+        with patch.object(interaction.response, "defer", new=defer):
+            await self.button(view, "approved").callback(cast(Any, interaction))
+        self.assertEqual(self.fixture.socket.sent_json, [])
+        self.assertTrue(interaction.response.messages)
+        self.assertTrue(view.is_finished())

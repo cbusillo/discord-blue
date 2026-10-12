@@ -215,7 +215,7 @@ in the TUI. The bridge answers a Codex request only
 after an explicit Discord decision. Approval cards offer **Approve once** and
 **Deny** buttons beneath the full request; reaction controls remain supported.
 The card removes its controls when a decision is sent, then shows whether the
-local agent acknowledged it or the request expired. The first answer wins, so the TUI can still
+local agent acknowledged it, the request expired, or the native terminal resolved it. The first answer wins, so the TUI can still
 answer. File-change approvals show the full proposed changes, including paths,
 change kinds and diffs; permissions show the full request and grant only for
 the current turn. Oversized or fenced content, unknown fields, unavailable

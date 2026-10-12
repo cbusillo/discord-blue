@@ -295,6 +295,8 @@ class FakeDiscord:
             return 201, created.payload()
         messages = self.parent_messages if thread is None else thread.messages
         if template == "/channels/{channel}/messages" and method == "POST":
+            if body.get("flags", 0) & (1 << 15) and body.get("content"):
+                return 400, {"message": "Content is unavailable on Components V2 messages", "code": 50035}
             message = FakeMessage(next(self.ids), channel_id or PARENT_ID, str(body.get("content") or ""))
             message.components = body.get("components", [])
             message.flags = body.get("flags", 0)
@@ -325,6 +327,8 @@ class FakeDiscord:
             if method == "DELETE":
                 messages.remove(found)
                 return 204, None
+            if method == "PATCH" and found.flags & (1 << 15) and body.get("content"):
+                return 400, {"message": "Content is unavailable on Components V2 messages", "code": 50035}
             if method == "PATCH" and "content" in body:
                 found.content = str(body["content"] or "")
             if method == "PATCH" and "components" in body:

@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    import discord
 
 from aiohttp import web
 
@@ -37,6 +40,7 @@ class RejectedCommandMessage:
 class PendingRemoteApproval:
     thread_id: int
     message_id: int
+    view: discord.ui.LayoutView | None = None
     decision: str | None = None
     decided_by: int | None = None
     retired: bool = False
@@ -126,7 +130,16 @@ class AgentSessionRegistry:
         self.by_session: dict[str, AgentSession] = {}
         self.by_thread: dict[int, str] = {}
 
+    @staticmethod
+    def stop_approval_views(session: AgentSession) -> None:
+        for approval in session.pending_approvals.values():
+            if approval.view is not None:
+                approval.view.stop()
+
     def register(self, session: AgentSession) -> None:
+        previous = self.by_session.get(session.session_id)
+        if previous is not None and previous is not session:
+            self.stop_approval_views(previous)
         self.by_session[session.session_id] = session
         if session.thread_id is not None:
             self.by_thread[session.thread_id] = session.session_id
@@ -162,6 +175,8 @@ class AgentSessionRegistry:
 
     def remove(self, session_id: str) -> AgentSession | None:
         session = self.by_session.pop(session_id, None)
+        if session is not None:
+            self.stop_approval_views(session)
         # Every thread mapped to this session ID, including one a replaced connection was bound to.
         for thread_id in [thread_id for thread_id, mapped in self.by_thread.items() if mapped == session_id]:
             del self.by_thread[thread_id]

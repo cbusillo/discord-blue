@@ -325,6 +325,10 @@ class FakeInteractionResponse:
         self.edits: list[tuple[str, bool]] = []
         self.edit_kwargs: list[dict[str, object]] = []
         self.modals: list[object] = []
+        self.deferred = False
+
+    async def defer(self) -> None:
+        self.deferred = True
 
     async def send_message(self, content: str, *, ephemeral: bool) -> None:
         self.messages.append((content, ephemeral))
@@ -348,6 +352,10 @@ class FakeInteraction:
         self.user = SimpleNamespace(id=user_id)
         self.message = message
         self.response = FakeInteractionResponse()
+        self.followup = SimpleNamespace(send=self.response.send_message)
+
+    async def edit_original_response(self, content: str | None, **kwargs: object) -> None:
+        await self.response.edit_message(content=content, **kwargs)
 
 
 class FakeBot:

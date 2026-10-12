@@ -1944,6 +1944,8 @@ class AgentSessionBridge:
     ) -> str | None:
         if error := self.dispatch_error(session, "approval_decision"):
             return error
+        if pending.retired or session.pending_approvals.get(approval_id) is not pending:
+            return "This approval is no longer active."
         if pending.decision is not None:
             return "This approval has already been answered."
         pending.decision, pending.decided_by = decision, user_id
@@ -2348,14 +2350,17 @@ class AgentSessionBridge:
         if not isinstance(channel, discord.Thread):
             return
 
-        message = await send_agent_session_message(
-            channel, view=ApprovalView(self, approval, content[:DISCORD_MESSAGE_LIMIT]), silent=False
-        )
+        view = ApprovalView(self, approval, content[:DISCORD_MESSAGE_LIMIT])
+        message = await send_agent_session_message(channel, view=view, silent=False)
+        previous = session.pending_approvals.get(approval.approval_id)
+        if previous is not None and previous.view is not None:
+            previous.view.stop()
         # Answerable from the moment it is posted: Discord shows the reactions one at a time, and a tap on the first
         # one while the bot still adds the next must count.
         session.pending_approvals[approval.approval_id] = PendingRemoteApproval(
             thread_id=session.thread_id,
             message_id=message.id,
+            view=view,
         )
         await self.add_message_reactions(
             message,
@@ -2575,18 +2580,21 @@ class AgentSessionBridge:
             await interaction.response.send_message("This approval has already been answered.", ephemeral=True)
             return
 
+        await interaction.response.defer()
         if error := await self.dispatch_approval(session, pending, approval_id, decision, interaction.user.id):
-            await interaction.response.send_message(error, ephemeral=True)
+            await interaction.followup.send(error, ephemeral=True)
             return
+        if pending.view is not None:
+            pending.view.stop()
         async with pending.ui_lock:
             if pending.retired or self.sessions.get(session_id) is not session:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "Decision sent; this approval is no longer active. Check the native TUI for its outcome.", ephemeral=True
                 )
                 return
             content = self.format_approval_pending(decision, interaction.user)
             is_v2 = message_uses_components_v2(interaction.message)
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=None if is_v2 else content,
                 view=notice_card(content) if is_v2 else None,
                 allowed_mentions=agent_session_allowed_mentions(),
@@ -2784,6 +2792,8 @@ class AgentSessionBridge:
         await self.edit_approval_message(pending, f"**Approval expired**\n{reason}")
 
     async def edit_approval_message(self, pending: PendingRemoteApproval, content: str, *, only_active: bool = False) -> None:
+        if pending.view is not None:
+            pending.view.stop()
         async with pending.ui_lock:
             if only_active and pending.retired:
                 return

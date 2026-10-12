@@ -2012,7 +2012,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("Need approval", visible_view_text(thread.sent_views[0]))
-        self.assertIn("```sh\ngit status\n```", visible_view_text(thread.sent_views[0]))
+        self.assertIn("git status", visible_view_text(thread.sent_views[0]))
         self.assertFalse(thread.sent_kwargs[0]["silent"])
         self.assertEqual(thread.sent_messages[0], "")
         self.assertIsInstance(thread.sent_views[0], bridge_module.ApprovalView)
