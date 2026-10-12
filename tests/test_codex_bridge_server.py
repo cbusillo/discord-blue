@@ -96,7 +96,11 @@ class CodexBridgeServerTests(unittest.IsolatedAsyncioTestCase):
                 approve = bridge_module.REACTION_APPROVAL_APPROVE
                 self.assertTrue(await until(lambda: offering(discord_thread, approve) is not None, 5), "no approval was offered")
                 approval_message = offering(discord_thread, approve)
-                assert approval_message is not None and "make test" in approval_message.content
+                assert approval_message is not None
+                self.assertIn(
+                    "make test",
+                    "\n".join(child.get("content", "") for c in approval_message.components for child in c.get("components", [])),
+                )
                 reaction_add(running.bot, discord_thread.id, approval_message.id, approve, OPERATOR)
                 decided = await until(lambda: bool(rpc.responses), 5)
             finally:
