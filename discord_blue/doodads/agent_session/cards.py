@@ -49,6 +49,13 @@ def assistant_answer_card(text: str) -> tuple[discord.ui.LayoutView, bool]:
     return view, long_answer
 
 
+def _dashboard_text(text: str, limit: int) -> str:
+    escaped = discord.utils.escape_markdown(strip_assistant_markers(text))[:limit]
+    # A cut between an escape and its character must not leave a lone backslash.
+    trailing_slashes = len(escaped) - len(escaped.rstrip("\\"))
+    return escaped[:-1] if trailing_slashes % 2 else escaped
+
+
 def active_session_cards(sessions: list[AgentSession], guild_id: int) -> list[discord.ui.LayoutView]:
     from discord_blue.doodads.agent_session.threads import session_thread_name
 
@@ -64,9 +71,9 @@ def active_session_cards(sessions: list[AgentSession], guild_id: int) -> list[di
         if not page:
             children.append(discord.ui.TextDisplay("No live agent sessions."))
         for session in page:
-            title = discord.utils.escape_markdown(strip_assistant_markers(session_thread_name(session.hello)))[:150]
-            host = discord.utils.escape_markdown(strip_assistant_markers(session.hello.host_label))[:80]
-            detail = discord.utils.escape_markdown(strip_assistant_markers(session.last_status_message or ""))[:160]
+            title = _dashboard_text(session_thread_name(session.hello), 150)
+            host = _dashboard_text(session.hello.host_label, 80)
+            detail = _dashboard_text(session.last_status_message or "", 160)
             label = STATUS_LABELS[session.display_state][0]
             text = f"**{label}** · {title}\n-# {host}"
             if detail:

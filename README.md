@@ -202,7 +202,9 @@ echoed when present.
 
 Both harnesses render final answers in a compact Components V2 card. Long
 answers show a code-fence-balanced preview and an **answer.md** file with the
-complete original Markdown. Short answers need no attachment. Answers still
+complete original Markdown. If Discord denies the upload, the answer uses the
+existing bounded text delivery path, with a terminal notice past its cap.
+Short answers need no attachment. Answers still
 notify normally and cannot ping people or roles. Restart recovery recognizes
 both new answer cards and older text answers, so it does not repost them.
 

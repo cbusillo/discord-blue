@@ -104,7 +104,7 @@ class AgentSessionDoodad(commands.Cog):
         from discord_blue.doodads.agent_session.cards import active_session_cards
         from discord_blue.doodads.agent_session.messages import agent_session_allowed_mentions
 
-        views = active_session_cards(self.bridge.sessions.live_sessions(), self.bot.config.discord.guild_id)
+        views = active_session_cards(self.bridge.sessions.live_sessions(), interaction.guild_id or 0)
         await interaction.response.send_message(view=views[0], ephemeral=True, allowed_mentions=agent_session_allowed_mentions())
         for view in views[1:]:
             await interaction.followup.send(view=view, ephemeral=True, allowed_mentions=agent_session_allowed_mentions())

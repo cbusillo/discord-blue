@@ -61,7 +61,8 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(payload.get("content"))
                         self.assertTrue(discord.MessageFlags._from_value(payload["flags"]).components_v2)
                         self.assertFalse(payload["allowed_mentions"]["parse"])
-                    self.assertFalse(thread.sent_kwargs[0]["silent"])
+                    answer_index = thread.sent_views.index(view)
+                    self.assertFalse(thread.sent_kwargs[answer_index].get("silent", False))
                     files = [item for item in view.walk_children() if isinstance(item, discord.ui.File)]
                     if len(answer) > ANSWER_PREVIEW_LIMIT:
                         self.assertEqual(thread.sent_files, [answer.encode()])
@@ -88,10 +89,33 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(fixture.thread.sent_files, [answer.encode()])
             self.assertLess(len(fixture.thread.sent_messages[0].splitlines()), len(answer.splitlines()))
 
+    async def test_denied_attachment_preserves_text_delivery_and_completion_controls(self) -> None:
+        with prompt_fixture() as fixture:
+            fixture.thread.deny_attachments = True
+            answer = "fallback line\n" * (ANSWER_PREVIEW_LINE_LIMIT + 1)
+            await fixture.bridge.handle_session_status(
+                "turn_complete",
+                SessionStatus(
+                    session_id=fixture.session.session_id,
+                    session_epoch=fixture.session.session_epoch,
+                    message="Turn complete",
+                    assistant_message=answer,
+                ),
+            )
+            self.assertEqual(fixture.thread.sent_messages[0], mark_assistant_message(answer.strip()))
+            self.assertFalse(fixture.thread.sent_files)
+            self.assertIsNotNone(fixture.session.control_message_id)
+            self.assertEqual(fixture.session.display_state, "done")
+            self.assertFalse(fixture.thread.sent_kwargs[0].get("silent", False))
+            fixture.session.hello.assistant_message = answer
+            count = len(fixture.thread.sent_messages)
+            await fixture.bridge.backfill_latest_assistant_message(cast(discord.Thread, fixture.thread), fixture.session.hello)
+            self.assertEqual(len(fixture.thread.sent_messages), count)
+
     async def test_only_bot_authored_cards_count_as_answers_in_history(self) -> None:
         with prompt_fixture() as fixture:
             await fixture.bridge.post_assistant_message(fixture.thread.id, "Answer from the agent")
-            message = await fixture.thread.fetch_message(901)
+            message = fixture.thread._history[-1]
             self.assertEqual(message.content, "")
             self.assertTrue(fixture.bridge.is_bot_assistant_message(cast(discord.Message, message)))
             # A Discord readback that normalizes invisible text still retains the card ID.
@@ -102,7 +126,9 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(fixture.bridge.is_bot_assistant_message(cast(discord.Message, message)))
             message.author.id = 123
             self.assertFalse(fixture.bridge.is_bot_assistant_message(cast(discord.Message, message)))
-            message.author.id = 999
+            bot_user = fixture.bridge.bot.user
+            assert bot_user is not None
+            message.author.id = bot_user.id
             await message.edit(view=discord.ui.LayoutView())
             self.assertFalse(fixture.bridge.is_bot_assistant_message(cast(discord.Message, message)))
 
@@ -139,7 +165,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
     async def test_active_command_pages_privately_and_excludes_disconnected_sessions(self) -> None:
         with prompt_fixture() as fixture:
             fixture.bridge.bot.config.agent_session.enabled = True
-            fixture.bridge.bot.config.discord.guild_id = 42
+            fixture.bridge.bot.config.discord.guild_id = 0
             for index in range(DASHBOARD_PAGE_SIZE + 2):
                 hello = make_hello()
                 hello.session_id = f"dashboard-{index}"
@@ -153,6 +179,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
             cog = SimpleNamespace(bot=fixture.bridge.bot, bridge=fixture.bridge)
             interaction = SimpleNamespace(
                 user=SimpleNamespace(id=123),
+                guild_id=42,
                 response=SimpleNamespace(send_message=AsyncMock()),
                 followup=SimpleNamespace(send=AsyncMock()),
             )
@@ -168,6 +195,10 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(call.kwargs["ephemeral"])
                 self.assertEqual(call.kwargs["allowed_mentions"].to_dict()["parse"], [])
                 text += text_in(call.kwargs["view"])
+                for item in call.kwargs["view"].walk_children():
+                    if isinstance(item, discord.ui.Button):
+                        assert item.url is not None
+                        self.assertIn("/42/", item.url)
             self.assertNotIn("dashboard-0", text)
             for index in range(1, DASHBOARD_PAGE_SIZE + 2):
                 self.assertIn(f"dashboard-{index}", text)

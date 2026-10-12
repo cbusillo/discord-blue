@@ -3669,7 +3669,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await bridge.backfill_latest_assistant_message(thread, hello)
 
         self.assertEqual(thread.sent_messages, [mark_assistant_message("Recovered answer")])
-        self.assertFalse(thread.sent_kwargs[0]["silent"])
+        self.assertFalse(thread.sent_kwargs[0].get("silent", False))
 
     async def test_backfill_skips_thread_with_existing_assistant(self) -> None:
         for existing in (mark_assistant_message("Already present"), f"{LEGACY_ASSISTANT_LABEL}\nAlready present"):

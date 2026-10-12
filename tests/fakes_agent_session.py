@@ -137,6 +137,7 @@ class FakeThread:
         self._history: list[FakeReplyMessage] = []
         self.sent_messages: list[str] = []
         self.sent_views: list[object] = []
+        self.deny_attachments = False
         self.sent_files: list[bytes] = []
         self.sent_filenames: list[str] = []
         self.sent_kwargs: list[dict[str, object]] = []
@@ -185,7 +186,7 @@ class FakeThread:
             yield message
 
     async def send(self, content: str | None = None, **kwargs: object) -> FakeReplyMessage:
-        if self.send_raises or self.send_failures_remaining > 0:
+        if self.send_raises or self.send_failures_remaining > 0 or (self.deny_attachments and "file" in kwargs):
             if self.send_failures_remaining > 0:
                 self.send_failures_remaining -= 1
             raise discord.Forbidden(
