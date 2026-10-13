@@ -359,8 +359,9 @@ class FakeBot:
         channel: FakeTextChannel | None = None,
     ) -> None:
         self.config = config
-        if not config.discord.guild_id:
-            config.discord.guild_id = GUILD_ID  # Model the home-guild selection performed before real bridge startup.
+        discord_config = getattr(config, "discord", None)
+        if discord_config is not None and not discord_config.guild_id:
+            discord_config.guild_id = GUILD_ID  # Model the home-guild selection performed before real bridge startup.
         self.user = SimpleNamespace(id=999)
         self._thread = thread
         self._channel = channel
