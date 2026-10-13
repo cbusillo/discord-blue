@@ -192,11 +192,10 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     return await original(session_id, record)
 
                 try:
-                    with (
-                        patch.object(running.bridge, "validated_stored_thread", new=slow_read),
-                        patch.object(bridge_module, "THREAD_LOOKUP_TIMEOUT_SECONDS", 0.03),
-                    ):
-                        await asyncio.wait_for(running.bridge.recover_stored_cleanups(), 1)
+                    with patch.object(running.bridge, "validated_stored_thread", new=slow_read):
+                        await asyncio.wait_for(
+                            running.bridge.recover_stored_cleanups(), bridge_module.THREAD_LOOKUP_TIMEOUT_SECONDS * 3
+                        )
                     self.assertTrue(second.archived)
                     self.assertFalse(cancelled)
                 finally:
