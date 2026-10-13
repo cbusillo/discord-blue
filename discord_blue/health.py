@@ -1,13 +1,71 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import time
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Literal
 
 SERVICE_NAME = "discord-blue"
 FALLBACK_VERSION = "0.2.0"
 RUNTIME_IDENTITY_ENV = "LAUNCHPLANE_RUNTIME_IDENTITY_JSON"
+
+
+class DiscordGatewayHealth:
+    """Keep only cadence and ACK progress, never gateway content or credentials."""
+
+    def __init__(self) -> None:
+        self.interval: float | None = None
+        self.last_ack: float | None = None
+        self.session_started = False
+
+    def disconnect(self) -> None:
+        self.interval = None
+        self.last_ack = None
+        self.session_started = False
+
+    def receive(self, raw: str) -> None:
+        try:
+            event = json.loads(raw)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(event, dict):
+            return
+        opcode = event.get("op")
+        if opcode == 10:  # HELLO starts a new connection, including resumed sessions.
+            self.disconnect()
+            data = event.get("d")
+            interval = data.get("heartbeat_interval") if isinstance(data, dict) else None
+            if isinstance(interval, (int, float)) and not isinstance(interval, bool) and math.isfinite(interval) and interval > 0:
+                self.interval = interval / 1000
+        elif opcode in (7, 9):  # RECONNECT / INVALID_SESSION must not retain old proof.
+            self.disconnect()
+        elif opcode == 11 and self.interval is not None:
+            self.last_ack = time.monotonic()
+        elif opcode == 0 and event.get("t") in ("READY", "RESUMED") and self.interval is not None:
+            self.session_started = True
+
+    def evidence(self, *, ready: bool) -> dict[str, Any]:
+        age = None if self.last_ack is None else max(0.0, time.monotonic() - self.last_ack)
+        # One interval to send the next heartbeat, one to receive its ACK.
+        budget = None if self.interval is None else self.interval * 2
+        reason = (
+            "not_ready"
+            if not ready or not self.session_started
+            else "unproved"
+            if age is None or budget is None
+            else "stale"
+            if age > budget
+            else "recent_ack"
+        )
+        return {
+            "status": "ok" if reason == "recent_ack" else "unhealthy",
+            "reason": reason,
+            "heartbeat_interval_seconds": self.interval,
+            "freshness_budget_seconds": budget,
+            "seconds_since_ack": None if age is None else round(age, 3),
+        }
 
 
 def package_version() -> str:
@@ -57,6 +115,7 @@ def runtime_identity() -> dict[str, Any] | None:
 def health_payload(
     *,
     discord_status: Literal["ok", "unhealthy"],
+    discord_gateway: dict[str, Any] | None = None,
     agent_session_enabled: bool = False,
     active_agent_sessions: int = 0,
     disconnected_agent_sessions: int | None = None,
@@ -80,6 +139,8 @@ def health_payload(
         },
     }
     agent_session_component = payload["components"]["agent_session"]
+    if discord_gateway is not None:
+        payload["components"]["discord"]["gateway"] = discord_gateway
     if disconnected_agent_sessions is not None:
         agent_session_component["disconnected_sessions"] = disconnected_agent_sessions
     if pending_agent_session_cleanups is not None:

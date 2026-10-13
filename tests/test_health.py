@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import unittest
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from aiohttp import web
+from aiohttp.test_utils import make_mocked_request
+from discord.gateway import DiscordWebSocket, KeepAliveHandler
 
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.health import RUNTIME_IDENTITY_ENV
 from discord_blue.health import health_payload
+from discord_blue.health import DiscordGatewayHealth
 from discord_blue.plugs.discord_plug import BlueBot
 from tests.fakes_agent_session import FakeBot
 
@@ -94,17 +97,18 @@ class HealthEndpointTests(unittest.IsolatedAsyncioTestCase):
                 listen_port=8787,
             )
         )
-        bridge = AgentSessionBridge(cast(BlueBot, FakeBot(cast(Any, config))))
+        bridge = AgentSessionBridge(cast(BlueBot, cast(object, FakeBot(cast(Any, config)))))
 
         with patch.dict("os.environ", {}, clear=True):
-            response = await bridge.handle_health(cast(web.Request, SimpleNamespace(headers={})))
+            response = await bridge.handle_health(make_mocked_request("GET", "/health"))
 
         self.assertEqual(response.status, 200)
         self.assertEqual(response.content_type, "application/json")
-        self.assertIsInstance(response.body, bytes)
-        body = json.loads(cast(bytes, response.body).decode())
+        assert isinstance(response.body, bytes)
+        body = json.loads(response.body)
         self.assertEqual(body["status"], "ok")
-        self.assertEqual(body["components"]["discord"], {"status": "ok"})
+        self.assertEqual(body["components"]["discord"]["status"], "ok")
+        self.assertEqual(body["components"]["discord"]["gateway"]["reason"], "recent_ack")
 
     async def test_bridge_health_endpoint_reports_unhealthy_when_discord_is_not_ready(self) -> None:
         config = SimpleNamespace(
@@ -117,16 +121,106 @@ class HealthEndpointTests(unittest.IsolatedAsyncioTestCase):
         )
         bot = FakeBot(cast(Any, config))
         bot.ready = False
-        bridge = AgentSessionBridge(cast(BlueBot, bot))
+        bridge = AgentSessionBridge(cast(BlueBot, cast(object, bot)))
 
         with patch.dict("os.environ", {}, clear=True):
-            response = await bridge.handle_health(cast(web.Request, SimpleNamespace(headers={})))
+            response = await bridge.handle_health(make_mocked_request("GET", "/health"))
 
         self.assertEqual(response.status, 503)
-        self.assertIsInstance(response.body, bytes)
-        body = json.loads(cast(bytes, response.body).decode())
+        assert isinstance(response.body, bytes)
+        body = json.loads(response.body)
         self.assertEqual(body["status"], "unhealthy")
-        self.assertEqual(body["components"]["discord"], {"status": "unhealthy"})
+        self.assertEqual(body["components"]["discord"]["status"], "unhealthy")
+
+    async def test_gateway_health_failures_and_recovery_keep_runtime_identity(self) -> None:
+        config = SimpleNamespace(agent_session=SimpleNamespace(enabled=False))
+        bot = FakeBot(cast(Any, config))
+        bridge = AgentSessionBridge(cast(BlueBot, cast(object, bot)))
+        identity = {"product": "discord-blue", "source_git_ref": "health-test"}
+        with patch.dict("os.environ", {RUNTIME_IDENTITY_ENV: json.dumps(identity)}, clear=True):
+            with patch("discord_blue.health.time.monotonic", return_value=100):
+                bot.gateway_health = DiscordGatewayHealth()
+                for ready, closed in ((False, False), (True, False), (True, True)):
+                    bot.ready, bot.closed = ready, closed
+                    self.assertEqual((await bridge.handle_health(make_mocked_request("GET", "/health"))).status, 503)
+                bot.ready, bot.closed = True, False
+                bot.gateway_health.receive('{"op":10,"d":{"heartbeat_interval":20000}}')
+                bot.gateway_health.receive('{"op":11}')
+                bot.gateway_health.receive('{"op":0,"t":"READY"}')
+            with patch("discord_blue.health.time.monotonic", return_value=139):
+                response = await bridge.handle_health(make_mocked_request("GET", "/health"))
+                self.assertEqual(response.status, 200)  # Quiet channel: ACKs suffice.
+                assert isinstance(response.body, bytes)
+                body = json.loads(response.body)
+                self.assertEqual(body["runtime_identity"], identity)
+            with patch("discord_blue.health.time.monotonic", return_value=141):
+                response = await bridge.handle_health(make_mocked_request("GET", "/health"))
+                self.assertEqual(response.status, 503)
+                assert isinstance(response.body, bytes)
+                body = json.loads(response.body)
+                self.assertEqual(body["status"], "unhealthy")
+                self.assertEqual(body["components"]["discord"]["gateway"]["reason"], "stale")
+                # Business events cannot hide missing protocol acknowledgements.
+                bot.gateway_health.receive('{"op":0,"t":"MESSAGE_CREATE","d":{"content":"private"}}')
+                self.assertEqual((await bridge.handle_health(make_mocked_request("GET", "/health"))).status, 503)
+                bot.gateway_health.receive('{"op":11}')
+                self.assertEqual((await bridge.handle_health(make_mocked_request("GET", "/health"))).status, 200)
+                bot.closed = True
+                self.assertEqual((await bridge.handle_health(make_mocked_request("GET", "/health"))).status, 503)
+
+    async def test_real_gateway_dispatch_tracks_ack_and_invalidates_reconnect_proof(self) -> None:
+        bot = BlueBot(cast(Any, SimpleNamespace()))
+        async with bot:
+            # Exercise discord.py's receive path with a fake socket, never Discord.
+            socket = DiscordWebSocket(cast(Any, SimpleNamespace(closed=False)), loop=asyncio.get_running_loop())
+            socket._dispatch = bot.dispatch
+            socket.shard_id = None
+            socket._max_heartbeat_timeout = bot._connection.heartbeat_timeout
+            self.assertTrue(bot._enable_debug_events)
+            with (
+                patch.object(socket, "log_receive", socket.debug_log_receive),
+                patch.object(socket, "send_as_json", new_callable=AsyncMock),
+                patch.object(KeepAliveHandler, "start"),
+            ):
+                await socket.received_message('{"op":10,"d":{"heartbeat_interval":30000}}')
+                self.assertEqual(bot.gateway_health.evidence(ready=True)["status"], "unhealthy")
+                await socket.received_message('{"op":11}')
+                self.assertEqual(bot.gateway_health.evidence(ready=True)["status"], "unhealthy")
+                bot.dispatch("socket_raw_receive", '{"op":0,"t":"READY"}')
+                self.assertEqual(bot.gateway_health.evidence(ready=True)["status"], "ok")
+                bot.dispatch("disconnect")
+                self.assertEqual(bot.gateway_health.evidence(ready=True)["status"], "unhealthy")
+                await socket.received_message('{"op":11}')
+                self.assertEqual(bot.gateway_health.evidence(ready=True)["status"], "unhealthy")
+                await socket.received_message('{"op":10,"d":{"heartbeat_interval":30000}}')
+                await socket.received_message('{"op":11}')
+                self.assertEqual(bot.gateway_health.evidence(ready=True)["status"], "unhealthy")
+                bot.dispatch("socket_raw_receive", '{"op":0,"t":"RESUMED"}')
+                self.assertEqual(bot.gateway_health.evidence(ready=True)["status"], "ok")
+                # The next HELLO cannot inherit the previous connection's ACK.
+                await socket.received_message('{"op":10,"d":{"heartbeat_interval":30000}}')
+                self.assertEqual(bot.gateway_health.evidence(ready=True)["status"], "unhealthy")
+
+
+class GatewayHealthTests(unittest.TestCase):
+    def test_invalid_hello_and_control_frames_never_retain_good_evidence(self) -> None:
+        for reset in ('{"op":7}', '{"op":9,"d":true}', '{"op":10,"d":{}}'):
+            with self.subTest(reset=reset):
+                health = DiscordGatewayHealth()
+                health.receive('{"op":10,"d":{"heartbeat_interval":45000}}')
+                health.receive('{"op":11}')
+                health.receive('{"op":0,"t":"READY"}')
+                self.assertEqual(health.evidence(ready=True)["status"], "ok")
+                health.receive(reset)
+                health.receive('{"op":11}')
+                self.assertEqual(health.evidence(ready=True)["status"], "unhealthy")
+
+    def test_non_protocol_input_cannot_supply_connectivity_evidence(self) -> None:
+        health = DiscordGatewayHealth()
+        for raw in ("{", "[]", '{"op":10,"d":{"heartbeat_interval":-1}}', '{"op":10,"d":{"heartbeat_interval":true}}'):
+            health.receive(raw)
+            health.receive('{"op":11}')
+            self.assertEqual(health.evidence(ready=True)["status"], "unhealthy")
 
 
 if __name__ == "__main__":
