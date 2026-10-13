@@ -154,6 +154,15 @@ class Config(Serializable):
             original = data.get(section, {})
             self._runtime_originals[section] = {key: original[key] for key in values if key in original}
             getattr(self, section).from_dict(values)
+        if overrides:
+            if not isinstance(self.discord.token, str) or not self.discord.token.strip() or self.discord.token == "from_terminal":
+                raise ValueError("Managed runtime requires a Discord token")
+            if any(type(value) is not int or value <= 0 for value in (self.discord.guild_id, self.discord.bot_channel_id)):
+                raise ValueError("Managed runtime requires positive Discord guild and channel IDs")
+            if self.agent_session.enabled and (
+                not isinstance(self.agent_session.token, str) or not self.agent_session.token.strip()
+            ):
+                raise ValueError("Managed runtime requires a token for its enabled agent-session bridge")
         self._runtime_fields = {section: set(values) for section, values in overrides.items()}
         self.save()
 

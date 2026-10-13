@@ -35,7 +35,8 @@ def runtime_overrides(sections: dict[str, object]) -> dict[str, dict[str, Any]]:
     for env_key, section in (("DISCORD_TOKEN", "discord"), ("AGENT_SESSION_TOKEN", "agent_session")):
         value = os.environ.get(env_key)
         if value is not None:
-            if not value.strip() or value == "from_terminal":
+            value = value.strip()
+            if not value or value == "from_terminal":
                 raise ValueError(f"{env_key} must be nonempty")
             overrides.setdefault(section, {})["token"] = value
     return overrides

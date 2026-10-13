@@ -50,7 +50,9 @@ auto_join_user_ids = [789]
         self.assertNotIn("enabled", stored["agent_session"])
 
     def test_runtime_override_preserves_existing_local_config(self) -> None:
-        self.config_path.write_text('[discord]\ntoken="local-bot"\nguild_id=222\n[agent_session]\ntoken="local-bridge"\n')
+        self.config_path.write_text(
+            '[discord]\ntoken="local-bot"\nguild_id=222\nbot_channel_id=333\n[agent_session]\ntoken="local-bridge"\n'
+        )
         os.environ.update(
             DISCORD_TOKEN="runtime-bot",
             AGENT_SESSION_TOKEN="runtime-bridge",
@@ -65,6 +67,33 @@ auto_join_user_ids = [789]
         self.assertEqual(local.agent_session.token, "local-bridge")
         self.assertEqual(local.discord.guild_id, 222)
         self.assertTrue(local.debug)
+
+    def test_incomplete_fresh_runtime_refuses_all_interactive_setup(self) -> None:
+        cases = (
+            {"DISCORD_BLUE_RUNTIME_CONFIG": "[discord]\nguild_id=123\nbot_channel_id=456"},
+            {"DISCORD_TOKEN": "synthetic-bot", "DISCORD_BLUE_RUNTIME_CONFIG": "[agent_session]\nenabled=false"},
+            {
+                "DISCORD_TOKEN": "synthetic-bot",
+                "DISCORD_BLUE_RUNTIME_CONFIG": "[discord]\nguild_id=123\nbot_channel_id=456\n[agent_session]\nenabled=true",
+            },
+        )
+        for env in cases:
+            with self.subTest(keys=list(env)), patch.dict(os.environ, env, clear=True):
+                self.config_path.write_text("")
+                with patch("builtins.input", side_effect=AssertionError("Managed runtime must not prompt")):
+                    with self.assertRaises(ValueError):
+                        Config()
+                self.assertEqual(self.config_path.read_text(), "")
+
+    def test_runtime_credentials_match_client_whitespace_normalization(self) -> None:
+        os.environ.update(
+            DISCORD_TOKEN=" synthetic-bot \n",
+            AGENT_SESSION_TOKEN="\n synthetic-bridge \n",
+            DISCORD_BLUE_RUNTIME_CONFIG="[discord]\nguild_id=123\nbot_channel_id=456",
+        )
+        config = Config()
+        self.assertEqual(config.discord.token, os.environ["DISCORD_TOKEN"].strip())
+        self.assertEqual(config.agent_session.token, os.environ["AGENT_SESSION_TOKEN"].strip())
 
     def test_invalid_inputs_fail_before_config_is_written_or_prompted(self) -> None:
         cases = (

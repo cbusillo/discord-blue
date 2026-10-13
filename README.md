@@ -198,6 +198,11 @@ operator_role_name = "Agent Admin"
 auto_join_user_ids = [789]
 ```
 
+Managed runtime mode requires a Discord token and positive guild/channel IDs
+from these inputs or existing local TOML, plus a bridge token when the bridge is
+enabled. Incomplete input refuses startup before any interactive setup or save.
+Runtime credential overrides trim surrounding whitespace, matching the client.
+
 Store the non-secret TOML as a lane runtime setting and the two credentials as
 that lane's managed secrets. The admin supplies secrets in Launchplane's
 signed-in screens. Use a separate state volume and testing identity; do not
