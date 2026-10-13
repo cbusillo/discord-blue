@@ -31,6 +31,7 @@ from discord_blue.doodads.agent_session.formatting import format_user_message
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
 from discord_blue.doodads.agent_session.formatting import strip_assistant_markers
 from discord_blue.doodads.agent_session.messages import edit_agent_session_message
+from discord_blue.doodads.agent_session.messages import message_uses_components_v2
 from discord_blue.doodads.agent_session.messages import agent_session_allowed_mentions
 from discord_blue.doodads.agent_session.messages import send_agent_session_message
 from discord_blue.doodads.agent_session.messages import send_assistant_message
@@ -237,6 +238,39 @@ class BridgeStopping(ThreadCreationStopped):
 
 MAX_INPUT_QUESTIONS = 5
 INPUT_ANSWER_PREVIEW_LIMIT = 180
+
+
+class ApprovalButton(discord.ui.Button[discord.ui.LayoutView]):
+    def __init__(self, bridge: AgentSessionBridge, approval: RemoteApprovalRequest, decision: Literal["approved", "denied"]) -> None:
+        super().__init__(
+            label="Approve once" if decision == "approved" else "Deny",
+            style=discord.ButtonStyle.success if decision == "approved" else discord.ButtonStyle.danger,
+        )
+        self.bridge = bridge
+        self.approval = approval
+        self.decision: Literal["approved", "denied"] = decision
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.bridge.handle_approval_interaction(
+            cast(discord.Interaction[BlueBot], interaction),
+            self.approval.session_id,
+            self.approval.approval_id,
+            self.decision,
+            session_epoch=self.approval.session_epoch,
+        )
+
+
+class ApprovalView(discord.ui.LayoutView):
+    def __init__(self, bridge: AgentSessionBridge, approval: RemoteApprovalRequest, content: str) -> None:
+        super().__init__(timeout=None)
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(strip_assistant_markers(content)),
+                discord.ui.Separator(),
+                discord.ui.ActionRow(ApprovalButton(bridge, approval, "approved"), ApprovalButton(bridge, approval, "denied")),
+                accent_color=0xF0B232,
+            )
+        )
 
 
 class RequestUserInputSelect(discord.ui.Select[discord.ui.LayoutView]):
@@ -1268,6 +1302,9 @@ class AgentSessionBridge:
                     self.sessions.remove_if_current(current)
                 self.restore_replaced(previous)
                 raise
+            if previous is not None:
+                # Provisional replacement can fail and restore this connection, so only retire its views after attach succeeds.
+                self.sessions.stop_approval_views(previous)
             if previous is not None and previous.grace_task is not None:
                 # Only now: had the attach failed, the old session's timer still closes its thread.
                 previous.grace_task.cancel()
@@ -1910,6 +1947,8 @@ class AgentSessionBridge:
     ) -> str | None:
         if error := self.dispatch_error(session, "approval_decision"):
             return error
+        if pending.retired or session.pending_approvals.get(approval_id) is not pending:
+            return "This approval is no longer active."
         if pending.decision is not None:
             return "This approval has already been answered."
         pending.decision, pending.decided_by = decision, user_id
@@ -2314,12 +2353,17 @@ class AgentSessionBridge:
         if not isinstance(channel, discord.Thread):
             return
 
-        message = await send_agent_session_message(channel, content[:DISCORD_MESSAGE_LIMIT])
+        view = ApprovalView(self, approval, content[:DISCORD_MESSAGE_LIMIT])
+        message = await send_agent_session_message(channel, view=view, silent=False)
+        previous = session.pending_approvals.get(approval.approval_id)
+        if previous is not None and previous.view is not None:
+            previous.view.stop()
         # Answerable from the moment it is posted: Discord shows the reactions one at a time, and a tap on the first
         # one while the bot still adds the next must count.
         session.pending_approvals[approval.approval_id] = PendingRemoteApproval(
             thread_id=session.thread_id,
             message_id=message.id,
+            view=view,
         )
         await self.add_message_reactions(
             message,
@@ -2539,20 +2583,26 @@ class AgentSessionBridge:
             await interaction.response.send_message("This approval has already been answered.", ephemeral=True)
             return
 
+        await interaction.response.defer()
         if error := await self.dispatch_approval(session, pending, approval_id, decision, interaction.user.id):
-            await interaction.response.send_message(error, ephemeral=True)
+            await interaction.followup.send(error, ephemeral=True)
             return
+        if pending.view is not None:
+            pending.view.stop()
         async with pending.ui_lock:
             if pending.retired or self.sessions.get(session_id) is not session:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "Decision sent; this approval is no longer active. Check the native TUI for its outcome.", ephemeral=True
                 )
                 return
-            await interaction.response.edit_message(
-                content=self.format_approval_pending(decision, interaction.user),
-                view=None,
+            content = self.format_approval_pending(decision, interaction.user)
+            is_v2 = message_uses_components_v2(interaction.message)
+            await interaction.edit_original_response(
+                content=None if is_v2 else content,
+                view=notice_card(content) if is_v2 else None,
                 allowed_mentions=agent_session_allowed_mentions(),
             )
+            await self.clear_message_reactions(interaction.message)
 
     async def handle_thread_reaction(
         self,
@@ -2745,6 +2795,8 @@ class AgentSessionBridge:
         await self.edit_approval_message(pending, f"**Approval expired**\n{reason}")
 
     async def edit_approval_message(self, pending: PendingRemoteApproval, content: str, *, only_active: bool = False) -> None:
+        if pending.view is not None:
+            pending.view.stop()
         async with pending.ui_lock:
             if only_active and pending.retired:
                 return

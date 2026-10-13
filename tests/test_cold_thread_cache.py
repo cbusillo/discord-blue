@@ -129,7 +129,10 @@ class ColdThreadCacheTests(unittest.IsolatedAsyncioTestCase):
             assert approval is not None
 
             def answered() -> bool:
-                return "Approval sent" in approval.content and not approval.reactions
+                text = "\n".join(
+                    child.get("content", "") for container in approval.components for child in container.get("components", [])
+                )
+                return "Approval sent" in text and not approval.reactions
 
             reaction_add(running.bot, thread.id, approval.id, approve, OPERATOR)
             try:

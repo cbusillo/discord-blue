@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from aiohttp import ClientWebSocketResponse, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
 
-from tests.fakes_agent_session import visible_view_text
+from tests.fakes_agent_session import visible_view_text, visible_message_text
 from tests.fakes_agent_session import FakeBot
 from tests.test_session_cleanup_progress import wait_until
 from tests.fakes_agent_session import FakeInteraction
@@ -799,9 +799,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 {"type": "approval_decision_ack", "approval_id": "approval-1", "session_epoch": "stale"},
             )
             self.assertIn("approval-1", session.pending_approvals)
-            self.assertIn("Approval sent", message.content)
+            self.assertIn("Approval sent", visible_message_text(message))
             await self.send_transport_event(bridge, websocket, {"type": "approval_decision_ack", "approval_id": "approval-1"})
-            self.assertEqual(message.content, "**Submitted: approved**\nby: `123`")
+            self.assertEqual(visible_message_text(message), "**Submitted: approved**\nby: `123`")
             self.assertEqual(session.pending_approvals, {})
 
     async def test_websocket_user_input_submit_and_cancel(self) -> None:
@@ -1986,7 +1986,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("| `field_", posted)
         self.assertIn(fenced, posted)
 
-    async def test_approval_request_posts_compact_reactions(self) -> None:
+    async def test_approval_request_posts_card_and_buttons(self) -> None:
         config = Config()
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
@@ -2011,11 +2011,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(len([content for content in thread.sent_messages if content]), 1)
-        self.assertIn("Need approval", thread.sent_messages[0])
-        self.assertIn("Quick review", thread.sent_messages[0])
-        self.assertTrue(thread.sent_kwargs[0]["suppress_embeds"])
-        self.assertIsNone(thread.sent_views[0])
+        self.assertIn("Need approval", visible_view_text(thread.sent_views[0]))
+        self.assertIn("git status", visible_view_text(thread.sent_views[0]))
+        self.assertFalse(thread.sent_kwargs[0]["silent"])
+        self.assertEqual(thread.sent_messages[0], "")
+        self.assertIsInstance(thread.sent_views[0], bridge_module.ApprovalView)
         approval_message = await thread.fetch_message(901)
         self.assertEqual(approval_message.reactions, ["✅", "✖️"])
 
@@ -2050,8 +2050,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(bool(session.pending_approvals), answerable)
                 if answerable:
-                    self.assertIn(content, thread.sent_messages[0])
-                    self.assertLessEqual(len(thread.sent_messages[0].encode("utf-16-le")) // 2, bridge_module.DISCORD_MESSAGE_LIMIT)
+                    self.assertIn(content, visible_view_text(thread.sent_views[0]))
+                    self.assertLessEqual(
+                        len(visible_view_text(thread.sent_views[0]).encode("utf-16-le")) // 2, bridge_module.DISCORD_MESSAGE_LIMIT
+                    )
                 else:
                     self.assertIn("native TUI", thread.sent_messages[0])
 
@@ -2085,7 +2087,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                         command_text=command_text,
                     )
                 )
-                [message] = [content for content in thread.sent_messages if content]
+                message = thread.sent_messages[0] or visible_view_text(thread.sent_views[0])
                 session = bridge.sessions.get("session-1")
                 assert session is not None
                 if shown is None:
@@ -2708,7 +2710,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         approval_message = await thread.fetch_message(901)
-        self.assertIn("Approval sent", approval_message.content)
+        self.assertIn("Approval sent", visible_message_text(approval_message))
         self.assertEqual(approval_message.reactions, [])
         self.assertNotIn("suppress", approval_message.edit_kwargs[-1])
         self.assertEqual(websocket.sent_json[0]["decision"], "approved")
