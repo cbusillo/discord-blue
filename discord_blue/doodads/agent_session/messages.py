@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from io import BytesIO
 
 import discord
 
-from discord_blue.doodads.agent_session.cards import notice_card
-from discord_blue.doodads.agent_session.formatting import strip_assistant_markers
+from discord_blue.doodads.agent_session.chunks import format_assistant_messages
+from discord_blue.doodads.agent_session.cards import ANSWER_FILENAME, assistant_answer_card, notice_card
+from discord_blue.doodads.agent_session.formatting import ASSISTANT_MESSAGE_MARKER, strip_assistant_markers
 
 logger = logging.getLogger(__name__)
 MISSING_MANAGE_MESSAGES_DESTINATIONS: set[int] = set()
@@ -38,9 +40,24 @@ async def send_agent_session_message(
     return await _send(destination, None if content is None else strip_assistant_markers(content), view=view, silent=silent)
 
 
-async def send_assistant_message(destination: discord.abc.Messageable, message: str) -> discord.Message:
-    """Post one message from `chunks.format_assistant_messages`, which already fits and carries its marker."""
-    return await _send(destination, message, view=None)
+async def send_assistant_message(destination: discord.abc.Messageable, message: str) -> discord.Message | None:
+    """Post a compact answer; long answers retain their full Markdown in an explicit file component."""
+    if not strip_assistant_markers(message.replace(ASSISTANT_MESSAGE_MARKER, "")).strip():
+        return None
+    view, attached = assistant_answer_card(message)
+    if attached:
+        file = discord.File(BytesIO(strip_assistant_markers(message).encode()), filename=ANSWER_FILENAME)
+        try:
+            return await destination.send(file=file, view=view, allowed_mentions=agent_session_allowed_mentions(), silent=False)
+        except discord.Forbidden:
+            logger.warning("Unable to attach the complete Agent session answer; sending text instead")
+            last_message = None
+            for chunk in format_assistant_messages(message):
+                last_message = await _send(destination, chunk, view=None)
+            return last_message
+        finally:
+            file.close()
+    return await destination.send(view=view, allowed_mentions=agent_session_allowed_mentions(), silent=False)
 
 
 async def _send(

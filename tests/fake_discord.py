@@ -41,6 +41,8 @@ class FakeMessage:
     author_id: int = BOT_ID
     # (emoji, user ID) for each reaction on the message.
     reactions: list[tuple[str, int]] = field(default_factory=list)
+    components: list[Json] = field(default_factory=list)
+    flags: int = 0
 
     def payload(self) -> Json:
         stamp = snowflake_time(self.id).isoformat()
@@ -50,6 +52,8 @@ class FakeMessage:
             "channel_id": str(self.channel_id),
             "author": author,
             "content": self.content,
+            "components": self.components,
+            "flags": self.flags,
             "timestamp": stamp,
             "edited_timestamp": None,
             "tts": False,
@@ -291,7 +295,11 @@ class FakeDiscord:
             return 201, created.payload()
         messages = self.parent_messages if thread is None else thread.messages
         if template == "/channels/{channel}/messages" and method == "POST":
+            if body.get("flags", 0) & (1 << 15) and body.get("content"):
+                return 400, {"message": "Content is unavailable on Components V2 messages", "code": 50035}
             message = FakeMessage(next(self.ids), channel_id or PARENT_ID, str(body.get("content") or ""))
+            message.components = body.get("components", [])
+            message.flags = body.get("flags", 0)
             messages.append(message)
             if thread is not None and thread.archived and not thread.locked:
                 thread.archived = False  # Posting reopens an archived, unlocked thread.
@@ -319,8 +327,14 @@ class FakeDiscord:
             if method == "DELETE":
                 messages.remove(found)
                 return 204, None
+            if method == "PATCH" and found.flags & (1 << 15) and body.get("content"):
+                return 400, {"message": "Content is unavailable on Components V2 messages", "code": 50035}
             if method == "PATCH" and "content" in body:
-                found.content = str(body["content"])
+                found.content = str(body["content"] or "")
+            if method == "PATCH" and "components" in body:
+                found.components = body["components"]
+            if method == "PATCH" and "flags" in body:
+                found.flags = body["flags"]
             return 200, found.payload()
         if thread is None:
             return 200, {"id": str(PARENT_ID), "type": 0, "guild_id": str(GUILD_ID), "name": "agent-sessions"}

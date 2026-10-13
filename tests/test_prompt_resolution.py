@@ -9,7 +9,7 @@ from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.protocol import RemoteApprovalRequest
 from tests.fakes_agent_prompts import prompt_fixture
 from tests import test_session_cleanup_transport as transport_tests
-from tests.fakes_agent_session import assert_no_controls, visible_message_text
+from tests.fakes_agent_session import assert_no_controls, visible_message_text, visible_view_text
 from tests.fakes_agent_session import FakeInteraction
 
 
@@ -162,8 +162,8 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
         editing, release = asyncio.Event(), asyncio.Event()
         original = message.edit
 
-        async def edit(content: str, **kwargs: object) -> None:
-            if "Approval sent" in content:
+        async def edit(content: str | None, **kwargs: object) -> None:
+            if "Approval sent" in (content or visible_view_text(kwargs.get("view"))):
                 editing.set()
                 await release.wait()
             await original(content=content, **kwargs)

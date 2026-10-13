@@ -198,6 +198,22 @@ objects so the response remains parseable and non-secret. Optional
 `LAUNCHPLANE_SOURCE_GIT_REF` and `LAUNCHPLANE_IMAGE_REFERENCE` values are also
 echoed when present.
 
+## Session answers and dashboard
+
+Both harnesses render final answers in a compact Components V2 card. Long
+answers show a code-fence-balanced preview and an **answer.md** file with the
+complete original Markdown. If Discord denies the upload, the answer uses the
+existing bounded text delivery path, with a terminal notice past its cap.
+Short answers need no attachment. Answers still
+notify normally and cannot ping people or roles. Restart recovery recognizes
+both new answer cards and older text answers, so it does not repost them.
+
+`/code active` shows operators a private dashboard snapshot, with sessions
+waiting on you first, then uncertain or failed sessions, working sessions and
+completed sessions. Each attached session has an **Open thread** button.
+Disconnected sessions are excluded. Large lists arrive as numbered pages;
+run the command again for a fresh snapshot.
+
 ## Codex bridge (runs on the Mac next to Codex)
 
 `discord-blue-codex-bridge` attaches to the stock Codex app-server daemon as one
@@ -212,7 +228,10 @@ turn or steers the running one), pause, ask for status, answer command, file-cha
 and answer `request_user_input` prompts. A command approval shows Codex's
 command exactly as the shell will run it; one Discord cannot show whole stays
 in the TUI. The bridge answers a Codex request only
-after an explicit Discord decision. The first answer wins, so the TUI can still
+after an explicit Discord decision. Approval cards offer **Approve once** and
+**Deny** buttons beneath the full request; reaction controls remain supported.
+The card removes its controls when a decision is sent, then shows whether the
+local agent acknowledged it, the request expired, or the native terminal resolved it. The first answer wins, so the TUI can still
 answer. File-change approvals show the full proposed changes, including paths,
 change kinds and diffs; permissions show the full request and grant only for
 the current turn. Oversized or fenced content, unknown fields, unavailable
