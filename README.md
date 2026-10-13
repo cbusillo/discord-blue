@@ -169,6 +169,49 @@ The agent-session bridge listens on the configured `[agent_session]` host and po
 The image exposes port `8787`, and the local Compose file binds it to
 `127.0.0.1:8787`.
 
+### Managed server runtime inputs
+
+An isolated server can start from an empty state volume using runtime inputs
+delivered by Launchplane. `DISCORD_TOKEN` supplies `[discord].token` and
+`AGENT_SESSION_TOKEN` supplies the server's `[agent_session].token`. Both are
+optional overrides of local TOML, enabled only when `DISCORD_BLUE_RUNTIME_CONFIG`
+is supplied; a supplied empty credential refuses startup in that mode.
+The local bridge client separately supports `AGENT_SESSION_TOKEN`; supplying
+the server's value does not configure the client.
+
+`DISCORD_BLUE_RUNTIME_CONFIG` carries **non-secret TOML** settings in the
+`discord` and `agent_session` sections. Fields use their existing config types;
+unknown fields, other sections and `token` fields refuse startup. For example,
+with sample IDs that must be replaced by the lane's recorded isolated IDs:
+
+```toml
+[discord]
+guild_id = 123
+bot_channel_id = 456
+loaded_doodads = ["agent_session_doodad"]
+
+[agent_session]
+enabled = true
+listen_host = "0.0.0.0"
+listen_port = 8787
+operator_role_name = "Agent Admin"
+auto_join_user_ids = [789]
+```
+
+Managed runtime mode requires a Discord token and positive guild/channel IDs
+from these inputs or existing local TOML, plus a bridge token when the bridge is
+enabled. Incomplete input refuses startup before any interactive setup or save.
+Runtime credential overrides trim surrounding whitespace, matching the client.
+
+Store the non-secret TOML as a lane runtime setting and the two credentials as
+that lane's managed secrets. The admin supplies secrets in Launchplane's
+signed-in screens. Use a separate state volume and testing identity; do not
+copy production state or credentials. Runtime overrides stay in memory and
+are excluded from subsequent TOML saves, which preserve existing local values.
+Without runtime inputs, local TOML and interactive setup retain their behavior.
+The local development Compose file does not deliver these inputs; configure
+their delivery on the prepared provider target before deploying an artifact.
+
 When the agent-session doodad is loaded and `[agent_session].enabled` is `true`, the
 same listener exposes an unauthenticated Launchplane-compatible health endpoint:
 

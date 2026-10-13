@@ -5,6 +5,8 @@ from typing import Any
 
 import tomli_w
 
+from discord_blue.runtime_config import runtime_overrides
+
 logger = logging.getLogger(__name__)
 
 
@@ -146,17 +148,36 @@ class Config(Serializable):
         except (FileNotFoundError, OSError, tomllib.TOMLDecodeError):
             logger.exception("Error loading configuration")
             exit(1)
+        overrides = runtime_overrides({"discord": self.discord, "agent_session": self.agent_session})
+        self._runtime_originals: dict[str, dict[str, Any]] = {}
+        for section, values in overrides.items():
+            original = data.get(section, {})
+            self._runtime_originals[section] = {key: original[key] for key in values if key in original}
+            getattr(self, section).from_dict(values)
+        if overrides:
+            if not isinstance(self.discord.token, str) or not self.discord.token.strip() or self.discord.token == "from_terminal":
+                raise ValueError("Managed runtime requires a Discord token")
+            if any(type(value) is not int or value <= 0 for value in (self.discord.guild_id, self.discord.bot_channel_id)):
+                raise ValueError("Managed runtime requires positive Discord guild and channel IDs")
+            if self.agent_session.enabled and (
+                not isinstance(self.agent_session.token, str) or not self.agent_session.token.strip()
+            ):
+                raise ValueError("Managed runtime requires a token for its enabled agent-session bridge")
+        self._runtime_fields = {section: set(values) for section, values in overrides.items()}
         self.save()
 
     def save(self) -> None:
         self.gather_missing_data(self)
         data = self.to_dict()
+        for section, fields in self._runtime_fields.items():
+            for key in fields:
+                data[section].pop(key, None)
+            data[section].update(self._runtime_originals[section])
         try:
             toml_data = tomli_w.dumps(data)
             self.filepath.write_text(toml_data)
         except KeyError as key_error:
             logger.error(f"KeyError when saving configuration: {key_error}")
-            logger.debug(f"Configuration data: {data}")
         except (FileNotFoundError, OSError) as error:
             logger.exception(f"Error saving configuration: {error!s}")
 
