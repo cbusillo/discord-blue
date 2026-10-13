@@ -103,7 +103,7 @@ class CleanupFailureTests(unittest.IsolatedAsyncioTestCase):
         response = await bridge.handle_health(cast(web.Request, SimpleNamespace()))
         payload = json.loads(cast(bytes, response.body))
         self.assertEqual(payload["components"]["agent_session"]["active_sessions"], 0)
-        self.assertEqual(bridge.active_sessions_summary(), "No live agent sessions.")
+        self.assertFalse(bridge.sessions.live_sessions())
 
     async def test_stop_completes_after_background_tasks_already_failed(self) -> None:
         bridge = make_bridge()

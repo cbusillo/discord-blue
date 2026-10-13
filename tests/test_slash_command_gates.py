@@ -77,7 +77,7 @@ class SlashCommandGateTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(command=name):
                     sent = len(live.frames)
                     response = await live.run(OPERATOR, name)
-                    reached = SESSION_ID in str(response.get("content")) or await live.sent_more_than(sent)
+                    reached = SESSION_ID in str(response) or await live.sent_more_than(sent)
                     self.assertTrue(reached, f"/code {name} did nothing for an operator: {response}")
 
     async def test_a_bystander_is_answered_privately_and_reaches_nothing(self) -> None:

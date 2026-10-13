@@ -116,10 +116,13 @@ class AgentSessionDoodad(commands.Cog):
             )
             return
 
-        await interaction.response.send_message(
-            self.bridge.active_sessions_summary(),
-            ephemeral=True,
-        )
+        from discord_blue.doodads.agent_session.cards import active_session_cards
+        from discord_blue.doodads.agent_session.messages import agent_session_allowed_mentions
+
+        views = active_session_cards(self.bridge.sessions.live_sessions(), interaction.guild_id or 0)
+        await interaction.response.send_message(view=views[0], ephemeral=True, allowed_mentions=agent_session_allowed_mentions())
+        for view in views[1:]:
+            await interaction.followup.send(view=view, ephemeral=True, allowed_mentions=agent_session_allowed_mentions())
 
     @code_group.command(
         name="status",

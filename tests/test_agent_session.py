@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from aiohttp import ClientWebSocketResponse, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
 
-from tests.fakes_agent_session import visible_view_text
+from tests.fakes_agent_session import visible_view_text, visible_message_text
 from tests.fakes_agent_session import FakeBot
 from tests.test_session_cleanup_progress import wait_until
 from tests.fakes_agent_session import FakeInteraction
@@ -799,9 +799,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 {"type": "approval_decision_ack", "approval_id": "approval-1", "session_epoch": "stale"},
             )
             self.assertIn("approval-1", session.pending_approvals)
-            self.assertIn("Approval sent", message.content)
+            self.assertIn("Approval sent", visible_message_text(message))
             await self.send_transport_event(bridge, websocket, {"type": "approval_decision_ack", "approval_id": "approval-1"})
-            self.assertEqual(message.content, "**Submitted: approved**\nby: `123`")
+            self.assertEqual(visible_message_text(message), "**Submitted: approved**\nby: `123`")
             self.assertEqual(session.pending_approvals, {})
 
     async def test_websocket_user_input_submit_and_cancel(self) -> None:
@@ -1914,7 +1914,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 "",  # Components V2 carries visible text in the view.
             ],
         )
-        self.assertIsNone(thread.sent_views[0])
+        self.assertIsInstance(thread.sent_views[0], bridge_module.discord.ui.LayoutView)
         self.assertIsInstance(thread.sent_views[1], bridge_module.discord.ui.LayoutView)
         control_message = await thread.fetch_message(902)
         self.assertEqual(control_message.reactions, ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"])
@@ -1944,7 +1944,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         assistant_messages = [message for message in thread.sent_messages if is_assistant_message(message)]
-        self.assertGreater(len(assistant_messages), 1)
+        self.assertEqual(len(assistant_messages), 1)
+        self.assertEqual(thread.sent_files, [assistant_message.encode()])
         for message in assistant_messages:
             self.assertLessEqual(len(message), bridge_module.DISCORD_MESSAGE_LIMIT)
             body = message.removesuffix(mark_assistant_message(""))
@@ -1977,16 +1978,17 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         assistant_messages = [message for message in thread.sent_messages if is_assistant_message(message)]
-        self.assertGreater(len(assistant_messages), 1)
+        self.assertEqual(len(assistant_messages), 1)
+        self.assertEqual(thread.sent_files, [assistant_message.encode()])
         for message in assistant_messages:
             self.assertLessEqual(len(message), bridge_module.DISCORD_MESSAGE_LIMIT)
             self.assertNotIn("Assistant", message)
         posted = "\n".join(assistant_messages)
-        self.assertEqual(posted.count("- **`field_"), len(rows))
+        self.assertGreater(posted.count("- **`field_"), 0)
         self.assertNotIn("| `field_", posted)
-        self.assertIn(fenced, posted)
+        self.assertIn(fenced, thread.sent_files[0].decode())
 
-    async def test_approval_request_posts_compact_reactions(self) -> None:
+    async def test_approval_request_posts_card_and_buttons(self) -> None:
         config = Config()
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
@@ -2011,11 +2013,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(len([content for content in thread.sent_messages if content]), 1)
-        self.assertIn("Need approval", thread.sent_messages[0])
-        self.assertIn("Quick review", thread.sent_messages[0])
-        self.assertTrue(thread.sent_kwargs[0]["suppress_embeds"])
-        self.assertIsNone(thread.sent_views[0])
+        self.assertIn("Need approval", visible_view_text(thread.sent_views[0]))
+        self.assertIn("git status", visible_view_text(thread.sent_views[0]))
+        self.assertFalse(thread.sent_kwargs[0]["silent"])
+        self.assertEqual(thread.sent_messages[0], "")
+        self.assertIsInstance(thread.sent_views[0], bridge_module.ApprovalView)
         approval_message = await thread.fetch_message(901)
         self.assertEqual(approval_message.reactions, ["✅", "✖️"])
 
@@ -2050,8 +2052,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(bool(session.pending_approvals), answerable)
                 if answerable:
-                    self.assertIn(content, thread.sent_messages[0])
-                    self.assertLessEqual(len(thread.sent_messages[0].encode("utf-16-le")) // 2, bridge_module.DISCORD_MESSAGE_LIMIT)
+                    self.assertIn(content, visible_view_text(thread.sent_views[0]))
+                    self.assertLessEqual(
+                        len(visible_view_text(thread.sent_views[0]).encode("utf-16-le")) // 2, bridge_module.DISCORD_MESSAGE_LIMIT
+                    )
                 else:
                     self.assertIn("native TUI", thread.sent_messages[0])
 
@@ -2085,7 +2089,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                         command_text=command_text,
                     )
                 )
-                [message] = [content for content in thread.sent_messages if content]
+                message = thread.sent_messages[0] or visible_view_text(thread.sent_views[0])
                 session = bridge.sessions.get("session-1")
                 assert session is not None
                 if shown is None:
@@ -2709,7 +2713,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         approval_message = await thread.fetch_message(901)
-        self.assertIn("Approval sent", approval_message.content)
+        self.assertIn("Approval sent", visible_message_text(approval_message))
         self.assertEqual(approval_message.reactions, [])
         self.assertNotIn("suppress", approval_message.edit_kwargs[-1])
         self.assertEqual(websocket.sent_json[0]["decision"], "approved")
@@ -3336,69 +3340,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.control_message_id, 904)
         self.assertFalse(session.control_interruptions_enabled)
 
-    async def test_active_sessions_summary_lists_live_sessions(self) -> None:
-        config = Config()
-        bridge = AgentSessionBridge(FakeBot(config))
-        session = AgentSession(
-            hello=make_hello(),
-            websocket=FakeWebSocket(),
-            thread_id=555,
-        )
-        bridge.sessions.register(session)
-        bridge.sessions.bind_thread("session-1", 555)
-
-        self.assertEqual(
-            bridge.active_sessions_summary(),
-            "\n".join(
-                [
-                    "Live agent sessions:",
-                    "- `project` (online, Mac Studio) <#555>",
-                ]
-            ),
-        )
-
-    async def test_active_sessions_summary_handles_empty_registry(self) -> None:
-        config = Config()
-        bridge = AgentSessionBridge(FakeBot(config))
-
-        self.assertEqual(bridge.active_sessions_summary(), "No live agent sessions.")
-
-    async def test_active_sessions_summary_marks_agent_session_origin(self) -> None:
-        config = Config()
-        bridge = AgentSessionBridge(FakeBot(config))
-        hello = SessionHello(
-            session_id="session-1",
-            session_epoch="epoch-1",
-            host_label="Mac Studio",
-            cwd="/tmp/project",
-            branch="main",
-            pid=42,
-            origin=SessionOrigin(
-                kind="launchplane",
-                request_id="agent-cbusillo-syo-67",
-                repository="cbusillo/sellyouroutboard",
-                issue_number=67,
-                issue_url="https://github.com/cbusillo/sellyouroutboard/issues/67",
-            ),
-        )
-        session = AgentSession(
-            hello=hello,
-            websocket=FakeWebSocket(),
-            thread_id=555,
-        )
-        bridge.sessions.register(session)
-        bridge.sessions.bind_thread("session-1", 555)
-
-        self.assertEqual(
-            bridge.active_sessions_summary(),
-            "\n".join(
-                [
-                    "Live agent sessions:",
-                    "- `Auto sellyouroutboard#67` (online, Mac Studio) <#555>",
-                ]
-            ),
-        )
-
     async def test_session_status_summary_uses_last_status(self) -> None:
         config = Config()
         thread = FakeThread(555)
@@ -3731,7 +3672,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await bridge.backfill_latest_assistant_message(thread, hello)
 
         self.assertEqual(thread.sent_messages, [mark_assistant_message("Recovered answer")])
-        self.assertTrue(thread.sent_kwargs[0]["suppress_embeds"])
+        self.assertFalse(thread.sent_kwargs[0].get("silent", False))
 
     async def test_backfill_skips_thread_with_existing_assistant(self) -> None:
         for existing in (mark_assistant_message("Already present"), f"{LEGACY_ASSISTANT_LABEL}\nAlready present"):
@@ -3778,7 +3719,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await bridge.post_assistant_message(555, answer)
 
         posted = list(thread.sent_messages)
-        self.assertGreater(len(posted), 1)
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(thread.sent_files, [answer.encode()])
         for message in posted:
             self.assertLessEqual(len(message), bridge_module.DISCORD_MESSAGE_LIMIT)
             self.assertTrue(is_assistant_message(message))
