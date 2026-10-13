@@ -37,7 +37,11 @@ Json = dict[str, Any]
 
 
 def contents(discord_thread: FakeThreadState) -> list[str]:
-    return [message.content for message in discord_thread.messages]
+    return [
+        message.content
+        + "\n".join(str(child.get("content", "")) for component in message.components for child in component.get("components", []))
+        for message in discord_thread.messages
+    ]
 
 
 class CodexBridgeServerTests(unittest.IsolatedAsyncioTestCase):

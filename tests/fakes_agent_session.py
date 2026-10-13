@@ -11,6 +11,7 @@ import discord
 
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.protocol import SessionHello
+from discord_blue.doodads.agent_session.formatting import is_assistant_message
 
 if TYPE_CHECKING:
     from discord_blue.config import Config
@@ -136,6 +137,9 @@ class FakeThread:
         self._history: list[FakeReplyMessage] = []
         self.sent_messages: list[str] = []
         self.sent_views: list[object] = []
+        self.deny_attachments = False
+        self.sent_files: list[bytes] = []
+        self.sent_filenames: list[str] = []
         self.sent_kwargs: list[dict[str, object]] = []
         self.send_raises = False
         self.send_failures_remaining = 0
@@ -182,7 +186,7 @@ class FakeThread:
             yield message
 
     async def send(self, content: str | None = None, **kwargs: object) -> FakeReplyMessage:
-        if self.send_raises or self.send_failures_remaining > 0:
+        if self.send_raises or self.send_failures_remaining > 0 or (self.deny_attachments and "file" in kwargs):
             if self.send_failures_remaining > 0:
                 self.send_failures_remaining -= 1
             raise discord.Forbidden(
@@ -190,7 +194,27 @@ class FakeThread:
                 message=f"Cannot send to {self.id}",
             )
         stored_content = content or ""
-        self.sent_messages.append(stored_content)
+        # Observe answer bodies as well as plain text. Actual V2 message.content
+        # remains empty below, and history retains the serialized components.
+        view = kwargs.get("view")
+        answer = (
+            next(
+                (
+                    item.content
+                    for item in view.walk_children()
+                    if isinstance(item, discord.ui.TextDisplay) and is_assistant_message(item.content)
+                ),
+                None,
+            )
+            if isinstance(view, discord.ui.LayoutView)
+            else None
+        )
+        self.sent_messages.append(answer if answer is not None else stored_content)
+        file = kwargs.get("file")
+        if isinstance(file, discord.File):
+            self.sent_files.append(file.fp.read())
+            self.sent_filenames.append(file.filename)
+            file.fp.seek(0)
         self.sent_views.append(kwargs.get("view"))
         self.sent_kwargs.append(kwargs)
         message = FakeReplyMessage(

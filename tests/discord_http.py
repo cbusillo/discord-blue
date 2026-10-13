@@ -39,6 +39,7 @@ class HttpMessage(FakeReplyMessage):
     def __init__(self, channel: HttpThread | HttpChannel, data: Json) -> None:
         super().__init__(int(data["id"]), channel, str(data.get("content") or ""), author_id=int(data["author"]["id"]))
         self.http = channel.http
+        self.components = [discord.Container(data=component, state=None) for component in data.get("components", [])]
 
     async def delete(self) -> None:
         await self.http.delete_message(self.channel.id, self.id)
@@ -92,7 +93,7 @@ class HttpThread(FakeThread):
         return [SimpleNamespace(id=int(m["user_id"])) for m in await self.http.get_thread_members(self.id)]
 
     async def send(self, content: str | None = None, **kwargs: object) -> FakeReplyMessage:
-        return await send(self, content)
+        return await send(self, content, **kwargs)
 
     async def fetch_message(self, message_id: int) -> FakeReplyMessage:
         return HttpMessage(self, as_json(await self.http.get_message(self.id, message_id)))
@@ -136,7 +137,7 @@ class HttpChannel(FakeTextChannel):
         return HttpThread(self.bot, as_json(data))
 
     async def send(self, content: str | None = None, **kwargs: object) -> FakeReplyMessage:
-        return await send(self, content)
+        return await send(self, content, **kwargs)
 
     async def fetch_message(self, message_id: int) -> FakeReplyMessage:
         return HttpMessage(self, as_json(await self.http.get_message(self.id, message_id)))
@@ -146,8 +147,12 @@ class HttpChannel(FakeTextChannel):
             yield message
 
 
-async def send(channel: HttpThread | HttpChannel, content: str | None) -> FakeReplyMessage:
-    with handle_message_parameters(content=content) as params:
+async def send(channel: HttpThread | HttpChannel, content: str | None, **kwargs: object) -> FakeReplyMessage:
+    flags = discord.MessageFlags(
+        suppress_embeds=bool(kwargs.get("suppress_embeds")), suppress_notifications=bool(kwargs.get("silent"))
+    )
+    options: dict[str, Any] = {key: kwargs[key] for key in ("view", "file", "allowed_mentions") if key in kwargs}
+    with handle_message_parameters(content=content, flags=flags, **options) as params:
         message = HttpMessage(channel, as_json(await channel.http.send_message(channel.id, params=params)))
     channel.sent_messages.append(content or "")
     return message
