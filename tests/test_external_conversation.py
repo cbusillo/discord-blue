@@ -16,6 +16,7 @@ import discord
 from aiohttp import ClientWebSocketResponse, ServerDisconnectedError, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
 
+from discord_blue.agent_client import AgentSessionClient
 from discord_blue.claude_channel.__main__ import run_channel
 from discord_blue.claude_channel.conversation import CMConversation
 from discord_blue.claude_channel.session import CHANNEL, Identity
@@ -25,6 +26,7 @@ from discord_blue.doodads._doodad_setup import SetupCommands, SetupDoodad
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
 from discord_blue.doodads.agent_session.conversation import INBOX_LIMIT, ConversationConnection
+from discord_blue.doodads.agent_session.threads import get_agent_session_channel
 from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 from discord_blue.plugs.discord_plug import BlueBot
 from tests.fakes_agent_session import FakeBot, FakeThread, FakeWebSocket
@@ -123,7 +125,7 @@ class GuildIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self.bot.close)
 
     async def test_home_events_keep_their_handlers_and_foreign_events_skip_doodads(self) -> None:
-        with patch("discord.ext.commands.Bot.dispatch") as dispatched:
+        with patch.object(BlueBot.__bases__[0], "dispatch") as dispatched:
             home = message(guild_id=HOME)
             self.bot.dispatch("message", home)
             dispatched.assert_called_once_with("message", home)
@@ -136,6 +138,12 @@ class GuildIsolationTests(unittest.IsolatedAsyncioTestCase):
                 self.bot.dispatch(event, SimpleNamespace(guild_id=FOREIGN))
             self.bot.dispatch("message", message(guild_id=30))
             self.assertEqual(dispatched.call_count, 1)  # Only the scoped listener sees a foreign message.
+
+    async def test_startup_channel_cannot_point_at_a_foreign_guild(self) -> None:
+        self.bot.config.discord.bot_channel_id = CHANNEL_ID
+        with patch.object(self.bot, "get_channel", return_value=channel()):
+            with self.assertRaises(ValueError):
+                await self.bot.blue_bot_channel(cast(Any, SimpleNamespace(id=HOME)))
 
     async def test_command_sync_publishes_home_commands_and_empty_foreign_commands(self) -> None:
         home, foreign = MagicMock(spec=discord.Guild), MagicMock(spec=discord.Guild)
@@ -248,6 +256,18 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         finally:
             supervisor.stdin.feed_eof()
             await asyncio.wait_for(task, 5)
+
+    async def test_home_session_destinations_refuse_foreign_channels_and_threads(self) -> None:
+        self.bot.config.agent_session.channel_id = CHANNEL_ID
+        with self.assertRaises(ValueError):
+            await get_agent_session_channel(cast(Any, self.bot))
+        foreign_thread = MagicMock(spec=discord.Thread)
+        foreign_thread.id, foreign_thread.guild = 555, SimpleNamespace(id=FOREIGN)
+        self.bot.get_channel = lambda channel_id: foreign_thread  # type: ignore[method-assign]
+        self.bot.fetch_channel = AsyncMock(return_value=foreign_thread)  # type: ignore[method-assign]
+        self.assertIsNone(await self.bridge.get_thread(555))
+        self.assertEqual(await self.bridge.get_thread_for_cleanup(555), (None, True))
+        self.destination.send.assert_not_awaited()
 
     async def test_wrong_channel_guild_person_bot_and_webhook_reach_nothing(self) -> None:
         websocket = await self.connect()
@@ -379,12 +399,12 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         successful: list[str] = []
         attempts = 0
 
-        async def send_chunk(text: str, **_kwargs: object) -> None:
+        async def send_chunk(chunk: str, **_kwargs: object) -> None:
             nonlocal attempts
             attempts += 1
             if attempts == 2:
                 raise ServerDisconnectedError()
-            successful.append(text)
+            successful.append(chunk)
 
         self.destination.send.side_effect = send_chunk
         text = "x" * (DISCORD_MESSAGE_LIMIT + 3)
@@ -452,7 +472,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             await local.on_hook_call({"event": event, "prompt": "private", "last_assistant_message": "private"}, {})
         self.assertTrue(all(item["type"] == "command_ack" for item in local.outbox))
         local.websocket = cast(Any, FakeWebSocket())
-        with patch.object(local, "send", new_callable=AsyncMock) as send:
+        with patch.object(AgentSessionClient, "send", new_callable=AsyncMock) as send:
             await local.reply_tool({"reply_id": "reply", "text": "CM answer", "channel_id": 999}, {})
             send.assert_not_awaited()
         local.server_features = frozenset()

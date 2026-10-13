@@ -108,7 +108,7 @@ class BlueBot(commands.Bot):
         if not self.config.discord.bot_channel_id:
             return await self.select_object(list(guild.text_channels), "channel", self.save_config_bot_channel)
         channel = self.get_channel(self.config.discord.bot_channel_id)
-        if isinstance(channel, discord.TextChannel):
+        if isinstance(channel, discord.TextChannel) and channel.guild.id == guild.id:
             return channel
 
         return self.message_and_raise_error(f"Could not find channel with ID {self.config.discord.bot_channel_id}")

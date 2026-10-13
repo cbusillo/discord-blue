@@ -9,7 +9,9 @@ handlers are excluded. The bot publishes commands only to the configured home
 `discord.guild_id`, clears foreign guild command registrations, and removes
 old global registrations. Chris's session bridge and commands remain in his
 home guild. Only one explicitly configured foreign conversation is enabled.
-That route checks both numeric guild/channel IDs and the text-channel name
+Home startup, session-parent and session-thread lookups also reject foreign
+guild destinations, including mistaken channel configuration. That route
+checks both numeric guild/channel IDs and the text-channel name
 `odoo-with-chris`; threads, DMs, other guilds/channels, bots, webhooks and
 unlisted numeric user IDs cannot enter it or trigger a reply.
 

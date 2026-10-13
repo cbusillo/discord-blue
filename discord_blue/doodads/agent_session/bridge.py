@@ -3523,7 +3523,11 @@ class AgentSessionBridge:
         except discord.DiscordException:
             logger.warning("Unable to fetch Agent session thread %s for cleanup", thread_id)
             return None, False
-        return (fetched, True) if isinstance(fetched, discord.Thread) else (None, True)
+        return (
+            (fetched, True)
+            if isinstance(fetched, discord.Thread) and fetched.guild.id == self.bot.config.discord.guild_id
+            else (None, True)
+        )
 
     def thread_channel(self, thread_id: int) -> object | None:
         """discord.py's cached channel, else the thread this bridge attached.
@@ -3532,7 +3536,10 @@ class AgentSessionBridge:
         sent right after hello_ack must not be dropped in that window.
         """
         channel = self.bot.get_channel(thread_id)
-        return channel if channel is not None else self._attached_threads.get(thread_id)
+        channel = channel if channel is not None else self._attached_threads.get(thread_id)
+        if channel is not None and getattr(getattr(channel, "guild", None), "id", None) == self.bot.config.discord.guild_id:
+            return channel
+        return None
 
     async def get_thread(self, thread_id: int) -> discord.Thread | None:
         channel = self.thread_channel(thread_id)
@@ -3542,7 +3549,7 @@ class AgentSessionBridge:
             fetched = await self.bot.fetch_channel(thread_id)
         except discord.DiscordException:
             return None
-        return fetched if isinstance(fetched, discord.Thread) else None
+        return fetched if isinstance(fetched, discord.Thread) and fetched.guild.id == self.bot.config.discord.guild_id else None
 
     def operator_role_name(self) -> str:
         return self.bot.config.agent_session.operator_role_name or self.bot.config.discord.employee_role_name
