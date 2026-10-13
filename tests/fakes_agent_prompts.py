@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
-from discord_blue.config import AgentSessionConfig, Config, DiscordConfig
+from discord_blue.config import ConversationConfig, AgentSessionConfig, Config, DiscordConfig
 from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.protocol import RemoteRequestUserInput, RequestUserInputQuestion
 from discord_blue.doodads.agent_session.sessions import AgentSession
@@ -17,7 +17,9 @@ from tests.fakes_agent_session import FakeBot, FakeThread, FakeWebSocket, every_
 class PromptFixture:
     def __init__(self) -> None:
         self.thread = FakeThread(555)
-        config = cast(Config, SimpleNamespace(agent_session=AgentSessionConfig(), discord=DiscordConfig()))
+        config = cast(
+            Config, SimpleNamespace(conversation=ConversationConfig(), agent_session=AgentSessionConfig(), discord=DiscordConfig())
+        )
         self.bridge = bridge_module.AgentSessionBridge(cast(BlueBot, FakeBot(config, thread=self.thread)))
         self.socket = FakeWebSocket()
         self.session = AgentSession(hello=make_hello(), websocket=cast(Any, self.socket), thread_id=555)

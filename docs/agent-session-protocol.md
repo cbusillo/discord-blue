@@ -373,3 +373,31 @@ The Codex bridge supports new_session through /code new in an existing Codex
 thread: that thread's cwd selects the repository. It calls thread/start with
 cwd only, then mirrors the new thread; its first substantive prompt supplies the title. It does not change the
 daemon's configured trust, sandbox or approval policy.
+
+## External CM conversation capability
+
+The authenticated `/agent-session/conversation` WebSocket shares the existing
+listener and bearer check, but never creates a session thread. See
+[CM configuration and operation](cm-conversation.md). A normal session hello on
+`/agent-session/connect` cannot attach the configured conversation session.
+
+Its first message is `hello` with the explicitly configured `session_id`, a
+nonempty `session_epoch`, `conversation: "cell_mechanic"`, `mirror: false` and
+`capabilities: ["conversation_input"]`. `hello_ack` advertises
+`external_conversation` and the bound `guild_id`/`channel_id`. Clients must
+refuse a server missing that feature. The separate URL prevents an older server
+from silently treating this as an ordinary mirrored hello.
+
+Server input is `command` with `kind: "conversation_input"`, `command_id`,
+session identity and an `envelope` containing untrusted text plus verified
+Discord provenance; `allowed: true` and empty `authority` describe conversation
+admission, never approval authority. `command_ack` retires transport delivery,
+not a confirmed answer or completed work. Clients reject all other command
+kinds and approval decisions. Same-epoch reconnects replay pending delivery;
+new epochs discard it. Client hooks/status/title/final answers are ignored.
+
+Explicit output uses `conversation_reply` with the active identity, `reply_id`
+and bounded nonempty `text`, with no selectable destination. Its
+`conversation_reply_ack` includes the identity and reply ID, and an `error`
+when Discord did not confirm full delivery. Retries reuse the ID and text.
+`heartbeat` maintains the socket; `session_end` closes this binding.

@@ -462,6 +462,9 @@ class RequestUserInputView(discord.ui.LayoutView):
 class AgentSessionBridge:
     def __init__(self, bot: BlueBot, *, store_path: Path | None = None) -> None:
         self.bot = bot
+        from discord_blue.doodads.agent_session.conversation import ConversationRouter
+
+        self.conversations = ConversationRouter(bot)
         # The container sets HOME to its existing durable /var/lib/discord-blue mount.
         self.store = SessionStore.for_path(store_path if store_path is not None else Path.home() / "agent-sessions.json")
         self.sessions = AgentSessionRegistry()
@@ -568,6 +571,24 @@ class AgentSessionBridge:
     def register_routes(self, app: web.Application) -> None:
         app.router.add_get("/health", self.handle_health)
         app.router.add_get(AGENT_SESSION_CONNECT_PATH, self.handle_connect)
+        app.router.add_get("/agent-session/conversation", self.handle_conversation_connect)
+
+    async def handle_conversation_connect(self, request: web.Request) -> web.WebSocketResponse:
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized()
+        websocket = web.WebSocketResponse(max_msg_size=65536)
+        await websocket.prepare(request)
+        try:
+            async with asyncio.timeout(15):
+                hello = await websocket.receive_json()
+            if isinstance(hello, dict) and hello.get("type") == "hello" and not self._stopping:
+                await self.conversations.serve(websocket, hello)
+        except (ValueError, TypeError, TimeoutError, ConnectionError):
+            pass
+        finally:
+            if not websocket.closed:
+                await websocket.close(message=b"conversation disconnected", drain=False)
+        return websocket
 
     async def handle_health(self, _request: web.Request) -> web.Response:
         discord_ready = self.discord_ready()
@@ -655,6 +676,7 @@ class AgentSessionBridge:
         return not callable(is_ready) or bool(is_ready())
 
     async def stop(self) -> None:
+        await self.conversations.stop()
         if self._runner is None:
             return
         self._stopping = True
@@ -1087,6 +1109,16 @@ class AgentSessionBridge:
                     continue
 
                 message_type = payload.get("type")
+                if message_type == "hello" and "conversation" in payload:
+                    await websocket.close(message=b"use conversation endpoint", drain=False)
+                    break
+                if (
+                    message_type == "hello"
+                    and self.bot.config.conversation.enabled
+                    and (payload.get("session_id") == self.bot.config.conversation.session_id)
+                ):
+                    await websocket.close(message=b"conversation cannot attach as mirrored session", drain=False)
+                    break
                 if message_type != "hello" and (
                     session is None
                     or self.sessions.get(session.session_id) is not session
@@ -3520,6 +3552,8 @@ class AgentSessionBridge:
         if not role_name:
             return False
         if not isinstance(user, discord.Member):
+            return False
+        if user.guild.id != self.bot.config.discord.guild_id:
             return False
         return any(role.name == role_name for role in user.roles)
 

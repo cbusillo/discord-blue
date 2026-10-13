@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 import discord
 from aiohttp import web
 
-from discord_blue.config import AgentSessionConfig, Config, DiscordConfig
+from discord_blue.config import ConversationConfig, AgentSessionConfig, Config, DiscordConfig
 from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.sessions import AgentSession, PendingSessionCleanup
@@ -28,7 +28,9 @@ class SessionCleanupTests(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def make_bridge(thread: FakeThread | None = None) -> AgentSessionBridge:
-        config = cast(Config, SimpleNamespace(agent_session=AgentSessionConfig(), discord=DiscordConfig()))
+        config = cast(
+            Config, SimpleNamespace(conversation=ConversationConfig(), agent_session=AgentSessionConfig(), discord=DiscordConfig())
+        )
         return AgentSessionBridge(cast(BlueBot, FakeBot(config, thread=thread)))
 
     @staticmethod
@@ -202,7 +204,9 @@ class SessionCleanupTests(unittest.IsolatedAsyncioTestCase):
         live_notice = add_bot_message(channel, 222, "live notice")
         agent_session = AgentSessionConfig()
         agent_session.channel_id = 321
-        config = cast(Config, SimpleNamespace(agent_session=agent_session, discord=DiscordConfig()))
+        config = cast(
+            Config, SimpleNamespace(conversation=ConversationConfig(), agent_session=agent_session, discord=DiscordConfig())
+        )
         bridge = AgentSessionBridge(cast(BlueBot, FakeBot(config, thread=thread, channel=channel)))
         current = AgentSession(
             hello=make_hello(),

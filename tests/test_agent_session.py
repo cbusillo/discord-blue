@@ -2234,6 +2234,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     def member(*role_names: str) -> MagicMock:
         author = MagicMock(spec=bridge_module.discord.Member)
         author.id, author.bot, author.roles = 123, False, [SimpleNamespace(name=name) for name in role_names]
+        author.guild = SimpleNamespace(id=1)
         return author
 
     async def test_a_configured_operator_role_admits_only_members_who_hold_it(self) -> None:

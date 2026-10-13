@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from discord_blue.config import AgentSessionConfig, Config, DiscordConfig
+from discord_blue.config import ConversationConfig, AgentSessionConfig, Config, DiscordConfig
 from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.sessions import AgentSession
@@ -28,7 +28,9 @@ class ProductionCleanupTestServer(TestServer):
 class CleanupTransportTests(unittest.IsolatedAsyncioTestCase):
     @asynccontextmanager
     async def transport(self) -> AsyncIterator[tuple[AgentSessionBridge, FakeThread, TestClient, asyncio.Event]]:
-        config = cast(Config, SimpleNamespace(agent_session=AgentSessionConfig(), discord=DiscordConfig()))
+        config = cast(
+            Config, SimpleNamespace(conversation=ConversationConfig(), agent_session=AgentSessionConfig(), discord=DiscordConfig())
+        )
         config.agent_session.token = "cleanup-transport-test"
         thread = FakeThread(555)
         bridge = AgentSessionBridge(cast(BlueBot, FakeBot(config, thread)))

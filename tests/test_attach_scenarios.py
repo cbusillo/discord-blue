@@ -23,7 +23,7 @@ from aiohttp import web
 
 from discord_blue.claude_channel.session import ClaudeSession, Identity
 from discord_blue.codex_bridge.config import BridgeConfig
-from discord_blue.config import AgentSessionConfig, Config, DiscordConfig
+from discord_blue.config import ConversationConfig, AgentSessionConfig, Config, DiscordConfig
 from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.protocol import SessionHello
 from discord_blue.doodads.agent_session.threads import session_start_message
@@ -74,7 +74,9 @@ class Scenario:
 @contextlib.asynccontextmanager
 async def scenario(fake: FakeDiscord, **agent_session: object) -> AsyncIterator[Scenario]:
     # No config file: Config() reads and writes one under HOME, which other test modules set up for themselves.
-    config = cast(Config, SimpleNamespace(agent_session=AgentSessionConfig(), discord=DiscordConfig()))
+    config = cast(
+        Config, SimpleNamespace(conversation=ConversationConfig(), agent_session=AgentSessionConfig(), discord=DiscordConfig())
+    )
     config.agent_session.token = TOKEN
     config.agent_session.channel_id = PARENT_ID
     store_path = agent_session.pop("store_path", None)

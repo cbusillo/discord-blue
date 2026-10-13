@@ -44,8 +44,14 @@ class BridgeConfig:
 
 def validate_server_url(url: str, *, allow_insecure_ws: bool) -> None:
     parsed = urlsplit(url)
-    if parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path != "/agent-session/connect":
-        raise ValueError("server_url must be a credential-free /agent-session/connect URL without query or fragment")
+    if (
+        parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"/agent-session/connect", "/agent-session/conversation"}
+    ):
+        raise ValueError("server_url must be a credential-free agent-session endpoint URL without query or fragment")
     if not parsed.hostname:
         raise ValueError("server_url needs a host")
     if parsed.scheme == "wss":

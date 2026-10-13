@@ -64,7 +64,7 @@ def start_bot() -> None:
         except PrivilegedIntentsRequired:
             logger.error("Privileged intents required")
             logger.error(
-                "Please enable intents in the discord developer portal https://discord.com/api/oauth2/authorize?client_id=1160954317306613800&permissions=8&scope=bot"
+                "Enable the existing application's required Gateway intents in Discord Developer Portal > Bot; see README.md"
             )
             sleep(5)
 

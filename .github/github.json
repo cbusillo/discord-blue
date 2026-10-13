@@ -11,7 +11,8 @@
     "dockerignore": ".dockerignore",
     "compose": "docker-compose.yml",
     "systemdService": "discord-blue.service",
-    "agentSessionProtocol": "docs/agent-session-protocol.md"
+    "agentSessionProtocol": "docs/agent-session-protocol.md",
+    "cmConversation": "docs/cm-conversation.md"
   },
   "qualityGate": {
     "setup": {
