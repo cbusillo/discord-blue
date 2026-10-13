@@ -7,6 +7,8 @@ import json
 from typing import Any
 from urllib.parse import urlsplit
 
+from aiohttp import ClientError
+
 from discord_blue.agent_client import DEFERRED, AgentSessionClient, Json, Rejected
 from discord_blue.claude_channel.session import CHANNEL, MODEL_CALL, RUNNING_EVENTS, Identity, Notify
 from discord_blue.codex_bridge.config import BridgeConfig
@@ -141,7 +143,7 @@ class CMConversation(AgentSessionClient):
             async with asyncio.timeout(15):
                 response = await waiter
             return str(response.get("error") or "Reply confirmed in #odoo-with-chris.")
-        except (TimeoutError, ConnectionError):
+        except (TimeoutError, ClientError, OSError):
             return "Reply delivery is uncertain. Retry with the same reply_id and text."
         finally:
             del self.reply_waiters[reply_id]

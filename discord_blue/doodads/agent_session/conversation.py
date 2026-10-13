@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import discord
-from aiohttp import WSMsgType, web
+from aiohttp import ClientError, WSMsgType, web
 
 from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT, split_discord_message
 
@@ -40,6 +40,7 @@ class ConversationRouter:
         self.connection: ConversationConnection | None = None
         self.seen: OrderedDict[str, None] = OrderedDict()
         self.observed: OrderedDict[int, dict[str, Any]] = OrderedDict()
+        self.connection_lock = asyncio.Lock()
 
     def binding(self) -> tuple[int, int, tuple[int, ...]] | None:
         config = self.bot.config.conversation
@@ -123,7 +124,12 @@ class ConversationRouter:
             return False
         if command_id in self.seen:
             return True
-        if connection is None or connection.websocket.closed or connection.binding != binding:
+        if (
+            connection is None
+            or connection.websocket.closed
+            or connection.binding != binding
+            or connection.session_id != self.bot.config.conversation.session_id
+        ):
             await channel.send(
                 "The CM conversation is offline. Please resend when it is connected.",
                 allowed_mentions=discord.AllowedMentions.none(),
@@ -170,21 +176,24 @@ class ConversationRouter:
         ):
             await websocket.close(message=b"invalid conversation binding", drain=False)
             return
-        previous = self.connection
-        if previous and previous.session_id == config.session_id and previous.epoch == epoch and previous.binding == binding:
-            connection = previous
-            old_socket = previous.websocket
-            connection.websocket = websocket
-            if not old_socket.closed:
-                await old_socket.close(message=b"replaced connection", drain=False)
-        else:
-            if previous and not previous.websocket.closed:
-                await previous.websocket.close(message=b"conversation changed", drain=False)
-            connection = ConversationConnection(config.session_id, epoch, binding, websocket)
-        self.connection = connection
-        await websocket.send_json({"type": "hello_ack", "features": [FEATURE], "guild_id": binding[0], "channel_id": binding[1]})
-        for payload in list(connection.pending.values()):
-            await websocket.send_json(payload)
+        async with self.connection_lock:
+            previous = self.connection
+            # No input may precede the new socket's hello_ack, including during an awaited old-socket close.
+            self.connection = None
+            if previous and previous.session_id == config.session_id and previous.epoch == epoch and previous.binding == binding:
+                connection = previous
+                old_socket = previous.websocket
+                connection.websocket = websocket
+                if not old_socket.closed:
+                    await old_socket.close(message=b"replaced connection", drain=False)
+            else:
+                if previous and not previous.websocket.closed:
+                    await previous.websocket.close(message=b"conversation changed", drain=False)
+                connection = ConversationConnection(config.session_id, epoch, binding, websocket)
+            await websocket.send_json({"type": "hello_ack", "features": [FEATURE], "guild_id": binding[0], "channel_id": binding[1]})
+            self.connection = connection
+            for payload in list(connection.pending.values()):
+                await websocket.send_json(payload)
         while not websocket.closed:
             try:
                 async with asyncio.timeout(self.bot.config.agent_session.heartbeat_timeout_seconds):
@@ -252,7 +261,11 @@ class ConversationRouter:
                     chunks = split_discord_message(text, DISCORD_MESSAGE_LIMIT)
                     try:
                         for chunk in chunks[sent:]:
-                            if self.connection is not connection or self.binding() != connection.binding:
+                            if (
+                                self.connection is not connection
+                                or self.binding() != connection.binding
+                                or connection.session_id != self.bot.config.conversation.session_id
+                            ):
                                 response["error"] = "Conversation binding changed; unsent reply chunks were discarded."
                                 break
                             nonce = uuid.uuid5(
@@ -265,7 +278,7 @@ class ConversationRouter:
                             connection.replies[reply_id] = (text, sent)
                         while len(connection.replies) > MEMORY_LIMIT:
                             connection.replies.popitem(last=False)
-                    except discord.DiscordException:
+                    except (discord.DiscordException, ClientError, OSError):
                         response["error"] = "Discord could not confirm the complete reply. Retry the same reply ID."
         await connection.websocket.send_json(response)
 

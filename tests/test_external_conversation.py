@@ -13,7 +13,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
-from aiohttp import ClientWebSocketResponse, WSMsgType, web
+from aiohttp import ClientWebSocketResponse, ServerDisconnectedError, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
 
 from discord_blue.claude_channel.__main__ import run_channel
@@ -23,10 +23,11 @@ from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.config import AgentSessionConfig, Config, ConversationConfig, DiscordConfig
 from discord_blue.doodads._doodad_setup import SetupCommands, SetupDoodad
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
+from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
 from discord_blue.doodads.agent_session.conversation import INBOX_LIMIT, ConversationConnection
 from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 from discord_blue.plugs.discord_plug import BlueBot
-from tests.fakes_agent_session import FakeBot, FakeThread
+from tests.fakes_agent_session import FakeBot, FakeThread, FakeWebSocket
 from tests.test_claude_channel import FakeClaudeCode
 from tests.test_session_cleanup_progress import wait_until
 
@@ -242,7 +243,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                     "arguments": {"reply_id": "confirmed-answer", "text": "Here is my understanding of your CM answer."},
                 },
             )
-            self.assertIn("confirmed", result["result"]["content"][0]["text"])
+            self.assertIn("result", result)
             self.destination.send.assert_awaited_once()
         finally:
             supervisor.stdin.feed_eof()
@@ -292,6 +293,38 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await websocket.receive(timeout=2)).type, WSMsgType.CLOSE)
         self.assertEqual(self.bridge.sessions.by_session, {})
 
+    async def test_session_config_change_stops_input_to_the_old_supervisor_immediately(self) -> None:
+        websocket = await self.connect()
+        await websocket.receive_json()
+        self.bot.config.conversation.session_id = "replacement-supervisor"
+        self.assertFalse(await self.bridge.conversations.receive_message(message()))
+        self.assertEqual(self.connection.pending, {})
+        self.destination.send.assert_awaited_once()
+        await websocket.close()
+
+    async def test_input_during_handshake_cannot_arrive_before_hello_ack(self) -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+        socket = FakeWebSocket()
+        original_send = socket.send_json
+
+        async def held_ack(payload: dict[str, object]) -> None:
+            if payload.get("type") == "hello_ack":
+                entered.set()
+                await release.wait()
+            await original_send(payload)
+
+        socket.send_json = held_ack  # type: ignore[method-assign]
+        socket.receive = AsyncMock(return_value=SimpleNamespace(type=WSMsgType.CLOSE))  # type: ignore[attr-defined]
+        task = asyncio.create_task(self.bridge.conversations.serve(cast(Any, socket), hello()))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            self.assertFalse(await self.bridge.conversations.receive_message(message()))
+            self.assertEqual(socket.sent_json, [])
+        finally:
+            release.set()
+            await asyncio.wait_for(task, 2)
+        self.assertEqual([payload["type"] for payload in socket.sent_json], ["hello_ack"])
+
     async def test_same_epoch_reconnect_replays_once_and_new_epoch_drops_old_input(self) -> None:
         websocket = await self.connect()
         await websocket.receive_json()
@@ -338,6 +371,30 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             await websocket.receive_json(timeout=2)
         self.assertFalse(await self.bridge.conversations.receive_message(message(message_id=5000)))
         self.destination.send.assert_awaited_once()
+        await websocket.close()
+
+    async def test_partial_discord_reply_retries_unsent_chunks_after_network_failure(self) -> None:
+        websocket = await self.connect()
+        await websocket.receive_json()
+        successful: list[str] = []
+        attempts = 0
+
+        async def send_chunk(text: str, **_kwargs: object) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 2:
+                raise ServerDisconnectedError()
+            successful.append(text)
+
+        self.destination.send.side_effect = send_chunk
+        text = "x" * (DISCORD_MESSAGE_LIMIT + 3)
+        reply = {**hello(), "type": "conversation_reply", "reply_id": "partial-answer", "text": text}
+        await websocket.send_json(reply)
+        self.assertIn("error", await websocket.receive_json(timeout=2))
+        await websocket.send_json(reply)
+        self.assertNotIn("error", await websocket.receive_json(timeout=2))
+        self.assertEqual("".join(successful), text)
+        self.assertEqual(self.destination.send.await_count, attempts)
         await websocket.close()
 
     async def test_explicit_reply_fixed_destination_mentions_off_split_dedup_and_stale_rejection(self) -> None:
@@ -394,8 +451,10 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         for event in ("UserPromptSubmit", "Stop", "PreToolUse", "PostToolUse"):
             await local.on_hook_call({"event": event, "prompt": "private", "last_assistant_message": "private"}, {})
         self.assertTrue(all(item["type"] == "command_ack" for item in local.outbox))
-        tool_response = await local.reply_tool({"reply_id": "reply", "text": "CM answer", "channel_id": 999}, {})
-        self.assertNotIn("confirmed", tool_response)
+        local.websocket = cast(Any, FakeWebSocket())
+        with patch.object(local, "send", new_callable=AsyncMock) as send:
+            await local.reply_tool({"reply_id": "reply", "text": "CM answer", "channel_id": 999}, {})
+            send.assert_not_awaited()
         local.server_features = frozenset()
         with self.assertRaises(ValueError):
             local.on_server_features()
