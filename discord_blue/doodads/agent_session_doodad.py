@@ -25,6 +25,21 @@ class AgentSessionDoodad(commands.Cog):
             return
         await self.bridge.start()
 
+    @commands.Cog.listener("on_conversation_message")
+    async def route_conversation_message(self, message: discord.Message) -> None:
+        if self.bot.config.agent_session.enabled:
+            await self.bridge.conversations.receive_message(message)
+
+    @commands.Cog.listener("on_conversation_message_edit")
+    async def route_conversation_edit(self, _before: discord.Message, after: discord.Message) -> None:
+        if self.bot.config.agent_session.enabled:
+            await self.bridge.conversations.receive_message(after, amendment=True)
+
+    @commands.Cog.listener("on_conversation_message_delete")
+    async def route_conversation_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
+        if self.bot.config.agent_session.enabled:
+            await self.bridge.conversations.receive_delete(payload)
+
     @commands.Cog.listener("on_message")
     async def route_thread_reply(self, message: discord.Message) -> None:
         if message.author.bot:

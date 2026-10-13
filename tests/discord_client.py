@@ -27,7 +27,7 @@ from discord import ClientUser
 from discord.http import Route
 from discord.utils import time_snowflake
 
-from discord_blue.config import AgentSessionConfig, Config, DiscordConfig
+from discord_blue.config import ConversationConfig, AgentSessionConfig, Config, DiscordConfig
 from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 from discord_blue.plugs.discord_plug import BlueBot
 from tests.fake_discord import ADD_REACTION, BOT_ID, EPOCH, GUILD_ID, PARENT_ID, FakeDiscord, FakeMessage, FakeThreadState, Hold
@@ -108,7 +108,10 @@ class RunningCog:
 @asynccontextmanager
 async def running_cog(fake: FakeDiscord) -> AsyncIterator[RunningCog]:
     """The agent-session cog on a real client, with OPERATOR holding the operator role and BYSTANDER not."""
-    config = cast(Config, SimpleNamespace(agent_session=AgentSessionConfig(), discord=DiscordConfig()))
+    config = cast(
+        Config, SimpleNamespace(conversation=ConversationConfig(), agent_session=AgentSessionConfig(), discord=DiscordConfig())
+    )
+    config.discord.guild_id = GUILD_ID
     config.agent_session.enabled = True
     config.agent_session.token = TOKEN
     config.agent_session.channel_id = PARENT_ID

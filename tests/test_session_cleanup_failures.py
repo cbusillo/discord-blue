@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
 
-from discord_blue.config import AgentSessionConfig, Config, DiscordConfig
+from discord_blue.config import ConversationConfig, AgentSessionConfig, Config, DiscordConfig
 from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.sessions import AgentSession, PendingSessionCleanup
@@ -21,7 +21,9 @@ from tests.fakes_agent_session import FakeBot, FakeThread, FakeWebSocket, make_h
 
 
 def make_bridge() -> AgentSessionBridge:
-    config = cast(Config, SimpleNamespace(agent_session=AgentSessionConfig(), discord=DiscordConfig()))
+    config = cast(
+        Config, SimpleNamespace(conversation=ConversationConfig(), agent_session=AgentSessionConfig(), discord=DiscordConfig())
+    )
     config.agent_session.enabled = True
     config.agent_session.heartbeat_timeout_seconds = 1
     return AgentSessionBridge(cast(BlueBot, FakeBot(config)))

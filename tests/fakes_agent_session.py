@@ -11,6 +11,7 @@ import discord
 
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.protocol import SessionHello
+from tests.fake_discord import GUILD_ID
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
 
 if TYPE_CHECKING:
@@ -131,7 +132,7 @@ class FakeThread:
         self.locked = locked
         self._private = private
         self.joined = joined
-        self.guild = SimpleNamespace(me=SimpleNamespace(id=999))
+        self.guild = SimpleNamespace(id=GUILD_ID, me=SimpleNamespace(id=999))
         self._manage_messages = manage_messages
         self._messages: dict[int, FakeReplyMessage] = {}
         self._history: list[FakeReplyMessage] = []
@@ -267,7 +268,7 @@ class FakeThread:
 class FakeTextChannel:
     def __init__(self, channel_id: int, threads: list[FakeThread], *, manage_messages: bool = True) -> None:
         self.id = channel_id
-        self.guild = SimpleNamespace(me=SimpleNamespace(id=999))
+        self.guild = SimpleNamespace(id=GUILD_ID, me=SimpleNamespace(id=999))
         self._manage_messages = manage_messages
         self._threads = list(threads)
         self._messages: dict[int, FakeReplyMessage] = {}
@@ -390,6 +391,9 @@ class FakeBot:
         channel: FakeTextChannel | None = None,
     ) -> None:
         self.config = config
+        discord_config = getattr(config, "discord", None)
+        if discord_config is not None and not discord_config.guild_id:
+            discord_config.guild_id = GUILD_ID  # Model the home-guild selection performed before real bridge startup.
         self.user = SimpleNamespace(id=999)
         self._thread = thread
         self._channel = channel

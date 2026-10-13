@@ -78,7 +78,8 @@ both services against the same bot token or state directory.
 
 **Note**: The systemd service runs as the `discord-blue` user and reads config
 from `/var/lib/discord-blue/.config/discord-blue/config.toml`. Slash commands
-sync directly to the first guild the bot joins, so they appear immediately.
+sync directly to the configured home guild, so they appear immediately. Foreign
+guilds receive no session/setup commands; see [CM conversation](docs/cm-conversation.md).
 
 To enable the agent-session bridge, set the doodad extension name in the
 generated config:

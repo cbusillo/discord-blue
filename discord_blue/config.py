@@ -75,6 +75,32 @@ class AgentSessionConfig(Serializable):
         self.auto_join_user_ids = []
 
 
+class ConversationConfig(Serializable):
+    """One explicitly bound external conversation; no default participants or session."""
+
+    enabled: bool = False
+    guild_id: int = 0
+    channel_id: int = 0
+    session_id: str = ""
+    allowed_user_ids: list[int]
+
+    def __init__(self) -> None:
+        self.allowed_user_ids = []
+
+    def validate(self) -> None:
+        if type(self.enabled) is not bool:
+            raise ValueError("conversation.enabled must be a boolean")
+        if self.enabled and (
+            any(type(value) is not int or value <= 0 for value in (self.guild_id, self.channel_id))
+            or not isinstance(self.session_id, str)
+            or not self.session_id.strip()
+            or not isinstance(self.allowed_user_ids, list)
+            or not self.allowed_user_ids
+            or any(type(value) is not int or value <= 0 for value in self.allowed_user_ids)
+        ):
+            raise ValueError("Enabled conversation needs guild/channel/session IDs and verified participant IDs")
+
+
 class Config(Serializable):
     _instance = None
 
@@ -88,6 +114,7 @@ class Config(Serializable):
 
         self.discord = DiscordConfig()
         self.agent_session = AgentSessionConfig()
+        self.conversation = ConversationConfig()
 
         self.load()
 

@@ -131,7 +131,7 @@ def session_notification_message(hello: SessionHello, thread: discord.Thread) ->
 async def get_agent_session_channel(bot: BlueBot) -> discord.TextChannel:
     channel_id = bot.config.agent_session.channel_id or bot.config.discord.bot_channel_id
     channel = bot.get_channel(channel_id)
-    if isinstance(channel, discord.TextChannel):
+    if isinstance(channel, discord.TextChannel) and channel.guild.id == bot.config.discord.guild_id:
         return channel
     raise ValueError(f"Agent session channel {channel_id} is not available")
 

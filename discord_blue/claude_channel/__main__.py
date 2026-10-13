@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import dataclasses
 import logging
+import os
 import sys
 from contextlib import suppress
 from pathlib import Path
@@ -13,6 +14,7 @@ from pathlib import Path
 import aiohttp
 
 from discord_blue.claude_channel.mcp import LINE_LIMIT, ChannelServer, Json, Output
+from discord_blue.claude_channel.conversation import CMConversation, INSTRUCTIONS as CM_INSTRUCTIONS, REPLY_TOOL
 from discord_blue.claude_channel.session import HOOK_TOOL, PERMISSION_REQUEST, ClaudeSession, Identity, host_label
 from discord_blue.codex_bridge.config import DEFAULT_CONFIG_PATH, BridgeConfig, load_config
 
@@ -30,25 +32,44 @@ async def ignore_hook(_arguments: Json, _meta: Json) -> str:
     return ""
 
 
-async def serve(config: BridgeConfig | None, identity: Identity | None) -> None:
+async def serve(config: BridgeConfig | None, identity: Identity | None, *, conversation: bool = False) -> None:
     loop = asyncio.get_running_loop()
     reader = asyncio.StreamReader(limit=LINE_LIMIT)
     await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
     transport, protocol = await loop.connect_write_pipe(asyncio.streams.FlowControlMixin, sys.stdout)
-    await run_channel(reader, asyncio.StreamWriter(transport, protocol, reader, loop), config, identity)
+    await run_channel(reader, asyncio.StreamWriter(transport, protocol, reader, loop), config, identity, conversation=conversation)
 
 
-async def run_channel(reader: asyncio.StreamReader, output: Output, config: BridgeConfig | None, identity: Identity | None) -> None:
+async def run_channel(
+    reader: asyncio.StreamReader,
+    output: Output,
+    config: BridgeConfig | None,
+    identity: Identity | None,
+    *,
+    conversation: bool = False,
+) -> None:
     # Without a session to mirror, relay nothing: an unanswered relay would only add noise.
     mirroring = config is not None and identity is not None
-    server = ChannelServer(reader, output, name="dui", version="0.1.0", instructions=INSTRUCTIONS, permission_relay=mirroring)
+    server = ChannelServer(
+        reader,
+        output,
+        name="dui",
+        version="0.1.0",
+        instructions=CM_INSTRUCTIONS if conversation else INSTRUCTIONS,
+        permission_relay=mirroring and not conversation,
+    )
     if config is None or identity is None:
         # The plugin's hooks still call their tool; answer them quietly rather than fail every hook.
         server.add_tool(HOOK_TOOL, ignore_hook)
         await server.serve()
         return
-    session = ClaudeSession(config, identity, server.notify)
-    server.on_notification(PERMISSION_REQUEST, session.on_permission_request)
+    session: ClaudeSession | CMConversation
+    if conversation:
+        session = CMConversation(config, identity, server.notify)
+        server.add_tool(REPLY_TOOL, session.reply_tool)
+    else:
+        session = ClaudeSession(config, identity, server.notify)
+        server.on_notification(PERMISSION_REQUEST, session.on_permission_request)
     server.add_tool(HOOK_TOOL, session.on_hook_call)
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=20)) as http:
         mirror = asyncio.create_task(session.run(http), name="claude-channel-session")
@@ -63,7 +84,13 @@ async def run_channel(reader: asyncio.StreamReader, output: Output, config: Brid
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Claude Code channel that mirrors this session into Discord Blue.")
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="TOML config file (the Codex bridge's)")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path(os.environ.get("DISCORD_BLUE_CHANNEL_CONFIG", str(DEFAULT_CONFIG_PATH))),
+        help="TOML config file (the Codex bridge's)",
+    )
+    parser.add_argument("--conversation", choices=["cell_mechanic"], default=os.environ.get("DISCORD_BLUE_CONVERSATION"))
     args = parser.parse_args()
     # stdout carries the MCP protocol; Claude Code keeps stderr in its MCP logs.
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -78,7 +105,7 @@ def main() -> None:
             # Keep answering MCP so Claude Code does not report a failed server; there is just no mirror.
             logger.error("claude channel config error, not mirroring this session: %s", exc)
     with suppress(KeyboardInterrupt):
-        asyncio.run(serve(config, identity))
+        asyncio.run(serve(config, identity, conversation=args.conversation == "cell_mechanic"))
 
 
 if __name__ == "__main__":
