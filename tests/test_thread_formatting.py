@@ -149,12 +149,14 @@ class MarkdownTableTests(unittest.TestCase):
 
     def conversion_work(self, rows: int) -> int:
         work = 0
-        filename = convert_markdown_tables.__code__.co_filename
+        entrypoint = convert_markdown_tables.__code__
 
         def trace(frame: FrameType, event: str, _arg: object) -> TraceFunction | None:
             nonlocal work
-            if frame.f_code.co_filename != filename:
-                return None
+            # Follow the converter's call tree even if parsing helpers move to another module.
+            if event == "call" and frame.f_code is not entrypoint:
+                if frame.f_back is None or frame.f_back.f_trace is not trace:
+                    return None
             if event == "line":
                 work += 1
             return trace
