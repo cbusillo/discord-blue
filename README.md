@@ -584,10 +584,10 @@ Behaviour and limits:
 
 ## Launchplane/Dokploy production deployment
 
-Production releases run through Launchplane's gated path and Dokploy. The product
-workflow validates the repo and publishes an immutable GHCR image. Launchplane
-owns testing deployment and production release qualification through
-[the service-owned release path](https://github.com/cbusillo/launchplane/issues/2792).
+Launchplane's gated path and Dokploy are the only production release route. The
+product workflow validates the repo and publishes an immutable GHCR image; it
+does not request production deployment. Testing and release qualification remain
+tracked in [launchplane#2792](https://github.com/cbusillo/launchplane/issues/2792).
 
 A push to `main`, including a PR merge, runs the canonical
 [Build workflow](.github/workflows/build.yml). It validates, builds and publishes
