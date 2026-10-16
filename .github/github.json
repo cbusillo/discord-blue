@@ -64,7 +64,7 @@
   },
   "importantWorkflows": [
     "Build",
-    "Deploy to Production",
+    "Read Build publication",
     "CodeQL",
     "Dependency Graph",
     "Dependabot Updates"
