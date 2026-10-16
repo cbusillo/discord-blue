@@ -137,7 +137,8 @@ class MarkdownTableTests(unittest.TestCase):
 
     def test_large_input_stays_within_cpu_budget(self) -> None:
         started = time.process_time()
-        self.convert_rows(20_000)
+        # Exercise enough data for quadratic copying in C builtins to exceed the budget too.
+        self.convert_rows(50_000)
         self.assertLess(time.process_time() - started, 2.0)
 
     def test_adversarial_lines_convert_quickly(self) -> None:
