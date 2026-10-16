@@ -209,8 +209,61 @@ signed-in screens. Use a separate state volume and testing identity; do not
 copy production state or credentials. Runtime overrides stay in memory and
 are excluded from subsequent TOML saves, which preserve existing local values.
 Without runtime inputs, local TOML and interactive setup retain their behavior.
-The local development Compose file does not deliver these inputs; configure
-their delivery on the prepared provider target before deploying an artifact.
+The local development Compose file does not deliver these inputs.
+
+### Managed runtime Compose
+
+[compose.runtime.yml](compose.runtime.yml) is the deployment entrypoint for an
+isolated managed server. Select that file on the prepared provider target;
+do not combine it with the local development Compose file. Launchplane selects
+`LAUNCHPLANE_IMAGE_REFERENCE` as the verified `repository@sha256:digest` from the
+canonical Build manifest, never a mutable tag or a local build. It also supplies
+`LAUNCHPLANE_SOURCE_GIT_REF` and `LAUNCHPLANE_RUNTIME_IDENTITY_JSON` for that same
+candidate and lane. Source checkout must be pinned to the reviewed completing
+commit, independently of selecting the runtime image.
+
+The Compose file explicitly passes those identity inputs and the four managed
+server inputs above. Every input must be nonempty before Compose can create a
+container. Set `DISCORD_BLUE_STATE_DIR` to `/var/lib/discord-blue`, matching the
+image's home and the Compose-scoped named volume. Keep the volume on the testing
+target; no state, credentials or project name come from production. The image's
+existing entrypoint initializes that volume and drops privileges before running
+the server. Runtime credential overrides stay out of saved TOML; the provider's
+managed environment remains sensitive and must not be dumped to logs or evidence.
+
+The lane's non-secret TOML must load `agent_session_doodad`, enable the bridge,
+and listen on `0.0.0.0:8787`. The service name is `discord-blue`. Only the
+target's default network reaches its HTTP `/health` and authenticated WebSocket
+`/agent-session/connect` listener; this file publishes no host port. Launchplane
+owns the private TLS overlay, certificates, receiver/monitor trust, activation
+and recovery, as described in its
+[private transport contract](https://github.com/cbusillo/launchplane/blob/main/docs/private-testing-transport.md).
+It must qualify the provider's actual converted source, network, volume and
+image bindings before activation. Compose validation is not live TLS, healthy
+Discord login or deployment proof. Missing credentials or invalid runtime TOML
+refuse startup; `/health` becomes available only after Discord readiness.
+
+For updates, use Launchplane's reviewed artifact/source selection and gated
+testing deployment, preserving this target's named state. Recover an uncertain
+operation with its original key and supported readback. Roll back through the
+same service path to the previous verified immutable artifact/source; preserve
+the state volume. Listener-only recovery belongs to Launchplane and must preserve
+this baseline. Do not use `down --volumes` on a retained lane.
+
+The opt-in container qualification uses a disposable local image and project,
+fictional credentials, the actual image entrypoint, and a stubbed Discord login:
+
+```sh
+docker build --tag discord-blue-runtime-fixture .
+DISCORD_BLUE_COMPOSE_TEST_IMAGE="$(docker image inspect --format '{{.Id}}' discord-blue-runtime-fixture)" \
+  uv run python -m unittest tests.test_runtime_compose -v
+docker image rm discord-blue-runtime-fixture
+```
+
+It checks input refusal, in-memory delivery, non-root startup and non-persistence
+without contacting Discord, reading a real token or installing a local client.
+Its temporary project/state are removed afterward. Ordinary unit CI skips this
+explicit artifact fixture; Build still validates and builds the actual image.
 
 When the agent-session doodad is loaded and `[agent_session].enabled` is `true`, the
 same listener exposes an unauthenticated Launchplane-compatible health endpoint:

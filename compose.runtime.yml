@@ -1,0 +1,17 @@
+services:
+  discord-blue:
+    image: "${LAUNCHPLANE_IMAGE_REFERENCE:?Launchplane must select an immutable image digest}"
+    environment:
+      DISCORD_BLUE_RUNTIME_CONFIG: "${DISCORD_BLUE_RUNTIME_CONFIG:?Managed non-secret TOML is required}"
+      DISCORD_BLUE_STATE_DIR: "${DISCORD_BLUE_STATE_DIR:?Managed state directory is required}"
+      DISCORD_TOKEN: "${DISCORD_TOKEN:?Managed Discord credential is required}"
+      AGENT_SESSION_TOKEN: "${AGENT_SESSION_TOKEN:?Managed bridge credential is required}"
+      LAUNCHPLANE_RUNTIME_IDENTITY_JSON: "${LAUNCHPLANE_RUNTIME_IDENTITY_JSON:?Managed runtime identity is required}"
+      LAUNCHPLANE_SOURCE_GIT_REF: "${LAUNCHPLANE_SOURCE_GIT_REF:?Managed source identity is required}"
+      LAUNCHPLANE_IMAGE_REFERENCE: "${LAUNCHPLANE_IMAGE_REFERENCE:?Launchplane must select an immutable image digest}"
+    volumes:
+      - "discord-blue-state:/var/lib/discord-blue"
+    restart: unless-stopped
+
+volumes:
+  discord-blue-state:
