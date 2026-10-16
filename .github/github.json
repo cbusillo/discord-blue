@@ -10,6 +10,7 @@
     "dockerfile": "Dockerfile",
     "dockerignore": ".dockerignore",
     "compose": "docker-compose.yml",
+    "runtimeCompose": "compose.runtime.yml",
     "systemdService": "discord-blue.service",
     "agentSessionProtocol": "docs/agent-session-protocol.md",
     "cmConversation": "docs/cm-conversation.md"

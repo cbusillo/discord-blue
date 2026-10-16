@@ -4,6 +4,11 @@ set -eu
 state_dir=/var/lib/discord-blue
 runtime_user=discord-blue
 
+if [ "${DISCORD_BLUE_STATE_DIR:-$state_dir}" != "$state_dir" ]; then
+  printf '%s\n' 'DISCORD_BLUE_STATE_DIR must match the image state directory' >&2
+  exit 1
+fi
+
 if [ -d "$state_dir" ]; then
   state_uid=$(stat -c '%u' "$state_dir")
   state_gid=$(stat -c '%g' "$state_dir")
