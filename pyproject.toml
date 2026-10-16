@@ -36,4 +36,4 @@ default-groups = "all"
 line-length = 133
 
 [tool.ruff.lint]
-select = ["ANN", "B", "E", "F", "RUF"]
+select = ["ANN", "B", "E", "F", "RUF", "S323", "S501", "S502", "S503", "S504"]
