@@ -118,8 +118,9 @@ jobs:
         env:
           PUBLISHED_IMAGE: ${{ needs.image.outputs.image_repository }}@${{ steps.push.outputs.digest }}
         run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
           docker pull "$PUBLISHED_IMAGE"
-          DISCORD_BLUE_COMPOSE_TEST_IMAGE="$(docker image inspect --format '{{.Id}}' "$PUBLISHED_IMAGE")"
+          DISCORD_BLUE_COMPOSE_TEST_IMAGE="$PUBLISHED_IMAGE"
           export DISCORD_BLUE_COMPOSE_TEST_IMAGE
           "$HOME/.local/bin/uv" run --python 3.13 python -m unittest tests.test_runtime_compose -v
       - name: Write artifact manifest
@@ -127,7 +128,6 @@ jobs:
           SOURCE_COMMIT: ${{ github.sha }}
           IMAGE_REFERENCE: ${{ needs.image.outputs.image_repository }}@${{ steps.push.outputs.digest }}
         run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
           "$HOME/.local/bin/uv" run --no-project --no-config --python 3.13 python -m scripts.artifact_manifest
       - name: Upload artifact manifest
         uses: actions/upload-artifact@v7

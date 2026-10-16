@@ -233,6 +233,9 @@ the server. Runtime credential overrides stay out of saved TOML; the provider's
 managed environment remains sensitive and must not be dumped to logs or evidence.
 The state-dir input is retained for compatibility with Launchplane's existing
 managed-input contract; it confirms the image path rather than relocating state.
+The provider must select a lane-unique Compose project name before creating
+resources. Invalid managed inputs remain unhealthy under the restart policy
+until corrected.
 
 The lane's non-secret TOML must load `agent_session_doodad`, enable the bridge,
 and listen on `0.0.0.0:8787`. The service name is `discord-blue`. Only the
@@ -269,6 +272,8 @@ Its temporary project/state are removed afterward. Ordinary unit validation skip
 this explicit artifact fixture; Build's image job runs it against the loaded
 image before the required gate can pass. Publishing also pulls and qualifies the
 exact pushed digest before producing the artifact manifest used by Launchplane.
+Registry tags can move before that post-push check finishes; only the digest in
+a successful canonical Build manifest qualifies for deployment.
 
 When the agent-session doodad is loaded and `[agent_session].enabled` is `true`, the
 same listener exposes an unauthenticated Launchplane-compatible health endpoint:

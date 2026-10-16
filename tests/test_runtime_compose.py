@@ -41,6 +41,7 @@ class RuntimeComposeTests(unittest.TestCase):
             timeout=30,
         )
         (image,) = json.loads(inspected_image.stdout)
+        self.selected_image_id = image["Id"]
         image_env = dict(value.split("=", 1) for value in image["Config"]["Env"])
         self.env["DISCORD_BLUE_STATE_DIR"] = image_env["HOME"]
         self.command = [
@@ -86,7 +87,7 @@ class RuntimeComposeTests(unittest.TestCase):
             ["docker", "inspect", container], env=self.env, capture_output=True, text=True, check=True, timeout=30
         )
         (created,) = json.loads(result.stdout)
-        self.assertEqual(created["Image"], self.env["LAUNCHPLANE_IMAGE_REFERENCE"])
+        self.assertEqual(created["Image"], self.selected_image_id)
         self.assertFalse(created["HostConfig"]["PortBindings"])
         container_env = dict(value.split("=", 1) for value in created["Config"]["Env"])
         (mount,) = created["Mounts"]
@@ -128,7 +129,10 @@ class RuntimeComposeTests(unittest.TestCase):
                 self.env.update(overrides)
                 result = self.compose("run", "--rm", "--no-deps", "-T", "discord-blue")
                 self.env = original
-                self.assertEqual(result.returncode, int(bool(overrides)), "Unexpected entrypoint outcome")
+                if overrides:
+                    self.assertNotEqual(result.returncode, 0, "Invalid runtime input must refuse")
+                else:
+                    self.assertEqual(result.returncode, 0, "Valid runtime input must start")
                 for value in ("fictional-bot-value", "fictional-bridge-value", "fictional-do-not-persist"):
                     self.assertNotIn(value, result.stdout + result.stderr)
                 if "DISCORD_BLUE_STATE_DIR" in overrides:
