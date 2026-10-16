@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sys
 import time
+from collections.abc import Callable
+from types import FrameType
 import unittest
 
 from discord_blue.doodads.agent_session.chunks import ASSISTANT_TRUNCATED_NOTICE
@@ -15,6 +18,9 @@ from discord_blue.doodads.agent_session.formatting import format_user_message
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
 from discord_blue.doodads.agent_session.formatting import mark_assistant_message
 from discord_blue.doodads.agent_session.formatting import strip_assistant_markers
+
+
+type TraceFunction = Callable[[FrameType, str, object], "TraceFunction | None"]
 
 
 class AssistantMarkerTests(unittest.TestCase):
@@ -120,29 +126,53 @@ class MarkdownTableTests(unittest.TestCase):
 
         self.assertEqual(convert_markdown_tables(text), text)
 
-    def test_large_input_converts_in_linear_time(self) -> None:
-        small = self.convert_duration(1_000)
-        large = self.convert_duration(20_000)
+    def test_large_input_conversion_work_scales_linearly(self) -> None:
+        # Count executed Python lines, not elapsed time: a descheduled large sample must not look quadratic.
+        # The slack allows implementation changes; rescanning all prior rows for each row still fails.
+        small = self.conversion_work(1_000)
+        large = self.conversion_work(20_000)
 
-        self.assertLess(large, 2.0)
-        self.assertLess(large, max(small, 0.001) * 20 * 5)
+        self.assertGreater(small, 0)
+        self.assertLess(large, small * 20 * 5)
+
+    def test_large_input_stays_within_cpu_budget(self) -> None:
+        started = time.process_time()
+        self.convert_rows(20_000)
+        self.assertLess(time.process_time() - started, 2.0)
 
     def test_adversarial_lines_convert_quickly(self) -> None:
         for text in ("|" * 200_000, "|" + " " * 200_000 + "|\n|" + "-" * 200_000 + "|", "\\" * 200_000 + "|\n| - |"):
             with self.subTest(length=len(text)):
-                started = time.perf_counter()
+                started = time.process_time()
                 convert_markdown_tables(text)
-                self.assertLess(time.perf_counter() - started, 2.0)
+                self.assertLess(time.process_time() - started, 2.0)
 
-    def convert_duration(self, rows: int) -> float:
+    def conversion_work(self, rows: int) -> int:
+        work = 0
+        filename = convert_markdown_tables.__code__.co_filename
+
+        def trace(frame: FrameType, event: str, _arg: object) -> TraceFunction | None:
+            nonlocal work
+            if frame.f_code.co_filename != filename:
+                return None
+            if event == "line":
+                work += 1
+            return trace
+
+        previous = sys.gettrace()
+        try:
+            sys.settrace(trace)
+            self.convert_rows(rows)
+        finally:
+            sys.settrace(previous)
+        return work
+
+    def convert_rows(self, rows: int) -> None:
         table = ["| Name | Kind | Note |", "|---|---|---|"]
-        table.extend(f"| row{index} | kind | {'x' * 40} \\| y |" for index in range(rows))
+        table.extend(f"| row{index:06d} | kind | {'x' * 40} \\| y |" for index in range(rows))
         text = "\n".join(["```", "| fenced | table |", "```", *table, "", "Done."])
-        started = time.perf_counter()
         converted = convert_markdown_tables(text)
-        duration = time.perf_counter() - started
         self.assertEqual(converted.count("\n- **row"), rows)
-        return duration
 
     def test_fence_info_strings_follow_gfm(self) -> None:
         table = "| a | b |\n|---|---|\n| 1 | 2 |"
@@ -162,10 +192,10 @@ class MarkdownTableTests(unittest.TestCase):
         rows = [f"| r{index} | a | b |" for index in range(2000)]
         text = "\n".join([header, "|---|---|---|", *rows])
 
-        started = time.perf_counter()
+        started = time.process_time()
         converted = convert_markdown_tables(text)
         messages = format_assistant_messages(text)
-        duration = time.perf_counter() - started
+        duration = time.process_time() - started
 
         self.assertEqual(converted, text)
         self.assertLessEqual(len(messages), MAX_ASSISTANT_CHUNKS)
