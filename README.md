@@ -584,9 +584,10 @@ Behaviour and limits:
 
 ## Launchplane/Dokploy production deployment
 
-Production deploys run through Launchplane and Dokploy. The product workflow
-validates the repo, publishes an immutable GHCR image, and asks Launchplane to
-deploy that image to the registered Dokploy application on the Discord Blue LXC.
+Production releases run through Launchplane's gated path and Dokploy. The product
+workflow validates the repo and publishes an immutable GHCR image. Launchplane
+owns testing deployment and production release qualification through
+[the service-owned release path](https://github.com/cbusillo/launchplane/issues/2792).
 
 A push to `main`, including a PR merge, runs the canonical
 [Build workflow](.github/workflows/build.yml). It validates, builds and publishes
@@ -596,35 +597,26 @@ run under its [artifact provenance contract](https://github.com/cbusillo/launchp
 Pull requests and `launchplane/train/**` pushes validate and build without
 publishing. Manual Build runs on `main` publish, but are not release provenance.
 
-The existing [production caller](.github/workflows/main.yml) also runs on main
-pushes, using the bounded wait in [the publication reader](scripts/build_publication.py)
-for the successful canonical Build for that exact commit and reading its
-current-attempt manifest before requesting deployment.
-It does not rebuild or publish another image, and preserves its original push
-event and authentication contract. Its retirement remains coordinated with the service-owned release work
-in [launchplane#2792](https://github.com/cbusillo/launchplane/issues/2792) and
-[launchplane#3019](https://github.com/cbusillo/launchplane/issues/3019).
+Main pushes feed Launchplane's testing reconciliation only; they do not request
+production deployment. The [publication reader](.github/workflows/main.yml)
+retains its bounded read of the successful canonical Build and current-attempt
+manifest for the exact commit, without calling Launchplane.
 When retrying a main Build, use **Re-run all jobs** so the latest run attempt
 uploads its own manifest. Re-running only failed jobs can leave the latest
-attempt without the manifest required by Launchplane. Retry a failed legacy
-caller only after that Build succeeds. Rebuilding republishes the SHA tag;
-release qualification must use the latest attempt's digest, not earlier evidence.
-The read-only caller wait uses a GitHub-hosted runner so it cannot occupy the
-self-hosted runners needed by Build.
-A merge's deployment request is separate from a confirmed production deployment;
-the required `ci-gate` proves validation and image build. The separate
-`launchplane-deploy` job succeeds only when Launchplane reports a passing deploy.
+attempt without the manifest required by Launchplane. Rebuilding republishes
+the SHA tag; release qualification must use the latest attempt's digest.
+The read-only publication wait uses a GitHub-hosted runner so it cannot occupy
+the self-hosted runners needed by Build. The required `ci-gate` proves validation
+and image build; it does not prove a production release.
 Consult the [overall direction](https://github.com/cbusillo/direction/blob/HEAD/DIRECTION.md)
 for release authority before production work.
 
 - CI proves the Docker image builds for every PR and push with read-only permissions.
 - A separate publishing job runs only on `main` pushes and manual `main` runs;
-  it alone has GHCR package-write permission. Only the main-push deploy job has
-  OIDC token-write permission. Pull-request jobs receive neither write permission.
-- Production publishes both a digest and a commit tag from
-  [the shared image metadata](scripts/image_metadata.py). The deploy request
-  uses the digest as `artifact_id` and the tag as `deploy_reference`, so Launchplane
-  can retain immutable evidence while Dokploy pulls the matching provider tag.
+  it alone has GHCR package-write permission. Pull-request jobs are read-only.
+- Build publishes both a digest and a commit tag from
+  [the shared image metadata](scripts/image_metadata.py); its artifact manifest
+  records the immutable digest for Launchplane.
 - The required `ci-gate` context fails closed unless both application
   validation and the container image build succeed, plus publishing on runs that
   publish an image, including its manifest upload.
