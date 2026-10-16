@@ -68,6 +68,8 @@ jobs:
           load: true
           tags: ${{ steps.image.outputs.tag_sha }}
           cache-from: type=registry,ref=${{ steps.image.outputs.cache }}
+      - name: Set up Docker Compose
+        uses: docker/setup-compose-action@v2
       - name: Qualify managed runtime Compose
         env:
           QUALIFICATION_IMAGE: ${{ steps.image.outputs.tag_sha }}
@@ -110,6 +112,8 @@ jobs:
             ${{ needs.image.outputs.tag_main }}
           cache-from: type=registry,ref=${{ needs.image.outputs.cache }}
           cache-to: type=registry,ref=${{ needs.image.outputs.cache }},mode=max
+      - name: Set up Docker Compose
+        uses: docker/setup-compose-action@v2
       - name: Qualify published runtime image
         env:
           PUBLISHED_IMAGE: ${{ needs.image.outputs.image_repository }}@${{ steps.push.outputs.digest }}
