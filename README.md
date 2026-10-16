@@ -225,7 +225,8 @@ commit, independently of selecting the runtime image.
 The Compose file explicitly passes those identity inputs and the four managed
 server inputs above. Every input must be nonempty before Compose can create a
 container. Set `DISCORD_BLUE_STATE_DIR` to `/var/lib/discord-blue`, matching the
-image's home and the Compose-scoped named volume. Keep the volume on the testing
+image's home and the Compose-scoped named volume; a different state-dir input
+refuses at the image entrypoint. Keep the volume on the testing
 target; no state, credentials or project name come from production. The image's
 existing entrypoint initializes that volume and drops privileges before running
 the server. Runtime credential overrides stay out of saved TOML; the provider's
@@ -262,8 +263,9 @@ docker image rm discord-blue-runtime-fixture
 
 It checks input refusal, in-memory delivery, non-root startup and non-persistence
 without contacting Discord, reading a real token or installing a local client.
-Its temporary project/state are removed afterward. Ordinary unit CI skips this
-explicit artifact fixture; Build still validates and builds the actual image.
+Its temporary project/state are removed afterward. Ordinary unit validation skips
+this explicit artifact fixture; Build's image job runs it against the loaded
+image before the required gate can pass.
 
 When the agent-session doodad is loaded and `[agent_session].enabled` is `true`, the
 same listener exposes an unauthenticated Launchplane-compatible health endpoint:

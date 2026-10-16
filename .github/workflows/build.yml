@@ -68,6 +68,13 @@ jobs:
           load: true
           tags: ${{ steps.image.outputs.tag_sha }}
           cache-from: type=registry,ref=${{ steps.image.outputs.cache }}
+      - name: Qualify managed runtime Compose
+        env:
+          QUALIFICATION_IMAGE: ${{ steps.image.outputs.tag_sha }}
+        run: |
+          DISCORD_BLUE_COMPOSE_TEST_IMAGE="$(docker image inspect --format '{{.Id}}' "$QUALIFICATION_IMAGE")"
+          export DISCORD_BLUE_COMPOSE_TEST_IMAGE
+          "$HOME/.local/bin/uv" run --python 3.13 python -m unittest tests.test_runtime_compose -v
 
   publish:
     needs: image
