@@ -222,8 +222,8 @@ canonical Build manifest, never a mutable tag or a local build. It also supplies
 candidate and lane. Source checkout must be pinned to the reviewed completing
 commit, independently of selecting the runtime image.
 
-The Compose file explicitly passes those identity inputs and the four managed
-server inputs above. Every input must be nonempty before Compose can create a
+The Compose file explicitly passes those identity inputs, the non-secret TOML
+and credentials described above, and `DISCORD_BLUE_STATE_DIR`. Every input must be nonempty before Compose can create a
 container. Set `DISCORD_BLUE_STATE_DIR` to `/var/lib/discord-blue`, matching the
 image's home and the Compose-scoped named volume; a different state-dir input
 refuses at the image entrypoint. Keep the volume on the testing
@@ -231,6 +231,8 @@ target; no state, credentials or project name come from production. The image's
 existing entrypoint initializes that volume and drops privileges before running
 the server. Runtime credential overrides stay out of saved TOML; the provider's
 managed environment remains sensitive and must not be dumped to logs or evidence.
+The state-dir input is retained for compatibility with Launchplane's existing
+managed-input contract; it confirms the image path rather than relocating state.
 
 The lane's non-secret TOML must load `agent_session_doodad`, enable the bridge,
 and listen on `0.0.0.0:8787`. The service name is `discord-blue`. Only the
@@ -265,7 +267,8 @@ It checks input refusal, in-memory delivery, non-root startup and non-persistenc
 without contacting Discord, reading a real token or installing a local client.
 Its temporary project/state are removed afterward. Ordinary unit validation skips
 this explicit artifact fixture; Build's image job runs it against the loaded
-image before the required gate can pass.
+image before the required gate can pass. Publishing also pulls and qualifies the
+exact pushed digest before producing the artifact manifest used by Launchplane.
 
 When the agent-session doodad is loaded and `[agent_session].enabled` is `true`, the
 same listener exposes an unauthenticated Launchplane-compatible health endpoint:

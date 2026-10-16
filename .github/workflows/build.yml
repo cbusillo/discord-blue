@@ -110,6 +110,14 @@ jobs:
             ${{ needs.image.outputs.tag_main }}
           cache-from: type=registry,ref=${{ needs.image.outputs.cache }}
           cache-to: type=registry,ref=${{ needs.image.outputs.cache }},mode=max
+      - name: Qualify published runtime image
+        env:
+          PUBLISHED_IMAGE: ${{ needs.image.outputs.image_repository }}@${{ steps.push.outputs.digest }}
+        run: |
+          docker pull "$PUBLISHED_IMAGE"
+          DISCORD_BLUE_COMPOSE_TEST_IMAGE="$(docker image inspect --format '{{.Id}}' "$PUBLISHED_IMAGE")"
+          export DISCORD_BLUE_COMPOSE_TEST_IMAGE
+          "$HOME/.local/bin/uv" run --python 3.13 python -m unittest tests.test_runtime_compose -v
       - name: Write artifact manifest
         env:
           SOURCE_COMMIT: ${{ github.sha }}

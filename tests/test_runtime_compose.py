@@ -27,7 +27,7 @@ class RuntimeComposeTests(unittest.TestCase):
             LAUNCHPLANE_RUNTIME_IDENTITY_JSON=json.dumps({"product": "fixture-bot", "environment": "testing"}),
             DISCORD_BLUE_RUNTIME_CONFIG=(
                 '[discord]\nguild_id=123\nbot_channel_id=456\nloaded_doodads=["agent_session_doodad"]\n'
-                '[agent_session]\nenabled=true\nlisten_host="0.0.0.0"\nlisten_port=8787\n'
+                '[agent_session]\nenabled=true\nlisten_host="127.0.0.1"\nlisten_port=18787\n'
             ),
             DISCORD_TOKEN="fictional-bot-value",
             AGENT_SESSION_TOKEN="fictional-bridge-value",
@@ -131,11 +131,18 @@ class RuntimeComposeTests(unittest.TestCase):
                 self.assertEqual(result.returncode, int(bool(overrides)), "Unexpected entrypoint outcome")
                 for value in ("fictional-bot-value", "fictional-bridge-value", "fictional-do-not-persist"):
                     self.assertNotIn(value, result.stdout + result.stderr)
+                if "DISCORD_BLUE_STATE_DIR" in overrides:
+                    self.assertNotIn("probe-started", result.stdout)
+                else:
+                    self.assertIn("probe-started", result.stdout)
+                if "DISCORD_BLUE_RUNTIME_CONFIG" in overrides:
+                    self.assertIn("runtime-config-refused", result.stdout)
                 if not overrides:
                     self.assertIn("runtime-inputs-qualified", result.stdout)
 
 
 ENTRYPOINT_PROBE = """
+print("probe-started", flush=True)
 import asyncio
 import json
 import os
@@ -154,8 +161,9 @@ class OfflineBot:
         assert config.discord.guild_id > 0 and config.discord.bot_channel_id > 0
         assert "agent_session_doodad" in config.discord.loaded_doodads
         assert config.agent_session.enabled
-        assert config.agent_session.listen_host == "0.0.0.0"
-        assert config.agent_session.listen_port > 0
+        supplied = tomllib.loads(os.environ["DISCORD_BLUE_RUNTIME_CONFIG"])["agent_session"]
+        assert config.agent_session.listen_host == supplied["listen_host"]
+        assert config.agent_session.listen_port == supplied["listen_port"]
         assert runtime_identity() == json.loads(os.environ["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"])
         config.update_and_save(debug=True)
         saved = tomllib.loads(config.filepath.read_text())
@@ -169,7 +177,11 @@ loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 try:
     with patch.object(server, "BlueBot", OfflineBot), patch("builtins.input", side_effect=AssertionError("Unexpected prompt")):
-        server.main()
+        try:
+            server.main()
+        except ValueError:
+            print("runtime-config-refused")
+            raise SystemExit(1)
     print("runtime-inputs-qualified")
 finally:
     loop.close()
