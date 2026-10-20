@@ -15,7 +15,6 @@ and load each step's owning skill for repository work.
 Use `model-review` for changes to AGENTS.md and whenever the maintained
 [reviews by another model](https://github.com/cbusillo/codex-skills/blob/main/skills/references/model-review.md)
 criteria call for it. That reference also owns how findings are weighed.
-The review supplies evidence; reviewer approval is not a merge or completion gate.
 
 ## Runtime
 
@@ -46,13 +45,8 @@ workflows, and cleanup policy.
 
 ## Tests
 
-* A test must fail when product behaviour breaks and pass when someone makes an
-  intended change. Do not write tests that restate the implementation.
-* Do not assert a literal that is defined elsewhere (versions, toolchain,
-  timeouts, hashes). Import the source of truth, or assert the invariant that
-  relates the values (for example, "the finalization budget covers its steps").
-* Do not assert workflow or config text. The workflow enforces itself when it
-  runs: `ci-gate` fails unless `validate` and `image` pass. Use `actionlint`
+Follow the [shared test rules](https://github.com/cbusillo/codex-skills/blob/main/instructions/global.md#tests).
+
+* `ci-gate` fails unless `validate` and `image` pass. Use `actionlint`
   for workflow syntax.
-* Verification and loading code must not depend on working-tree state. Tests
-  use temporary homes and fakes, never real Discord or production.
+* Tests use temporary homes and fakes, never real Discord or production.
