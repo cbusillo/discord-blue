@@ -49,4 +49,5 @@ Follow the [shared test rules](https://github.com/cbusillo/codex-skills/blob/mai
 
 * `ci-gate` fails unless `validate` and `image` pass. Use `actionlint`
   for workflow syntax.
+* Loading code must not depend on working-tree state.
 * Tests use temporary homes and fakes, never real Discord or production.
