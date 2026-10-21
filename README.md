@@ -107,22 +107,8 @@ The owner's [overall DIRECTION.md](https://github.com/cbusillo/direction/blob/HE
 governs this repository; there is no separate repository DIRECTION.md.
 [AGENTS.md](AGENTS.md) is the only agent-instruction file and points to the
 maintained execution and review procedures. Repository workflow facts and
-validation commands live in [.github/github.json](.github/github.json).
-
-Install the managed Python environment:
-
-```bash
-uv sync --all-groups --python 3.13
-```
-
-Run the local validation gates:
-
-```bash
-uv run ruff format --check .
-uv run ruff check .
-uv run mypy .
-uv run python -m unittest discover -s tests -q
-```
+validation commands, including setup, lint, type check and tests, live in
+`qualityGate` in [.github/github.json](.github/github.json).
 
 ## Docker
 
@@ -501,7 +487,7 @@ session on a daemon needs coordination with the Director (the person whose
 direction the agents follow).
 An installed, non-editable `uv tool` copy does not pick up repository changes
 automatically. Build the merged wheel (`uv build --wheel`) and install it
-(`uv tool install --force dist/discord_blue-0.2.0-py3-none-any.whl`) as part of
+(`uv tool install --force dist/discord_blue-*-py3-none-any.whl`) as part of
 the next planned bridge launch, after the current bridge has stopped.
 `uv run discord-blue-codex-bridge` uses the checkout version instead.
 If launchd owns the bridge, put `--supervisor-config` and the absolute path of
@@ -632,16 +618,8 @@ for release authority before production work.
 - Launchplane owns the deploy record, Dokploy mutation, and rollback decision.
 - This repo keeps source, image build inputs, tests, and smoke-check guidance.
 
-GitHub Actions expects repo-scoped self-hosted runners with these labels:
-
-- `self-hosted`
-- `chris-testing`
-- `chris-testing-discord-blue`
-
-This follows the product-repo pattern used by repos such as Sell Your Outboard
-and VeriReel. Individual runners may also carry per-runner labels such as
-`chris-testing-discord-blue-1` and `chris-testing-discord-blue-2` for targeted
-maintenance.
+GitHub Actions runs on repo-scoped self-hosted runners; the `runs-on` labels in
+[the build workflow](.github/workflows/build.yml) are the source of truth.
 
 ## Icon artwork
 
