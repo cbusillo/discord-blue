@@ -1,10 +1,8 @@
 import logging
-import textwrap
 from typing import Callable, NoReturn, TypeVar
 
 import discord
 from discord.ext import commands
-from discord.ext.commands import Bot
 
 from discord_blue.config import Config
 from discord_blue.health import DiscordGatewayHealth
@@ -151,19 +149,3 @@ class BlueBot(commands.Bot):
     def save_config_bot_channel(self, channel: discord.TextChannel) -> None:
         self.config.discord.bot_channel_id = channel.id
         self.config.save()
-
-    @staticmethod
-    async def wrap_reply_lines(lines: str, message: discord.Message | discord.Interaction[Bot]) -> None:
-        if not isinstance(message.channel, discord.TextChannel):
-            return
-        if lines is None or lines == "":
-            lines = "No lines to send"
-        if isinstance(message, discord.Message):
-            wrap_length = 2000 - len(message.author.mention)
-        else:
-            wrap_length = 2000
-        lines_list = textwrap.wrap(lines, wrap_length, replace_whitespace=False)
-        if isinstance(message, discord.Message) and message.author.bot is False:
-            lines_list[0] = f"{message.author.mention} {lines_list[0]}"
-        for line in lines_list:
-            await message.channel.send(line)

@@ -265,7 +265,6 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         foreign_thread.id, foreign_thread.guild = 555, SimpleNamespace(id=FOREIGN)
         self.bot.get_channel = lambda channel_id: foreign_thread  # type: ignore[method-assign]
         self.bot.fetch_channel = AsyncMock(return_value=foreign_thread)  # type: ignore[method-assign]
-        self.assertIsNone(await self.bridge.get_thread(555))
         self.assertEqual(await self.bridge.get_thread_for_cleanup(555), (None, True))
         self.destination.send.assert_not_awaited()
 

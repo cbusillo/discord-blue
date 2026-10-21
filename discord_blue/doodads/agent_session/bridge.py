@@ -887,9 +887,6 @@ class AgentSessionBridge:
             return default
         return str(value)
 
-    async def close_active_sessions(self) -> None:
-        await self.disconnect_active_sessions()
-
     async def cleanup_stale_sessions(self) -> None:
         await asyncio.sleep(STARTUP_RECONNECT_GRACE_SECONDS)
         while True:
@@ -2216,34 +2213,6 @@ class AgentSessionBridge:
         await self.show_pending_control(session, channel, "Session end requested; waiting for the native session.")
         return "Asked the agent session to end this session."
 
-    async def handle_go_ahead_interaction(
-        self,
-        interaction: discord.Interaction[BlueBot],
-    ) -> None:
-        response = await self.send_continue_autonomously(
-            interaction.channel,
-            interaction.user,
-        )
-        await interaction.response.send_message(response, ephemeral=True)
-        if response != CONTINUE_AUTONOMOUSLY_DELIVERED:
-            return
-        message = interaction.message
-        if message is None or not isinstance(interaction.channel, discord.Thread):
-            return
-        session = self.sessions.get_by_thread(interaction.channel.id)
-        if session is None or session.control_message_id != message.id:
-            return
-        await self.refresh_session_controls(session, interaction.channel)
-
-    async def handle_status_interaction(
-        self,
-        interaction: discord.Interaction[BlueBot],
-    ) -> None:
-        await interaction.response.send_message(
-            self.session_status_summary(interaction.channel, interaction.user),
-            ephemeral=True,
-        )
-
     def session_status_summary(
         self,
         channel: object,
@@ -3166,28 +3135,6 @@ class AgentSessionBridge:
             session.pending_user_inputs.pop(call_id)
             await self.retire_user_input(session, pending, "**Resolved**")
 
-    async def clear_session_controls(self, session: AgentSession) -> None:
-        if session.thread_id is None or session.control_message_id is None:
-            return
-        channel = self.thread_channel(session.thread_id)
-        if not isinstance(channel, discord.Thread):
-            return
-        try:
-            message = await channel.fetch_message(session.control_message_id)
-            await message.delete()
-        except discord.NotFound:
-            session.control_message_id = None
-        except discord.DiscordException:
-            logger.warning(
-                "Unable to clear Agent session control message %s",
-                session.control_message_id,
-            )
-        else:
-            session.control_message_id = None
-        session.pending_control_confirmation = None
-        session.control_status_reaction = None
-        session.control_interruptions_enabled = False
-
     async def delete_session_message(self, thread_id: int, message_id: int) -> None:
         channel = self.thread_channel(thread_id)
         if not isinstance(channel, discord.Thread):
@@ -3600,16 +3547,6 @@ class AgentSessionBridge:
             return channel
         return None
 
-    async def get_thread(self, thread_id: int) -> discord.Thread | None:
-        channel = self.thread_channel(thread_id)
-        if isinstance(channel, discord.Thread):
-            return channel
-        try:
-            fetched = await self.bot.fetch_channel(thread_id)
-        except discord.DiscordException:
-            return None
-        return fetched if isinstance(fetched, discord.Thread) and fetched.guild.id == self.bot.config.discord.guild_id else None
-
     def operator_role_name(self) -> str:
         return self.bot.config.agent_session.operator_role_name or self.bot.config.discord.employee_role_name
 
@@ -3840,28 +3777,3 @@ class AgentSessionBridge:
             await message.remove_reaction(reaction, user)
         except discord.DiscordException:
             logger.warning("Unable to remove Agent session reaction %s from %s", reaction, message_id)
-
-    async def replace_message_reactions(
-        self,
-        thread: discord.Thread,
-        message_id: int,
-        reactions: list[str],
-        *,
-        remove_user_reaction: tuple[str, discord.User | discord.Member] | None = None,
-    ) -> bool:
-        session = self.sessions.get_by_thread(thread.id)
-        if session is not None and session.control_message_id == message_id:
-            return await self.refresh_control_card(
-                session,
-                thread,
-                message_id,
-                reactions,
-                remove_user_reaction=remove_user_reaction,
-            )
-        try:
-            message = await thread.fetch_message(message_id)
-        except discord.DiscordException:
-            logger.warning("Unable to replace Agent session reactions on %s", message_id)
-            return False
-        await self.write_message_reactions(message, reactions, clear=True, remove_user_reaction=remove_user_reaction)
-        return True

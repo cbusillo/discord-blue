@@ -41,7 +41,8 @@ auto_join_user_ids = [789]
         self.assertEqual((config.discord.guild_id, config.discord.bot_channel_id), (123, 456))
         self.assertTrue(config.agent_session.enabled)
         self.assertEqual(config.agent_session.auto_join_user_ids, [789])
-        config.update_and_save(debug=True)
+        config.debug = True
+        config.save()
         stored = tomllib.loads(self.config_path.read_text())
         self.assertTrue(stored["debug"])
         self.assertNotIn("token", stored["discord"])
@@ -60,7 +61,8 @@ auto_join_user_ids = [789]
         )
         config = Config()
         self.assertEqual(config.discord.token, "runtime-bot")
-        config.update_and_save(debug=True)
+        config.debug = True
+        config.save()
         os.environ.clear()
         local = Config()
         self.assertEqual(local.discord.token, "local-bot")

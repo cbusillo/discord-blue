@@ -169,7 +169,8 @@ class OfflineBot:
         assert config.agent_session.listen_host == supplied["listen_host"]
         assert config.agent_session.listen_port == supplied["listen_port"]
         assert runtime_identity() == json.loads(os.environ["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"])
-        config.update_and_save(debug=True)
+        config.debug = True
+        config.save()
         saved = tomllib.loads(config.filepath.read_text())
         assert "token" not in saved["discord"] and "token" not in saved["agent_session"]
     async def start(self, token):
