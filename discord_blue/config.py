@@ -181,16 +181,6 @@ class Config(Serializable):
         except (FileNotFoundError, OSError) as error:
             logger.exception(f"Error saving configuration: {error!s}")
 
-    def update_and_save(self, **kwargs: object) -> None:
-        for key, value in kwargs.items():
-            parts = key.split("__")
-            if len(parts) > 1 and hasattr(self, parts[0]):
-                obj = getattr(self, parts[0])
-                setattr(obj, parts[1], value)
-            else:
-                setattr(self, key, value)
-        self.save()
-
     @staticmethod
     def get_all_keys(instance: object) -> set[str]:
         instance_keys = set(instance.__dict__.keys())

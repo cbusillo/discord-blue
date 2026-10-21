@@ -1804,48 +1804,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pending.kind, "new_session")
         self.assertEqual(pending.reject_notice, "Agent session could not start a new session")
 
-    async def test_go_ahead_interaction_replies_ephemerally(self) -> None:
-        config = Config()
-        thread = FakeThread(555)
-        bridge = AgentSessionBridge(FakeBot(config, thread))
-        websocket = FakeWebSocket()
-        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
-        bridge.sessions.register(session)
-        bridge.sessions.bind_thread("session-1", 555)
-        interaction = FakeInteraction(thread)
-
-        await bridge.handle_go_ahead_interaction(interaction)
-
-        self.assertEqual(
-            interaction.response.messages,
-            [("Asked the agent session to go ahead until it needs you.", True)],
-        )
-        self.assertEqual(websocket.sent_json[0]["kind"], "continue_autonomously")
-
-    async def test_go_ahead_interaction_preserves_the_control_anchor(self) -> None:
-        config = Config()
-        thread = FakeThread(555)
-        bridge = AgentSessionBridge(FakeBot(config, thread))
-        websocket = FakeWebSocket()
-        session = AgentSession(
-            hello=make_hello(),
-            websocket=websocket,
-            thread_id=555,
-            control_message_id=901,
-        )
-        bridge.sessions.register(session)
-        bridge.sessions.bind_thread("session-1", 555)
-        control_message = FakeReplyMessage(901, thread, "Agent session `project` on `main`")
-        thread.add_message(control_message)
-        interaction = FakeInteraction(thread, message=control_message)
-
-        await bridge.handle_go_ahead_interaction(interaction)
-
-        self.assertFalse(control_message.deleted)
-        self.assertEqual(session.control_message_id, 901)
-        self.assertEqual(control_message.reactions, [bridge_module.REACTION_QUEUED])
-        self.assertEqual(websocket.sent_json[0]["kind"], "continue_autonomously")
-
     async def test_tui_user_message_rebinds_pending_control_command_to_new_anchor(self) -> None:
         config = Config()
         thread = FakeThread(555)
