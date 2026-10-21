@@ -146,9 +146,7 @@ Recovery reads are bounded and failures are isolated per record. Completed close
 steps stay complete across recovery; exhausted cleanup follows the existing retry
 limit instead of repeatedly reopening a thread and posting another end notice.
 
-The first deployment of this version replaces an older server whose shutdown
-still archives threads. The new server refills the store; subsequent replacements
-use it. An older image ignores the file on rollback. Persistence covers bound
+An older image ignores the file on rollback. Persistence covers bound
 threads; a crash before the binding record is saved still uses discovery and the
 existing creation-token reconciliation.
 
@@ -176,8 +174,7 @@ budgets: one second for the socket, two seconds for notification cleanup, and
 six seconds for thread cleanup. These bound how long teardown waits, not the
 requests themselves. A request still running when a wait ends finishes later,
 and the shared retry record drops each step as it lands, so a retry never repeats
-one. A failed notice or member removal does not stop the archive and leave. The
-total nine-second cleanup budget stays below the ten-second reconnect lock wait.
+one. A failed notice or member removal does not stop the archive and leave.
 A failed notification operation does not prevent thread cleanup, and a failed
 or slow session does not terminate the heartbeat monitor.
 
