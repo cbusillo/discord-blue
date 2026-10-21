@@ -486,7 +486,7 @@ bridge or convert running embedded sessions. Closing and resuming an existing
 session on a daemon needs coordination with the Director (the person whose
 direction the agents follow).
 An installed, non-editable `uv tool` copy does not pick up repository changes
-automatically. Build the merged wheel (`uv build --wheel`) and install it
+automatically. Build the merged wheel (`uv build --wheel --clear`, so `dist/` holds only it) and install it
 (`uv tool install --force dist/discord_blue-*-py3-none-any.whl`) as part of
 the next planned bridge launch, after the current bridge has stopped.
 `uv run discord-blue-codex-bridge` uses the checkout version instead.
@@ -522,7 +522,8 @@ thread says which tool is waiting; approve or deny it in the terminal. The threa
 One-time setup on the Mac:
 
 ```sh
-uv tool install --force /path/to/discord_blue-*.whl  # provides discord-blue-claude-channel
+uv build --wheel --clear  # in the discord-blue checkout; dist/ then holds one wheel
+uv tool install --force dist/discord_blue-*.whl  # provides discord-blue-claude-channel
 claude plugin marketplace add ~/Developer/discord-blue
 claude plugin install dui@discord-blue
 # In ~/.zshrc, add the channel flag to the existing alias:
