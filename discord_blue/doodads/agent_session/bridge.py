@@ -175,6 +175,54 @@ SESSION_NOTIFICATION_PREFIXES = (
 )
 CONTINUE_AUTONOMOUSLY_DELIVERED = "Asked the agent session to go ahead until it needs you."
 PAUSE_CURRENT_TURN_DELIVERED = "Asked the agent session to pause what it is doing now."
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class SessionControl:
+    kind: Literal["continue_autonomously", "pause_current_turn", "new_session", "end_session"]
+    slash_command: str
+    operator_action: str
+    offline_reply: str
+    reject_notice: str
+    delivered: str
+    pending_status: str | None = None
+
+
+GO_AHEAD_CONTROL = SessionControl(
+    kind="continue_autonomously",
+    slash_command="go-ahead",
+    operator_action="ask a session to continue",
+    offline_reply="Agent session is offline; go-ahead was not delivered.",
+    reject_notice="Agent session could not go ahead",
+    delivered=CONTINUE_AUTONOMOUSLY_DELIVERED,
+    pending_status="Your request is queued.",
+)
+PAUSE_CONTROL = SessionControl(
+    kind="pause_current_turn",
+    slash_command="pause",
+    operator_action="pause a turn",
+    offline_reply="Agent session is offline; pause was not delivered.",
+    reject_notice="Agent session could not pause the current turn",
+    delivered=PAUSE_CURRENT_TURN_DELIVERED,
+    pending_status="Pause requested; waiting for the native session.",
+)
+NEW_SESSION_CONTROL = SessionControl(
+    kind="new_session",
+    slash_command="new",
+    operator_action="start a new session",
+    offline_reply="Agent session is offline; new session was not started.",
+    reject_notice="Agent session could not start a new session",
+    delivered="Asked the agent session to start a new session in this folder.",
+)
+END_SESSION_CONTROL = SessionControl(
+    kind="end_session",
+    slash_command="end-session",
+    operator_action="end a session",
+    offline_reply="Agent session is already offline.",
+    reject_notice="Agent session could not end the session",
+    delivered="Asked the agent session to end this session.",
+    pending_status="Session end requested; waiting for the native session.",
+)
 SESSION_NOTIFICATION_THREAD_RE = re.compile(r"<#(?P<thread_id>\d+)>")
 REACTION_QUEUED = "⏳"
 REACTION_DELIVERED = "📬"
@@ -2081,140 +2129,53 @@ class AgentSessionBridge:
             await message.reply(error, mention_author=False)
         return True
 
-    async def send_continue_autonomously(
+    async def send_continue_autonomously(self, channel: object, user: discord.User | discord.Member) -> str:
+        return await self.send_session_control(channel, user, GO_AHEAD_CONTROL)
+
+    async def send_pause_current_turn(self, channel: object, user: discord.User | discord.Member) -> str:
+        return await self.send_session_control(channel, user, PAUSE_CONTROL)
+
+    async def send_new_session(self, channel: object, user: discord.User | discord.Member) -> str:
+        return await self.send_session_control(channel, user, NEW_SESSION_CONTROL)
+
+    async def send_end_session(self, channel: object, user: discord.User | discord.Member) -> str:
+        return await self.send_session_control(channel, user, END_SESSION_CONTROL)
+
+    async def send_session_control(
         self,
         channel: object,
         user: discord.User | discord.Member,
+        control: SessionControl,
     ) -> str:
         if not isinstance(channel, discord.Thread):
-            return "Use `/code go-ahead` inside an agent session thread."
+            return f"Use `/code {control.slash_command}` inside an agent session thread."
         if not self.is_operator(user):
-            return "Only agent session operators can ask a session to continue."
+            return f"Only agent session operators can {control.operator_action}."
 
         session = self.sessions.get_by_thread(channel.id)
         if session is None:
             return "This thread is not attached to a live agent session."
         if session.websocket.closed:
-            return "Agent session is offline; go-ahead was not delivered."
+            return control.offline_reply
 
         command = RemoteCommand(
             command_id=str(uuid.uuid4()),
             session_id=session.session_id,
             session_epoch=session.session_epoch,
-            kind="continue_autonomously",
+            kind=control.kind,
             issued_by=str(user.id),
         )
         pending = PendingRemoteCommand(
             thread_id=channel.id,
             message_id=session.control_message_id,
-            kind="continue_autonomously",
-            reject_notice="Agent session could not go ahead",
+            kind=control.kind,
+            reject_notice=control.reject_notice,
         )
         if error := await self.dispatch_command(session, command, pending):
             return error
-        await self.show_pending_control(session, channel, "Your request is queued.")
-        return CONTINUE_AUTONOMOUSLY_DELIVERED
-
-    async def send_pause_current_turn(
-        self,
-        channel: object,
-        user: discord.User | discord.Member,
-    ) -> str:
-        if not isinstance(channel, discord.Thread):
-            return "Use `/code pause` inside an agent session thread."
-        if not self.is_operator(user):
-            return "Only agent session operators can pause a turn."
-
-        session = self.sessions.get_by_thread(channel.id)
-        if session is None:
-            return "This thread is not attached to a live agent session."
-        if session.websocket.closed:
-            return "Agent session is offline; pause was not delivered."
-
-        command = RemoteCommand(
-            command_id=str(uuid.uuid4()),
-            session_id=session.session_id,
-            session_epoch=session.session_epoch,
-            kind="pause_current_turn",
-            issued_by=str(user.id),
-        )
-        pending = PendingRemoteCommand(
-            thread_id=channel.id,
-            message_id=session.control_message_id,
-            kind="pause_current_turn",
-            reject_notice="Agent session could not pause the current turn",
-        )
-        if error := await self.dispatch_command(session, command, pending):
-            return error
-        await self.show_pending_control(session, channel, "Pause requested; waiting for the native session.")
-        return PAUSE_CURRENT_TURN_DELIVERED
-
-    async def send_new_session(
-        self,
-        channel: object,
-        user: discord.User | discord.Member,
-    ) -> str:
-        if not isinstance(channel, discord.Thread):
-            return "Use `/code new` inside an agent session thread."
-        if not self.is_operator(user):
-            return "Only agent session operators can start a new session."
-
-        session = self.sessions.get_by_thread(channel.id)
-        if session is None:
-            return "This thread is not attached to a live agent session."
-        if session.websocket.closed:
-            return "Agent session is offline; new session was not started."
-
-        command = RemoteCommand(
-            command_id=str(uuid.uuid4()),
-            session_id=session.session_id,
-            session_epoch=session.session_epoch,
-            kind="new_session",
-            issued_by=str(user.id),
-        )
-        pending = PendingRemoteCommand(
-            thread_id=channel.id,
-            message_id=session.control_message_id,
-            kind="new_session",
-            reject_notice="Agent session could not start a new session",
-        )
-        if error := await self.dispatch_command(session, command, pending):
-            return error
-        return "Asked the agent session to start a new session in this folder."
-
-    async def send_end_session(
-        self,
-        channel: object,
-        user: discord.User | discord.Member,
-    ) -> str:
-        if not isinstance(channel, discord.Thread):
-            return "Use `/code end-session` inside an agent session thread."
-        if not self.is_operator(user):
-            return "Only agent session operators can end a session."
-
-        session = self.sessions.get_by_thread(channel.id)
-        if session is None:
-            return "This thread is not attached to a live agent session."
-        if session.websocket.closed:
-            return "Agent session is already offline."
-
-        command = RemoteCommand(
-            command_id=str(uuid.uuid4()),
-            session_id=session.session_id,
-            session_epoch=session.session_epoch,
-            kind="end_session",
-            issued_by=str(user.id),
-        )
-        pending = PendingRemoteCommand(
-            thread_id=channel.id,
-            message_id=session.control_message_id,
-            kind="end_session",
-            reject_notice="Agent session could not end the session",
-        )
-        if error := await self.dispatch_command(session, command, pending):
-            return error
-        await self.show_pending_control(session, channel, "Session end requested; waiting for the native session.")
-        return "Asked the agent session to end this session."
+        if control.pending_status is not None:
+            await self.show_pending_control(session, channel, control.pending_status)
+        return control.delivered
 
     async def handle_go_ahead_interaction(
         self,
