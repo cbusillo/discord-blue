@@ -115,7 +115,7 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.pending_commands, {})
         newer = await self.fixture.prompt("call-2")
         new_message = await self.thread.fetch_message(cast(int, newer.message_id))
-        for handler in (self.bridge.handle_command_ack, self.bridge.handle_command_reject):
+        for handler in (self.bridge.controls.handle_command_ack, self.bridge.controls.handle_command_reject):
             await handler(self.event("command_ack", command_id=self.socket.sent_json[0]["command_id"]))
         self.assertEqual(new_message.reactions, [])
         self.assertEqual(new_message.edits, [])
@@ -193,10 +193,12 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
         await view.submit(cast(Any, FakeInteraction(self.thread)))
         pending = self.session.pending_user_inputs["call-1"]
         message = await self.thread.fetch_message(pending.message_id)
-        reaction_spy = self.enterContext(patch.object(self.bridge, "set_message_reaction", wraps=self.bridge.set_message_reaction))
+        reaction_spy = self.enterContext(
+            patch.object(self.bridge.controls, "set_message_reaction", wraps=self.bridge.controls.set_message_reaction)
+        )
         await pending.ui_lock.acquire()
         ack = asyncio.create_task(
-            self.bridge.handle_command_ack(self.event("command_ack", command_id=self.socket.sent_json[0]["command_id"]))
+            self.bridge.controls.handle_command_ack(self.event("command_ack", command_id=self.socket.sent_json[0]["command_id"]))
         )
         await asyncio.sleep(0)
         resolve = asyncio.create_task(

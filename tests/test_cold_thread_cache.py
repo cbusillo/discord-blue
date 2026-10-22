@@ -16,7 +16,7 @@ from typing import Any, cast
 
 import aiohttp
 
-from discord_blue.doodads.agent_session import bridge as bridge_module
+from discord_blue.doodads.agent_session import controls as controls_module
 from tests.discord_client import (
     BYSTANDER,
     BYSTANDER_ID,
@@ -63,10 +63,10 @@ class ColdThreadCacheTests(unittest.IsolatedAsyncioTestCase):
             thread.messages.append(reply)
             message_create(running.bot, reply, OPERATOR)
             delivered = await next_command(websocket, "reply")
-            queued = await until(lambda: (bridge_module.REACTION_QUEUED, BOT_ID) in reply.reactions, timeout=2)
+            queued = await until(lambda: (controls_module.REACTION_QUEUED, BOT_ID) in reply.reactions, timeout=2)
 
             # The operator pauses the turn from the session controls; the reaction's thread is not cached either.
-            pause = bridge_module.REACTION_CONTROL_PAUSE
+            pause = controls_module.REACTION_CONTROL_PAUSE
             self.assertTrue(await until(lambda: offering(thread, pause) is not None, 5), "no pause control was offered")
             controls = offering(thread, pause)
             assert controls is not None
@@ -82,7 +82,7 @@ class ColdThreadCacheTests(unittest.IsolatedAsyncioTestCase):
         """A prompt typed in the TUI posts fresh session controls. The bot adds them one at a time, and an operator
         who taps pause as soon as it shows must not be ignored because the bot is still adding end-session."""
         fake = FakeDiscord(latency=0.002)
-        end_held = hold_reaction(fake, bridge_module.REACTION_CONTROL_END)
+        end_held = hold_reaction(fake, controls_module.REACTION_CONTROL_END)
         hello = hello_for("fresh-controls")
         thread = fake.add_thread("fresh-controls", marker=marker(hello), archived=True, locked=True)
         async with running_cog(fake) as running, aiohttp.ClientSession() as http:
@@ -91,12 +91,12 @@ class ColdThreadCacheTests(unittest.IsolatedAsyncioTestCase):
             await websocket.receive_json(timeout=10)
             typed = {"type": "user_message", "session_id": "fresh-controls", "session_epoch": "e1", "message": "typed in the TUI"}
             await websocket.send_json(typed)
-            pause = bridge_module.REACTION_CONTROL_PAUSE
+            pause = controls_module.REACTION_CONTROL_PAUSE
             self.assertTrue(await until(lambda: offering(thread, pause) is not None, 5), "no pause control was offered")
             controls = offering(thread, pause)
             assert controls is not None
             reaction_add(running.bot, thread.id, controls.id, pause, OPERATOR)
-            queued = (bridge_module.REACTION_QUEUED, BOT_ID)
+            queued = (controls_module.REACTION_QUEUED, BOT_ID)
             try:
                 paused = await next_command(websocket, "pause_current_turn")
                 # Then the end-session reaction the bot was adding lands; the controls must still show only queued.
@@ -114,7 +114,7 @@ class ColdThreadCacheTests(unittest.IsolatedAsyncioTestCase):
         """The bot adds approve, then deny. An operator who approves as soon as approve shows gets the approval sent
         and its reactions cleared; the deny the bot was still adding must not land on the answered approval."""
         fake = FakeDiscord(latency=0.002)
-        deny_held = hold_reaction(fake, bridge_module.REACTION_APPROVAL_DENY)
+        deny_held = hold_reaction(fake, controls_module.REACTION_APPROVAL_DENY)
         hello = hello_for("early-approval")
         thread = fake.add_thread("early-approval", marker=marker(hello), archived=True, locked=True)
         async with running_cog(fake) as running, aiohttp.ClientSession() as http:
@@ -123,7 +123,7 @@ class ColdThreadCacheTests(unittest.IsolatedAsyncioTestCase):
             await websocket.receive_json(timeout=10)
             request = {"type": "approval_request", "session_id": "early-approval", "session_epoch": "e1", "approval_id": "a1"}
             await websocket.send_json({**request, "command": ["make", "test"], "cwd": "/w/early-approval"})
-            approve = bridge_module.REACTION_APPROVAL_APPROVE
+            approve = controls_module.REACTION_APPROVAL_APPROVE
             self.assertTrue(await until(lambda: offering(thread, approve) is not None, 5), "no approval was offered")
             approval = offering(thread, approve)
             assert approval is not None

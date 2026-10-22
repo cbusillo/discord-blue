@@ -17,7 +17,7 @@ import aiohttp
 
 from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.config import BridgeConfig
-from discord_blue.doodads.agent_session import bridge as bridge_module
+from discord_blue.doodads.agent_session import controls as controls_module
 from tests.discord_client import (
     OPERATOR,
     OPERATOR_ID,
@@ -47,7 +47,7 @@ def contents(discord_thread: FakeThreadState) -> list[str]:
 class CodexBridgeServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_codex_session_round_trips_through_the_real_server(self) -> None:
         fake = FakeDiscord(latency=0.002)
-        deny_held = hold_reaction(fake, bridge_module.REACTION_APPROVAL_DENY)
+        deny_held = hold_reaction(fake, controls_module.REACTION_APPROVAL_DENY)
         rpc = FakeRpc(thread("root"))
         async with running_cog(fake) as running, aiohttp.ClientSession() as http:
             config = BridgeConfig(
@@ -97,7 +97,7 @@ class CodexBridgeServerTests(unittest.IsolatedAsyncioTestCase):
                 approval = {"threadId": "root", "turnId": "t2", "itemId": "item-1", "command": "make test", "cwd": "/work/project"}
                 await codex.dispatch({"id": 7, "method": "item/commandExecution/requestApproval", "params": approval})
                 # The operator taps approve as soon as it shows, while the bot is still adding deny.
-                approve = bridge_module.REACTION_APPROVAL_APPROVE
+                approve = controls_module.REACTION_APPROVAL_APPROVE
                 self.assertTrue(await until(lambda: offering(discord_thread, approve) is not None, 5), "no approval was offered")
                 approval_message = offering(discord_thread, approve)
                 assert approval_message is not None

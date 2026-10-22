@@ -10,7 +10,7 @@ from unittest.mock import patch
 import discord
 from discord.http import handle_message_parameters
 
-from discord_blue.doodads.agent_session import bridge as bridge_module
+from discord_blue.doodads.agent_session import controls as controls_module
 from discord_blue.doodads.agent_session.cards import session_status_card
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
 from discord_blue.doodads.agent_session.protocol import SessionStatus, UserMessage
@@ -79,7 +79,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Waiting for direction", visible_text(await self.current_card()))
 
     async def test_existing_text_anchor_converts_without_legacy_content_or_embeds(self) -> None:
-        await self.bridge.post_session_controls(self.session)
+        await self.bridge.controls.post_session_controls(self.session)
         message = await self.thread.fetch_message(cast(int, self.session.control_message_id))
         message.content = "old plain controls"
         await self.status("status_changed", "Turn started")
@@ -97,7 +97,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_v2_send_needs_no_manage_messages_and_does_not_ping(self) -> None:
         self.thread._manage_messages = False
-        await self.bridge.post_session_controls(self.session)
+        await self.bridge.controls.post_session_controls(self.session)
         self.assertEqual(len(self.thread.sent_messages), 1)  # No obsolete link-preview permission notice.
         kwargs = self.thread.sent_kwargs[-1]
         self.assertTrue(kwargs["silent"])
@@ -118,14 +118,14 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("keep the session open", text)
         self.session.pending_control_confirmation = None
         self.session.hello.capabilities = frozenset()
-        card = session_status_card(self.session, self.bridge.session_control_reactions(self.session))
+        card = session_status_card(self.session, self.bridge.controls.session_control_reactions(self.session))
         text = visible_text(card)
         self.assertNotIn("pause", text)
         self.assertNotIn("continue", text)
         self.assertNotIn("end", text)
 
     async def test_edit_failure_keeps_anchor_and_retry_can_refresh(self) -> None:
-        await self.bridge.post_session_controls(self.session)
+        await self.bridge.controls.post_session_controls(self.session)
         anchor = self.session.control_message_id
         error = discord.Forbidden(cast(ClientResponse, SimpleNamespace(status=403, reason="Forbidden")), "denied")
         with patch.object(FakeReplyMessage, "edit", side_effect=error):
@@ -140,18 +140,18 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         card = visible_text(await self.current_card())
         self.assertIn("Waiting on you", card)
         self.assertNotIn("Failed", card)
-        await self.bridge.send_continue_autonomously(self.thread, cast(discord.User, SimpleNamespace(id=123)))
+        await self.bridge.controls.send_continue_autonomously(self.thread, cast(discord.User, SimpleNamespace(id=123)))
         self.assertIn("queued", visible_text(await self.current_card()))
         self.assertIn("Working", visible_text(await self.current_card()))
 
     async def test_edit_failure_still_updates_confirmation_reactions(self) -> None:
-        await self.bridge.post_session_controls(self.session)
+        await self.bridge.controls.post_session_controls(self.session)
         message = await self.thread.fetch_message(cast(int, self.session.control_message_id))
         self.session.pending_control_confirmation = "end_session"
         error = discord.Forbidden(cast(ClientResponse, SimpleNamespace(status=403, reason="Forbidden")), "denied")
         with patch.object(FakeReplyMessage, "edit", side_effect=error):
-            await self.bridge.refresh_session_controls(self.session, cast(discord.Thread, self.thread))
-        self.assertEqual(message.reactions, [bridge_module.REACTION_APPROVAL_APPROVE, bridge_module.REACTION_APPROVAL_DENY])
+            await self.bridge.controls.refresh_session_controls(self.session, cast(discord.Thread, self.thread))
+        self.assertEqual(message.reactions, [controls_module.REACTION_APPROVAL_APPROVE, controls_module.REACTION_APPROVAL_DENY])
 
     async def test_reconnect_replaces_old_card_without_reactivating_old_controls(self) -> None:
         await self.status("status_changed", "Turn started")
@@ -182,7 +182,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
 
         await self.status("turn_complete", "Waiting for direction")
         self.session.pending_commands["reply"] = PendingRemoteCommand(self.thread.id, 123, "reply")
-        await self.bridge.handle_command_reject(
+        await self.bridge.controls.handle_command_reject(
             {"session_id": self.session.session_id, "command_id": "reply", "reason": "Session busy"}
         )
         text = visible_text(await self.current_card())
@@ -192,7 +192,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         reply = FakeReplyMessage(123, self.thread, "Try again")
         self.thread.add_message(reply)
         with patch.object(FakeWebSocket, "send_json", side_effect=OSError("lost socket")):
-            await self.bridge.send_thread_reply(cast(discord.Message, reply))
+            await self.bridge.controls.send_thread_reply(cast(discord.Message, reply))
         self.assertIn("Done", visible_text(await self.current_card()))
         self.assertIn("delivery could not be confirmed", reply.replies[0])
         self.assertNotIn("queued", visible_text(await self.current_card()))
@@ -220,16 +220,16 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.handle_user_message(
             UserMessage(session_id=self.session.session_id, session_epoch=self.session.session_epoch, message="Work on this")
         )
-        await self.bridge.send_pause_current_turn(self.thread, user)
+        await self.bridge.controls.send_pause_current_turn(self.thread, user)
         command = self.fixture.socket.sent_json[-1]
-        await self.bridge.handle_command_reject({**command, "reason": "Pause rejected"})
+        await self.bridge.controls.handle_command_reject({**command, "reason": "Pause rejected"})
         message = await self.thread.fetch_message(cast(int, self.session.control_message_id))
         self.assertIn("Working", visible_text(await self.current_card()))
-        self.assertIn(bridge_module.REACTION_CONTROL_PAUSE, message.reactions)
-        await self.bridge.send_pause_current_turn(self.thread, user)
+        self.assertIn(controls_module.REACTION_CONTROL_PAUSE, message.reactions)
+        await self.bridge.controls.send_pause_current_turn(self.thread, user)
         command = self.fixture.socket.sent_json[-1]
         await self.status("turn_complete", "Waiting for direction")
-        await self.bridge.handle_command_reject({**command, "reason": "No running turn"})
+        await self.bridge.controls.handle_command_reject({**command, "reason": "No running turn"})
         self.assertIn("Done", visible_text(await self.current_card()))
         self.assertNotIn("Failed", visible_text(await self.current_card()))
 
@@ -246,34 +246,34 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
             UserMessage(session_id=self.session.session_id, session_epoch=self.session.session_epoch, message="Work on this")
         )
         anchor = cast(int, self.session.control_message_id)
-        original = self.bridge.show_pending_control
+        original = self.bridge.controls.show_pending_control
 
         async def update_and_ack(session: AgentSession, thread: discord.Thread, detail: str) -> None:
             await original(session, thread, detail)
-            await self.bridge.handle_command_ack(self.fixture.socket.sent_json[-1])
+            await self.bridge.controls.handle_command_ack(self.fixture.socket.sent_json[-1])
 
-        with patch.object(self.bridge, "show_pending_control", new=update_and_ack):
+        with patch.object(self.bridge.controls, "show_pending_control", new=update_and_ack):
             await self.bridge.handle_thread_reaction(
                 cast(discord.Thread, self.thread),
                 anchor,
-                bridge_module.REACTION_CONTROL_PAUSE,
+                controls_module.REACTION_CONTROL_PAUSE,
                 cast(discord.User, SimpleNamespace(id=123)),
             )
         message = await self.thread.fetch_message(anchor)
-        self.assertIn(bridge_module.REACTION_DELIVERED, message.reactions)
-        self.assertNotIn(bridge_module.REACTION_QUEUED, message.reactions)
+        self.assertIn(controls_module.REACTION_DELIVERED, message.reactions)
+        self.assertNotIn(controls_module.REACTION_QUEUED, message.reactions)
 
     async def test_reply_ack_updates_queued_detail_and_preserves_newer_native_status(self) -> None:
         self.session.acknowledged = True
         reply = FakeReplyMessage(123, self.thread, "Work on this")
         self.thread.add_message(reply)
-        await self.bridge.send_thread_reply(cast(discord.Message, reply))
+        await self.bridge.controls.send_thread_reply(cast(discord.Message, reply))
         command = self.fixture.socket.sent_json[-1]
-        await self.bridge.handle_command_ack(command)
+        await self.bridge.controls.handle_command_ack(command)
         self.assertIn("delivered", visible_text(await self.current_card()))
         self.assertNotIn("queued", visible_text(await self.current_card()))
         await self.status("status_changed", "Waiting on a decision in the Codex TUI")
-        await self.bridge.handle_command_ack(command)
+        await self.bridge.controls.handle_command_ack(command)
         self.assertIn("Waiting on you", visible_text(await self.current_card()))
 
     async def test_refresh_cannot_forget_a_new_anchor_published_during_fetch(self) -> None:
@@ -291,7 +291,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
             return await original(message_id)
 
         with patch.object(self.thread, "fetch_message", new=fetch):
-            await self.bridge.refresh_session_controls(self.session, cast(discord.Thread, self.thread))
+            await self.bridge.controls.refresh_session_controls(self.session, cast(discord.Thread, self.thread))
         assert new_card is not None
         self.assertEqual(self.session.control_message_id, new_card.id)
         self.assertEqual(len(self.thread.sent_messages), 2)

@@ -61,6 +61,15 @@ def parse_capabilities(payload: dict[str, Any]) -> frozenset[str] | None:
     return frozenset(value) & REMOTE_ACTIONS
 
 
+def payload_string(payload: dict[str, object], key: str, default: str = "") -> str:
+    value = payload.get(key)
+    if isinstance(value, str):
+        return value or default
+    if value is None:
+        return default
+    return str(value)
+
+
 @dataclass(slots=True)
 class SessionOrigin:
     kind: str
