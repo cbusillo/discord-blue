@@ -150,6 +150,7 @@ class FakeDiscord:
         self.requests: list[tuple[str, str]] = []
         # Each interaction's response (the JSON body of its callback), by interaction ID.
         self.interaction_responses: dict[int, Json] = {}
+        self.followups_by_token: dict[str, list[Json]] = {}
         self.listeners: list[Callable[[FakeThreadState, bool], None]] = []
         self.ids = itertools.count(10_000)
         self.clock = itertools.count(1)
@@ -190,6 +191,7 @@ class FakeDiscord:
     ROUTES: tuple[tuple[str, str], ...] = (
         ("GET", "/users/@me"),
         ("POST", "/interactions/{interaction}/{token}/callback"),
+        ("POST", "/webhooks/{application}/{token}"),
         ("GET", "/guilds/{guild}/threads/active"),
         ("GET", "/channels/{channel}/threads/archived/public"),
         ("GET", "/channels/{channel}/threads/archived/private"),
@@ -281,6 +283,9 @@ class FakeDiscord:
                 "response_message_ephemeral": bool(body["data"].get("flags", 0) & 64),
             }
             return 200, {"interaction": interaction}
+        if template == "/webhooks/{application}/{token}":
+            self.followups_by_token.setdefault(ids["token"], []).append(body)
+            return 200, FakeMessage(next(self.ids), PARENT_ID, str(body.get("content") or "")).payload()
         if template == "/users/@me":
             return 200, {"id": str(BOT_ID), "username": "bot", "discriminator": "0", "avatar": None, "bot": True}
         if template == "/guilds/{guild}/threads/active":
