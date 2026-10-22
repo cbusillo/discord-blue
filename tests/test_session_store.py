@@ -14,7 +14,7 @@ from unittest.mock import patch
 import aiohttp
 
 from discord_blue.doodads.agent_session import bridge as bridge_module
-from discord_blue.doodads.agent_session.cleanup import THREAD_LOOKUP_TIMEOUT_SECONDS
+from discord_blue.doodads.agent_session.cleanup import PENDING_CLEANUP_MAX_ATTEMPTS, THREAD_LOOKUP_TIMEOUT_SECONDS
 from discord_blue.doodads.agent_session.store import SessionStore, StoredSession
 from tests.fake_discord import BOT_ID, PARENT_ID, FakeDiscord, FakeMessage, Fault
 from tests.test_attach_scenarios import hello_for, marker, scenario, until
@@ -179,7 +179,7 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     )
                 release, completed = asyncio.Event(), asyncio.Event()
                 cancelled = False
-                original = running.bridge.validated_stored_thread
+                original = running.bridge.session_threads.validated_stored_thread
 
                 async def slow_read(session_id: str, record: StoredSession) -> object:
                     nonlocal cancelled
@@ -193,7 +193,7 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     return await original(session_id, record)
 
                 try:
-                    with patch.object(running.bridge, "validated_stored_thread", new=slow_read):
+                    with patch.object(running.bridge.session_threads, "validated_stored_thread", new=slow_read):
                         await asyncio.wait_for(running.bridge.cleanups.recover_stored_cleanups(), THREAD_LOOKUP_TIMEOUT_SECONDS * 3)
                     self.assertTrue(second.archived)
                     self.assertFalse(cancelled)
@@ -268,7 +268,7 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     hello["session_id"], StoredSession(thread.id, None, marker(hello), "closing", 0, time.time())
                 )
                 fake.faults.append(Fault("DELETE", "/channels/{channel}/thread-members/{member}", times=100, status=403))
-                for _ in range(bridge_module.PENDING_CLEANUP_MAX_ATTEMPTS + 2):
+                for _ in range(PENDING_CLEANUP_MAX_ATTEMPTS + 2):
                     await running.bridge.cleanups.recover_stored_cleanups()
                     await running.bridge.cleanups.retry_pending_cleanups()
                 self.assertEqual(notices(thread), [bridge_module.SESSION_ENDED_NOTICE])
@@ -289,11 +289,11 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     )
                 fault = Fault("GET", "/channels/{channel}", times=100, status=403, match=lambda ids: int(ids["channel"]) == first.id)
                 fake.faults.append(fault)
-                for _ in range(bridge_module.PENDING_CLEANUP_MAX_ATTEMPTS + 2):
+                for _ in range(PENDING_CLEANUP_MAX_ATTEMPTS + 2):
                     await running.bridge.cleanups.recover_stored_cleanups()
                 self.assertTrue(second.archived)
                 self.assertFalse(first.archived)
-                self.assertLessEqual(100 - fault.times, bridge_module.PENDING_CLEANUP_MAX_ATTEMPTS)
+                self.assertLessEqual(100 - fault.times, PENDING_CLEANUP_MAX_ATTEMPTS)
 
     async def test_a_notification_failure_does_not_prevent_a_stored_session_attaching(self) -> None:
         fake = FakeDiscord(latency=0.002)
@@ -393,14 +393,14 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 record = running.bridge.store.records["boundary"]
                 running.bridge.store.put("boundary", replace(record, grace_until=time.time() - 1))
                 validating, release = asyncio.Event(), asyncio.Event()
-                original = running.bridge.validated_stored_thread
+                original = running.bridge.session_threads.validated_stored_thread
 
                 async def slow_validation(session_id: str, saved: StoredSession) -> object:
                     validating.set()
                     await release.wait()
                     return await original(session_id, saved)
 
-                with patch.object(running.bridge, "validated_stored_thread", new=slow_validation):
+                with patch.object(running.bridge.session_threads, "validated_stored_thread", new=slow_validation):
                     expiry = asyncio.create_task(running.bridge.cleanups.recover_stored_cleanups())
                     await asyncio.wait_for(validating.wait(), 2)
                     socket = await running.connect(http)

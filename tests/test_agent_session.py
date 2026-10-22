@@ -95,6 +95,7 @@ AgentSessionBridge = bridge_module.AgentSessionBridge
 messages_module = importlib.import_module("discord_blue.doodads.agent_session.messages")
 cleanup_module = importlib.import_module("discord_blue.doodads.agent_session.cleanup")
 threads_module = importlib.import_module("discord_blue.doodads.agent_session.threads")
+session_threads_module = importlib.import_module("discord_blue.doodads.agent_session.session_threads")
 protocol_module = importlib.import_module("discord_blue.doodads.agent_session.protocol")
 RemoteCommand = protocol_module.RemoteCommand
 RemoteApprovalRequest = protocol_module.RemoteApprovalRequest
@@ -557,7 +558,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         app = web.Application()
         bridge.register_routes(app)
         attachment = bridge_module.SessionThread(thread=thread, notification_message_id=None)
-        with patch.object(cast("SessionBridge", bridge), "find_or_create_session_thread", new=AsyncMock(return_value=attachment)):
+        with patch.object(bridge.session_threads, "find_or_create_session_thread", new=AsyncMock(return_value=attachment)):
             async with TestClient(TestServer(app)) as client:
                 yield bridge, thread, client
 
@@ -1156,7 +1157,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         app = web.Application()
         bridge.register_routes(app)
         attachment = bridge_module.SessionThread(thread=thread, notification_message_id=None)
-        with patch.object(cast("SessionBridge", bridge), "find_or_create_session_thread", new=AsyncMock(return_value=attachment)):
+        with patch.object(bridge.session_threads, "find_or_create_session_thread", new=AsyncMock(return_value=attachment)):
             async with TestClient(TestServer(app)) as client:
                 unauthorized = await client.get("/agent-session/connect")
                 self.assertEqual(unauthorized.status, 401)
@@ -1436,7 +1437,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             add_bot_message(channel, 200 + index, f"Agent session status summary {index}")
         bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
-        self.assertEqual(await bridge.find_session_notification_for_thread(555), matching_notice.id)
+        self.assertEqual(await bridge.session_threads.find_session_notification_for_thread(555), matching_notice.id)
 
     async def test_close_session_thread_deletes_reused_thread_notification(self) -> None:
         config = Config()
@@ -2151,7 +2152,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 entered.set()
                 await release.wait()
 
-            with patch.object(cast("SessionBridge", bridge), "backfill_latest_assistant_message", new=stalled_backfill):
+            with patch.object(bridge.session_threads, "backfill_latest_assistant_message", new=stalled_backfill):
                 connecting = asyncio.create_task(self.connect_transport(client))
                 try:
                     await asyncio.wait_for(entered.wait(), 2)
@@ -3062,7 +3063,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 recovered = FakeThread(556)
                 hello = make_hello()
                 hello.assistant_message = answer
-                await bridge.backfill_latest_assistant_message(recovered, hello)
+                await bridge.session_threads.backfill_latest_assistant_message(recovered, hello)
                 self.assertEqual(recovered.sent_messages, completed)
                 if len(answer) < TEXT_LIMIT:
                     self.assertEqual(completed, [mark_assistant_message(answer)])
@@ -3386,7 +3387,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         channel = FakeTextChannel(321, [empty_reconnect_thread, original_thread])
         bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
-        session_thread = await bridge.find_or_create_session_thread(hello)
+        session_thread = await bridge.session_threads.find_or_create_session_thread(hello)
 
         self.assertIs(session_thread.thread, original_thread)
         self.assertEqual(session_thread.notification_message_id, 801)
@@ -3414,7 +3415,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(original_thread.joined)
         self.assertNotIn(original_thread, channel.threads)
 
-        session_thread = await bridge.find_or_create_session_thread(hello)
+        session_thread = await bridge.session_threads.find_or_create_session_thread(hello)
 
         self.assertIs(session_thread.thread, original_thread)
         self.assertFalse(original_thread.archived)
@@ -3438,68 +3439,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retired_thread.edits, [])
         self.assertTrue(retired_thread.left)
 
-    async def test_reconnect_reuses_thread_with_legacy_default_host_label(self) -> None:
-        config = Config()
-        config.agent_session.channel_id = 321
-        hello = SessionHello.from_payload(
-            {
-                "session_id": "session-1",
-                "session_epoch": "epoch-1",
-                "cwd": "/tmp/project",
-                "branch": "main",
-                "pid": 42,
-            }
-        )
-        legacy_hello = SessionHello(
-            session_id=hello.session_id,
-            session_epoch=hello.session_epoch,
-            host_label="Agent session",
-            cwd=hello.cwd,
-            branch=hello.branch,
-            pid=hello.pid,
-            origin=hello.origin,
-        )
-        original_thread = FakeThread(555)
-        add_bot_message(
-            original_thread,
-            1,
-            bridge_module.AgentSessionBridge.legacy_session_start_without_session(session_start_message(legacy_hello)),
-        )
-        channel = FakeTextChannel(321, [original_thread])
-        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
-
-        session_thread = await bridge.find_or_create_session_thread(hello)
-
-        self.assertIs(session_thread.thread, original_thread)
-        self.assertEqual(session_thread.notification_message_id, 801)
-        self.assertEqual(channel.sent_messages, [session_notification_message(hello, original_thread)])
-
-    async def test_reconnect_does_not_pid_relax_legacy_thread_without_session_id(self) -> None:
-        config = Config()
-        config.agent_session.channel_id = 321
-        hello = make_hello()
-        old_hello = SessionHello(
-            session_id=hello.session_id,
-            session_epoch=hello.session_epoch,
-            host_label=hello.host_label,
-            cwd=hello.cwd,
-            branch=hello.branch,
-            pid=hello.pid - 1,
-            origin=hello.origin,
-        )
-        original_thread = FakeThread(555)
-        add_bot_message(
-            original_thread,
-            1,
-            bridge_module.AgentSessionBridge.legacy_session_start_without_session(session_start_message(old_hello)),
-        )
-        channel = FakeTextChannel(321, [original_thread])
-        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
-
-        session_thread = await bridge.find_or_create_session_thread(hello)
-
-        self.assertIsNot(session_thread.thread, original_thread)
-
     async def test_reconnect_reuses_unambiguous_thread_when_pid_changes(self) -> None:
         config = Config()
         config.agent_session.channel_id = 321
@@ -3518,7 +3457,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         channel = FakeTextChannel(321, [original_thread])
         bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
-        session_thread = await bridge.find_or_create_session_thread(hello)
+        session_thread = await bridge.session_threads.find_or_create_session_thread(hello)
 
         self.assertIs(session_thread.thread, original_thread)
         self.assertEqual(session_thread.notification_message_id, 801)
@@ -3552,8 +3491,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         channel = FakeTextChannel(321, [first_thread, second_thread])
         bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
-        with self.assertLogs(bridge_module.__name__, level="WARNING"):
-            session_thread = await bridge.find_or_create_session_thread(hello)
+        with self.assertLogs(session_threads_module.__name__, level="WARNING"):
+            session_thread = await bridge.session_threads.find_or_create_session_thread(hello)
 
         self.assertNotIn(session_thread.thread, [first_thread, second_thread])
 
@@ -3567,7 +3506,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         notice = add_bot_message(channel, 701, session_notification_message(hello, original_thread))
         bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
-        session_thread = await bridge.find_or_create_session_thread(hello)
+        session_thread = await bridge.session_threads.find_or_create_session_thread(hello)
 
         self.assertIs(session_thread.thread, original_thread)
         self.assertEqual(session_thread.notification_message_id, notice.id)
@@ -3592,7 +3531,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         new_session = AgentSession(hello=hello, websocket=FakeWebSocket())
         bridge.sessions.register(new_session)
 
-        session_thread = await bridge.find_or_create_session_thread(hello)
+        session_thread = await bridge.session_threads.find_or_create_session_thread(hello)
         bridge.sessions.bind_thread(
             hello.session_id,
             session_thread.thread.id,
@@ -3621,7 +3560,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         channel = FakeTextChannel(321, [other_thread])
         bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
-        self.assertIsNone(await bridge.find_existing_session_thread(hello))
+        self.assertIsNone(await bridge.session_threads.find_existing_session_thread(hello))
 
     async def test_backfill_posts_latest_assistant_when_thread_has_none(self) -> None:
         config = Config()
@@ -3630,7 +3569,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         hello = make_hello()
         hello.assistant_message = "Recovered answer"
 
-        await bridge.backfill_latest_assistant_message(thread, hello)
+        await bridge.session_threads.backfill_latest_assistant_message(thread, hello)
 
         self.assertEqual(thread.sent_messages, [mark_assistant_message("Recovered answer")])
         self.assertFalse(thread.sent_kwargs[0].get("silent", False))
@@ -3645,7 +3584,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 hello = make_hello()
                 hello.assistant_message = "Recovered answer"
 
-                await bridge.backfill_latest_assistant_message(thread, hello)
+                await bridge.session_threads.backfill_latest_assistant_message(thread, hello)
 
                 self.assertEqual(thread.sent_messages, [])
 
@@ -3666,7 +3605,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         hello = make_hello()
         hello.assistant_message = "Recovered answer"
 
-        await bridge.backfill_latest_assistant_message(thread, hello)
+        await bridge.session_threads.backfill_latest_assistant_message(thread, hello)
 
         self.assertEqual(thread.sent_messages[sent_before_backfill:], [mark_assistant_message("Recovered answer")])
 
@@ -3689,7 +3628,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         hello = make_hello()
         hello.assistant_message = answer
 
-        await bridge.backfill_latest_assistant_message(thread, hello)
+        await bridge.session_threads.backfill_latest_assistant_message(thread, hello)
 
         self.assertEqual(thread.sent_messages, posted)
 
@@ -3703,7 +3642,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         hello = make_hello()
         hello.assistant_message = "Recovered answer"
 
-        await bridge.backfill_latest_assistant_message(thread, hello)
+        await bridge.session_threads.backfill_latest_assistant_message(thread, hello)
 
         self.assertEqual(thread.sent_messages, [mark_assistant_message("Recovered answer")])
 

@@ -292,7 +292,7 @@ class CapabilityTransportTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((await websocket.receive(timeout=2)).type, WSMsgType.CLOSE)
                     await websocket.close()
                     await asyncio.wait_for(finished.wait(), 2)
-                    cast(AsyncMock, bridge.find_or_create_session_thread).assert_not_awaited()
+                    cast(AsyncMock, bridge.session_threads.find_or_create_session_thread).assert_not_awaited()
                     self.assertEqual(bridge.sessions.by_session, {})
 
     async def test_reconnect_narrows_controls_and_rejects_prior_session_dispatch(self) -> None:
