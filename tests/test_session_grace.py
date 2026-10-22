@@ -116,7 +116,7 @@ class SessionGraceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await until(lambda: session is not None and session.grace_task is not None, timeout=2))
             await asyncio.sleep(0.2)  # Past the heartbeat timeout.
             await running.bridge.close_timed_out_sessions()
-            await running.bridge.cleanup_stale_session_threads()
+            await running.bridge.cleanups.cleanup_stale_session_threads()
             await asyncio.sleep(0.2)
 
         self.assertEqual(running.archived, [])

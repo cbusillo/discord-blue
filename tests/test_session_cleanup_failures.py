@@ -14,6 +14,7 @@ from aiohttp import web
 
 from discord_blue.config import ConversationConfig, AgentSessionConfig, Config, DiscordConfig
 from discord_blue.doodads.agent_session import bridge as bridge_module
+from discord_blue.doodads.agent_session import cleanup as cleanup_module
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.sessions import AgentSession, PendingSessionCleanup
 from discord_blue.plugs.discord_plug import BlueBot
@@ -55,7 +56,7 @@ class CleanupFailureTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(bridge_module, "SESSION_DISCONNECT_GRACE_SECONDS", 0),
-            patch.object(bridge, "close_session_thread", new=cleanup),
+            patch.object(bridge.cleanups, "close_session_thread", new=cleanup),
             self.assertLogs(bridge_module.logger, level="WARNING"),
         ):
             # The threadless session closes at once; the one with a thread closes when its grace period expires.
@@ -66,7 +67,7 @@ class CleanupFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.sessions.by_session, {})
         self.assertTrue(first.websocket.closed)
         self.assertTrue(second.websocket.closed)
-        self.assertTrue(bridge._pending_cleanups)
+        self.assertTrue(bridge.cleanups.pending)
 
     async def test_monitor_keeps_sweeping_after_iteration_exception(self) -> None:
         bridge = make_bridge()
@@ -187,15 +188,15 @@ class CleanupFailureTests(unittest.IsolatedAsyncioTestCase):
                         _cancelled.set()
                     return True
 
-                target = session.websocket if phase == "socket" else bridge
+                target = session.websocket if phase == "socket" else bridge.cleanups
                 method = "close" if phase == "socket" else "delete_session_notification"
                 with (
                     patch.object(bridge_module.discord, "Thread", FakeThread),
-                    patch.object(bridge, "get_thread_for_cleanup", new=AsyncMock(return_value=(thread, True))),
+                    patch.object(bridge.cleanups, "get_thread_for_cleanup", new=AsyncMock(return_value=(thread, True))),
                     patch.object(bridge_module, "SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS", 0.01),
-                    patch.object(bridge_module, "SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS", 0.01),
+                    patch.object(cleanup_module, "SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS", 0.01),
                     patch.object(target, method, new=hang),
-                    self.assertLogs(bridge_module.logger, level="WARNING"),
+                    self.assertLogs((bridge_module if phase == "socket" else cleanup_module).logger, level="WARNING"),
                 ):
                     await bridge.finalize_session(session)
                 # Closing the websocket is local and is cut off; a Discord delete is left to finish on its own.
@@ -204,4 +205,4 @@ class CleanupFailureTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(thread.left)
                 self.assertEqual(bridge.sessions.by_session, {})
                 if phase == "notification":
-                    self.assertTrue(bridge._pending_cleanups)
+                    self.assertTrue(bridge.cleanups.pending)
