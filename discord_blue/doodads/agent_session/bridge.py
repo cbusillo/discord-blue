@@ -610,17 +610,37 @@ class AgentSessionBridge:
                     continue
 
                 message_type = payload.get("type")
-                if message_type == "hello" and "conversation" in payload:
-                    await websocket.close(message=b"use conversation endpoint", drain=False)
-                    break
+                if message_type == "hello":
+                    if "conversation" in payload:
+                        await websocket.close(message=b"use conversation endpoint", drain=False)
+                        break
+                    if self.bot.config.conversation.enabled and (
+                        payload.get("session_id") == self.bot.config.conversation.session_id
+                    ):
+                        await websocket.close(message=b"conversation cannot attach as mirrored session", drain=False)
+                        break
+                    if session is not None:
+                        logger.warning("Rejecting a second hello on Agent session connection %s", session.session_id)
+                        await websocket.close(message=b"hello already received", drain=False)
+                        break
+                    try:
+                        hello = SessionHello.from_payload(payload)
+                    except (KeyError, TypeError, ValueError, OverflowError):
+                        logger.warning("Rejecting invalid Agent session hello")
+                        await websocket.close(message=b"invalid hello", drain=False)
+                        break
+                    if self._stopping:
+                        await websocket.close(message=b"bridge shutdown", drain=False)
+                        break
+                    # The newest connection is the session's from now on; the attach answers only it. It is
+                    # registered here so the finally below ends it however the attach turns out.
+                    previous = self.sessions.get(hello.session_id)
+                    session = opened = AgentSession(hello=hello, websocket=websocket)
+                    self.sessions.register(opened)
+                    if not await self.accept_hello(opened, previous):
+                        break
+                    continue
                 if (
-                    message_type == "hello"
-                    and self.bot.config.conversation.enabled
-                    and (payload.get("session_id") == self.bot.config.conversation.session_id)
-                ):
-                    await websocket.close(message=b"conversation cannot attach as mirrored session", drain=False)
-                    break
-                if message_type != "hello" and (
                     session is None
                     or self.sessions.get(session.session_id) is not session
                     or payload.get("session_id") != session.session_id
@@ -635,129 +655,119 @@ class AgentSessionBridge:
                         session.session_epoch if session is not None else None,
                     )
                     continue
-                if message_type == "hello":
-                    if session is not None:
-                        logger.warning("Rejecting a second hello on Agent session connection %s", session.session_id)
-                        await websocket.close(message=b"hello already received", drain=False)
-                        break
-                    try:
-                        hello = SessionHello.from_payload(payload)
-                    except (KeyError, TypeError, ValueError, OverflowError):
-                        logger.warning("Rejecting invalid Agent session hello")
-                        await websocket.close(message=b"invalid hello", drain=False)
-                        break
-                    if self._stopping:
-                        await websocket.close(message=b"bridge shutdown", drain=False)
-                        break
-                    # The newest connection is the session's from now on; the attach answers only it.
-                    previous = self.sessions.get(hello.session_id)
-                    session = AgentSession(hello=hello, websocket=websocket)
-                    self.sessions.register(session)
-                    task = self.attach_task(hello, previous)
-                    try:
-                        if hello.hello_pending:
-                            # Wait without cancelling the attach or an in-flight discord.py request. Only the
-                            # current socket receives progress; events remain queued until the final ack.
-                            while not task.done():
-                                done, _ = await asyncio.wait({task}, timeout=HELLO_PENDING_INTERVAL_SECONDS)
-                                if done:
-                                    break
-                                if self.sessions.get(hello.session_id) is not session or websocket.closed:
-                                    raise ConnectionError("session left while waiting for a thread")
-                                await websocket.send_json(
-                                    {
-                                        "type": "hello_pending",
-                                        "session_id": hello.session_id,
-                                        "session_epoch": hello.session_epoch,
-                                        "message": "Waiting for a thread",
-                                    }
-                                )
-                        session_thread = await asyncio.shield(task)
-                    except ThreadCreationStopped:
-                        await websocket.close(message=b"bridge shutdown", drain=False)
-                        break
-                    except ConnectionError:
-                        logger.info("Agent session %s left while waiting for a thread", hello.session_id)
-                        if self.sessions.get(hello.session_id) is session:
-                            # A dropped socket still owns this attach. Let it bind before end_connection decides
-                            # between grace and finalization; otherwise it would archive the just-created thread.
-                            with suppress(discord.DiscordException, ValueError, ThreadCreationStopped):
-                                await asyncio.shield(task)
-                        break
-                    except (discord.DiscordException, ValueError):
-                        await websocket.close(message=b"unable to attach Discord thread", drain=False)
-                        break
-                    if self.sessions.get(hello.session_id) is not session:
-                        # A newer connection of this session joined the attach while this one waited; it gets the ack.
-                        await websocket.close(message=b"replaced by a newer connection", drain=False)
-                        break
-                    if session.thread_id != session_thread.thread.id:
-                        # This connection joined after the attach bound the thread to an earlier one: it is the
-                        # thread's owner now, so it is bound before it is acknowledged.
-                        self.sessions.bind_thread(hello.session_id, session_thread.thread.id, session_thread.notification_message_id)
-                    try:
-                        await websocket.send_json(
-                            {
-                                "type": "hello_ack",
-                                "features": sorted(SERVER_FEATURES),
-                                "thread_id": session_thread.thread.id,
-                                **({"capabilities": sorted(hello.capabilities)} if hello.capabilities is not None else {}),
-                            }
-                        )
-                    except ConnectionError:
-                        # The client stopped waiting; it will reconnect, so this starts a grace period below.
-                        logger.info("Agent session %s left before its hello was acknowledged", hello.session_id)
-                        break
-                    # Heartbeats start after the ack, so the watchdog's clock starts here too.
-                    session.acknowledged = True
-                    session.touch()
-                    if self.sessions.get(session.session_id) is session and not self._stopping:
-                        self.save_session(session, "live")
-                    # Attached, acknowledged and outside every lock: bring the thread's name up to date in the
-                    # background. The thread's worker coalesces and rate-limits; nothing here waits on Discord.
-                    self.request_thread_name(session)
-                elif message_type in {"approval_resolved", "request_user_input_resolved"}:
-                    await self.interactions.handle_prompt_resolved(message_type, payload)
-                elif message_type == "heartbeat" and session is not None:
-                    session.touch()
-                elif message_type == "user_message":
-                    user_message = UserMessage.from_payload(payload)
-                    await self.handle_user_message(user_message)
-                elif message_type in {"status_changed", "turn_complete", "error"}:
-                    status = SessionStatus.from_payload(payload)
-                    await self.handle_session_status(message_type, status)
-                elif message_type == "approval_request":
-                    approval = RemoteApprovalRequest.from_payload(payload)
-                    await self.interactions.handle_approval_request(approval)
-                elif message_type == "request_user_input":
-                    request_user_input = RemoteRequestUserInput.from_payload(payload)
-                    await self.interactions.handle_request_user_input(request_user_input)
-                elif message_type == "approval_decision_ack":
-                    logger.info("Agent session approval decision ack: %s", payload.get("approval_id"))
-                    await self.interactions.handle_approval_decision_ack(payload)
-                elif message_type == "approval_decision_reject":
-                    logger.warning("Agent session approval decision reject: %s", payload)
-                    await self.interactions.handle_approval_decision_reject(payload)
-                elif message_type == "session_end" and session is not None:
+                if message_type == "session_end":
                     # A clean end: close the thread now instead of waiting out a grace period.
                     session.ended = True
                     break
-                elif message_type == "title_changed" and session is not None:
-                    await self.handle_title_changed(session, payload.get("title"))
-                elif message_type == "notice" and session is not None and session.thread_id is not None:
-                    if isinstance(notice := payload.get("message"), str) and notice.strip():
-                        await self.post_thread_notice(session.thread_id, notice)
-                elif message_type == "command_ack":
-                    logger.info("Agent session command ack: %s", payload.get("command_id"))
-                    await self.controls.handle_command_ack(payload)
-                elif message_type == "command_reject":
-                    logger.warning("Agent session command reject: %s", payload)
-                    await self.controls.handle_command_reject(payload)
+                # Awaited inline, so the session's events are handled in the order they arrive.
+                await self.handle_event(session, message_type, payload)
         finally:
             if session is not None:
                 await self.end_connection(session)
 
         return websocket
+
+    async def accept_hello(self, session: AgentSession, previous: AgentSession | None) -> bool:
+        """Wait for the session's attach and acknowledge its hello; False when the connection should close."""
+        hello = session.hello
+        websocket = session.websocket
+        task = self.attach_task(hello, previous)
+        try:
+            if hello.hello_pending:
+                # Wait without cancelling the attach or an in-flight discord.py request. Only the
+                # current socket receives progress; events remain queued until the final ack.
+                while not task.done():
+                    done, _ = await asyncio.wait({task}, timeout=HELLO_PENDING_INTERVAL_SECONDS)
+                    if done:
+                        break
+                    if self.sessions.get(hello.session_id) is not session or websocket.closed:
+                        raise ConnectionError("session left while waiting for a thread")
+                    await websocket.send_json(
+                        {
+                            "type": "hello_pending",
+                            "session_id": hello.session_id,
+                            "session_epoch": hello.session_epoch,
+                            "message": "Waiting for a thread",
+                        }
+                    )
+            session_thread = await asyncio.shield(task)
+        except ThreadCreationStopped:
+            await websocket.close(message=b"bridge shutdown", drain=False)
+            return False
+        except ConnectionError:
+            logger.info("Agent session %s left while waiting for a thread", hello.session_id)
+            if self.sessions.get(hello.session_id) is session:
+                # A dropped socket still owns this attach. Let it bind before end_connection decides
+                # between grace and finalization; otherwise it would archive the just-created thread.
+                with suppress(discord.DiscordException, ValueError, ThreadCreationStopped):
+                    await asyncio.shield(task)
+            return False
+        except (discord.DiscordException, ValueError):
+            await websocket.close(message=b"unable to attach Discord thread", drain=False)
+            return False
+        if self.sessions.get(hello.session_id) is not session:
+            # A newer connection of this session joined the attach while this one waited; it gets the ack.
+            await websocket.close(message=b"replaced by a newer connection", drain=False)
+            return False
+        if session.thread_id != session_thread.thread.id:
+            # This connection joined after the attach bound the thread to an earlier one: it is the
+            # thread's owner now, so it is bound before it is acknowledged.
+            self.sessions.bind_thread(hello.session_id, session_thread.thread.id, session_thread.notification_message_id)
+        try:
+            await websocket.send_json(
+                {
+                    "type": "hello_ack",
+                    "features": sorted(SERVER_FEATURES),
+                    "thread_id": session_thread.thread.id,
+                    **({"capabilities": sorted(hello.capabilities)} if hello.capabilities is not None else {}),
+                }
+            )
+        except ConnectionError:
+            # The client stopped waiting; it will reconnect, so the connection's end starts a grace period.
+            logger.info("Agent session %s left before its hello was acknowledged", hello.session_id)
+            return False
+        # Heartbeats start after the ack, so the watchdog's clock starts here too.
+        session.acknowledged = True
+        session.touch()
+        if self.sessions.get(session.session_id) is session and not self._stopping:
+            self.save_session(session, "live")
+        # Attached, acknowledged and outside every lock: bring the thread's name up to date in the
+        # background. The thread's worker coalesces and rate-limits; nothing here waits on Discord.
+        self.request_thread_name(session)
+        return True
+
+    async def handle_event(self, session: AgentSession, message_type: object, payload: dict[str, object]) -> None:
+        """Route one event from the session's current connection; unknown types are ignored."""
+        match message_type:
+            case "heartbeat":
+                session.touch()
+            case "user_message":
+                await self.handle_user_message(UserMessage.from_payload(payload))
+            case "status_changed" | "turn_complete" | "error":
+                await self.handle_session_status(message_type, SessionStatus.from_payload(payload))
+            case "title_changed":
+                await self.handle_title_changed(session, payload.get("title"))
+            case "notice" if session.thread_id is not None:
+                if isinstance(notice := payload.get("message"), str) and notice.strip():
+                    await self.post_thread_notice(session.thread_id, notice)
+            case "approval_resolved" | "request_user_input_resolved":
+                await self.interactions.handle_prompt_resolved(message_type, payload)
+            case "approval_request":
+                await self.interactions.handle_approval_request(RemoteApprovalRequest.from_payload(payload))
+            case "request_user_input":
+                await self.interactions.handle_request_user_input(RemoteRequestUserInput.from_payload(payload))
+            case "approval_decision_ack":
+                logger.info("Agent session approval decision ack: %s", payload.get("approval_id"))
+                await self.interactions.handle_approval_decision_ack(payload)
+            case "approval_decision_reject":
+                logger.warning("Agent session approval decision reject: %s", payload)
+                await self.interactions.handle_approval_decision_reject(payload)
+            case "command_ack":
+                logger.info("Agent session command ack: %s", payload.get("command_id"))
+                await self.controls.handle_command_ack(payload)
+            case "command_reject":
+                logger.warning("Agent session command reject: %s", payload)
+                await self.controls.handle_command_reject(payload)
 
     def attach_task(self, hello: SessionHello, previous: AgentSession | None) -> asyncio.Task[SessionThread]:
         """The session's running attach, or a new one; it outlives the sockets that wait for it."""
