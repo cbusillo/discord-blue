@@ -25,6 +25,7 @@ from discord_blue.claude_channel.session import ClaudeSession, Identity
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.config import ConversationConfig, AgentSessionConfig, Config, DiscordConfig
 from discord_blue.doodads.agent_session import bridge as bridge_module
+from discord_blue.doodads.agent_session import cleanup as cleanup_module
 from discord_blue.doodads.agent_session.protocol import SessionHello
 from discord_blue.doodads.agent_session.threads import session_start_message
 from discord_blue.plugs.discord_plug import MAX_RATELIMIT_SLEEP_SECONDS
@@ -230,7 +231,7 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
         fake.add_thread("arriving", marker=marker(arriving), archived=True, locked=True)
         with (
             patch.object(bridge_module, "SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS", 0.2),
-            patch.object(bridge_module, "THREAD_CLOSE_WAIT_SECONDS", 0.1),
+            patch.object(cleanup_module, "THREAD_CLOSE_WAIT_SECONDS", 0.1),
         ):
             async with scenario(fake) as running, aiohttp.ClientSession() as http:
                 first = await running.connect(http)

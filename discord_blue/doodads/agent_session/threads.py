@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -18,6 +19,13 @@ DISCORD_THREAD_NAME_LIMIT = 100
 # The thread-name icon for each agent a client reports in hello's `harness`; others get none.
 HARNESS_ICONS = {"claude": "\u2734\ufe0f", "codex": "\U0001f537"}
 DEFAULT_BRANCH_NAMES = {"main", "master", "develop", "development", "dev", "trunk"}
+SESSION_START_PREFIX = "Agent session connected"
+SESSION_NOTIFICATION_PREFIX = "Agent session connected for "
+SESSION_NOTIFICATION_PREFIXES = (
+    SESSION_NOTIFICATION_PREFIX,
+    "Automated agent session connected for ",
+)
+SESSION_NOTIFICATION_THREAD_RE = re.compile(r"<#(?P<thread_id>\d+)>")
 
 
 @dataclass(slots=True)
@@ -115,6 +123,13 @@ def session_start_message(hello: SessionHello) -> str:
             f"pid: `{hello.pid}`",
         ]
     )
+
+
+def notification_thread_id(content: str) -> int | None:
+    match = SESSION_NOTIFICATION_THREAD_RE.search(content)
+    if match is None:
+        return None
+    return int(match.group("thread_id"))
 
 
 def session_notification_message(hello: SessionHello, thread: discord.Thread) -> str:

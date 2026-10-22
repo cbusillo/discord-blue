@@ -14,7 +14,9 @@ import discord
 from aiohttp import web
 
 from discord_blue.doodads.agent_session import bridge as bridge_module
-from discord_blue.doodads.agent_session.sessions import AgentSession
+from discord_blue.doodads.agent_session import cleanup as cleanup_module
+from discord_blue.doodads.agent_session import threads as threads_module
+from discord_blue.doodads.agent_session.sessions import AgentSession, CleanupStep
 from discord_blue.doodads.agent_session.thread_worker import RenameTarget, ThreadWorkers
 from tests.fakes_agent_session import (
     FakeReplyMessage,
@@ -66,7 +68,7 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
             return await original_fetch()
 
         with patch.object(thread, "fetch_members", new=slow_fetch):
-            steps: set[bridge_module.CleanupStep] = {"members", "archive", "leave"}
+            steps: set[CleanupStep] = {"members", "archive", "leave"}
             closing = asyncio.create_task(workers.close(cast(discord.Thread, thread), steps))
             await asyncio.wait_for(listing.wait(), timeout=1)
             # The session reconnects while the close is still listing the thread's members.
@@ -90,7 +92,7 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
             await original_edit(**kwargs)
 
         with patch.object(thread, "edit", new=slow_edit):
-            steps: set[bridge_module.CleanupStep] = {"archive"}
+            steps: set[CleanupStep] = {"archive"}
             await workers.close(cast(discord.Thread, thread), steps, timeout=0)
             await asyncio.wait_for(archiving.wait(), timeout=1)
             worker = workers.workers[thread.id]
@@ -115,12 +117,12 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
             return await original_fetch(message_id)
 
         with (
-            patch.object(bridge_module, "get_agent_session_channel", return_value=channel),
+            patch.object(threads_module, "get_agent_session_channel", return_value=channel),
             patch.object(channel, "fetch_message", new=slow_fetch),
-            patch.object(bridge_module, "SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS", 0.01),
+            patch.object(cleanup_module, "SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS", 0.01),
         ):
             with self.assertRaises(TimeoutError):
-                await bridge.threads.bounded(bridge.delete_session_notification(notice.id), 0.01)
+                await bridge.threads.bounded(bridge.cleanups.delete_session_notification(notice.id), 0.01)
             await asyncio.wait_for(fetching.wait(), timeout=1)
             # Teardown stopped waiting; a reconnect now reuses the same notification.
             session = register_stale(bridge, "reconnected")
@@ -197,11 +199,11 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
             await original_delete()
 
         with (
-            patch.object(bridge_module, "get_agent_session_channel", return_value=channel),
+            patch.object(threads_module, "get_agent_session_channel", return_value=channel),
             patch.object(notice, "delete", new=rate_limited_delete),
         ):
             with self.assertRaises(TimeoutError):
-                await bridge.threads.bounded(bridge.delete_session_notification(notice.id), 0.01)
+                await bridge.threads.bounded(bridge.cleanups.delete_session_notification(notice.id), 0.01)
             await asyncio.wait_for(deleting.wait(), timeout=1)
             adopted = await bridge.find_session_notification_for_thread(501)
             release.set()
@@ -228,11 +230,11 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
             attaching = asyncio.create_task(bridge.find_or_create_session_thread(hello))
             await asyncio.wait_for(posting.wait(), timeout=1)
             # Reopened, not yet bound: an older session's cleanup retry reaches the thread now.
-            retry = bridge.pending_cleanup_for_session(
+            retry = bridge.cleanups.pending_cleanup_for_session(
                 AgentSession(hello=make_hello(), websocket=cast(web.WebSocketResponse, FakeWebSocket()), thread_id=501)
             )
             retry.pending_steps.discard("notification")
-            await bridge.close_thread(cast(discord.Thread, thread), retry.pending_steps, timeout=1)
+            await bridge.cleanups.close_thread(cast(discord.Thread, thread), retry.pending_steps, timeout=1)
             release.set()
             await asyncio.wait_for(attaching, timeout=1)
 
@@ -259,13 +261,13 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
                 raise discord.RateLimited(60.0)
 
         with (
-            patch.object(bridge_module, "get_agent_session_channel", return_value=channel),
+            patch.object(threads_module, "get_agent_session_channel", return_value=channel),
             patch.object(notice, "delete", new=delete),
         ):
-            first = asyncio.create_task(bridge.delete_notification_message(cast(discord.Message, notice)))
+            first = asyncio.create_task(bridge.cleanups.delete_notification_message(cast(discord.Message, notice)))
             await asyncio.wait_for(first_sent.wait(), timeout=1)
             with self.assertRaises(discord.RateLimited):
-                await bridge.delete_notification_message(cast(discord.Message, notice))
+                await bridge.cleanups.delete_notification_message(cast(discord.Message, notice))
             adopted = await bridge.find_session_notification_for_thread(501)
             release.set()
             await first
@@ -283,10 +285,10 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
                 yield message
 
         with (
-            patch.object(bridge_module, "get_agent_session_channel", return_value=channel),
+            patch.object(threads_module, "get_agent_session_channel", return_value=channel),
             patch.object(channel, "history", history),
         ):
-            await bridge.delete_notification_message(cast(discord.Message, notice))
+            await bridge.cleanups.delete_notification_message(cast(discord.Message, notice))
             adopted = await bridge.find_session_notification_for_thread(501)
 
         self.assertIsNone(adopted)
@@ -310,7 +312,7 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(thread, "remove_user", new=slow_remove), patch.object(thread, "add_user", new=add_user, create=True):
             await old_bridge.start()
-            await old_bridge.close_thread(cast(discord.Thread, thread), {"members", "archive", "leave"}, timeout=0)
+            await old_bridge.cleanups.close_thread(cast(discord.Thread, thread), {"members", "archive", "leave"}, timeout=0)
             await asyncio.wait_for(removing.wait(), timeout=1)
             await old_bridge.stop()
             # The doodad is reloaded: a new bridge on the same bot, and the session reattaches at once.
@@ -336,11 +338,11 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
             return await original_send(content, **kwargs)
 
         with patch.object(thread, "send", new=slow_send):
-            ended: set[bridge_module.CleanupStep] = {"disconnect_notice", "archive", "leave"}
+            ended: set[CleanupStep] = {"disconnect_notice", "archive", "leave"}
             session_close = asyncio.create_task(workers.close(cast(discord.Thread, thread), ended))
             await asyncio.wait_for(posting.wait(), timeout=1)
             # An older orphan record for the same thread is retried while the notice is being posted.
-            orphan: set[bridge_module.CleanupStep] = {"disconnect_notice", "archive", "leave"}
+            orphan: set[CleanupStep] = {"disconnect_notice", "archive", "leave"}
             orphan_close = asyncio.create_task(workers.close(cast(discord.Thread, thread), orphan))
             release.set()
             await asyncio.wait_for(asyncio.gather(session_close, orphan_close), timeout=1)
