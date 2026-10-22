@@ -1656,27 +1656,6 @@ class AgentSessionBridge:
             return None
         return "\n".join(lines[:-1])
 
-    @staticmethod
-    async def session_thread_candidates(channel: discord.TextChannel) -> list[discord.Thread]:
-        candidates = list(channel.threads)
-        try:
-            async for thread in channel.archived_threads(
-                limit=50,
-            ):
-                candidates.append(thread)
-        except (discord.DiscordException, ValueError):
-            logger.warning("Unable to scan public archived Agent session threads")
-        try:
-            async for thread in channel.archived_threads(
-                private=True,
-                joined=True,
-                limit=50,
-            ):
-                candidates.append(thread)
-        except (discord.DiscordException, ValueError):
-            logger.warning("Unable to scan joined private archived Agent session threads")
-        return candidates
-
     async def score_session_thread(self, thread: discord.Thread) -> tuple[int, int, int]:
         assistant_messages = 0
         messages = 0

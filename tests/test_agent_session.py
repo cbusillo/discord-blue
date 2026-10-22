@@ -92,6 +92,7 @@ Config = importlib.import_module("discord_blue.config").Config
 bridge_module = importlib.import_module("discord_blue.doodads.agent_session.bridge")
 AgentSessionBridge = bridge_module.AgentSessionBridge
 messages_module = importlib.import_module("discord_blue.doodads.agent_session.messages")
+cleanup_module = importlib.import_module("discord_blue.doodads.agent_session.cleanup")
 threads_module = importlib.import_module("discord_blue.doodads.agent_session.threads")
 protocol_module = importlib.import_module("discord_blue.doodads.agent_session.protocol")
 RemoteCommand = protocol_module.RemoteCommand
@@ -106,6 +107,7 @@ sessions_module = importlib.import_module("discord_blue.doodads.agent_session.se
 AgentSession = sessions_module.AgentSession
 AgentSessionRegistry = sessions_module.AgentSessionRegistry
 PendingRemoteApproval = sessions_module.PendingRemoteApproval
+cleanup_module = importlib.import_module("discord_blue.doodads.agent_session.cleanup")
 threads_module = importlib.import_module("discord_blue.doodads.agent_session.threads")
 create_session_thread = threads_module.create_session_thread
 session_notification_message = threads_module.session_notification_message
@@ -404,7 +406,7 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         left_private_archived = FakeThread(558, archived=True, joined=False)
         channel = FakeTextChannel(321, [active, public_archived, joined_private_archived, left_private_archived])
 
-        candidates = await bridge_module.AgentSessionBridge.session_thread_candidates(cast(Any, channel))
+        candidates = await cleanup_module.SessionCleanups.session_thread_candidates(cast(Any, channel))
 
         self.assertCountEqual(candidates, [active, public_archived, joined_private_archived])
 

@@ -54,8 +54,6 @@ class CleanupHooks(Protocol):
 
     def session_lifecycle_lock(self, session_id: str) -> asyncio.Lock: ...
 
-    async def session_thread_candidates(self, channel: discord.TextChannel) -> list[discord.Thread]: ...
-
     def stored_thread_protected(self, thread_id: int) -> bool: ...
 
     def thread_channel(self, thread_id: int) -> object | None: ...
@@ -171,7 +169,7 @@ class SessionCleanups:
         self.bridge.record_maintenance_progress()
         try:
             candidates = await self.bridge.threads.bounded(
-                self.bridge.session_thread_candidates(channel), MAINTENANCE_DISCOVERY_TIMEOUT_SECONDS
+                self.session_thread_candidates(channel), MAINTENANCE_DISCOVERY_TIMEOUT_SECONDS
             )
         except Exception:
             logger.warning("Unable to discover archived Agent session threads; checking active threads", exc_info=True)
@@ -219,6 +217,27 @@ class SessionCleanups:
             self.remember_pending_cleanup(cleanup)
             await self.close_thread(thread, cleanup.pending_steps, timeout=SESSION_THREAD_CLEANUP_TIMEOUT_SECONDS)
             self.bridge.record_maintenance_progress()
+
+    @staticmethod
+    async def session_thread_candidates(channel: discord.TextChannel) -> list[discord.Thread]:
+        candidates = list(channel.threads)
+        try:
+            async for thread in channel.archived_threads(
+                limit=50,
+            ):
+                candidates.append(thread)
+        except (discord.DiscordException, ValueError):
+            logger.warning("Unable to scan public archived Agent session threads")
+        try:
+            async for thread in channel.archived_threads(
+                private=True,
+                joined=True,
+                limit=50,
+            ):
+                candidates.append(thread)
+        except (discord.DiscordException, ValueError):
+            logger.warning("Unable to scan joined private archived Agent session threads")
+        return candidates
 
     async def is_agent_session_session_thread(self, thread: discord.Thread) -> bool:
         bot_user = self.bridge.bot.user
