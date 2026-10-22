@@ -23,7 +23,7 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
         return {"type": kind, "session_id": self.session.session_id, "session_epoch": self.session.session_epoch, **fields}
 
     async def approval(self) -> None:
-        await self.bridge.handle_approval_request(
+        await self.bridge.interactions.handle_approval_request(
             RemoteApprovalRequest(
                 session_id=self.session.session_id,
                 session_epoch=self.session.session_epoch,
@@ -45,9 +45,9 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
             ("approval_resolved", {"approval_id": "approval"}),
             ("request_user_input_resolved", {"call_id": "call-1", "turn_id": "turn-1"}),
         ):
-            await self.bridge.handle_prompt_resolved(kind, self.event(kind, **fields))
+            await self.bridge.interactions.handle_prompt_resolved(kind, self.event(kind, **fields))
             edits = len(input_message.edits) + len(approval_message.edits)
-            await self.bridge.handle_prompt_resolved(kind, self.event(kind, **fields))
+            await self.bridge.interactions.handle_prompt_resolved(kind, self.event(kind, **fields))
             self.assertEqual(len(input_message.edits) + len(approval_message.edits), edits)
         for message in (input_message, approval_message):
             self.assertEqual(visible_message_text(message), "**Resolved**")
@@ -70,8 +70,8 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
                 {"approval_id": "wrong", "call_id": "wrong"},
                 {"approval_id": 4, "call_id": 4},
             ):
-                await self.bridge.handle_prompt_resolved(kind, {**self.event(kind, **fields), **changed})
-        await self.bridge.handle_prompt_resolved(
+                await self.bridge.interactions.handle_prompt_resolved(kind, {**self.event(kind, **fields), **changed})
+        await self.bridge.interactions.handle_prompt_resolved(
             "request_user_input_resolved", self.event("request_user_input_resolved", call_id="call-1", turn_id="wrong")
         )
         self.assertIn("call-1", self.session.pending_user_inputs)
@@ -84,14 +84,16 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
 
         async def send(payload: dict[str, object]) -> None:
             await original(payload)
-            await self.bridge.handle_prompt_resolved("approval_resolved", self.event("approval_resolved", approval_id="approval"))
+            await self.bridge.interactions.handle_prompt_resolved(
+                "approval_resolved", self.event("approval_resolved", approval_id="approval")
+            )
 
         interaction = FakeInteraction(self.thread, message=message)
         with patch.object(self.socket, "send_json", new=send):
-            await self.bridge.handle_approval_interaction(
+            await self.bridge.interactions.handle_approval_interaction(
                 cast(Any, interaction), self.session.session_id, "approval", "approved", session_epoch=self.session.session_epoch
             )
-        await self.bridge.handle_approval_decision_ack(self.event("approval_decision_ack", approval_id="approval"))
+        await self.bridge.interactions.handle_approval_decision_ack(self.event("approval_decision_ack", approval_id="approval"))
         self.assertEqual(visible_message_text(message), "**Resolved**")
         self.assertEqual(interaction.response.edits, [])
         self.assertIn("Decision sent", interaction.response.messages[0][0])
@@ -103,7 +105,7 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
 
         async def send(payload: dict[str, object]) -> None:
             await original(payload)
-            await self.bridge.handle_prompt_resolved(
+            await self.bridge.interactions.handle_prompt_resolved(
                 "request_user_input_resolved", self.event("request_user_input_resolved", call_id="call-1", turn_id="turn-1")
             )
 
@@ -137,7 +139,7 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(editing.wait(), 1)
             pending = self.session.pending_user_inputs["call-1"]
             resolve = asyncio.create_task(
-                self.bridge.handle_prompt_resolved(
+                self.bridge.interactions.handle_prompt_resolved(
                     "request_user_input_resolved", self.event("request_user_input_resolved", call_id="call-1", turn_id="turn-1")
                 )
             )
@@ -170,13 +172,15 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(message, "edit", new=edit):
             click = asyncio.create_task(
-                self.bridge.handle_approval_reaction(
+                self.bridge.interactions.handle_approval_reaction(
                     self.session, cast(Any, self.thread), "approval", "✅", cast(Any, FakeInteraction(self.thread).user)
                 )
             )
             await asyncio.wait_for(editing.wait(), 1)
             resolve = asyncio.create_task(
-                self.bridge.handle_prompt_resolved("approval_resolved", self.event("approval_resolved", approval_id="approval"))
+                self.bridge.interactions.handle_prompt_resolved(
+                    "approval_resolved", self.event("approval_resolved", approval_id="approval")
+                )
             )
             try:
                 await asyncio.sleep(0)
@@ -202,7 +206,7 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
         )
         await asyncio.sleep(0)
         resolve = asyncio.create_task(
-            self.bridge.handle_prompt_resolved(
+            self.bridge.interactions.handle_prompt_resolved(
                 "request_user_input_resolved", self.event("request_user_input_resolved", call_id="call-1", turn_id="turn-1")
             )
         )
@@ -218,8 +222,8 @@ class PromptResolutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message.reactions, [])
 
     def test_ack_copy_describes_submission_without_asserting_winner(self) -> None:
-        self.assertEqual(self.bridge.format_approval_finished("approved", 123), "**Submitted: approved**\nby: `123`")
-        self.assertEqual(self.bridge.format_approval_finished(None, None), "**Decision acknowledged**")
+        self.assertEqual(self.bridge.interactions.format_approval_finished("approved", 123), "**Submitted: approved**\nby: `123`")
+        self.assertEqual(self.bridge.interactions.format_approval_finished(None, None), "**Decision acknowledged**")
 
 
 class ResolutionTransportTests(unittest.IsolatedAsyncioTestCase):
@@ -235,7 +239,7 @@ class ResolutionTransportTests(unittest.IsolatedAsyncioTestCase):
             await current.receive_json(timeout=2)
             session = bridge.sessions.get("cleanup-session")
             assert session is not None
-            await bridge.handle_approval_request(
+            await bridge.interactions.handle_approval_request(
                 RemoteApprovalRequest(
                     session_id=session.session_id,
                     session_epoch=session.session_epoch,
@@ -266,14 +270,14 @@ class ResolutionTransportTests(unittest.IsolatedAsyncioTestCase):
             await websocket.send_json(identity)
             await websocket.receive_json(timeout=2)
             done = asyncio.Event()
-            original = bridge.handle_prompt_resolved
+            original = bridge.interactions.handle_prompt_resolved
 
             async def resolved(kind: str, payload: dict[str, object]) -> None:
                 await original(kind, payload)
                 if payload.get("call_id") == "input":
                     done.set()
 
-            with patch.object(bridge, "handle_prompt_resolved", new=resolved):
+            with patch.object(bridge.interactions, "handle_prompt_resolved", new=resolved):
                 await websocket.send_json(
                     {
                         **identity,

@@ -49,7 +49,7 @@ from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 
 if TYPE_CHECKING:
     from discord_blue.doodads.agent_session.bridge import AgentSessionBridge as SessionBridge
-    from discord_blue.doodads.agent_session.bridge import RequestUserInputView
+    from discord_blue.doodads.agent_session.interactions import RequestUserInputView
     from discord_blue.doodads.agent_session.protocol import SessionHello as SessionHelloType
     from discord_blue.doodads.agent_session.sessions import AgentSession as AgentSessionType
     from discord_blue.doodads.agent_session.sessions import PendingSessionCleanup
@@ -91,6 +91,7 @@ write_default_config()
 Config = importlib.import_module("discord_blue.config").Config
 bridge_module = importlib.import_module("discord_blue.doodads.agent_session.bridge")
 controls_module = importlib.import_module("discord_blue.doodads.agent_session.controls")
+interactions_module = importlib.import_module("discord_blue.doodads.agent_session.interactions")
 AgentSessionBridge = bridge_module.AgentSessionBridge
 messages_module = importlib.import_module("discord_blue.doodads.agent_session.messages")
 cleanup_module = importlib.import_module("discord_blue.doodads.agent_session.cleanup")
@@ -786,7 +787,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             )
             session = bridge.sessions.get("transport-session")
             message = await thread.fetch_message(session.pending_approvals["approval-1"].message_id)
-            await bridge.handle_approval_reaction(
+            await bridge.interactions.handle_approval_reaction(
                 session, thread, "approval-1", controls_module.REACTION_APPROVAL_APPROVE, FakeInteraction(thread).user
             )
             self.assertEqual(
@@ -836,7 +837,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     )
                     view = cast(
                         "RequestUserInputView",
-                        next(view for view in reversed(thread.sent_views) if isinstance(view, bridge_module.RequestUserInputView)),
+                        next(
+                            view
+                            for view in reversed(thread.sent_views)
+                            if isinstance(view, interactions_module.RequestUserInputView)
+                        ),
                     )
                     interaction = FakeInteraction(thread)
                     if cancel:
@@ -1962,7 +1967,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        await bridge.handle_approval_request(
+        await bridge.interactions.handle_approval_request(
             RemoteApprovalRequest(
                 approval_id="approval-1",
                 call_id="call-1",
@@ -1979,7 +1984,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("git status", visible_view_text(thread.sent_views[0]))
         self.assertFalse(thread.sent_kwargs[0]["silent"])
         self.assertEqual(thread.sent_messages[0], "")
-        self.assertIsInstance(thread.sent_views[0], bridge_module.ApprovalView)
+        self.assertIsInstance(thread.sent_views[0], interactions_module.ApprovalView)
         approval_message = await thread.fetch_message(901)
         self.assertEqual(approval_message.reactions, ["✅", "✖️"])
 
@@ -1998,7 +2003,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
                 bridge.sessions.register(session)
                 bridge.sessions.bind_thread("session-1", 555)
-                await bridge.handle_approval_request(
+                await bridge.interactions.handle_approval_request(
                     RemoteApprovalRequest(
                         approval_id="a",
                         call_id="c",
@@ -2028,7 +2033,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             "raw command shown exactly": (raw, ["echo", "$(touch /tmp/x)", "|", "wc", "-c"], f"```sh\n{raw}\n```"),
             "older client without it": (None, ["git", "status"], "```sh\ngit status\n```"),
             "raw command that would break the fence": ("echo '```'", ["echo", "```"], None),
-            "raw command longer than Discord shows": ("x" * (bridge_module.APPROVAL_COMMAND_DISPLAY_LIMIT + 1), ["x"], None),
+            "raw command longer than Discord shows": ("x" * (interactions_module.APPROVAL_COMMAND_DISPLAY_LIMIT + 1), ["x"], None),
             "directory that would push the command out of the message": ("ls", ["ls"], None),
         }
         for case, (command_text, argv, shown) in cases.items():
@@ -2038,7 +2043,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 bridge.sessions.register(AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555))
                 bridge.sessions.bind_thread("session-1", 555)
                 cwd = "/" + "d" * bridge_module.DISCORD_MESSAGE_LIMIT if case.startswith("directory") else "/repo"
-                await bridge.handle_approval_request(
+                await bridge.interactions.handle_approval_request(
                     RemoteApprovalRequest(
                         approval_id="approval-1",
                         call_id="call-1",
@@ -2240,7 +2245,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
-        await bridge.handle_approval_request(
+        await bridge.interactions.handle_approval_request(
             RemoteApprovalRequest(
                 approval_id="approval-1",
                 call_id="call-1",
@@ -2653,7 +2658,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        await bridge.handle_approval_request(
+        await bridge.interactions.handle_approval_request(
             RemoteApprovalRequest(
                 approval_id="approval-1",
                 call_id="call-1",
@@ -2691,7 +2696,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         session.pending_approvals["approval-1"] = PendingRemoteApproval(thread_id=555, message_id=901)
         interaction = FakeInteraction(thread, message=FakeReplyMessage(901, thread))
 
-        await bridge.handle_approval_interaction(
+        await bridge.interactions.handle_approval_interaction(
             cast(Any, interaction),
             "session-1",
             "approval-1",
@@ -2722,7 +2727,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         bridge.sessions.register(session)
 
-        await bridge.handle_approval_decision_reject(
+        await bridge.interactions.handle_approval_decision_reject(
             {
                 "session_id": "session-1",
                 "approval_id": "approval-1",
@@ -2753,7 +2758,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         bridge.sessions.register(session)
 
-        await bridge.handle_approval_decision_reject(
+        await bridge.interactions.handle_approval_decision_reject(
             {
                 "session_id": "session-1",
                 "approval_id": "approval-1",
@@ -2777,7 +2782,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        await bridge.handle_request_user_input(
+        await bridge.interactions.handle_request_user_input(
             RemoteRequestUserInput(
                 call_id="call-1",
                 turn_id="turn-1",
@@ -2829,7 +2834,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        await bridge.handle_request_user_input(
+        await bridge.interactions.handle_request_user_input(
             RemoteRequestUserInput(
                 call_id="call-1",
                 turn_id="turn-2",
@@ -2894,7 +2899,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 )
             ],
         )
-        await bridge.handle_request_user_input(request)
+        await bridge.interactions.handle_request_user_input(request)
 
         view = cast(Any, thread.sent_views[0])
         view.set_answer("mode", "Safe")
@@ -2943,7 +2948,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 )
             ],
         )
-        await bridge.handle_request_user_input(request)
+        await bridge.interactions.handle_request_user_input(request)
 
         view = cast(Any, thread.sent_views[0])
         interaction = FakeInteraction(thread)

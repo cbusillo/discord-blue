@@ -7,7 +7,7 @@ from dataclasses import replace
 from typing import Any, cast
 from unittest.mock import patch
 
-from discord_blue.doodads.agent_session import bridge as bridge_module
+from discord_blue.doodads.agent_session import interactions as interactions_module
 from discord_blue.doodads.agent_session.sessions import AgentSession, PendingRemoteApproval
 from tests.fakes_agent_prompts import prompt_fixture
 from tests.fakes_agent_session import FakeInteraction, FakeReplyMessage, FakeThread, make_hello
@@ -19,7 +19,7 @@ class PromptIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.thread, self.socket = self.fixture.thread, self.fixture.socket
         self.bridge, self.session = self.fixture.bridge, self.fixture.session
 
-    async def prompt(self, call_id: str = "call-1") -> bridge_module.RequestUserInputView:
+    async def prompt(self, call_id: str = "call-1") -> interactions_module.RequestUserInputView:
         self.fixture.session = self.session
         return await self.fixture.prompt(call_id)
 
@@ -68,7 +68,7 @@ class PromptIdentityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stale_modal_cannot_restore_retired_view_or_edit_answers(self) -> None:
         old = await self.prompt()
-        modal = bridge_module.RequestUserInputAnswerModal(old, old.request.questions[0])
+        modal = interactions_module.RequestUserInputAnswerModal(old, old.request.questions[0])
         await self.prompt("call-2")
         interaction = FakeInteraction(self.thread)
         await modal.on_submit(cast(Any, interaction))
@@ -136,7 +136,7 @@ class PromptIdentityTests(unittest.IsolatedAsyncioTestCase):
                 first_interaction = FakeInteraction(self.thread, message=FakeReplyMessage(901, self.thread))
                 with patch.object(self.socket, "send_json", new=send):
                     first = asyncio.create_task(
-                        self.bridge.handle_approval_interaction(
+                        self.bridge.interactions.handle_approval_interaction(
                             cast(Any, first_interaction),
                             self.session.session_id,
                             "approval",
@@ -148,7 +148,7 @@ class PromptIdentityTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.wait_for(started.wait(), 1)
                         second = FakeInteraction(self.thread, user_id=456, message=FakeReplyMessage(901, self.thread))
                         if second_kind == "button":
-                            await self.bridge.handle_approval_interaction(
+                            await self.bridge.interactions.handle_approval_interaction(
                                 cast(Any, second),
                                 self.session.session_id,
                                 "approval",
@@ -156,7 +156,7 @@ class PromptIdentityTests(unittest.IsolatedAsyncioTestCase):
                                 session_epoch=self.session.session_epoch,
                             )
                         else:
-                            await self.bridge.handle_approval_reaction(
+                            await self.bridge.interactions.handle_approval_reaction(
                                 self.session, cast(Any, self.thread), "approval", "✖️", cast(Any, second.user)
                             )
                         self.assertEqual(len(self.socket.sent_json), 1)
