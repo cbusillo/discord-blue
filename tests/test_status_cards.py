@@ -28,7 +28,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         self.bridge, self.session, self.thread = self.fixture.bridge, self.fixture.session, self.fixture.thread
 
     async def status(self, event: str, message: str, epoch: str | None = None) -> None:
-        await self.bridge.handle_session_status(
+        await self.bridge.status.handle_session_status(
             event,
             SessionStatus(
                 session_id=self.session.session_id,
@@ -72,7 +72,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tui_prompt_restarts_work_after_done(self) -> None:
         await self.status("turn_complete", "Waiting for direction")
-        await self.bridge.handle_user_message(
+        await self.bridge.status.handle_user_message(
             UserMessage(session_id=self.session.session_id, session_epoch=self.session.session_epoch, message="Try again")
         )
         self.assertIn("Working", visible_text(await self.current_card()))
@@ -217,7 +217,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rejected_pause_preserves_running_controls_and_newer_completion(self) -> None:
         user = cast(discord.User, SimpleNamespace(id=123))
-        await self.bridge.handle_user_message(
+        await self.bridge.status.handle_user_message(
             UserMessage(session_id=self.session.session_id, session_epoch=self.session.session_epoch, message="Work on this")
         )
         await self.bridge.controls.send_pause_current_turn(self.thread, user)
@@ -242,7 +242,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Waiting on you", text)
 
     async def test_pause_tap_does_not_overwrite_ack_arriving_during_card_update(self) -> None:
-        await self.bridge.handle_user_message(
+        await self.bridge.status.handle_user_message(
             UserMessage(session_id=self.session.session_id, session_epoch=self.session.session_epoch, message="Work on this")
         )
         anchor = cast(int, self.session.control_message_id)

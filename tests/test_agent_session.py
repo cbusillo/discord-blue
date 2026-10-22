@@ -1832,7 +1832,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         control_message = FakeReplyMessage(910, thread, WAITING_FOR_DIRECTION)
         thread.add_message(control_message)
 
-        await bridge.handle_user_message(
+        await bridge.status.handle_user_message(
             protocol_module.UserMessage(
                 session_id="session-1",
                 session_epoch="epoch-1",
@@ -1864,7 +1864,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        await bridge.handle_session_status(
+        await bridge.status.handle_session_status(
             "turn_complete",
             SessionStatus(
                 session_id="session-1",
@@ -1900,7 +1900,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.bind_thread("session-1", 555)
         assistant_message = "```python\n" + "print('hello')\n" * 180 + "```"
 
-        await bridge.handle_session_status(
+        await bridge.status.handle_session_status(
             "turn_complete",
             SessionStatus(
                 session_id="session-1",
@@ -1934,7 +1934,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         fenced = "```\n| kept | as |\n|---|---|\n| raw | table |\n```"
         assistant_message = "\n".join(["| Field | Verdict | Action |", "|---|---|---|", *rows, "", fenced])
 
-        await bridge.handle_session_status(
+        await bridge.status.handle_session_status(
             "turn_complete",
             SessionStatus(
                 session_id="session-1",
@@ -2075,7 +2075,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        await bridge.handle_session_status(
+        await bridge.status.handle_session_status(
             "turn_complete",
             SessionStatus(
                 session_id="session-1",
@@ -2343,7 +2343,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         command_id = next(iter(session.pending_commands))
         session.active_command_id = command_id
 
-        await bridge.handle_session_status(
+        await bridge.status.handle_session_status(
             "turn_complete",
             SessionStatus(
                 session_id="session-1",
@@ -2393,7 +2393,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply_message.reactions, [controls_module.REACTION_REJECTED])
         self.assertEqual(len(session.rejected_command_messages), 1)
 
-        await bridge.handle_session_status(
+        await bridge.status.handle_session_status(
             "turn_complete",
             SessionStatus(
                 session_id="session-1",
@@ -2424,7 +2424,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        await bridge.handle_session_status(
+        await bridge.status.handle_session_status(
             "turn_complete",
             SessionStatus(
                 session_id="session-1",
@@ -2463,7 +2463,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         session.active_command_id = "cmd-1"
 
-        await bridge.handle_session_status(
+        await bridge.status.handle_session_status(
             "turn_complete",
             SessionStatus(
                 session_id="session-1",
@@ -2499,7 +2499,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         session.active_command_id = "cmd-1"
 
-        await bridge.handle_session_status(
+        await bridge.status.handle_session_status(
             "status_changed",
             SessionStatus(
                 session_id="session-1",
@@ -2528,7 +2528,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        await bridge.handle_session_status(
+        await bridge.status.handle_session_status(
             "turn_complete",
             SessionStatus(
                 session_id="session-1",
@@ -2578,7 +2578,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        await bridge.handle_session_status(
+        await bridge.status.handle_session_status(
             "turn_complete",
             SessionStatus(
                 session_id="session-1",
@@ -2620,7 +2620,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        await bridge.handle_session_status(
+        await bridge.status.handle_session_status(
             "turn_complete",
             SessionStatus(
                 session_id="session-1",
@@ -2984,7 +2984,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         session.active_command_id = "cmd-1"
 
-        await bridge.handle_session_status(
+        await bridge.status.handle_session_status(
             "status_changed",
             SessionStatus(
                 session_id="session-1",
@@ -3022,7 +3022,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        await bridge.handle_session_status(
+        await bridge.status.handle_session_status(
             "status_changed",
             SessionStatus(
                 session_id="session-1",
@@ -3055,7 +3055,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 bridge = AgentSessionBridge(FakeBot(Config(), thread))
                 session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
                 bridge.sessions.register(session)
-                await bridge.handle_session_status(
+                await bridge.status.handle_session_status(
                     "turn_complete",
                     protocol_module.SessionStatus(
                         session_id=session.session_id,
@@ -3125,7 +3125,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
                 bridge.sessions.register(session)
                 bridge.sessions.bind_thread("session-1", 555)
-                await bridge.handle_user_message(
+                await bridge.status.handle_user_message(
                     protocol_module.UserMessage(session_id="session-1", session_epoch="epoch-1", message=raw)
                 )
                 self.assertEqual(thread.sent_messages[0], format_user_message(expected))
@@ -3138,7 +3138,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
                 bridge.sessions.register(session)
                 bridge.sessions.bind_thread("session-1", 555)
-                await bridge.handle_user_message(
+                await bridge.status.handle_user_message(
                     protocol_module.UserMessage(session_id="session-1", session_epoch="epoch-1", message=raw)
                 )
                 self.assertEqual(thread.sent_messages, [])
@@ -3155,7 +3155,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge = AgentSessionBridge(FakeBot(Config(), thread))
         session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
         bridge.sessions.register(session)
-        await bridge.handle_user_message(
+        await bridge.status.handle_user_message(
             protocol_module.UserMessage(session_id=session.session_id, session_epoch=session.session_epoch, message=answer)
         )
         self.assertEqual(thread.sent_messages[0], format_user_message(answer))
@@ -3171,7 +3171,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge = AgentSessionBridge(FakeBot(Config(), thread))
         session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
         bridge.sessions.register(session)
-        await bridge.handle_user_message(
+        await bridge.status.handle_user_message(
             protocol_module.UserMessage(session_id=session.session_id, session_epoch=session.session_epoch, message=answer)
         )
         self.assertEqual(thread.sent_messages[0], format_user_message(answer))
@@ -3182,7 +3182,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge = AgentSessionBridge(FakeBot(Config(), thread))
         session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
         bridge.sessions.register(session)
-        await bridge.handle_user_message(
+        await bridge.status.handle_user_message(
             protocol_module.UserMessage(session_id=session.session_id, session_epoch=session.session_epoch, message=answer)
         )
         self.assertEqual(thread.sent_messages[0], format_user_message(answer))
@@ -3195,7 +3195,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge = AgentSessionBridge(FakeBot(Config(), thread))
         session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
         bridge.sessions.register(session)
-        await bridge.handle_user_message(
+        await bridge.status.handle_user_message(
             protocol_module.UserMessage(session_id=session.session_id, session_epoch=session.session_epoch, message=prompt)
         )
         self.assertEqual(thread.sent_messages[0], format_user_message("Continue."))
@@ -3206,7 +3206,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge = AgentSessionBridge(FakeBot(Config(), thread))
         session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
         bridge.sessions.register(session)
-        await bridge.handle_user_message(
+        await bridge.status.handle_user_message(
             protocol_module.UserMessage(session_id=session.session_id, session_epoch=session.session_epoch, message=raw)
         )
         self.assertEqual(thread.sent_messages[0], format_user_message("go"))
@@ -3217,7 +3217,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge = AgentSessionBridge(FakeBot(Config(), thread))
         session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
         bridge.sessions.register(session)
-        await bridge.handle_user_message(
+        await bridge.status.handle_user_message(
             protocol_module.UserMessage(session_id=session.session_id, session_epoch=session.session_epoch, message=raw)
         )
         self.assertEqual(thread.sent_messages[0], format_user_message("Agent message:\nReport:\n```text\nresults\n```\nNext step."))
@@ -3234,7 +3234,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        await bridge.handle_user_message(
+        await bridge.status.handle_user_message(
             protocol_module.UserMessage(
                 session_id="session-1",
                 session_epoch="epoch-1",
@@ -3273,7 +3273,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        await bridge.handle_user_message(
+        await bridge.status.handle_user_message(
             protocol_module.UserMessage(
                 session_id="session-1",
                 session_epoch="epoch-1",
@@ -3282,7 +3282,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         old_control_message = await thread.fetch_message(902)
 
-        await bridge.handle_session_status(
+        await bridge.status.handle_session_status(
             "turn_complete",
             SessionStatus(
                 session_id="session-1",
@@ -3319,7 +3319,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        await bridge.handle_session_status(
+        await bridge.status.handle_session_status(
             "status_changed",
             SessionStatus(
                 session_id="session-1",
@@ -3602,7 +3602,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(), thread_id=555)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
-        await bridge.handle_user_message(
+        await bridge.status.handle_user_message(
             protocol_module.UserMessage(session_id="session-1", session_epoch="epoch-1", message=pasted)
         )
         await bridge.post_thread_notice(555, pasted)
@@ -3621,7 +3621,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         fence = "`" * 300
         answer = f"{fence}text\n" + "\n".join(f"line {index:04d} " + "x" * 30 for index in range(70)) + f"\n{fence}"
 
-        await bridge.post_assistant_message(555, answer)
+        await bridge.status.post_assistant_message(555, answer)
 
         posted = list(thread.sent_messages)
         self.assertEqual(len(posted), 1)

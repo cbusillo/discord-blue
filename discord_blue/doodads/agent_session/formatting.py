@@ -7,6 +7,7 @@ recognised again when a thread's history is read back after a restart.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 WORD_JOINER = "\N{WORD JOINER}"
@@ -42,6 +43,56 @@ def mark_assistant_message(chunk: str) -> str:
 def format_user_message(message: str) -> str:
     # `>>>` quotes the rest of the message, so every line of a multi-line prompt stays inside one quote block.
     return f">>> {USER_MESSAGE_PREFIX}{message.strip()}"
+
+
+# Only complete harness envelopes at the start of a prose line are presentation markup.
+# Inline examples, indented code and arbitrary XML remain conversation text.
+INJECTED_BLOCK = re.compile(
+    r" {0,3}<(system-reminder|task-notification|agent-message|channel)(?=[\s>])[^<>]*>"
+    r"(?:([ \t]*\r?\n.*?)^ {0,3}</\1>|([^\r\n]*?)</\1>)",
+    re.MULTILINE | re.DOTALL,
+)
+CLIPPED_REMINDER = re.compile(r" {0,3}<system-reminder>[ \t]*\r?\n")
+TASK_METADATA = re.compile(r"<(task-id|tool-use-id|output-file|usage)>.*?(?:</\1>|\Z)", re.DOTALL)
+TASK_FIELDS = re.compile(r"</?(?:status|summary|note|event|result)>")
+
+
+def filter_injected_tags(text: str) -> str:
+    """Render envelopes from user-message input; assistant text already has known provenance."""
+
+    def render(block: re.Match[str]) -> str:
+        tag = block.group(1)
+        body = block.group(2) if block.group(2) is not None else block.group(3)
+        if tag == "system-reminder":
+            return ""
+        if tag == "task-notification":
+            body = TASK_FIELDS.sub("", TASK_METADATA.sub("", body)).strip()
+            return f"Task notification:\n{body}" if body else ""
+        if tag == "agent-message":
+            return f"Agent message:\n{body.strip()}"
+        return body.strip()
+
+    output: list[str] = []
+    fence = None
+    position = 0
+    while position < len(text):
+        if fence is None:
+            if envelope := INJECTED_BLOCK.match(text, position):
+                output.append(render(envelope))
+                position = envelope.end()
+                # Envelope bodies are independent text, so their fences cannot hide later envelopes.
+                continue
+            if CLIPPED_REMINDER.match(text, position) and (
+                position == 0 or text.endswith("\n[Truncated; see the Claude Code terminal.]")
+            ):
+                break  # A standalone reminder or the client's explicitly clipped reminder tail.
+        newline = text.find("\n", position)
+        end = len(text) if newline == -1 else newline + 1
+        line = text[position:end]
+        fence = advance_code_fence(line.rstrip("\r\n"), fence)
+        output.append(line)
+        position = end
+    return "".join(output).strip()
 
 
 @dataclass(frozen=True, slots=True)
