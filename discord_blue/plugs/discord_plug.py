@@ -99,7 +99,10 @@ class BlueBot(commands.Bot):
     async def setup_hook(self) -> None:
         await self.load_extension("discord_blue.doodads._doodad_setup")
         for doodad in self.config.discord.loaded_doodads:
-            await self.load_extension(f"discord_blue.doodads.{doodad}")
+            try:
+                await self.load_extension(f"discord_blue.doodads.{doodad}")
+            except commands.ExtensionNotFound:
+                logger.warning("Skipping doodad %r from discord.loaded_doodads: no such module", doodad)
 
     async def on_ready(self) -> None:
         if self.user:
