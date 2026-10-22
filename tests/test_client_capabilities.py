@@ -17,6 +17,8 @@ from unittest.mock import AsyncMock, patch
 from aiohttp import WSMsgType
 
 from discord_blue.doodads.agent_session import bridge as bridge_module
+from discord_blue.doodads.agent_session import controls as controls_module
+from discord_blue.doodads.agent_session.controls import SessionControls
 from discord_blue.doodads.agent_session.protocol import REMOTE_ACTIONS, RemoteApprovalRequest, RemoteRequestUserInput, SessionHello
 from discord_blue.doodads.agent_session.sessions import PendingRemoteApproval
 from tests.fakes_agent_prompts import PromptFixture, prompt_fixture
@@ -53,22 +55,22 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_empty_capabilities_gate_every_command_without_queue_or_reactions(self) -> None:
         self.restrict()
         senders: tuple[Callable[[object, discord.User | discord.Member], Awaitable[str]], ...] = (
-            self.bridge.send_continue_autonomously,
-            self.bridge.send_pause_current_turn,
-            self.bridge.send_new_session,
-            self.bridge.send_end_session,
+            self.bridge.controls.send_continue_autonomously,
+            self.bridge.controls.send_pause_current_turn,
+            self.bridge.controls.send_new_session,
+            self.bridge.controls.send_end_session,
         )
         for send in senders:
             self.assertIn("does not support", await send(self.thread, self.user))
         message = FakeReplyMessage(2000, self.thread, "please continue")
         self.thread.add_message(message)
-        self.assertTrue(await self.bridge.send_thread_reply(cast(Any, message)))
+        self.assertTrue(await self.bridge.controls.send_thread_reply(cast(Any, message)))
         self.assertIn("does not support", message.replies[0])
         self.assertEqual(message.reactions, [])
         self.assertIsNone(self.session.control_message_id)
         self.assertEqual(self.socket.sent_json, [])
         self.assertEqual(self.session.pending_commands, {})
-        self.assertIn("online", self.bridge.session_status_summary(self.thread, self.user))
+        self.assertIn("online", self.bridge.controls.session_status_summary(self.thread, self.user))
 
     async def test_stale_input_and_approval_controls_cannot_bypass_empty_capabilities(self) -> None:
         view = await self.fixture.prompt()
@@ -126,12 +128,12 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
         control = FakeReplyMessage(950, self.thread)
         self.thread.add_message(control)
         self.session.control_message_id = control.id
-        await self.bridge.handle_session_control_reaction(
+        await self.bridge.controls.handle_session_control_reaction(
             self.session, cast(discord.Thread, self.thread), control.id, "⏹️", self.user
         )
         self.assertIsNone(self.session.pending_control_confirmation)
         self.session.pending_control_confirmation = "end_session"
-        await self.bridge.handle_pending_control_confirmation(
+        await self.bridge.controls.handle_pending_control_confirmation(
             self.session, cast(discord.Thread, self.thread), control.id, "✅", self.user
         )
         self.assertEqual(self.socket.sent_json, [])
@@ -139,16 +141,20 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("⏳", control.reactions)
 
     def test_capabilities_filter_actions_preserve_local_status_and_status_indicator(self) -> None:
-        self.assertEqual(self.bridge.session_control_reactions(self.session), ["▶️", bridge_module.REACTION_CONTROL_STATUS, "⏹️"])
+        self.assertEqual(
+            self.bridge.controls.session_control_reactions(self.session), ["▶️", controls_module.REACTION_CONTROL_STATUS, "⏹️"]
+        )
         self.restrict("reply", "status_request", "pause_current_turn", "end_session")
-        self.assertEqual(self.bridge.session_control_reactions(self.session), [bridge_module.REACTION_CONTROL_STATUS, "⏹️"])
+        self.assertEqual(
+            self.bridge.controls.session_control_reactions(self.session), [controls_module.REACTION_CONTROL_STATUS, "⏹️"]
+        )
         self.session.control_status_reaction = "🔄"
         self.session.control_interruptions_enabled = True
-        self.assertEqual(self.bridge.session_control_reactions(self.session), ["🔄", "⏸️", "⏹️"])
+        self.assertEqual(self.bridge.controls.session_control_reactions(self.session), ["🔄", "⏸️", "⏹️"])
         self.restrict()
-        self.assertEqual(self.bridge.session_control_reactions(self.session), ["🔄"])
+        self.assertEqual(self.bridge.controls.session_control_reactions(self.session), ["🔄"])
         self.session.control_status_reaction = None
-        self.assertEqual(self.bridge.session_control_reactions(self.session), [bridge_module.REACTION_CONTROL_STATUS])
+        self.assertEqual(self.bridge.controls.session_control_reactions(self.session), [controls_module.REACTION_CONTROL_STATUS])
 
     async def test_input_send_failure_clears_reservation_and_reports_delivery_uncertainty(self) -> None:
         view = await self.fixture.prompt()
@@ -185,11 +191,11 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.restrict("reply", "status_request", "pause_current_turn", "end_session")
         message = FakeReplyMessage(2100, self.thread, "hello")
         self.thread.add_message(message)
-        await self.bridge.send_thread_reply(cast(Any, message))
-        await self.bridge.send_pause_current_turn(self.thread, self.user)
-        await self.bridge.send_end_session(self.thread, self.user)
-        self.assertIn("does not support", await self.bridge.send_new_session(self.thread, self.user))
-        self.assertIn("does not support", await self.bridge.send_continue_autonomously(self.thread, self.user))
+        await self.bridge.controls.send_thread_reply(cast(Any, message))
+        await self.bridge.controls.send_pause_current_turn(self.thread, self.user)
+        await self.bridge.controls.send_end_session(self.thread, self.user)
+        self.assertIn("does not support", await self.bridge.controls.send_new_session(self.thread, self.user))
+        self.assertIn("does not support", await self.bridge.controls.send_continue_autonomously(self.thread, self.user))
         self.assertEqual([item["kind"] for item in self.socket.sent_json], ["reply", "pause_current_turn", "end_session"])
 
     async def test_every_failure_unwinds_input_and_approval_reservations(self) -> None:
@@ -227,7 +233,7 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
                 self.socket.closed = False
                 message = FakeReplyMessage(2100, self.thread, "hello")
                 self.thread.add_message(message)
-                original = self.bridge.show_active_session_controls
+                original = self.bridge.controls.show_active_session_controls
 
                 async def prepare(
                     session: AgentSession,
@@ -244,9 +250,9 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         raise RuntimeError("unexpected preparation failure")
 
-                with patch.object(self.bridge, "show_active_session_controls", new=prepare):
+                with patch.object(self.bridge.controls, "show_active_session_controls", new=prepare):
                     try:
-                        await self.bridge.send_thread_reply(cast(Any, message))
+                        await self.bridge.controls.send_thread_reply(cast(Any, message))
                     except RuntimeError:
                         self.assertEqual(failure_kind, "runtime")
                 self.assertEqual(self.session.pending_commands, {})
@@ -257,9 +263,10 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("Discord could not prepare", message.replies[0])
 
     def test_outbound_wire_sends_have_one_command_and_one_approval_dispatch_gate(self) -> None:
-        tree = ast.parse(textwrap.dedent(inspect.getsource(bridge_module.AgentSessionBridge)))
+        trees = [ast.parse(textwrap.dedent(inspect.getsource(cls))) for cls in (bridge_module.AgentSessionBridge, SessionControls)]
         senders = {
             node.name
+            for tree in trees
             for node in ast.walk(tree)
             if isinstance(node, ast.AsyncFunctionDef)
             and any(
@@ -298,8 +305,8 @@ class CapabilityTransportTests(unittest.IsolatedAsyncioTestCase):
             await old.receive_json(timeout=2)
             prior = bridge.sessions.get("cleanup-session")
             assert prior is not None
-            await bridge.post_session_controls(prior)
-            self.assertIn("▶️", bridge.session_control_reactions(prior))
+            await bridge.controls.post_session_controls(prior)
+            self.assertIn("▶️", bridge.controls.session_control_reactions(prior))
             current = await client.ws_connect(
                 bridge_module.AGENT_SESSION_CONNECT_PATH, headers={"Authorization": "Bearer cleanup-transport-test"}
             )
@@ -307,10 +314,10 @@ class CapabilityTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await current.receive_json(timeout=2))["capabilities"], [])
             attached = bridge.sessions.get("cleanup-session")
             assert attached is not None
-            await bridge.post_session_controls(attached)
-            self.assertEqual(bridge.session_control_reactions(attached), [bridge_module.REACTION_CONTROL_STATUS])
-            self.assertIn("offline", cast(str, bridge.dispatch_error(prior, "reply")))
-            response = await bridge.send_continue_autonomously(thread, cast(discord.User, FakeInteraction(thread).user))
+            await bridge.controls.post_session_controls(attached)
+            self.assertEqual(bridge.controls.session_control_reactions(attached), [controls_module.REACTION_CONTROL_STATUS])
+            self.assertIn("offline", cast(str, bridge.controls.dispatch_error(prior, "reply")))
+            response = await bridge.controls.send_continue_autonomously(thread, cast(discord.User, FakeInteraction(thread).user))
             self.assertIn("does not support", response)
             self.assertEqual(attached.pending_commands, {})
             await old.close()
