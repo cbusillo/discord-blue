@@ -7,7 +7,6 @@ import logging
 import re
 import time
 import weakref
-from collections import Counter
 from contextlib import suppress
 from functools import partial
 from datetime import UTC, datetime, timedelta
@@ -16,11 +15,9 @@ from pathlib import Path
 import discord
 from aiohttp import WSMsgType, web
 
-from discord_blue.doodads.agent_session.cards import ANSWER_CARD_COMPONENT_ID
 from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
 from discord_blue.doodads.agent_session.formatting import advance_code_fence
 from discord_blue.doodads.agent_session.formatting import format_user_message
-from discord_blue.doodads.agent_session.formatting import is_assistant_message
 from discord_blue.doodads.agent_session.messages import send_agent_session_message
 from discord_blue.doodads.agent_session.messages import send_assistant_message
 from discord_blue.doodads.agent_session.protocol import (
@@ -35,16 +32,14 @@ from discord_blue.doodads.agent_session.sessions import (
     AgentSession,
     AgentSessionRegistry,
 )
-from discord_blue.doodads.agent_session import threads as threads_module
 from discord_blue.doodads.agent_session.cleanup import (
     MAINTENANCE_DISCOVERY_TIMEOUT_SECONDS,
-    PENDING_CLEANUP_MAX_ATTEMPTS,
     SESSION_FINALIZATION_TIMEOUT_SECONDS,
     SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS,
     SESSION_THREAD_CLEANUP_TIMEOUT_SECONDS,
-    THREAD_CLOSE_WAIT_SECONDS,
     SessionCleanups,
 )
+from discord_blue.doodads.agent_session.session_threads import SessionThreads
 from discord_blue.doodads.agent_session.controls import (
     REACTION_COMPACTING,
     REACTION_FINISHED,
@@ -58,12 +53,8 @@ from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
 from discord_blue.doodads.agent_session.store import SessionState, SessionStore, StoredSession
 from discord_blue.doodads.agent_session.thread_worker import RenameTarget, ThreadWorkers
 from discord_blue.doodads.agent_session.threads import SessionThread
-from discord_blue.doodads.agent_session.threads import SESSION_NOTIFICATION_PREFIXES, SESSION_START_PREFIX
 from discord_blue.doodads.agent_session.threads import auto_join_configured_users
-from discord_blue.doodads.agent_session.threads import ThreadCreationStopped, create_session_thread
-from discord_blue.doodads.agent_session.threads import creation_token_suffix
-from discord_blue.doodads.agent_session.threads import new_creation_token
-from discord_blue.doodads.agent_session.threads import session_notification_message
+from discord_blue.doodads.agent_session.threads import ThreadCreationStopped
 from discord_blue.doodads.agent_session.threads import distinct_thread_name
 from discord_blue.doodads.agent_session.threads import session_start_message
 from discord_blue.health import health_payload
@@ -127,9 +118,6 @@ SESSION_STORE_WAIT_TIMEOUT_SECONDS = 1
 SESSION_ENDED_NOTICE = "Session ended"
 
 STARTUP_RECONNECT_GRACE_SECONDS = 20
-# Before giving up on an incomplete discovery (a failed read or listing page), refresh it again after these waits.
-DISCOVERY_RETRY_DELAYS_SECONDS = (0.5, 1.0, 2.0, 4.0)
-DISCORD_UNKNOWN_CHANNEL = 10003
 # After a start, sessions from before it reconnect over this long, and until they do nothing marks their threads as
 # theirs, so the maintenance sweeps leave unbound threads and notifications alone for this long.
 STARTUP_SWEEP_HOLD_SECONDS = 600
@@ -141,26 +129,6 @@ SHUTDOWN_ATTACH_SETTLE_SECONDS = 10
 SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS = SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS + SESSION_THREAD_CLEANUP_TIMEOUT_SECONDS
 
 AGENT_SESSION_CONNECT_PATH = "/agent-session/connect"
-
-
-class DiscoveryIncomplete(discord.DiscordException):
-    """Discovery could not read every candidate, so it cannot say the session has no thread; nothing is created."""
-
-
-class CandidateGone(Exception):
-    """The thread discovery chose no longer exists on Discord."""
-
-    def __init__(self, thread_id: int) -> None:
-        super().__init__(thread_id)
-        self.thread_id = thread_id
-
-
-@dataclasses.dataclass(slots=True)
-class CreationCheck:
-    created_id: int
-    parent_id: int | None
-    guild: discord.Guild
-    attempts: int = 0
 
 
 HELLO_PENDING_INTERVAL_SECONDS = 15
@@ -185,20 +153,16 @@ class AgentSessionBridge:
         self._heartbeat_task: asyncio.Task[None] | None = None
         # One FIFO admission queue for attaches, including creation; a rate-limited create keeps its slot.
         self._session_attach_lock = asyncio.Lock()
-        self._creation_stopping = asyncio.Event()
         self._grace_tasks: set[asyncio.Task[None]] = set()
         # Every change to a session thread (reopen, join, members, notice, archive, leave, rename) goes through its
         # worker, one request at a time and never cancelled.
         self.threads = ThreadWorkers.for_client(bot, self)
         self.discovery = DiscoveryIndex(self.bot_user_id)
-        # Creations whose duplicate check could not finish, by token; maintenance retries them.
-        self._creation_checks: dict[str, CreationCheck] = {}
         # No await occurs while resolving the entry, so one event loop turn
         # cannot create two locks for the same session ID.
         self._session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self.cleanups = SessionCleanups(self, self._session_attach_lock)
-        # Threads an attach is reopening and has not bound yet; no close may touch them meanwhile.
-        self._attaching_threads: Counter[int] = Counter()
+        self.session_threads = SessionThreads(self)
         # One attach per session ID; a reconnecting socket joins the one already running instead of starting over.
         self._attach_tasks: dict[str, asyncio.Task[SessionThread]] = {}
         # Each attached thread as the attach resolved it, for handlers while discord.py's cache lacks it.
@@ -389,7 +353,7 @@ class AgentSessionBridge:
         if self._runner is None:
             return
         self._stopping = True
-        self._creation_stopping.set()
+        self.session_threads.creation_stopping.set()
         for task in list(self._grace_tasks):
             task.cancel()
         await self.stop_background_task("maintenance", self._cleanup_task)
@@ -554,7 +518,7 @@ class AgentSessionBridge:
                 self.store.retry_failed_write()
                 await self.cleanups.recover_stored_cleanups()
                 await self.cleanups.retry_pending_cleanups()
-                await self.retry_creation_checks()
+                await self.session_threads.retry_creation_checks()
                 if time.monotonic() - self._monitor_started_at >= STARTUP_SWEEP_HOLD_SECONDS:
                     await self.cleanups.cleanup_stale_session_notifications()
                     await self.cleanups.cleanup_stale_session_threads()
@@ -821,9 +785,9 @@ class AgentSessionBridge:
             try:
                 if self._stopping:
                     raise BridgeStopping
-                session_thread = await self.resume_thread_in_grace(previous, hello) or await self.find_or_create_session_thread(
-                    hello
-                )
+                session_thread = await self.resume_thread_in_grace(
+                    previous, hello
+                ) or await self.session_threads.find_or_create_session_thread(hello)
             except (discord.DiscordException, ValueError, ThreadCreationStopped) as exc:
                 if not isinstance(exc, ThreadCreationStopped):
                     logger.warning(
@@ -857,7 +821,7 @@ class AgentSessionBridge:
                     self.store.error = exc
                     logger.warning("Agent session %s attached without a durable recovery record", session_id)
             try:
-                await self.backfill_latest_assistant_message(session_thread.thread, hello)
+                await self.session_threads.backfill_latest_assistant_message(session_thread.thread, hello)
             except Exception:
                 # Only the thread's history is short; the session is attached all the same.
                 logger.warning("Unable to backfill Agent session thread %s", session_thread.thread.id, exc_info=True)
@@ -946,394 +910,6 @@ class AgentSessionBridge:
         thread = cached if isinstance(cached, discord.Thread) else thread
         self.sessions.bind_thread(hello.session_id, thread.id, previous.notification_message_id)
         return SessionThread(thread=thread, notification_message_id=previous.notification_message_id)
-
-    async def find_or_create_session_thread(self, hello: SessionHello) -> SessionThread:
-        try:
-            return await self.find_or_create_session_thread_once(hello)
-        except CandidateGone as gone:
-            # The thread discovery found was deleted meanwhile (a cached listing still named it): forget it and
-            # resolve again, which creates a replacement if the session has no other thread.
-            self.discovery.forget(gone.thread_id)
-            return await self.find_or_create_session_thread_once(hello)
-
-    def forget_stored_hint(self, session_id: str, record: StoredSession) -> None:
-        if self.store.records.get(session_id) is record:
-            self.store.forget(session_id)
-
-    async def validated_stored_thread(self, session_id: str, record: StoredSession) -> discord.Thread | None:
-        try:
-            thread = await self.bot.fetch_channel(record.thread_id)
-        except discord.Forbidden:
-            # Definite lost access makes this hint unusable. Discovery already skips forbidden candidates.
-            self.forget_stored_hint(session_id, record)
-            self.discovery.forget(record.thread_id)
-            return None
-        except discord.NotFound:
-            self.forget_stored_hint(session_id, record)
-            self.discovery.forget(record.thread_id)
-            return None
-        # Other Discord failures remain failures, not evidence permitting a duplicate creation.
-        parent_id = self.bot.config.agent_session.channel_id or self.bot.config.discord.bot_channel_id
-        if not isinstance(thread, discord.Thread) or thread.parent_id != parent_id or thread.owner_id != self.bot_user_id():
-            self.forget_stored_hint(session_id, record)
-            return None
-        opening = [
-            message.content
-            async for message in thread.history(limit=10, oldest_first=True)
-            if message.author.id == self.bot_user_id()
-        ]
-        expected = self.session_start_without_pid(record.marker)
-        if expected is None or not any(self.session_start_without_pid(message) == expected for message in opening):
-            self.forget_stored_hint(session_id, record)
-            return None
-        return thread
-
-    async def resume_stored_thread(self, hello: SessionHello) -> SessionThread | None:
-        record = self.store.records.get(hello.session_id)
-        if record is None:
-            return None
-        expected = self.session_start_without_pid(session_start_message(hello))
-        if self.session_start_without_pid(record.marker) != expected:
-            return None  # Retain the stored marker's session identity and metadata; PID changes are tolerated.
-        mapped = self.sessions.by_thread.get(record.thread_id)
-        if mapped is not None and mapped != hello.session_id:
-            return None
-        thread = await self.validated_stored_thread(hello.session_id, record)
-        if thread is None:
-            return None
-        self._attaching_threads[thread.id] += 1
-        try:
-            if thread.archived or thread.locked or self.threads.closing(thread.id) or record.status in {"closing", "closed"}:
-                thread = await self.threads.open(thread)
-            notification_id = record.notification_id
-            try:
-                channel = await threads_module.get_agent_session_channel(self.bot)
-                if notification_id is not None:
-                    try:
-                        notification = await channel.fetch_message(notification_id)
-                        if (
-                            notification.author.id != self.bot_user_id()
-                            or threads_module.notification_thread_id(notification.content) != thread.id
-                            or self.cleanups.notification_going(notification_id)
-                        ):
-                            notification_id = None
-                    except discord.NotFound:
-                        notification_id = None
-                if notification_id is None:
-                    notification = await send_agent_session_message(channel, session_notification_message(hello, thread))
-                    notification_id = notification.id
-            except (discord.DiscordException, ValueError):
-                logger.warning("Unable to refresh Agent session notification for thread %s; attaching anyway", thread.id)
-            self.sessions.bind_thread(hello.session_id, thread.id, notification_id)
-            logger.info("Recovered Agent session %s from store in thread %s", hello.session_id, thread.id)
-            return SessionThread(thread=thread, notification_message_id=notification_id)
-        finally:
-            self._attaching_threads[thread.id] -= 1
-            if self._attaching_threads[thread.id] <= 0:
-                del self._attaching_threads[thread.id]
-
-    async def find_or_create_session_thread_once(self, hello: SessionHello) -> SessionThread:
-        if stored := await self.resume_stored_thread(hello):
-            return stored
-        thread = await self.find_existing_session_thread(hello)
-        if thread is None:
-            token = new_creation_token()
-            session_thread = await create_session_thread(
-                self.bot,
-                hello,
-                token=token,
-                settle=partial(self.delete_creation_duplicates, token),
-                stopping=self._creation_stopping,
-            )
-            self.discovery.add(session_thread.thread, [session_start_message(hello)])
-            self.sessions.bind_thread(
-                hello.session_id,
-                session_thread.thread.id,
-                session_thread.notification_message_id,
-            )
-            return session_thread
-
-        mapped_session_id = self.sessions.by_thread.get(thread.id)
-        if mapped_session_id is not None and mapped_session_id != hello.session_id:
-            raise ValueError(f"Agent session thread {thread.id} is already attached")
-        # The thread's worker reopens it after any close request of its last session has landed, never before. From
-        # here until it is bound, the thread counts as owned, so a close that is already under way stops.
-        self._attaching_threads[thread.id] += 1
-        try:
-            try:
-                thread = await self.threads.open(thread)
-            except discord.NotFound as exc:
-                if exc.code == DISCORD_UNKNOWN_CHANNEL:
-                    raise CandidateGone(thread.id) from exc
-                raise
-            notification_message_id = await self.ensure_session_notification(hello, thread)
-            self.sessions.bind_thread(hello.session_id, thread.id, notification_message_id)
-        finally:
-            self._attaching_threads[thread.id] -= 1
-            if self._attaching_threads[thread.id] <= 0:
-                del self._attaching_threads[thread.id]
-        return SessionThread(thread=thread, notification_message_id=notification_message_id)
-
-    async def delete_creation_duplicates(self, token: str, created: discord.Thread) -> None:
-        """Close other threads of this creation: discord.py retries a create that failed with a 5xx, and Discord may
-        have made the first one anyway. Runs before anything is posted, so a duplicate is still empty. If the check
-        cannot finish now, maintenance retries it."""
-        try:
-            done = await self.check_creation_duplicates(token, created.id, created.parent_id, created.guild)
-        except Exception:
-            logger.warning("Unable to check for duplicate Agent session threads of %s", created.id, exc_info=True)
-            done = False
-        if not done:
-            self._creation_checks[token] = CreationCheck(created.id, created.parent_id, created.guild)
-
-    async def check_creation_duplicates(self, token: str, created_id: int, parent_id: int | None, guild: discord.Guild) -> bool:
-        """True once every duplicate is archived and locked; False if listing or an archive failed, to retry later.
-
-        A duplicate is archived rather than deleted: the checks below cannot rule out that someone posts in it
-        before the request lands, and an archive can be undone.
-        """
-        suffix = creation_token_suffix(token)
-        bot_user_id = self.bot_user_id()
-        try:
-            active = await guild.active_threads()
-        except Exception:
-            logger.warning("Unable to check for duplicate Agent session threads of %s", created_id, exc_info=True)
-            return False
-        done = True
-        for thread in active:
-            # Only an empty thread the bot itself created under the same parent, carrying this creation's token: a
-            # name alone can be copied, but not ownership, and a session thread has at least its marker.
-            if (
-                thread.id == created_id
-                or thread.parent_id != parent_id
-                or thread.owner_id != bot_user_id
-                or thread.message_count
-                or not (thread.name or "").endswith(suffix)
-                or thread.id in self.sessions.by_thread
-            ):
-                continue
-            remaining = await self.threads.close(thread, {"archive", "leave"}, timeout=THREAD_CLOSE_WAIT_SECONDS)
-            if "archive" in remaining:
-                logger.warning("Unable to archive duplicate Agent session thread %s yet", thread.id)
-                done = False
-            else:
-                logger.info("Archived duplicate Agent session thread %s of %s", thread.id, created_id)
-        return done
-
-    async def retry_creation_checks(self) -> None:
-        for token, check in list(self._creation_checks.items()):
-            self.record_maintenance_progress()
-            check.attempts += 1
-            try:
-                done = await self.check_creation_duplicates(token, check.created_id, check.parent_id, check.guild)
-            except Exception:
-                logger.warning("Unable to check for duplicate Agent session threads of %s", check.created_id, exc_info=True)
-                done = False
-            if done:
-                self._creation_checks.pop(token, None)
-            elif check.attempts >= PENDING_CLEANUP_MAX_ATTEMPTS:
-                self._creation_checks.pop(token, None)
-                logger.warning("Giving up on duplicate Agent session threads of %s", check.created_id)
-
-    async def ensure_session_notification(self, hello: SessionHello, thread: discord.Thread) -> int | None:
-        existing_message_id = await self.find_session_notification_for_thread(thread.id)
-        if existing_message_id is not None:
-            return existing_message_id
-        try:
-            channel = await threads_module.get_agent_session_channel(self.bot)
-            message = await send_agent_session_message(channel, session_notification_message(hello, thread))
-        except (discord.DiscordException, ValueError):
-            logger.warning("Unable to create Agent session notification for thread %s", thread.id)
-            return None
-        return message.id
-
-    async def find_session_notification_for_thread(self, thread_id: int) -> int | None:
-        try:
-            channel = await threads_module.get_agent_session_channel(self.bot)
-        except ValueError:
-            return None
-        bot_user = self.bot.user
-        if bot_user is None:
-            return None
-        try:
-            async for message in channel.history(limit=None):
-                if message.author.id != bot_user.id:
-                    continue
-                if not message.content.startswith(SESSION_NOTIFICATION_PREFIXES):
-                    continue
-                if self.cleanups.notification_going(message.id):
-                    continue  # Going away: the attach posts a new one instead.
-                if threads_module.notification_thread_id(message.content) == thread_id:
-                    return message.id
-        except discord.DiscordException:
-            logger.warning("Unable to scan Agent session notifications for thread %s", thread_id)
-        return None
-
-    async def find_existing_session_thread(self, hello: SessionHello) -> discord.Thread | None:
-        """The session's thread from the shared discovery index; None only when a complete index has no match.
-
-        An incomplete index (a listing page or a candidate's read failed) is refreshed a few times; if it stays
-        incomplete the attach fails with DiscoveryIncomplete rather than creating a second thread.
-        """
-        try:
-            channel = await threads_module.get_agent_session_channel(self.bot)
-        except ValueError:
-            logger.warning("Unable to find reusable Agent session thread: channel is unavailable")
-            return None
-        for attempt, delay in enumerate((0.0, *DISCOVERY_RETRY_DELAYS_SECONDS)):
-            if delay:
-                await asyncio.sleep(delay)
-            await self.discovery.fresh(channel, force=attempt > 0)
-            if self.discovery.complete:
-                return await self.match_session_thread(hello, complete=True)
-        # Still incomplete: an exact match is still this session's thread (the best of those read), but neither a
-        # pid-relaxed match nor "no match" can be trusted, since an unread thread might be the better or only one.
-        thread = await self.match_session_thread(hello, complete=False)
-        if thread is not None:
-            return thread
-        raise DiscoveryIncomplete(f"Agent session discovery stayed incomplete for session {hello.session_id}")
-
-    async def match_session_thread(self, hello: SessionHello, *, complete: bool) -> discord.Thread | None:
-        expected_starts = self.expected_session_start_messages(hello)
-        expected_starts_without_pid = self.session_start_messages_without_pid(expected_starts)
-        matches: list[discord.Thread] = []
-        pid_relaxed_matches: list[discord.Thread] = []
-        skipped_mapped = 0
-        entries = self.discovery.entries()
-        for entry in entries:
-            mapped_session_id = self.sessions.by_thread.get(entry.thread.id)
-            if mapped_session_id is not None and mapped_session_id != hello.session_id:
-                skipped_mapped += 1
-                continue
-            opening = entry.opening or []
-            if any(message in expected_starts for message in opening):
-                matches.append(entry.thread)
-            elif expected_starts_without_pid and any(
-                self.session_start_without_pid(message) in expected_starts_without_pid for message in opening
-            ):
-                pid_relaxed_matches.append(entry.thread)
-        if not complete:
-            pid_relaxed_matches = []
-        if len(matches) == 1:
-            return matches[0]
-        if matches:
-            # Rare (an earlier duplicate): the thread with the most conversation wins, as before.
-            scored_threads = [(await self.score_session_thread(thread), thread) for thread in matches]
-            _, thread = max(scored_threads, key=lambda pair: pair[0])
-            return thread
-        if len(pid_relaxed_matches) == 1:
-            thread = pid_relaxed_matches[0]
-            logger.info(
-                "Reusing Agent session thread %s despite pid mismatch for cwd=%s branch=%s host=%s",
-                thread.id,
-                hello.cwd,
-                hello.branch or "unknown",
-                hello.host_label,
-            )
-            return thread
-        if pid_relaxed_matches:
-            logger.warning(
-                "Not reusing Agent session thread for cwd=%s branch=%s host=%s because %s pid-relaxed candidates matched",
-                hello.cwd,
-                hello.branch or "unknown",
-                hello.host_label,
-                len(pid_relaxed_matches),
-            )
-        elif complete:
-            logger.info(
-                "No reusable Agent session thread found for cwd=%s branch=%s host=%s pid=%s "
-                "after checking %s candidate(s), skipped_mapped=%s",
-                hello.cwd,
-                hello.branch or "unknown",
-                hello.host_label,
-                hello.pid,
-                len(entries),
-                skipped_mapped,
-            )
-        return None
-
-    @staticmethod
-    def expected_session_start_messages(hello: SessionHello) -> set[str]:
-        expected = session_start_message(hello)
-        starts = {expected, AgentSessionBridge.legacy_session_start_without_session(expected)}
-        if hello.host_label == "Agent":
-            starts.add(expected.replace("\nhost: Agent\n", "\nhost: Agent session\n"))
-            starts.add(
-                AgentSessionBridge.legacy_session_start_without_session(expected).replace(
-                    "\nhost: Agent\n", "\nhost: Agent session\n"
-                )
-            )
-        return starts
-
-    @staticmethod
-    def legacy_session_start_without_session(content: str) -> str:
-        return re.sub(r"\nsession: `[^`]+`\n", "\n", content, count=1)
-
-    @staticmethod
-    def session_start_messages_without_pid(starts: set[str]) -> set[str]:
-        return {start_without_pid for start in starts if (start_without_pid := AgentSessionBridge.session_start_without_pid(start))}
-
-    @staticmethod
-    def session_start_without_pid(content: str) -> str | None:
-        lines = content.splitlines()
-        if not lines or lines[0] != SESSION_START_PREFIX:
-            return None
-        if not any(line.startswith("session: `") for line in lines):
-            return None
-        if not lines[-1].startswith("pid: `"):
-            return None
-        return "\n".join(lines[:-1])
-
-    async def score_session_thread(self, thread: discord.Thread) -> tuple[int, int, int]:
-        assistant_messages = 0
-        messages = 0
-        try:
-            async for message in thread.history(limit=50):
-                messages += 1
-                if self.is_bot_assistant_message(message):
-                    assistant_messages += 1
-        except discord.DiscordException:
-            logger.warning("Unable to score Agent session thread %s", thread.id)
-        return assistant_messages, messages, thread.id
-
-    async def backfill_latest_assistant_message(
-        self,
-        thread: discord.Thread,
-        hello: SessionHello,
-    ) -> None:
-        if await self.thread_has_assistant_message(thread):
-            return
-        assistant_message = hello.assistant_message
-        if assistant_message is None:
-            return
-        await send_assistant_message(thread, assistant_message)
-
-    def is_bot_assistant_message(self, message: discord.Message) -> bool:
-        bot_user = self.bot.user
-        if bot_user is None or message.author.id != bot_user.id:
-            return False
-        if is_assistant_message(message.content):
-            return True
-        if any(
-            isinstance(component, discord.Container) and component.id == ANSWER_CARD_COMPONENT_ID for component in message.components
-        ):
-            return True
-        # Also recognize marked cards from before the explicit component ID.
-        return any(
-            isinstance(child, discord.TextDisplay) and is_assistant_message(child.content)
-            for component in message.components
-            if isinstance(component, discord.Container)
-            for child in component.children
-        )
-
-    async def thread_has_assistant_message(self, thread: discord.Thread) -> bool:
-        try:
-            async for message in thread.history(limit=50):
-                if self.is_bot_assistant_message(message):
-                    return True
-        except discord.DiscordException:
-            logger.warning("Unable to inspect Agent session assistant history %s", thread.id)
-        return False
 
     async def handle_thread_reaction(
         self,
@@ -1487,7 +1063,7 @@ class AgentSessionBridge:
 
     def owned(self, thread_id: int) -> bool:
         return (
-            thread_id in self._attaching_threads
+            self.session_threads.binding(thread_id)
             or self.sessions.get_by_thread(thread_id) is not None
             or self.stored_thread_protected(thread_id)
         )

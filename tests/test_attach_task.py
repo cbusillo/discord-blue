@@ -90,14 +90,14 @@ class AttachTaskTests(unittest.IsolatedAsyncioTestCase):
         thread = fake.add_thread("late-joiner", marker=marker(hello))
         async with scenario(fake) as running, aiohttp.ClientSession() as http:
             backfilling, release = asyncio.Event(), asyncio.Event()
-            original = running.bridge.backfill_latest_assistant_message
+            original = running.bridge.session_threads.backfill_latest_assistant_message
 
             async def slow_backfill(*args: object) -> None:
                 backfilling.set()
                 await release.wait()
                 await original(*args)  # type: ignore[arg-type]
 
-            with patch.object(running.bridge, "backfill_latest_assistant_message", new=slow_backfill):
+            with patch.object(running.bridge.session_threads, "backfill_latest_assistant_message", new=slow_backfill):
                 first = await running.connect(http)
                 await first.send_json(hello)
                 await asyncio.wait_for(backfilling.wait(), timeout=5)  # Bound to the first connection by now.
@@ -134,7 +134,9 @@ class AttachTaskTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.5)  # The old session's grace runs out meanwhile.
                 with (
                     patch.object(running.bridge, "resume_thread_in_grace", new=AsyncMock(return_value=None)),
-                    patch.object(running.bridge, "find_or_create_session_thread", new=AsyncMock(side_effect=refused)),
+                    patch.object(
+                        running.bridge.session_threads, "find_or_create_session_thread", new=AsyncMock(side_effect=refused)
+                    ),
                 ):
                     running.bridge._session_attach_lock.release()
                     answer = await second.receive(timeout=10)
@@ -157,7 +159,7 @@ class AttachTaskTests(unittest.IsolatedAsyncioTestCase):
                 await release.wait()
                 raise refused
 
-            with patch.object(running.bridge, "backfill_latest_assistant_message", new=failing_backfill):
+            with patch.object(running.bridge.session_threads, "backfill_latest_assistant_message", new=failing_backfill):
                 first = await running.connect(http)
                 await first.send_json(hello)
                 await asyncio.wait_for(backfilling.wait(), timeout=5)
@@ -239,7 +241,7 @@ class AttachTaskTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.2)
             with (
                 patch.object(running.bridge, "resume_thread_in_grace", new=AsyncMock(return_value=None)),
-                patch.object(running.bridge, "find_or_create_session_thread", new=AsyncMock(side_effect=refused)),
+                patch.object(running.bridge.session_threads, "find_or_create_session_thread", new=AsyncMock(side_effect=refused)),
             ):
                 running.bridge._session_attach_lock.release()
                 await second.receive(timeout=10)

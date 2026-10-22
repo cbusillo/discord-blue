@@ -125,6 +125,25 @@ def session_start_message(hello: SessionHello) -> str:
     )
 
 
+def expected_session_start_messages(hello: SessionHello) -> set[str]:
+    return {session_start_message(hello)}
+
+
+def session_start_messages_without_pid(starts: set[str]) -> set[str]:
+    return {start_without_pid for start in starts if (start_without_pid := session_start_without_pid(start))}
+
+
+def session_start_without_pid(content: str) -> str | None:
+    lines = content.splitlines()
+    if not lines or lines[0] != SESSION_START_PREFIX:
+        return None
+    if not any(line.startswith("session: `") for line in lines):
+        return None
+    if not lines[-1].startswith("pid: `"):
+        return None
+    return "\n".join(lines[:-1])
+
+
 def notification_thread_id(content: str) -> int | None:
     match = SESSION_NOTIFICATION_THREAD_RE.search(content)
     if match is None:
