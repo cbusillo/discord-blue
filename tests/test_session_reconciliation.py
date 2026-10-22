@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, patch
 import discord
 
 from discord_blue.doodads.agent_session import bridge as bridge_module
+from discord_blue.doodads.agent_session import cleanup as cleanup_module
+from discord_blue.doodads.agent_session import threads as threads_module
 from tests.fakes_agent_session import FakeReplyMessage, FakeTextChannel, FakeThread, add_bot_message
 from tests.test_session_cleanup_failures import make_bridge, register_stale
 
@@ -32,14 +34,14 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
         channel = FakeTextChannel(321, [public, private])
         for thread in (public, private):
             add_bot_message(thread, thread.id, "Agent session connected")
-        with patch.object(bridge_module, "get_agent_session_channel", return_value=channel):
-            await bridge.cleanup_stale_session_threads()
+        with patch.object(threads_module, "get_agent_session_channel", return_value=channel):
+            await bridge.cleanups.cleanup_stale_session_threads()
             self.assertTrue(public.archived)
             self.assertTrue(public.locked)
             notices = list(public.sent_messages)
             edits = list(public.edits)
-            await bridge.cleanup_stale_session_threads()
-            await bridge.cleanup_stale_session_threads()
+            await bridge.cleanups.cleanup_stale_session_threads()
+            await bridge.cleanups.cleanup_stale_session_threads()
         self.assertEqual(public.sent_messages, notices)
         self.assertEqual(public.edits, edits)
         self.assertEqual(private.sent_messages, [])
@@ -58,19 +60,19 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
             return []
 
         with (
-            patch.object(bridge_module, "get_agent_session_channel", return_value=channel),
+            patch.object(threads_module, "get_agent_session_channel", return_value=channel),
             patch.object(thread, "fetch_members", new=blocked_members),
         ):
-            task = asyncio.create_task(bridge.cleanup_stale_session_threads())
+            task = asyncio.create_task(bridge.cleanups.cleanup_stale_session_threads())
             await asyncio.wait_for(removing.wait(), timeout=1)
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
-            pending = list(bridge._pending_cleanups.values())
+            pending = list(bridge.cleanups.pending.values())
             self.assertEqual(len(pending), 1)
             self.assertEqual(pending[0].pending_steps, {"members", "archive", "leave"})
             self.assertFalse(thread.archived)
-            await asyncio.wait_for(bridge.cleanup_stale_session_threads(), timeout=0.1)
+            await asyncio.wait_for(bridge.cleanups.cleanup_stale_session_threads(), timeout=0.1)
         self.assertEqual(thread.sent_messages, [bridge_module.SESSION_ENDED_NOTICE])
 
     async def test_orphan_scan_preserves_unregistered_session_still_finalizing(self) -> None:
@@ -88,15 +90,15 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
             await release.wait()
 
         with (
-            patch.object(bridge_module, "get_agent_session_channel", return_value=channel),
-            patch.object(bridge, "get_thread_for_cleanup", new=AsyncMock(return_value=(thread, True))),
+            patch.object(threads_module, "get_agent_session_channel", return_value=channel),
+            patch.object(bridge.cleanups, "get_thread_for_cleanup", new=AsyncMock(return_value=(thread, True))),
             patch.object(bridge, "close_session_websocket", new=close_socket),
         ):
             task = asyncio.create_task(bridge.finalize_session(session))
             try:
                 await asyncio.wait_for(closing.wait(), timeout=1)
                 self.assertIsNone(bridge.sessions.get(session.session_id))
-                await bridge.cleanup_stale_session_threads()
+                await bridge.cleanups.cleanup_stale_session_threads()
                 self.assertEqual(thread.sent_messages, [])
                 self.assertFalse(thread.archived)
             finally:
@@ -116,10 +118,10 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
             yield FakeReplyMessage(777, channel)
 
         with (
-            patch.object(bridge_module, "get_agent_session_channel", return_value=channel),
+            patch.object(threads_module, "get_agent_session_channel", return_value=channel),
             patch.object(channel, "history", history),
         ):
-            scan = asyncio.create_task(bridge.cleanup_stale_session_notifications())
+            scan = asyncio.create_task(bridge.cleanups.cleanup_stale_session_notifications())
             try:
                 await asyncio.wait_for(started.wait(), timeout=1)
                 self.assertFalse(bridge._session_attach_lock.locked())
@@ -143,15 +145,15 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
                 cancelled.set()
 
         with (
-            patch.object(bridge_module, "get_agent_session_channel", return_value=channel),
+            patch.object(threads_module, "get_agent_session_channel", return_value=channel),
             patch.object(blocked, "delete", new=hang),
-            patch.object(bridge_module, "SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS", 0.01),
-            self.assertLogs(bridge_module.logger, level="WARNING"),
+            patch.object(cleanup_module, "SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS", 0.01),
+            self.assertLogs(cleanup_module.logger, level="WARNING"),
         ):
-            await bridge.cleanup_stale_session_notifications()
+            await bridge.cleanups.cleanup_stale_session_notifications()
         self.assertFalse(cancelled.is_set(), "the blocked delete was cancelled instead of left to finish")
         self.assertTrue(later.deleted)
-        self.assertTrue(bridge._pending_cleanups)
+        self.assertTrue(bridge.cleanups.pending)
 
     async def test_notice_changed_during_discovery_is_not_overwritten(self) -> None:
         bridge = make_bridge()
@@ -171,10 +173,10 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
             yield duplicate
 
         with (
-            patch.object(bridge_module, "get_agent_session_channel", return_value=channel),
+            patch.object(threads_module, "get_agent_session_channel", return_value=channel),
             patch.object(channel, "history", history),
         ):
-            scan = asyncio.create_task(bridge.cleanup_stale_session_notifications())
+            scan = asyncio.create_task(bridge.cleanups.cleanup_stale_session_notifications())
             try:
                 await asyncio.wait_for(scanned_first.wait(), timeout=1)
                 session.notification_message_id = new_notice.id
@@ -203,16 +205,16 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
             # An attach is reopening the thread through its worker, not yet bound to its session.
             reopen = asyncio.create_task(bridge.threads.open(cast(discord.Thread, thread)))
             await asyncio.wait_for(joining.wait(), timeout=1)
-            with patch.object(bridge_module, "get_agent_session_channel", return_value=channel):
-                await bridge.cleanup_stale_session_threads()
+            with patch.object(threads_module, "get_agent_session_channel", return_value=channel):
+                await bridge.cleanups.cleanup_stale_session_threads()
             self.assertFalse(thread.archived)
             self.assertFalse(thread.left)
             release.set()
             await asyncio.wait_for(reopen, timeout=1)
             session = register_stale(bridge, "connecting")
             bridge.sessions.bind_thread(session.session_id, thread.id)
-        with patch.object(bridge_module, "get_agent_session_channel", return_value=channel):
-            await bridge.cleanup_stale_session_threads()
+        with patch.object(threads_module, "get_agent_session_channel", return_value=channel):
+            await bridge.cleanups.cleanup_stale_session_threads()
         self.assertFalse(thread.archived)
         self.assertFalse(thread.left)
         self.assertIsNotNone(bridge.sessions.get_by_thread(thread.id))
@@ -225,11 +227,11 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
         # The create path publishes a marker while still holding the attach
         # lock, before its new thread ID can be bound in the registry.
         async with bridge._session_attach_lock:
-            with patch.object(bridge_module, "get_agent_session_channel", return_value=channel):
-                await bridge.cleanup_stale_session_threads()
+            with patch.object(threads_module, "get_agent_session_channel", return_value=channel):
+                await bridge.cleanups.cleanup_stale_session_threads()
             self.assertFalse(thread.archived)
             self.assertFalse(thread.left)
-        with patch.object(bridge_module, "get_agent_session_channel", return_value=channel):
-            await bridge.cleanup_stale_session_threads()
+        with patch.object(threads_module, "get_agent_session_channel", return_value=channel):
+            await bridge.cleanups.cleanup_stale_session_threads()
         self.assertTrue(thread.archived)
         self.assertTrue(thread.left)

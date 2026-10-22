@@ -14,6 +14,7 @@ from unittest.mock import patch
 import aiohttp
 
 from discord_blue.doodads.agent_session import bridge as bridge_module
+from discord_blue.doodads.agent_session.cleanup import THREAD_LOOKUP_TIMEOUT_SECONDS
 from discord_blue.doodads.agent_session.store import SessionStore, StoredSession
 from tests.fake_discord import BOT_ID, PARENT_ID, FakeDiscord, FakeMessage, Fault
 from tests.test_attach_scenarios import hello_for, marker, scenario, until
@@ -193,9 +194,7 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
                 try:
                     with patch.object(running.bridge, "validated_stored_thread", new=slow_read):
-                        await asyncio.wait_for(
-                            running.bridge.recover_stored_cleanups(), bridge_module.THREAD_LOOKUP_TIMEOUT_SECONDS * 3
-                        )
+                        await asyncio.wait_for(running.bridge.cleanups.recover_stored_cleanups(), THREAD_LOOKUP_TIMEOUT_SECONDS * 3)
                     self.assertTrue(second.archived)
                     self.assertFalse(cancelled)
                 finally:
@@ -215,7 +214,7 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
             await store.close()
             async with scenario(fake, store_path=path, listen_host="127.0.0.1", listen_port=0) as running:
                 await running.bridge.start()
-                await running.bridge.recover_stored_cleanups()
+                await running.bridge.cleanups.recover_stored_cleanups()
                 self.assertEqual(notices(thread), [bridge_module.SESSION_ENDED_NOTICE])
                 self.assertEqual(thread.members, set())
                 self.assertTrue(thread.archived and thread.locked)
@@ -270,8 +269,8 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 )
                 fake.faults.append(Fault("DELETE", "/channels/{channel}/thread-members/{member}", times=100, status=403))
                 for _ in range(bridge_module.PENDING_CLEANUP_MAX_ATTEMPTS + 2):
-                    await running.bridge.recover_stored_cleanups()
-                    await running.bridge.retry_pending_cleanups()
+                    await running.bridge.cleanups.recover_stored_cleanups()
+                    await running.bridge.cleanups.retry_pending_cleanups()
                 self.assertEqual(notices(thread), [bridge_module.SESSION_ENDED_NOTICE])
 
     async def test_a_forbidden_stored_thread_does_not_block_another_cleanup(self) -> None:
@@ -291,7 +290,7 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 fault = Fault("GET", "/channels/{channel}", times=100, status=403, match=lambda ids: int(ids["channel"]) == first.id)
                 fake.faults.append(fault)
                 for _ in range(bridge_module.PENDING_CLEANUP_MAX_ATTEMPTS + 2):
-                    await running.bridge.recover_stored_cleanups()
+                    await running.bridge.cleanups.recover_stored_cleanups()
                 self.assertTrue(second.archived)
                 self.assertFalse(first.archived)
                 self.assertLessEqual(100 - fault.times, bridge_module.PENDING_CLEANUP_MAX_ATTEMPTS)
@@ -334,7 +333,7 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 await socket.receive_json(timeout=10)
                 notice = fake.parent_messages[0]
                 fake.parent_messages.append(FakeMessage(next(fake.ids), PARENT_ID, notice.content))
-                await running.bridge.cleanup_stale_session_notifications()
+                await running.bridge.cleanups.cleanup_stale_session_notifications()
                 self.assertEqual([message.id for message in fake.parent_messages], [notice.id])
                 await socket.close()
 
@@ -349,7 +348,7 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
             await store.close()
             async with scenario(fake, store_path=path, listen_host="127.0.0.1", listen_port=0) as running:
                 await running.bridge.start()
-                await running.bridge.recover_stored_cleanups()
+                await running.bridge.cleanups.recover_stored_cleanups()
                 self.assertFalse(thread.archived)
                 self.assertEqual(notices(thread), [])
                 self.assertNotIn("hint", running.bridge.store.records)
@@ -402,7 +401,7 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     return await original(session_id, saved)
 
                 with patch.object(running.bridge, "validated_stored_thread", new=slow_validation):
-                    expiry = asyncio.create_task(running.bridge.recover_stored_cleanups())
+                    expiry = asyncio.create_task(running.bridge.cleanups.recover_stored_cleanups())
                     await asyncio.wait_for(validating.wait(), 2)
                     socket = await running.connect(http)
                     await socket.send_json(hello)
@@ -425,7 +424,7 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     async with scenario(fake, store_path=path, listen_host="127.0.0.1", listen_port=0) as running:
                         await running.bridge.start()
                         if restart:
-                            await running.bridge.cleanup_stale_session_threads()
+                            await running.bridge.cleanups.cleanup_stale_session_threads()
                         before = len(fake.requests)
                         sockets = await asyncio.gather(*(running.connect(http) for _ in hellos))
                         await asyncio.gather(
@@ -465,17 +464,17 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     await socket.close()
                 async with scenario(fake, store_path=path, listen_host="127.0.0.1", listen_port=0) as second:
                     await second.bridge.start()
-                    await second.bridge.cleanup_stale_session_notifications()
-                    await second.bridge.cleanup_stale_session_threads()
+                    await second.bridge.cleanups.cleanup_stale_session_notifications()
+                    await second.bridge.cleanups.cleanup_stale_session_threads()
                     self.assertEqual(notices(thread), [])
                     self.assertFalse(thread.archived)
                     self.assertTrue(any(message.id == notification_id for message in fake.parent_messages))
                     record = second.bridge.store.records[hello["session_id"]]
                     second.bridge.store.put(hello["session_id"], replace(record, grace_until=time.time() - 1))
-                    await second.bridge.recover_stored_cleanups()
+                    await second.bridge.cleanups.recover_stored_cleanups()
                     self.assertTrue(await until(lambda: thread.archived and thread.locked, 5))
                     self.assertEqual(notices(thread), [bridge_module.SESSION_ENDED_NOTICE])
-                    await second.bridge.recover_stored_cleanups()
+                    await second.bridge.cleanups.recover_stored_cleanups()
                     self.assertEqual(notices(thread), [bridge_module.SESSION_ENDED_NOTICE])
 
     async def test_deleted_thread_hint_is_replaced_and_missing_notification_is_recreated(self) -> None:

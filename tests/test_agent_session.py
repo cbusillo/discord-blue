@@ -92,6 +92,7 @@ Config = importlib.import_module("discord_blue.config").Config
 bridge_module = importlib.import_module("discord_blue.doodads.agent_session.bridge")
 AgentSessionBridge = bridge_module.AgentSessionBridge
 messages_module = importlib.import_module("discord_blue.doodads.agent_session.messages")
+threads_module = importlib.import_module("discord_blue.doodads.agent_session.threads")
 protocol_module = importlib.import_module("discord_blue.doodads.agent_session.protocol")
 RemoteCommand = protocol_module.RemoteCommand
 RemoteApprovalRequest = protocol_module.RemoteApprovalRequest
@@ -904,7 +905,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.register_routes(app)
         cleanup_started = asyncio.Event()
         allow_cleanup = asyncio.Event()
-        original_close = bridge.close_session_thread
+        original_close = bridge.cleanups.close_session_thread
 
         async def connect(transport_client: TestClient, session_hello: SessionHelloType) -> ClientWebSocketResponse:
             ws = await transport_client.ws_connect(
@@ -933,7 +934,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                         await allow_cleanup.wait()
                     await original_close(session, cleanup)
 
-                with patch.object(cast("SessionBridge", bridge), "close_session_thread", side_effect=paused_close):
+                with patch.object(cast("SessionBridge", bridge).cleanups, "close_session_thread", side_effect=paused_close):
                     # A clean end closes the thread at once; a bare drop would wait out the grace period instead.
                     await old.send_json(
                         {"type": "session_end", "session_id": hello.session_id, "session_epoch": hello.session_epoch}
@@ -1032,7 +1033,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         async def replace_second(_session: AgentSessionType, _cleanup: PendingSessionCleanup | None = None) -> None:
             bridge.sessions.register(replacement)
 
-        with patch.object(cast("SessionBridge", bridge), "close_session_thread", side_effect=replace_second) as cleanup:
+        with patch.object(cast("SessionBridge", bridge).cleanups, "close_session_thread", side_effect=replace_second) as cleanup:
             await bridge.close_timed_out_sessions()
 
         self.assertEqual(cleanup.await_count, 1)
@@ -1204,7 +1205,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         channel.add_message(user_notice)
         bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
-        await bridge.cleanup_stale_session_notifications()
+        await bridge.cleanups.cleanup_stale_session_notifications()
 
         self.assertTrue(human_notice.deleted)
         self.assertTrue(automated_notice.deleted)
@@ -1234,7 +1235,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        await bridge.cleanup_stale_session_notifications()
+        await bridge.cleanups.cleanup_stale_session_notifications()
 
         self.assertFalse(live_notice.deleted)
         self.assertTrue(stale_notice.deleted)
@@ -1262,7 +1263,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         bridge.sessions.register(session)
 
-        await bridge.cleanup_stale_session_notifications()
+        await bridge.cleanups.cleanup_stale_session_notifications()
 
         self.assertFalse(current_notice.deleted)
         self.assertTrue(duplicate_notice.deleted)
@@ -1286,7 +1287,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         bridge.sessions.register(session)
 
-        await bridge.cleanup_stale_session_notifications()
+        await bridge.cleanups.cleanup_stale_session_notifications()
 
         self.assertFalse(replacement_notice.deleted)
         self.assertEqual(session.notification_message_id, replacement_notice.id)
@@ -1313,7 +1314,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         bridge.sessions.register(session)
 
-        await bridge.cleanup_stale_session_notifications()
+        await bridge.cleanups.cleanup_stale_session_notifications()
 
         self.assertTrue(older_notice.deleted)
         self.assertFalse(newer_notice.deleted)
@@ -1334,7 +1335,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             websocket=FakeWebSocket(),
         )
         bridge.sessions.register(session)
-        original_notification_thread_id = cast("type[SessionBridge]", AgentSessionBridge).notification_thread_id
+        original_notification_thread_id = threads_module.notification_thread_id
 
         def bind_during_cleanup(content: str) -> int | None:
             thread_id = original_notification_thread_id(content)
@@ -1342,10 +1343,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 bridge.sessions.bind_thread("session-1", 555)
             return thread_id
 
-        with patch.object(
-            cast("type[SessionBridge]", AgentSessionBridge), "notification_thread_id", side_effect=bind_during_cleanup
-        ):
-            await bridge.cleanup_stale_session_notifications()
+        with patch.object(threads_module, "notification_thread_id", side_effect=bind_during_cleanup):
+            await bridge.cleanups.cleanup_stale_session_notifications()
 
         self.assertFalse(live_notice.deleted)
 
@@ -1361,7 +1360,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge = AgentSessionBridge(FakeBot(config, channel=channel))
         session_attach_lock = bridge._session_attach_lock
         await session_attach_lock.acquire()
-        await asyncio.wait_for(bridge.cleanup_stale_session_notifications(), timeout=0.1)
+        await asyncio.wait_for(bridge.cleanups.cleanup_stale_session_notifications(), timeout=0.1)
         self.assertFalse(live_notice.deleted)
         session = AgentSession(
             hello=make_hello(),
@@ -1372,7 +1371,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.bind_thread("session-1", 555)
         session_attach_lock.release()
 
-        await bridge.cleanup_stale_session_notifications()
+        await bridge.cleanups.cleanup_stale_session_notifications()
 
         self.assertFalse(live_notice.deleted)
 
@@ -1398,7 +1397,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         channel.add_message(user_notice)
         bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
-        await bridge.delete_session_notification_for_thread(555)
+        await bridge.cleanups.delete_session_notification_for_thread(555)
 
         self.assertTrue(matching_notice.deleted)
         self.assertFalse(other_notice.deleted)
@@ -1417,7 +1416,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             add_bot_message(channel, 200 + index, f"Agent session status summary {index}")
         bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
-        await bridge.delete_session_notification_for_thread(555)
+        await bridge.cleanups.delete_session_notification_for_thread(555)
 
         self.assertTrue(matching_notice.deleted)
 
@@ -1453,7 +1452,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             thread_id=555,
         )
 
-        await bridge.close_session_thread(session)
+        await bridge.cleanups.close_session_thread(session)
 
         self.assertTrue(notification.deleted)
         self.assertTrue(thread.archived)
@@ -1584,7 +1583,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge = AgentSessionBridge(FakeBot(config))
         session = AgentSession(hello=make_hello(), websocket=FakeWebSocket(closed=True), thread_id=555)
         bridge.sessions.register(session)
-        with patch.object(bridge, "close_session_thread", new=AsyncMock()) as cleanup:
+        with patch.object(bridge.cleanups, "close_session_thread", new=AsyncMock()) as cleanup:
             await bridge.disconnect_active_session("session-1", session)
         cleanup.assert_not_awaited()
         self.assertIsNone(bridge.sessions.get("session-1"))
@@ -3405,7 +3404,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         channel = FakeTextChannel(321, [original_thread])
         bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
-        await bridge.close_thread(original_thread)
+        await bridge.cleanups.close_thread(original_thread)
 
         self.assertTrue(original_thread.archived)
         self.assertTrue(original_thread.locked)
@@ -3430,7 +3429,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         channel = FakeTextChannel(321, [retired_thread])
         bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
-        await bridge.cleanup_stale_session_threads()
+        await bridge.cleanups.cleanup_stale_session_threads()
 
         self.assertEqual(retired_thread.sent_messages, [])
         self.assertEqual(retired_thread.edits, [])

@@ -36,11 +36,11 @@ class CleanupProgressTests(unittest.IsolatedAsyncioTestCase):
         bridge = cleanup_tests.SessionCleanupTests.make_bridge()
         residual = cleanup_tests.SessionCleanupTests.cleanup_record(555, "leave")
         residual.notification_message_id = 101
-        bridge.remember_pending_cleanup(residual)
+        bridge.cleanups.remember_pending_cleanup(residual)
         newer = cleanup_tests.SessionCleanupTests.cleanup_record(555, "notification", "members", "archive", "leave")
         newer.notification_message_id = 202
-        bridge.remember_pending_cleanup(newer)
-        self.assertIs(bridge._pending_cleanups[residual.key], newer)
+        bridge.cleanups.remember_pending_cleanup(newer)
+        self.assertIs(bridge.cleanups.pending[residual.key], newer)
         self.assertEqual(newer.pending_steps, {"notification", "members", "archive", "leave"})
         self.assertEqual(newer.notification_message_id, 202)
 
@@ -60,7 +60,7 @@ class CleanupProgressTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(bridge_module, "STARTUP_RECONNECT_GRACE_SECONDS", 0),
             patch.object(bridge_module, "MAINTENANCE_INTERVAL_SECONDS", 0),
-            patch.object(bridge, "retry_pending_cleanups", new=retry),
+            patch.object(bridge.cleanups, "retry_pending_cleanups", new=retry),
             self.assertLogs(bridge_module.logger, level="ERROR"),
         ):
             task = asyncio.create_task(bridge.cleanup_stale_sessions())
@@ -99,7 +99,7 @@ class CleanupProgressTests(unittest.IsolatedAsyncioTestCase):
 
                 with (
                     patch.object(thread, "leave", new=slow_leave),
-                    patch.object(bridge, "delete_session_notification", new=AsyncMock(return_value=True)) as delete,
+                    patch.object(bridge.cleanups, "delete_session_notification", new=AsyncMock(return_value=True)) as delete,
                     patch.object(bridge_module, "SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS", 0.05),
                 ):
                     task = asyncio.create_task(bridge.finalize_session(session))
@@ -111,17 +111,17 @@ class CleanupProgressTests(unittest.IsolatedAsyncioTestCase):
                     delete.assert_awaited_once_with(101)
                     self.assertIsNone(bridge.sessions.get(session.session_id))
                     self.assertTrue(thread.archived)
-                    pending = list(bridge._pending_cleanups.values())
+                    pending = list(bridge.cleanups.pending.values())
                     self.assertEqual([record.pending_steps for record in pending], [{"leave"}])
                     notices, edits = list(thread.sent_messages), list(thread.edits)
                     # The leave was never cancelled: a retry now would repeat it, so the retry waits for it.
-                    await bridge.retry_pending_cleanups()
+                    await bridge.cleanups.retry_pending_cleanups()
                     self.assertEqual(pending[0].attempts, 0)
                     release.set()
                     self.assertTrue(await wait_until(lambda: thread.left))  # noqa: B023 - awaited within this iteration
                     self.assertEqual(pending[0].pending_steps, set())
-                    await bridge.retry_pending_cleanups()
-                self.assertEqual(bridge._pending_cleanups, {})
+                    await bridge.cleanups.retry_pending_cleanups()
+                self.assertEqual(bridge.cleanups.pending, {})
                 self.assertEqual(thread.sent_messages, notices)
                 self.assertEqual(thread.edits, edits)
 
@@ -131,7 +131,7 @@ class CleanupProgressTests(unittest.IsolatedAsyncioTestCase):
                 thread = FakeThread(555, archived=True)
                 bridge = cleanup_tests.SessionCleanupTests.make_bridge(thread)
                 cleanup = cleanup_tests.SessionCleanupTests.cleanup_record(555, "archive", "leave")
-                bridge.remember_pending_cleanup(cleanup)
+                bridge.cleanups.remember_pending_cleanup(cleanup)
                 release = asyncio.Event()
                 original_edit = thread.edit
 
@@ -149,7 +149,7 @@ class CleanupProgressTests(unittest.IsolatedAsyncioTestCase):
                         # An attach is reopening the thread through its worker.
                         reopen = asyncio.create_task(bridge.threads.open(cast(discord.Thread, thread)))
                         await asyncio.sleep(0)
-                    await asyncio.wait_for(bridge.retry_pending_cleanups(), timeout=0.1)
+                    await asyncio.wait_for(bridge.cleanups.retry_pending_cleanups(), timeout=0.1)
                     self.assertEqual(cleanup.attempts, 0)
                     self.assertFalse(thread.left)
                     if busy_with == "attach":
@@ -157,15 +157,15 @@ class CleanupProgressTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         release.set()
                         await asyncio.wait_for(reopen, timeout=1)
-                    await bridge.retry_pending_cleanups()
-                self.assertEqual(bridge._pending_cleanups, {})
+                    await bridge.cleanups.retry_pending_cleanups()
+                self.assertEqual(bridge.cleanups.pending, {})
                 self.assertTrue(thread.archived)
                 self.assertTrue(thread.left)
 
     async def test_cleanup_allows_slow_rest_calls_and_multiple_members(self) -> None:
         thread = FakeThread(555, archived=True, locked=True, members=[111, 222])
         bridge = cleanup_tests.SessionCleanupTests.make_bridge(thread)
-        original_lookup = bridge.get_thread_for_cleanup
+        original_lookup = bridge.cleanups.get_thread_for_cleanup
         original_edit = thread.edit
         original_send = thread.send
         original_fetch = thread.fetch_members
@@ -193,13 +193,13 @@ class CleanupProgressTests(unittest.IsolatedAsyncioTestCase):
 
         cleanup = cleanup_tests.SessionCleanupTests.cleanup_record(555, "disconnect_notice", "members", "archive", "leave")
         with (
-            patch.object(bridge, "get_thread_for_cleanup", new=lookup),
+            patch.object(bridge.cleanups, "get_thread_for_cleanup", new=lookup),
             patch.object(thread, "edit", new=edit),
             patch.object(thread, "send", new=send),
             patch.object(thread, "fetch_members", new=fetch),
             patch.object(thread, "remove_user", new=remove),
         ):
-            residual = await bridge.cleanup_session_artifacts(cleanup)
+            residual = await bridge.cleanups.cleanup_session_artifacts(cleanup)
         self.assertIsNone(residual)
         self.assertEqual(thread.removed_user_ids, [111, 222])
         self.assertEqual(thread.sent_messages, [bridge_module.SESSION_ENDED_NOTICE])
