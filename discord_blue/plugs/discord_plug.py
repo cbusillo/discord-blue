@@ -18,6 +18,17 @@ class HomeCommandTree(discord.app_commands.CommandTree["BlueBot"]):
     async def interaction_check(self, interaction: discord.Interaction["BlueBot"]) -> bool:
         return interaction.guild_id == self.client.config.discord.guild_id and bool(interaction.guild_id)
 
+    async def on_error(self, interaction: discord.Interaction["BlueBot"], error: discord.app_commands.AppCommandError) -> None:
+        await super().on_error(interaction, error)
+        if isinstance(error, discord.app_commands.CheckFailure):
+            message = "You do not have permission to use this command."
+        else:
+            message = "That command failed. Details are in the bot's log."
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+
 
 class BlueBot(commands.Bot):
     destination_guild: discord.Guild
@@ -88,7 +99,10 @@ class BlueBot(commands.Bot):
     async def setup_hook(self) -> None:
         await self.load_extension("discord_blue.doodads._doodad_setup")
         for doodad in self.config.discord.loaded_doodads:
-            await self.load_extension(f"discord_blue.doodads.{doodad}")
+            try:
+                await self.load_extension(f"discord_blue.doodads.{doodad}")
+            except commands.ExtensionNotFound:
+                logger.warning("Skipping doodad %r from discord.loaded_doodads: no such module", doodad)
 
     async def on_ready(self) -> None:
         if self.user:
