@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from discord_blue.config import ConversationConfig, AgentSessionConfig, Config, DiscordConfig
 from discord_blue.doodads.agent_session import bridge as bridge_module
+from discord_blue.doodads.agent_session import interactions as interactions_module
 from discord_blue.doodads.agent_session.protocol import RemoteRequestUserInput, RequestUserInputQuestion
 from discord_blue.doodads.agent_session.sessions import AgentSession
 from discord_blue.plugs.discord_plug import BlueBot
@@ -25,7 +26,7 @@ class PromptFixture:
         self.session = AgentSession(hello=make_hello(), websocket=cast(Any, self.socket), thread_id=555)
         self.bridge.sessions.register(self.session)
 
-    async def prompt(self, call_id: str = "call-1") -> bridge_module.RequestUserInputView:
+    async def prompt(self, call_id: str = "call-1") -> interactions_module.RequestUserInputView:
         request = RemoteRequestUserInput(
             session_id=self.session.session_id,
             session_epoch=self.session.session_epoch,
@@ -35,10 +36,10 @@ class PromptFixture:
                 RequestUserInputQuestion(id="answer", header="Answer", question="Choose", is_other=True, is_secret=False, options=[])
             ],
         )
-        await self.bridge.handle_request_user_input(request)
+        await self.bridge.interactions.handle_request_user_input(request)
         view = cast(
-            bridge_module.RequestUserInputView,
-            next(view for view in reversed(self.thread.sent_views) if isinstance(view, bridge_module.RequestUserInputView)),
+            interactions_module.RequestUserInputView,
+            next(view for view in reversed(self.thread.sent_views) if isinstance(view, interactions_module.RequestUserInputView)),
         )
         view.set_answer("answer", "yes")
         return view

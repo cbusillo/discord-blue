@@ -19,6 +19,7 @@ from aiohttp import WSMsgType
 from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session import controls as controls_module
 from discord_blue.doodads.agent_session.controls import SessionControls
+from discord_blue.doodads.agent_session.interactions import SessionInteractions
 from discord_blue.doodads.agent_session.protocol import REMOTE_ACTIONS, RemoteApprovalRequest, RemoteRequestUserInput, SessionHello
 from discord_blue.doodads.agent_session.sessions import PendingRemoteApproval
 from tests.fakes_agent_prompts import PromptFixture, prompt_fixture
@@ -83,17 +84,19 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("does not support", interaction.response.messages[0][0])
         self.assertFalse(self.session.pending_user_inputs["call-1"].submitted)
         button = FakeInteraction(self.thread, message=approval_message)
-        await self.bridge.handle_approval_interaction(
+        await self.bridge.interactions.handle_approval_interaction(
             cast(Any, button), self.session.session_id, "approval", "approved", session_epoch=self.session.session_epoch
         )
-        await self.bridge.handle_approval_reaction(self.session, cast(discord.Thread, self.thread), "approval", "✅", self.user)
+        await self.bridge.interactions.handle_approval_reaction(
+            self.session, cast(discord.Thread, self.thread), "approval", "✅", self.user
+        )
         self.assertIsNone(self.session.pending_approvals["approval"].decision)
         self.assertEqual(self.socket.sent_json, [])
         self.assertEqual(self.session.pending_commands, {})
 
     async def test_unsupported_inbound_requests_do_not_render_prompts(self) -> None:
         self.restrict()
-        await self.bridge.handle_approval_request(
+        await self.bridge.interactions.handle_approval_request(
             RemoteApprovalRequest(
                 session_id=self.session.session_id,
                 session_epoch=self.session.session_epoch,
@@ -105,7 +108,7 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
                 reason=None,
             )
         )
-        await self.bridge.handle_request_user_input(
+        await self.bridge.interactions.handle_request_user_input(
             RemoteRequestUserInput(
                 session_id=self.session.session_id,
                 session_epoch=self.session.session_epoch,
@@ -170,7 +173,7 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.session.pending_approvals["approval"] = pending
         interaction = FakeInteraction(self.thread, message=FakeReplyMessage(950, self.thread))
         with patch.object(self.socket, "send_json", new=AsyncMock(side_effect=ConnectionResetError)):
-            await self.bridge.handle_approval_interaction(
+            await self.bridge.interactions.handle_approval_interaction(
                 cast(Any, interaction), self.session.session_id, "approval", "approved", session_epoch=self.session.session_epoch
             )
         self.assertIsNone(pending.decision)
@@ -181,7 +184,7 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.session.pending_approvals["approval"] = PendingRemoteApproval(thread_id=555, message_id=950)
         for epoch, message_id in (("old", 950), (self.session.session_epoch, 951)):
             interaction = FakeInteraction(self.thread, message=FakeReplyMessage(message_id, self.thread))
-            await self.bridge.handle_approval_interaction(
+            await self.bridge.interactions.handle_approval_interaction(
                 cast(Any, interaction), self.session.session_id, "approval", "approved", session_epoch=epoch
             )
             self.assertEqual(interaction.response.messages, [("This approval is no longer active.", True)])
@@ -213,7 +216,7 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
                             if kind == "input":
                                 await view.submit(cast(Any, interaction))
                             else:
-                                await self.bridge.handle_approval_interaction(
+                                await self.bridge.interactions.handle_approval_interaction(
                                     cast(Any, interaction),
                                     self.session.session_id,
                                     "approval",
@@ -263,7 +266,10 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("Discord could not prepare", message.replies[0])
 
     def test_outbound_wire_sends_have_one_command_and_one_approval_dispatch_gate(self) -> None:
-        trees = [ast.parse(textwrap.dedent(inspect.getsource(cls))) for cls in (bridge_module.AgentSessionBridge, SessionControls)]
+        trees = [
+            ast.parse(textwrap.dedent(inspect.getsource(cls)))
+            for cls in (bridge_module.AgentSessionBridge, SessionControls, SessionInteractions)
+        ]
         senders = {
             node.name
             for tree in trees

@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 import discord
 
-from discord_blue.doodads.agent_session.bridge import AgentSessionBridge, ApprovalButton, ApprovalView
+from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
+from discord_blue.doodads.agent_session.interactions import ApprovalButton, ApprovalView
 from discord_blue.doodads.agent_session.protocol import RemoteApprovalDecision, RemoteApprovalRequest
 from tests.fakes_agent_prompts import prompt_fixture
 from tests.fakes_agent_session import FakeInteraction, FakeReplyMessage, FakeThread, visible_view_text
@@ -30,7 +31,7 @@ class ApprovalCardTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def offer(self) -> tuple[ApprovalView, FakeReplyMessage]:
-        await self.fixture.bridge.handle_approval_request(self.request)
+        await self.fixture.bridge.interactions.handle_approval_request(self.request)
         pending = self.fixture.session.pending_approvals[self.request.approval_id]
         message = await self.fixture.thread.fetch_message(pending.message_id)
         assert isinstance(message.view, ApprovalView)
@@ -66,7 +67,7 @@ class ApprovalCardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(visible_view_text(replacement))
                 self.assertEqual(self.fixture.session.pending_approvals[self.request.approval_id].decision, decision)
                 self.assertEqual(message.reactions, [])
-                await self.fixture.bridge.handle_approval_decision_ack(sent)
+                await self.fixture.bridge.interactions.handle_approval_decision_ack(sent)
                 self.assertTrue(visible_view_text(message.view))
                 self.assertFalse(
                     any(isinstance(item, discord.ui.Button) for item in cast(discord.ui.LayoutView, message.view).walk_children())
@@ -100,7 +101,7 @@ class ApprovalCardTests(unittest.IsolatedAsyncioTestCase):
                 self.request = dataclasses.replace(self.request, approval_kind=kind, content_text=context, command_text=None)
                 view, message = await self.offer()
                 self.assertIn(context, visible_view_text(view))
-                await self.fixture.bridge.handle_prompt_resolved(
+                await self.fixture.bridge.interactions.handle_prompt_resolved(
                     "approval_resolved",
                     {
                         "session_id": self.request.session_id,
@@ -130,7 +131,7 @@ class ApprovalCardTests(unittest.IsolatedAsyncioTestCase):
             try:
                 await asyncio.wait_for(sending.wait(), 1)
                 self.assertTrue(interaction.response.deferred)
-                await self.fixture.bridge.handle_prompt_resolved(
+                await self.fixture.bridge.interactions.handle_prompt_resolved(
                     "approval_resolved",
                     {
                         "session_id": self.request.session_id,
@@ -161,7 +162,7 @@ class ApprovalCardTests(unittest.IsolatedAsyncioTestCase):
 
         async def defer() -> None:
             await original()
-            await self.fixture.bridge.handle_prompt_resolved(
+            await self.fixture.bridge.interactions.handle_prompt_resolved(
                 "approval_resolved",
                 {
                     "session_id": self.request.session_id,

@@ -5,7 +5,7 @@ from typing import Any
 import unittest
 
 from discord_blue.doodads.agent_session.protocol import RemoteApprovalRequest
-from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
+from discord_blue.doodads.agent_session.interactions import SessionInteractions
 from tests.test_attach_scenarios import until
 from tests.test_codex_bridge import FakeRpc, command, running_bridge, thread
 
@@ -42,7 +42,7 @@ class SliceTwoTests(unittest.IsolatedAsyncioTestCase):
                             expected = {"permissions": params["permissions"] if decision == "approved" else {}, "scope": "turn"}
                         await bridge.dispatch({"id": 42, "method": method, "params": params})
                         approval = await discord.next("approval_request")
-                        display = AgentSessionBridge.format_approval_request(RemoteApprovalRequest.from_payload(approval))
+                        display = SessionInteractions.format_approval_request(RemoteApprovalRequest.from_payload(approval))
                         self.assertIn(approval["content_text"], display)
                         self.assertEqual(json.loads(approval["content_text"])["request"], params)
                         self.assertEqual(rpc.responses, [])

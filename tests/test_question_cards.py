@@ -8,7 +8,7 @@ from typing import Any, cast
 import discord
 from discord_blue.doodads.agent_session.messages import edit_agent_session_message
 
-from discord_blue.doodads.agent_session.bridge import MAX_INPUT_QUESTIONS, RequestUserInputAnswerModal, RequestUserInputSelect
+from discord_blue.doodads.agent_session.interactions import MAX_INPUT_QUESTIONS, RequestUserInputAnswerModal, RequestUserInputSelect
 from discord_blue.doodads.agent_session.protocol import (
     RemoteRequestUserInput,
     RequestUserInputQuestion,
@@ -38,7 +38,7 @@ class QuestionCardTests(unittest.IsolatedAsyncioTestCase):
 
     async def post(self, questions: list[RequestUserInputQuestion]) -> discord.ui.LayoutView:
         session = self.fixture.session
-        await self.fixture.bridge.handle_request_user_input(
+        await self.fixture.bridge.interactions.handle_request_user_input(
             RemoteRequestUserInput(
                 session_id=session.session_id,
                 session_epoch=session.session_epoch,
