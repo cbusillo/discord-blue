@@ -109,7 +109,7 @@ class CleanupTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await websocket.receive_json(timeout=2))["thread_id"], thread.id)
             session = bridge.sessions.get("cleanup-session")
             self.assertIsInstance(session, AgentSession)
-            with patch.object(bridge, "handle_command_ack", new=AsyncMock(side_effect=RuntimeError("handler failed"))):
+            with patch.object(bridge.controls, "handle_command_ack", new=AsyncMock(side_effect=RuntimeError("handler failed"))):
                 await websocket.send_json({**self.hello(), "type": "command_ack", "command_id": "failure"})
                 await websocket.receive(timeout=2)
                 await websocket.close()
@@ -136,7 +136,7 @@ class CleanupTransportTests(unittest.IsolatedAsyncioTestCase):
             async def barrier(_payload: dict[str, object]) -> None:
                 handled.set()
 
-            with patch.object(bridge, "handle_command_ack", new=barrier):
+            with patch.object(bridge.controls, "handle_command_ack", new=barrier):
                 payloads: tuple[object, ...] = ([], None, 12, "text")
                 for payload in payloads:
                     await websocket.send_json(payload)

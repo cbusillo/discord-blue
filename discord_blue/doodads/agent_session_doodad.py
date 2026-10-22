@@ -48,7 +48,7 @@ class AgentSessionDoodad(commands.Cog):
             return
         if not self.bridge.is_operator(message.author):
             return
-        delivered = await self.bridge.send_thread_reply(message)
+        delivered = await self.bridge.controls.send_thread_reply(message)
         if delivered:
             logger.info("Delivered Agent session thread reply from %s", message.author.id)
 
@@ -95,7 +95,7 @@ class AgentSessionDoodad(commands.Cog):
             await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
 
-        response = await self.bridge.send_continue_autonomously(
+        response = await self.bridge.controls.send_continue_autonomously(
             interaction.channel,
             interaction.user,
         )
@@ -134,7 +134,7 @@ class AgentSessionDoodad(commands.Cog):
             return
 
         await interaction.response.send_message(
-            self.bridge.session_status_summary(interaction.channel, interaction.user),
+            self.bridge.controls.session_status_summary(interaction.channel, interaction.user),
             ephemeral=True,
         )
 
@@ -147,7 +147,7 @@ class AgentSessionDoodad(commands.Cog):
             await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
 
-        response = await self.bridge.send_pause_current_turn(
+        response = await self.bridge.controls.send_pause_current_turn(
             interaction.channel,
             interaction.user,
         )
@@ -162,7 +162,7 @@ class AgentSessionDoodad(commands.Cog):
             await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
 
-        response = await self.bridge.send_new_session(
+        response = await self.bridge.controls.send_new_session(
             interaction.channel,
             interaction.user,
         )
@@ -177,7 +177,7 @@ class AgentSessionDoodad(commands.Cog):
             await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
 
-        response = await self.bridge.send_end_session(
+        response = await self.bridge.controls.send_end_session(
             interaction.channel,
             interaction.user,
         )
