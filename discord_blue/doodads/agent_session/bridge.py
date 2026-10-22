@@ -2335,7 +2335,7 @@ class AgentSessionBridge:
             message_id=message.id,
             view=view,
         )
-        await self.add_message_reactions(
+        await self.write_message_reactions(
             message,
             [REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY],
         )
@@ -2376,7 +2376,7 @@ class AgentSessionBridge:
         ):
             await self.user_input_stays_native(session)
             return
-        view = self.request_user_input_view(session.session_id, request)
+        view = RequestUserInputView(self, session.session_id, request)
         # Reserve space for every selection echo before offering an answerable card.
         answer_budget = sum(len("\nSelected: ") + 2 * INPUT_ANSWER_PREVIEW_LIMIT for _ in request.questions)
         if view.content_length() + answer_budget > 4000:
@@ -2621,10 +2621,8 @@ class AgentSessionBridge:
 
         if emoji == REACTION_CONTROL_CONTINUE:
             response = await self.send_continue_autonomously(thread, user)
-            if response == CONTINUE_AUTONOMOUSLY_DELIVERED:
-                await self.remove_message_reaction(thread, message_id, emoji, user)
-            else:
-                await self.remove_message_reaction(thread, message_id, emoji, user)
+            await self.remove_message_reaction(thread, message_id, emoji, user)
+            if response != CONTINUE_AUTONOMOUSLY_DELIVERED:
                 await self.post_thread_notice(thread.id, response)
             return True
         if emoji == REACTION_CONTROL_STATUS:
@@ -2636,10 +2634,8 @@ class AgentSessionBridge:
             return True
         if emoji == REACTION_CONTROL_PAUSE:
             response = await self.send_pause_current_turn(thread, user)
-            if response == PAUSE_CURRENT_TURN_DELIVERED:
-                await self.remove_message_reaction(thread, message_id, emoji, user)
-            else:
-                await self.remove_message_reaction(thread, message_id, emoji, user)
+            await self.remove_message_reaction(thread, message_id, emoji, user)
+            if response != PAUSE_CURRENT_TURN_DELIVERED:
                 await self.post_thread_notice(thread.id, response)
             return True
         if emoji == REACTION_CONTROL_END:
@@ -2675,18 +2671,9 @@ class AgentSessionBridge:
         if emoji != REACTION_APPROVAL_APPROVE:
             return False
 
-        pending_confirmation = session.pending_control_confirmation
         session.pending_control_confirmation = None
-        if pending_confirmation != "end_session":
-            await self.refresh_session_controls(
-                session,
-                thread,
-                remove_user_reaction=(emoji, user),
-            )
-            return True
-
         response = await self.send_end_session(thread, user)
-        if response == "Asked the agent session to end this session.":
+        if response == END_SESSION_CONTROL.delivered:
             await self.remove_message_reaction(thread, message_id, emoji, user)
         else:
             await self.refresh_session_controls(
@@ -2742,13 +2729,8 @@ class AgentSessionBridge:
         session = self.sessions.get(session_id)
         if session is None or not approval_id:
             return
-        pending = session.pending_approvals.pop(approval_id, None)
-        if pending is None:
-            return
-        pending.retired = True
-        await self.edit_approval_message(
-            pending,
-            self.format_approval_finished(pending.decision, pending.decided_by),
+        await self.retire_approval(
+            session, approval_id, lambda pending: self.format_approval_finished(pending.decision, pending.decided_by)
         )
 
     async def handle_approval_decision_reject(self, payload: dict[str, object]) -> None:
@@ -2758,11 +2740,19 @@ class AgentSessionBridge:
         session = self.sessions.get(session_id)
         if session is None or not approval_id:
             return
+        await self.retire_approval(session, approval_id, f"**Approval expired**\n{reason}")
+
+    async def retire_approval(
+        self,
+        session: AgentSession,
+        approval_id: str,
+        content: str | Callable[[PendingRemoteApproval], str],
+    ) -> None:
         pending = session.pending_approvals.pop(approval_id, None)
         if pending is None:
             return
         pending.retired = True
-        await self.edit_approval_message(pending, f"**Approval expired**\n{reason}")
+        await self.edit_approval_message(pending, content if isinstance(content, str) else content(pending))
 
     async def edit_approval_message(self, pending: PendingRemoteApproval, content: str, *, only_active: bool = False) -> None:
         if pending.view is not None:
@@ -2864,7 +2854,7 @@ class AgentSessionBridge:
 
         await send_agent_session_message(
             channel,
-            self.format_user_message_notice(message)[:DISCORD_MESSAGE_LIMIT],
+            format_user_message(message)[:DISCORD_MESSAGE_LIMIT],
         )
         session.status_revision += 1
         session.display_state = "working"
@@ -3081,11 +3071,7 @@ class AgentSessionBridge:
             approval_id = payload.get("approval_id")
             if not isinstance(approval_id, str) or not approval_id:
                 return
-            approval = session.pending_approvals.pop(approval_id, None)
-            if approval is None:
-                return
-            approval.retired = True
-            await self.edit_approval_message(approval, "**Resolved**")
+            await self.retire_approval(session, approval_id, "**Resolved**")
         elif message_type == "request_user_input_resolved":
             call_id, turn_id = payload.get("call_id"), payload.get("turn_id")
             if not isinstance(call_id, str) or not call_id or not isinstance(turn_id, str):
@@ -3148,7 +3134,7 @@ class AgentSessionBridge:
         replaced = old_control_message_id if old_control_message_id != message.id else None
         if replaced is not None:
             self.rebind_session_control_commands(session, replaced, message.id)
-        await self.add_message_reactions(message, self.session_control_reactions(session))
+        await self.write_message_reactions(message, self.session_control_reactions(session))
         if replaced is not None:
             await self.delete_session_message(session.thread_id, replaced)
         return True
@@ -3521,13 +3507,6 @@ class AgentSessionBridge:
             return False
         return any(role.name == role_name for role in user.roles)
 
-    def request_user_input_view(
-        self,
-        session_id: str,
-        request: RemoteRequestUserInput,
-    ) -> RequestUserInputView:
-        return RequestUserInputView(self, session_id, request)
-
     @staticmethod
     def format_approval_request(approval: RemoteApprovalRequest) -> str:
         """The approval message, untruncated; a raw command_text is shown verbatim instead of the re-quoted argv."""
@@ -3571,10 +3550,6 @@ class AgentSessionBridge:
     ) -> str:
         label = "Answer cancelled" if cancelled else "Answer sent"
         return f"**{label}**\nWaiting for local agent to accept the response.\nby: `{user}`"
-
-    @staticmethod
-    def format_user_message_notice(message: str) -> str:
-        return format_user_message(message)
 
     @staticmethod
     def session_control_reactions(session: AgentSession) -> list[str]:
@@ -3668,7 +3643,7 @@ class AgentSessionBridge:
             view=session_status_card(session, self.session_control_reactions(session)),
         )
         session.control_message_id = message.id  # Before its reactions, so a tap on the first one counts.
-        await self.add_message_reactions(message, self.session_control_reactions(session))
+        await self.write_message_reactions(message, self.session_control_reactions(session))
 
     def _authorized(self, request: web.Request) -> bool:
         token = self.bot.config.agent_session.token
@@ -3676,13 +3651,6 @@ class AgentSessionBridge:
             return False
         expected = f"Bearer {token}"
         return request.headers.get("Authorization") == expected
-
-    async def add_message_reactions(
-        self,
-        message: discord.Message,
-        reactions: list[str],
-    ) -> None:
-        await self.write_message_reactions(message, reactions)
 
     async def clear_message_reactions(self, message: discord.Message) -> None:
         await self.write_message_reactions(message, [], clear=True)
