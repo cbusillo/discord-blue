@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import aiohttp
 
-from discord_blue.doodads.agent_session import bridge as bridge_module
+from discord_blue.doodads.agent_session import threads as threads_module
 from discord_blue.doodads.agent_session.protocol import SessionHello
 from discord_blue.doodads.agent_session.threads import session_thread_name
 from tests.fake_discord import FakeDiscord, Fault
@@ -46,7 +46,7 @@ class CreationTokenTests(unittest.IsolatedAsyncioTestCase):
         fake = FakeDiscord(latency=0.002)
         copied = fake.add_thread("a discussion [abcdef]", marker="someone copied a session thread's name")
         fake.faults.append(Fault("POST", "/channels/{channel}/threads", status=502, applied=True))
-        with patch.object(bridge_module, "new_creation_token", return_value="abcdef"):
+        with patch.object(threads_module, "new_creation_token", return_value="abcdef"):
             async with scenario(fake) as running, aiohttp.ClientSession() as http:
                 websocket = await running.connect(http)
                 await websocket.send_json(hello_for("fresh"))
@@ -65,7 +65,7 @@ class CreationTokenTests(unittest.IsolatedAsyncioTestCase):
             await websocket.send_json(hello_for("fresh"))
             ack = await websocket.receive_json(timeout=15)
             before = sorted(fake.threads)
-            await running.bridge.retry_creation_checks()
+            await running.bridge.session_threads.retry_creation_checks()
             await websocket.close()
 
         self.assertEqual(len(before), 2, "the test needs the duplicate to survive the first check")
@@ -87,7 +87,7 @@ class CreationTokenTests(unittest.IsolatedAsyncioTestCase):
                 websocket = await running.connect(http)
                 await websocket.send_json(hello_for("fresh"))
                 ack = await websocket.receive_json(timeout=15)
-                await running.bridge.retry_creation_checks()
+                await running.bridge.session_threads.retry_creation_checks()
                 await websocket.close()
 
         self.assertEqual([t.id for t in fake.threads.values() if not t.archived], [ack["thread_id"]])

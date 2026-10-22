@@ -26,6 +26,7 @@ from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.config import ConversationConfig, AgentSessionConfig, Config, DiscordConfig
 from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session import cleanup as cleanup_module
+from discord_blue.doodads.agent_session import session_threads as session_threads_module
 from discord_blue.doodads.agent_session.protocol import SessionHello
 from discord_blue.doodads.agent_session.threads import session_start_message
 from discord_blue.plugs.discord_plug import MAX_RATELIMIT_SLEEP_SECONDS
@@ -90,7 +91,9 @@ async def scenario(fake: FakeDiscord, **agent_session: object) -> AsyncIterator[
         scaled_discord_sleeps(0.01),
         # Discovery's own retry backoff, scaled like discord.py's so an unreadable candidate costs ~0.1 s, not 7.5 s.
         patch.object(
-            bridge_module, "DISCOVERY_RETRY_DELAYS_SECONDS", tuple(d * 0.01 for d in bridge_module.DISCOVERY_RETRY_DELAYS_SECONDS)
+            session_threads_module,
+            "DISCOVERY_RETRY_DELAYS_SECONDS",
+            tuple(d * 0.01 for d in session_threads_module.DISCOVERY_RETRY_DELAYS_SECONDS),
         ),
     ):
         async with discord_bot(fake, config) as bot:

@@ -51,7 +51,7 @@ class CleanupTransportTests(unittest.IsolatedAsyncioTestCase):
             # Long enough to observe the grace period, short enough to wait out.
             patch.object(bridge_module, "SESSION_DISCONNECT_GRACE_SECONDS", 0.2),
             patch.object(bridge_module.discord, "Thread", FakeThread),
-            patch.object(bridge, "find_or_create_session_thread", new=AsyncMock(return_value=attachment)),
+            patch.object(bridge.session_threads, "find_or_create_session_thread", new=AsyncMock(return_value=attachment)),
         ):
             async with TestClient(ProductionCleanupTestServer(app)) as client:
                 yield bridge, thread, client, finished

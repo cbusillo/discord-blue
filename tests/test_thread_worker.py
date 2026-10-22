@@ -205,7 +205,7 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(TimeoutError):
                 await bridge.threads.bounded(bridge.cleanups.delete_session_notification(notice.id), 0.01)
             await asyncio.wait_for(deleting.wait(), timeout=1)
-            adopted = await bridge.find_session_notification_for_thread(501)
+            adopted = await bridge.session_threads.find_session_notification_for_thread(501)
             release.set()
             await asyncio.sleep(0.05)
 
@@ -224,10 +224,10 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
             return 7
 
         with (
-            patch.object(bridge, "find_existing_session_thread", new=AsyncMock(return_value=thread)),
-            patch.object(bridge, "ensure_session_notification", new=slow_notification),
+            patch.object(bridge.session_threads, "find_existing_session_thread", new=AsyncMock(return_value=thread)),
+            patch.object(bridge.session_threads, "ensure_session_notification", new=slow_notification),
         ):
-            attaching = asyncio.create_task(bridge.find_or_create_session_thread(hello))
+            attaching = asyncio.create_task(bridge.session_threads.find_or_create_session_thread(hello))
             await asyncio.wait_for(posting.wait(), timeout=1)
             # Reopened, not yet bound: an older session's cleanup retry reaches the thread now.
             retry = bridge.cleanups.pending_cleanup_for_session(
@@ -268,7 +268,7 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(first_sent.wait(), timeout=1)
             with self.assertRaises(discord.RateLimited):
                 await bridge.cleanups.delete_notification_message(cast(discord.Message, notice))
-            adopted = await bridge.find_session_notification_for_thread(501)
+            adopted = await bridge.session_threads.find_session_notification_for_thread(501)
             release.set()
             await first
 
@@ -289,7 +289,7 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
             patch.object(channel, "history", history),
         ):
             await bridge.cleanups.delete_notification_message(cast(discord.Message, notice))
-            adopted = await bridge.find_session_notification_for_thread(501)
+            adopted = await bridge.session_threads.find_session_notification_for_thread(501)
 
         self.assertIsNone(adopted)
 

@@ -74,7 +74,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                         self.assertIn(answer, text_in(view))
                     posted = len(thread.sent_messages)
                     session.hello.assistant_message = answer
-                    await bridge.backfill_latest_assistant_message(cast(discord.Thread, thread), session.hello)
+                    await bridge.session_threads.backfill_latest_assistant_message(cast(discord.Thread, thread), session.hello)
                     self.assertEqual(len(thread.sent_messages), posted, "V2 history must prevent duplicate backfill")
 
     async def test_blank_answers_do_not_send_or_notify_and_line_dense_answers_stay_compact(self) -> None:
@@ -82,7 +82,9 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
             for answer in ("", "  ", "\n", mark_assistant_message("  ")):
                 await fixture.bridge.post_assistant_message(fixture.thread.id, answer)
                 fixture.session.hello.assistant_message = answer
-                await fixture.bridge.backfill_latest_assistant_message(cast(discord.Thread, fixture.thread), fixture.session.hello)
+                await fixture.bridge.session_threads.backfill_latest_assistant_message(
+                    cast(discord.Thread, fixture.thread), fixture.session.hello
+                )
             self.assertFalse(fixture.thread.sent_messages)
             answer = "short line\n" * (ANSWER_PREVIEW_LINE_LIMIT + 1)
             await fixture.bridge.post_assistant_message(fixture.thread.id, answer)
@@ -109,7 +111,9 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(fixture.thread.sent_kwargs[0].get("silent", False))
             fixture.session.hello.assistant_message = answer
             count = len(fixture.thread.sent_messages)
-            await fixture.bridge.backfill_latest_assistant_message(cast(discord.Thread, fixture.thread), fixture.session.hello)
+            await fixture.bridge.session_threads.backfill_latest_assistant_message(
+                cast(discord.Thread, fixture.thread), fixture.session.hello
+            )
             self.assertEqual(len(fixture.thread.sent_messages), count)
 
     async def test_only_bot_authored_cards_count_as_answers_in_history(self) -> None:
@@ -117,20 +121,20 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
             await fixture.bridge.post_assistant_message(fixture.thread.id, "Answer from the agent")
             message = fixture.thread._history[-1]
             self.assertEqual(message.content, "")
-            self.assertTrue(fixture.bridge.is_bot_assistant_message(cast(discord.Message, message)))
+            self.assertTrue(fixture.bridge.session_threads.is_bot_assistant_message(cast(discord.Message, message)))
             # A Discord readback that normalizes invisible text still retains the card ID.
             for container in message.components:
                 for child in container.children:
                     if isinstance(child, discord.TextDisplay):
                         child.content = child.content.replace(mark_assistant_message(""), "")
-            self.assertTrue(fixture.bridge.is_bot_assistant_message(cast(discord.Message, message)))
+            self.assertTrue(fixture.bridge.session_threads.is_bot_assistant_message(cast(discord.Message, message)))
             message.author.id = 123
-            self.assertFalse(fixture.bridge.is_bot_assistant_message(cast(discord.Message, message)))
+            self.assertFalse(fixture.bridge.session_threads.is_bot_assistant_message(cast(discord.Message, message)))
             bot_user = fixture.bridge.bot.user
             assert bot_user is not None
             message.author.id = bot_user.id
             await message.edit(view=discord.ui.LayoutView())
-            self.assertFalse(fixture.bridge.is_bot_assistant_message(cast(discord.Message, message)))
+            self.assertFalse(fixture.bridge.session_threads.is_bot_assistant_message(cast(discord.Message, message)))
 
     async def test_dashboard_prioritizes_attention_and_includes_every_thread_in_bounded_pages(self) -> None:
         sessions = []

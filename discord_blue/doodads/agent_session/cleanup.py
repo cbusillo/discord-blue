@@ -10,7 +10,7 @@ import dataclasses
 import logging
 import time
 from collections import Counter
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import discord
 
@@ -20,6 +20,9 @@ from discord_blue.doodads.agent_session.store import SessionState, SessionStore,
 from discord_blue.doodads.agent_session.thread_worker import THREAD_CLOSE_STEPS, ThreadWorkers
 from discord_blue.doodads.agent_session.threads import SESSION_NOTIFICATION_PREFIXES, SESSION_START_PREFIX
 from discord_blue.plugs.discord_plug import BlueBot
+
+if TYPE_CHECKING:
+    from discord_blue.doodads.agent_session.session_threads import SessionThreads
 
 logger = logging.getLogger(__name__)
 SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS = 2
@@ -40,6 +43,7 @@ class CleanupHooks(Protocol):
     """What cleanup needs from the bridge."""
 
     bot: BlueBot
+    session_threads: SessionThreads
     sessions: AgentSessionRegistry
     store: SessionStore
     threads: ThreadWorkers
@@ -57,8 +61,6 @@ class CleanupHooks(Protocol):
     def stored_thread_protected(self, thread_id: int) -> bool: ...
 
     def thread_channel(self, thread_id: int) -> object | None: ...
-
-    async def validated_stored_thread(self, session_id: str, record: StoredSession) -> discord.Thread | None: ...
 
 
 class SessionCleanups:
@@ -284,7 +286,7 @@ class SessionCleanups:
             if self.bridge.store.records.get(session_id) is not record or self.bridge.sessions.get(session_id) is not None:
                 return
             thread = await self.bridge.threads.bounded(
-                self.bridge.validated_stored_thread(session_id, record), THREAD_LOOKUP_TIMEOUT_SECONDS
+                self.bridge.session_threads.validated_stored_thread(session_id, record), THREAD_LOOKUP_TIMEOUT_SECONDS
             )
             if thread is None:
                 return
