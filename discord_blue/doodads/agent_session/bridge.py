@@ -4,7 +4,6 @@ import asyncio
 import dataclasses
 import json
 import logging
-import re
 import time
 import weakref
 from contextlib import suppress
@@ -16,10 +15,7 @@ import discord
 from aiohttp import WSMsgType, web
 
 from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
-from discord_blue.doodads.agent_session.formatting import advance_code_fence
-from discord_blue.doodads.agent_session.formatting import format_user_message
 from discord_blue.doodads.agent_session.messages import send_agent_session_message
-from discord_blue.doodads.agent_session.messages import send_assistant_message
 from discord_blue.doodads.agent_session.protocol import (
     SERVER_FEATURES,
     RemoteApprovalRequest,
@@ -40,14 +36,9 @@ from discord_blue.doodads.agent_session.cleanup import (
     SessionCleanups,
 )
 from discord_blue.doodads.agent_session.session_threads import SessionThreads
-from discord_blue.doodads.agent_session.controls import (
-    REACTION_COMPACTING,
-    REACTION_FINISHED,
-    REACTION_IN_PROGRESS,
-    REACTION_REJECTED,
-    SessionControls,
-)
+from discord_blue.doodads.agent_session.controls import SessionControls
 from discord_blue.doodads.agent_session.interactions import SessionInteractions
+from discord_blue.doodads.agent_session.session_status import SessionStatusUpdates
 
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
 from discord_blue.doodads.agent_session.store import SessionState, SessionStore, StoredSession
@@ -59,56 +50,6 @@ from discord_blue.doodads.agent_session.threads import distinct_thread_name
 from discord_blue.doodads.agent_session.threads import session_start_message
 from discord_blue.health import health_payload
 from discord_blue.plugs.discord_plug import BlueBot
-
-# Only complete harness envelopes at the start of a prose line are presentation markup.
-# Inline examples, indented code and arbitrary XML remain conversation text.
-INJECTED_BLOCK = re.compile(
-    r" {0,3}<(system-reminder|task-notification|agent-message|channel)(?=[\s>])[^<>]*>"
-    r"(?:([ \t]*\r?\n.*?)^ {0,3}</\1>|([^\r\n]*?)</\1>)",
-    re.MULTILINE | re.DOTALL,
-)
-CLIPPED_REMINDER = re.compile(r" {0,3}<system-reminder>[ \t]*\r?\n")
-TASK_METADATA = re.compile(r"<(task-id|tool-use-id|output-file|usage)>.*?(?:</\1>|\Z)", re.DOTALL)
-TASK_FIELDS = re.compile(r"</?(?:status|summary|note|event|result)>")
-
-
-def filter_injected_tags(text: str) -> str:
-    """Render envelopes from user-message input; assistant text already has known provenance."""
-
-    def render(block: re.Match[str]) -> str:
-        tag = block.group(1)
-        body = block.group(2) if block.group(2) is not None else block.group(3)
-        if tag == "system-reminder":
-            return ""
-        if tag == "task-notification":
-            body = TASK_FIELDS.sub("", TASK_METADATA.sub("", body)).strip()
-            return f"Task notification:\n{body}" if body else ""
-        if tag == "agent-message":
-            return f"Agent message:\n{body.strip()}"
-        return body.strip()
-
-    output: list[str] = []
-    fence = None
-    position = 0
-    while position < len(text):
-        if fence is None:
-            if envelope := INJECTED_BLOCK.match(text, position):
-                output.append(render(envelope))
-                position = envelope.end()
-                # Envelope bodies are independent text, so their fences cannot hide later envelopes.
-                continue
-            if CLIPPED_REMINDER.match(text, position) and (
-                position == 0 or text.endswith("\n[Truncated; see the Claude Code terminal.]")
-            ):
-                break  # A standalone reminder or the client's explicitly clipped reminder tail.
-        newline = text.find("\n", position)
-        end = len(text) if newline == -1 else newline + 1
-        line = text[position:end]
-        fence = advance_code_fence(line.rstrip("\r\n"), fence)
-        output.append(line)
-        position = end
-    return "".join(output).strip()
-
 
 logger = logging.getLogger(__name__)
 # A connection that drops without a clean session_end (including a failed hello_ack) keeps its thread untouched
@@ -169,6 +110,7 @@ class AgentSessionBridge:
         self._attached_threads: dict[int, discord.Thread] = {}
         self.controls = SessionControls(self)
         self.interactions = SessionInteractions(self)
+        self.status = SessionStatusUpdates(self)
         self._monitor_started_at = time.monotonic()
         self._monitor_last_progress = self._monitor_started_at
         self._monitor_has_run = False
@@ -742,11 +684,11 @@ class AgentSessionBridge:
             case "heartbeat":
                 session.touch()
             case "user_message":
-                await self.handle_user_message(UserMessage.from_payload(payload))
+                await self.status.handle_user_message(UserMessage.from_payload(payload))
             case "status_changed" | "turn_complete" | "error":
-                await self.handle_session_status(message_type, SessionStatus.from_payload(payload))
+                await self.status.handle_session_status(message_type, SessionStatus.from_payload(payload))
             case "title_changed":
-                await self.handle_title_changed(session, payload.get("title"))
+                await self.status.handle_title_changed(session, payload.get("title"))
             case "notice" if session.thread_id is not None:
                 if isinstance(notice := payload.get("message"), str) and notice.strip():
                     await self.post_thread_notice(session.thread_id, notice)
@@ -948,111 +890,6 @@ class AgentSessionBridge:
                     user,
                 )
         return False
-
-    async def handle_session_status(self, message_type: str, status: SessionStatus) -> None:
-        session = self.sessions.get(status.session_id)
-        if session is None or session.thread_id is None:
-            logger.warning("Agent session status for unknown session: %s", status.session_id)
-            return
-        if status.session_epoch != session.session_epoch:
-            logger.warning("Agent session status for stale session epoch: %s", status.session_id)
-            return
-        session.status_revision += 1
-        session.last_status_message = status.message
-        if message_type == "turn_complete":
-            session.display_state = "done"
-        elif message_type == "error":
-            session.display_state = "failed"
-        elif "unconfirmed" in (status.message or "").lower():
-            session.display_state = "unknown"
-        elif "waiting" in (status.message or "").lower() or (status.message or "").lower() == "turn aborted":
-            session.display_state = "waiting"
-        else:
-            session.display_state = "working"
-
-        if message_type == "status_changed":
-            status_message = (status.message or "").lower()
-            if status_message == "turn aborted":
-                await self.controls.post_session_controls(session)
-                return
-            elif "compact" in status_message:
-                reaction = REACTION_COMPACTING
-            else:
-                reaction = REACTION_IN_PROGRESS
-            await self.interactions.clear_pending_user_inputs(
-                session,
-                "Agent session is no longer waiting on this prompt.",
-            )
-            await self.controls.update_session_status_reaction(session, reaction)
-            return
-
-        if message_type == "error":
-            await self.interactions.clear_pending_user_inputs(
-                session,
-                "Agent session stopped waiting on this prompt.",
-            )
-            await self.controls.update_session_status_reaction(session, REACTION_REJECTED)
-            return
-
-        if message_type == "turn_complete" and status.assistant_message:
-            await self.post_assistant_message(session.thread_id, status.assistant_message)
-        if message_type == "turn_complete":
-            await self.controls.clear_rejected_command_reactions(session)
-            await self.controls.update_active_command_reaction(session, REACTION_FINISHED, clear=True)
-            await self.interactions.clear_pending_user_inputs(
-                session,
-                "Agent session is no longer waiting on this prompt.",
-            )
-            if status.assistant_message and session.control_interruptions_enabled:
-                replaced = await self.controls.spawn_session_controls(
-                    session,
-                    reaction=None,
-                    interruptions_enabled=False,
-                )
-                if replaced:
-                    return
-            await self.controls.post_session_controls(session)
-
-    async def handle_user_message(self, user_message: UserMessage) -> None:
-        session = self.sessions.get(user_message.session_id)
-        if session is None or session.thread_id is None:
-            logger.warning("Agent session user message for unknown session: %s", user_message.session_id)
-            return
-        if user_message.session_epoch != session.session_epoch:
-            logger.warning("Agent session user message for stale session epoch: %s", user_message.session_id)
-            return
-        message = filter_injected_tags(user_message.message)
-        if not message:
-            return
-        channel = self.thread_channel(session.thread_id)
-        if not isinstance(channel, discord.Thread):
-            return
-
-        await send_agent_session_message(
-            channel,
-            format_user_message(message)[:DISCORD_MESSAGE_LIMIT],
-        )
-        session.status_revision += 1
-        session.display_state = "working"
-        session.last_status_message = "Working on your request."
-        await self.controls.spawn_session_controls(
-            session,
-            reaction=REACTION_IN_PROGRESS,
-            interruptions_enabled=True,
-        )
-
-    async def post_assistant_message(self, thread_id: int, text: str) -> None:
-        channel = self.thread_channel(thread_id)
-        if not isinstance(channel, discord.Thread):
-            return
-        await send_assistant_message(channel, text)
-
-    async def handle_title_changed(self, session: AgentSession, title: object) -> None:
-        """Rename the session thread for a title the client learned after hello, such as its latest prompt."""
-        if not isinstance(title, str) or not title.strip() or session.thread_id is None:
-            return
-        session.hello.title = title.strip()
-        self.request_thread_name(session)
 
     def thread_name_for(self, hello: SessionHello) -> str:
         taken = {

@@ -35,7 +35,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(harness=harness, long=len(answer) > ANSWER_PREVIEW_LIMIT), prompt_fixture() as fixture:
                     bridge, session, thread = fixture.bridge, fixture.session, fixture.thread
                     session.hello.harness = harness
-                    await bridge.handle_session_status(
+                    await bridge.status.handle_session_status(
                         "turn_complete",
                         SessionStatus(
                             session_id=session.session_id,
@@ -80,14 +80,14 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
     async def test_blank_answers_do_not_send_or_notify_and_line_dense_answers_stay_compact(self) -> None:
         with prompt_fixture() as fixture:
             for answer in ("", "  ", "\n", mark_assistant_message("  ")):
-                await fixture.bridge.post_assistant_message(fixture.thread.id, answer)
+                await fixture.bridge.status.post_assistant_message(fixture.thread.id, answer)
                 fixture.session.hello.assistant_message = answer
                 await fixture.bridge.session_threads.backfill_latest_assistant_message(
                     cast(discord.Thread, fixture.thread), fixture.session.hello
                 )
             self.assertFalse(fixture.thread.sent_messages)
             answer = "short line\n" * (ANSWER_PREVIEW_LINE_LIMIT + 1)
-            await fixture.bridge.post_assistant_message(fixture.thread.id, answer)
+            await fixture.bridge.status.post_assistant_message(fixture.thread.id, answer)
             self.assertEqual(fixture.thread.sent_files, [answer.encode()])
             self.assertLess(len(fixture.thread.sent_messages[0].splitlines()), len(answer.splitlines()))
 
@@ -95,7 +95,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
         with prompt_fixture() as fixture:
             fixture.thread.deny_attachments = True
             answer = "fallback line\n" * (ANSWER_PREVIEW_LINE_LIMIT + 1)
-            await fixture.bridge.handle_session_status(
+            await fixture.bridge.status.handle_session_status(
                 "turn_complete",
                 SessionStatus(
                     session_id=fixture.session.session_id,
@@ -118,7 +118,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_only_bot_authored_cards_count_as_answers_in_history(self) -> None:
         with prompt_fixture() as fixture:
-            await fixture.bridge.post_assistant_message(fixture.thread.id, "Answer from the agent")
+            await fixture.bridge.status.post_assistant_message(fixture.thread.id, "Answer from the agent")
             message = fixture.thread._history[-1]
             self.assertEqual(message.content, "")
             self.assertTrue(fixture.bridge.session_threads.is_bot_assistant_message(cast(discord.Message, message)))
