@@ -280,7 +280,7 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
                 for child in ast.walk(node)
             )
         }
-        self.assertEqual(senders, {"handle_connect", "dispatch_command", "dispatch_approval"})
+        self.assertEqual(senders, {"accept_hello", "dispatch_command", "dispatch_approval"})
 
 
 class CapabilityTransportTests(unittest.IsolatedAsyncioTestCase):
