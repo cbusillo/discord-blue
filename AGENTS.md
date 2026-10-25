@@ -1,5 +1,11 @@
 # Project Coding Agent Guide - Discord Blue
 
+## What Discord Blue does
+
+Discord Blue is a Discord bot with a plugin system and an agent-session bridge.
+The Director uses Discord threads to interact with local Codex and Claude Code sessions.
+Evidence: [README.md](README.md).
+
 ## Direction and execution
 
 Read the owner's [overall DIRECTION.md](https://github.com/cbusillo/direction/blob/HEAD/DIRECTION.md)
