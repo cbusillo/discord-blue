@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import unittest
 from collections.abc import Awaitable, Callable
 from aiohttp import web
@@ -106,6 +107,14 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             self.assertIn("**Q901:** Ship this?", "\n".join(fixture.thread.sent_messages))
+            self.assertFalse(
+                any(
+                    isinstance(item, discord.ui.File)
+                    for view in fixture.thread.sent_views
+                    if isinstance(view, discord.ui.LayoutView)
+                    for item in view.walk_children()
+                )
+            )
             self.assertFalse(fixture.thread.sent_files)
             self.assertIsNotNone(fixture.session.control_message_id)
             self.assertEqual(fixture.session.display_state, "done")
@@ -242,6 +251,14 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Q999", displayed)
         for number in numbers:
             self.assertIn(f"**Q{number}", displayed)
+
+    def test_huge_report_indentation_does_not_stall_question_extraction(self) -> None:
+        source = "Background.\n" + " " * 20000 + "ordinary report\n**Q901:** Continue?"
+        started = time.process_time()
+        views, attached = assistant_answer_cards(source)
+        self.assertTrue(attached)
+        self.assertIn("**Q901:** Continue?", "\n".join(text_in(view) for view in views))
+        self.assertLess(time.process_time() - started, 1.0)
 
     def test_emoji_heavy_answers_fit_discord_text_budget(self) -> None:
         views, _ = assistant_answer_cards("🟢" * 4000)
