@@ -3624,7 +3624,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await bridge.status.post_assistant_message(555, answer)
 
         posted = list(thread.sent_messages)
-        self.assertEqual(len(posted), 1)
+        self.assertGreater(len(posted), 1)
         self.assertFalse(thread.sent_files)
         for message in posted:
             self.assertLessEqual(len(message), 4000)

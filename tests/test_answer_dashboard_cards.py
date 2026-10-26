@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable
 from aiohttp import web
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import discord
 from discord.http import handle_message_parameters
@@ -170,6 +170,49 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual("".join(bodies), answer)
                 for view in views:
                     self.assertLessEqual(len(text_in(view)), 4000)
+
+    async def test_multipart_answer_notifies_once_and_recovers_missing_tail_after_partial_send(self) -> None:
+        with prompt_fixture() as fixture:
+            await fixture.bridge.status.post_assistant_message(fixture.thread.id, "Previous complete answer")
+            answer = "A new answer. " * 500 + "\n\n**Q999:** Is the recovered tail readable?"
+            original_send = fixture.thread.send
+            attempts = 0
+
+            async def fail_second(content: str | None = None, **kwargs: object) -> object:
+                nonlocal attempts
+                attempts += 1
+                if attempts == 2:
+                    raise RuntimeError("Interrupted delivery")
+                return await original_send(content, **kwargs)
+
+            with patch.object(fixture.thread, "send", side_effect=fail_second), self.assertRaises(RuntimeError):
+                await fixture.bridge.status.post_assistant_message(fixture.thread.id, answer)
+            self.assertFalse(await fixture.bridge.session_threads.thread_has_assistant_message(cast(discord.Thread, fixture.thread)))
+            fixture.session.hello.assistant_message = answer
+            start = len(fixture.thread.sent_messages)
+            await fixture.bridge.session_threads.backfill_latest_assistant_message(
+                cast(discord.Thread, fixture.thread), fixture.session.hello
+            )
+            self.assertIn("**Q999:** Is the recovered tail readable?", "\n".join(fixture.thread.sent_messages[start:]))
+            self.assertEqual(sum(not kwargs["silent"] for kwargs in fixture.thread.sent_kwargs[start:]), 1)
+            self.assertTrue(await fixture.bridge.session_threads.thread_has_assistant_message(cast(discord.Thread, fixture.thread)))
+
+    def test_huge_output_keeps_questions_without_unrelated_report_or_inline_references(self) -> None:
+        answer = "**Q901:** May we continue?\n\nRecommend yes.\n\n" + "report line\n" * 10000
+        answer += "\n\nAs noted in **Q902** above, this is a reference."
+        views, attached = assistant_answer_cards(answer)
+        self.assertTrue(attached)
+        self.assertEqual(len(views), 1)
+        displayed = text_in(views[0])
+        self.assertIn("**Q901:** May we continue?", displayed)
+        self.assertIn("Recommend yes.", displayed)
+        self.assertNotIn("report line", displayed)
+        self.assertNotIn("Q902", displayed)
+
+    def test_emoji_heavy_answers_fit_discord_text_budget(self) -> None:
+        views, _ = assistant_answer_cards("🟢" * 4000)
+        for view in views:
+            self.assertLessEqual(len(text_in(view).encode("utf-16-le")) // 2, 4000)
 
     async def test_only_bot_authored_cards_count_as_answers_in_history(self) -> None:
         with prompt_fixture() as fixture:

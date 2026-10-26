@@ -1,37 +1,9 @@
-"""Split assistant answers into Discord messages.
-
-Every message this module returns fits Discord's limit exactly, including the code fences it adds to keep a
-split code block balanced and the assistant marker, so no send path ever has to truncate one.
-"""
-
 from __future__ import annotations
 
-from discord_blue.doodads.agent_session.formatting import ASSISTANT_MESSAGE_MARKER
-from discord_blue.doodads.agent_session.formatting import CodeFence
-from discord_blue.doodads.agent_session.formatting import advance_code_fence
-from discord_blue.doodads.agent_session.formatting import convert_markdown_tables
-from discord_blue.doodads.agent_session.formatting import mark_assistant_message
-from discord_blue.doodads.agent_session.formatting import strip_assistant_markers
+from discord_blue.doodads.agent_session.formatting import CodeFence, advance_code_fence
 
 DISCORD_MESSAGE_LIMIT = 2000
-DISCORD_ASSISTANT_CHUNK_LIMIT = 1800
-MAX_ASSISTANT_CHUNKS = 10
-ASSISTANT_TRUNCATED_NOTICE = "\n\n*(truncated, see terminal)*"
-# Tries at shrinking a chunk to make room for its fences before giving up on keeping that code block balanced.
 FENCE_FIT_ATTEMPTS = 8
-
-
-def format_assistant_messages(text: str) -> list[str]:
-    """Turn one assistant answer into marked Discord messages, at most `MAX_ASSISTANT_CHUNKS` of them."""
-    body_limit = DISCORD_ASSISTANT_CHUNK_LIMIT - len(ASSISTANT_MESSAGE_MARKER) - len(ASSISTANT_TRUNCATED_NOTICE)
-    source = convert_markdown_tables(strip_assistant_markers(text))
-    # The answer can only fill this many messages; reading further would be wasted work.
-    source = source[: (MAX_ASSISTANT_CHUNKS + 1) * DISCORD_ASSISTANT_CHUNK_LIMIT]
-    chunks = split_discord_message(source, body_limit, max_chunks=MAX_ASSISTANT_CHUNKS + 1)
-    if len(chunks) > MAX_ASSISTANT_CHUNKS:
-        chunks = chunks[:MAX_ASSISTANT_CHUNKS]
-        chunks[-1] = f"{chunks[-1]}{ASSISTANT_TRUNCATED_NOTICE}"
-    return [mark_assistant_message(chunk) for chunk in chunks]
 
 
 def split_discord_message(text: str, limit: int, *, max_chunks: int | None = None) -> list[str]:

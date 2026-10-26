@@ -49,19 +49,20 @@ async def send_assistant_message(destination: discord.abc.Messageable, message: 
             file = discord.File(BytesIO(strip_assistant_markers(message).encode()), filename=ANSWER_FILENAME)
             try:
                 last_message = await destination.send(
-                    file=file, view=view, allowed_mentions=agent_session_allowed_mentions(), silent=False
+                    file=file, view=view, allowed_mentions=agent_session_allowed_mentions(), silent=index > 0
                 )
                 continue
             except discord.Forbidden:
                 logger.warning("Unable to attach the complete Agent session answer; keeping questions inline")
-                for item in list(view.walk_children()):
-                    if isinstance(item, discord.ui.File) and isinstance(item.parent, discord.ui.Container):
-                        item.parent.remove_item(item)
-                    elif isinstance(item, discord.ui.TextDisplay) and item.content.startswith("-# Huge output"):
-                        item.content = "-# Attachment unavailable · Full answer remains in the terminal"
+                container = view.children[0]
+                assert isinstance(container, discord.ui.Container)
+                container.remove_item(container.children[-1])
+                note = container.children[-1]
+                assert isinstance(note, discord.ui.TextDisplay)
+                note.content = "-# Attachment unavailable · Full answer remains in the terminal"
             finally:
                 file.close()
-        last_message = await destination.send(view=view, allowed_mentions=agent_session_allowed_mentions(), silent=False)
+        last_message = await destination.send(view=view, allowed_mentions=agent_session_allowed_mentions(), silent=index > 0)
     return last_message
 
 

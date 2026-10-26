@@ -15,10 +15,11 @@ from discord_blue.doodads.agent_session.sessions import AgentSession
 
 STATUS_CARD_COMPONENT_ID = 213
 ANSWER_CARD_COMPONENT_ID = 214
+ANSWER_CONTINUATION_COMPONENT_ID = 215
 ANSWER_FILENAME = "answer.md"
-ANSWER_CHUNK_LIMIT = 3600
+ANSWER_CHUNK_LIMIT = 1800
 MAX_INLINE_ANSWER_CARDS = 10
-QUESTION_NUMBER = re.compile(r"\*\*Q[0-9]+\b")
+QUESTION_NUMBER = re.compile(r"^\s{0,3}(?:#{1,6}\s+)?(?:[-*]\s+)?\*\*Q[0-9]+\b")
 DASHBOARD_PAGE_SIZE = 8
 STATUS_LABELS = {
     "working": ("🔄 Working", 0x758AFF),
@@ -36,7 +37,7 @@ def assistant_answer_cards(text: str) -> tuple[list[discord.ui.LayoutView], bool
     if attached:
         questions = _answer_questions(source)
         chunks = split_discord_message(questions, ANSWER_CHUNK_LIMIT) if questions else chunks[:1]
-    views = [_answer_card(chunk) for chunk in chunks]
+    views = [_answer_card(chunk, complete=index == len(chunks) - 1) for index, chunk in enumerate(chunks)]
     if attached:
         container = views[-1].children[0]
         assert isinstance(container, discord.ui.Container)
@@ -47,24 +48,23 @@ def assistant_answer_cards(text: str) -> tuple[list[discord.ui.LayoutView], bool
 
 def _answer_questions(source: str) -> str:
     sections: list[str] = []
-    current: list[str] = []
+    include_context = False
     fence = None
-    for line in source.splitlines():
-        question = fence is None and QUESTION_NUMBER.search(line) is not None
-        heading = fence is None and line.lstrip().startswith("#")
-        if question or heading:
-            if current:
-                sections.append("\n".join(current).strip())
-            current = []
-        if question or current:
-            current.append(line)
-        fence = advance_code_fence(line, fence)
-    if current:
-        sections.append("\n".join(current).strip())
+    for paragraph in re.split(r"\n[ \t]*\n", source):
+        question = False
+        for line in paragraph.splitlines():
+            question |= fence is None and QUESTION_NUMBER.search(line) is not None
+            fence = advance_code_fence(line, fence)
+        if question:
+            sections.append(paragraph)
+        elif include_context and not paragraph.lstrip().startswith(("#", "```", "~~~", "---")):
+            context = split_discord_message(paragraph, ANSWER_CHUNK_LIMIT, max_chunks=1)
+            sections.extend(context)
+        include_context = question
     return "\n\n".join(sections)
 
 
-def _answer_card(chunk: str) -> discord.ui.LayoutView:
+def _answer_card(chunk: str, *, complete: bool) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(
         discord.ui.Container(
@@ -72,7 +72,7 @@ def _answer_card(chunk: str) -> discord.ui.LayoutView:
             discord.ui.Separator(),
             discord.ui.TextDisplay(mark_assistant_message(chunk)),
             accent_color=STATUS_LABELS["done"][1],
-            id=ANSWER_CARD_COMPONENT_ID,
+            id=ANSWER_CARD_COMPONENT_ID if complete else ANSWER_CONTINUATION_COMPONENT_ID,
         )
     )
     return view
