@@ -242,13 +242,12 @@ async def create_session_thread(
         await settle(thread)
     notification = await send_agent_session_message(channel, session_notification_message(hello, thread))
     await send_agent_session_message(thread, session_start_message(hello))
-    if not hello.spawned:
-        await auto_join_configured_users(bot, thread)
+    await auto_join_configured_users(bot, thread)
     return SessionThread(thread=thread, notification_message_id=notification.id)
 
 
 async def auto_join_configured_users(bot: BlueBot, thread: discord.Thread) -> None:
-    if thread.parent_id == bot.config.agent_session.spawned_channel_id:
+    if thread.parent_id in agent_session_channel_ids(bot)[1:]:
         return
     for user_id in bot.config.agent_session.auto_join_user_ids:
         try:

@@ -214,9 +214,9 @@ and the Director-opened Supervisor, use the main session channel and add
 reopen. A new spawned session waits for a distinct configured second channel
 instead of falling back to the main channel. Existing threads retain their
 parent channel; recovery, replies, approvals and cleanup support both parents.
-Spawned sessions route questions for the Director through the Supervisor's
-main-channel session. This does not change the existing embedded Codex
-visibility limit: the bridge mirrors the shared daemon's sessions.
+For question routing, follow the [Supervisor question queue](https://github.com/cbusillo/codex-skills/blob/main/skills/supervisor/SKILL.md).
+The bridge mirrors the shared daemon's Codex sessions; embedded sessions retain
+their existing visibility limit.
 
 ### Managed runtime Compose
 

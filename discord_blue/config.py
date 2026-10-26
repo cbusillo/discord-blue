@@ -164,6 +164,10 @@ class Config(Serializable):
                 not isinstance(self.agent_session.token, str) or not self.agent_session.token.strip()
             ):
                 raise ValueError("Managed runtime requires a token for its enabled agent-session bridge")
+        spawned_channel = self.agent_session.spawned_channel_id
+        main_channel = self.agent_session.channel_id or self.discord.bot_channel_id
+        if type(spawned_channel) is not int or spawned_channel < 0 or (spawned_channel and spawned_channel == main_channel):
+            raise ValueError("agent_session.spawned_channel_id must be zero or a positive ID distinct from the main channel")
         self._runtime_fields = {section: set(values) for section, values in overrides.items()}
         self.save()
 

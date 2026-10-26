@@ -13,6 +13,7 @@ from discord_blue.doodads.agent_session.protocol import SessionHello
 from discord_blue.claude_channel.session import Identity
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
+from discord_blue.doodads.agent_session.session_threads import DiscoveryIncomplete
 from discord_blue.doodads.agent_session.store import StoredSession
 from discord_blue.doodads.agent_session.threads import auto_join_configured_users, create_session_thread, session_start_message
 from discord_blue.config import AgentSessionConfig, Config, ConversationConfig, DiscordConfig
@@ -58,6 +59,7 @@ class SessionRoutingTests(unittest.IsolatedAsyncioTestCase):
                 )
                 config.agent_session.channel_id = 321
                 config.agent_session.spawned_channel_id = 654
+                config.agent_session.auto_join_user_ids = [123]
                 hello = dataclasses.replace(make_hello(), spawned=spawned)
                 existing = FakeThread(9999, archived=True)
                 existing.parent_id = parent_id
@@ -70,13 +72,11 @@ class SessionRoutingTests(unittest.IsolatedAsyncioTestCase):
                 discovered = await bridge.session_threads.find_existing_session_thread(hello)
                 self.assertIs(discovered, existing)
                 bridge.store.records[hello.session_id] = StoredSession(existing.id, None, session_start_message(hello), "live", 0, 0)
-                with patch.object(existing, "add_user", new_callable=AsyncMock, create=True) as add_user:
-                    recovered = await bridge.session_threads.resume_stored_thread(hello)
-                add_user.assert_not_awaited()
+                recovered = await bridge.session_threads.resume_stored_thread(hello)
+                self.assertEqual(existing._member_ids, config.agent_session.auto_join_user_ids if parent_id == 321 else [])
                 self.assertIsNotNone(recovered)
                 assert recovered is not None
                 self.assertIs(recovered.thread, existing)
-                self.assertEqual(existing.parent_id, parent_id)
                 self.assertEqual(bool(main.sent_messages), parent_id == main.id)
                 self.assertEqual(bool(second.sent_messages), parent_id == second.id)
                 self.assertTrue(await bridge.cleanups.delete_session_notification(recovered.notification_message_id or 0))
@@ -183,13 +183,12 @@ class SessionRoutingTests(unittest.IsolatedAsyncioTestCase):
                             "session_kind": label,
                         }
                     )
-                    with patch(
-                        "discord_blue.doodads.agent_session.threads.auto_join_configured_users", new_callable=AsyncMock
-                    ) as join:
-                        await create_session_thread(cast(Any, bot), hello)
+                    created = await create_session_thread(cast(Any, bot), hello)
                     self.assertEqual(bool(spawned.sent_messages), label == "spawned")
                     self.assertEqual(bool(main.sent_messages), label != "spawned")
-                    self.assertEqual(join.await_count, 0 if label == "spawned" else 1)
+                    self.assertEqual(
+                        cast(Any, created.thread)._member_ids, [] if label == "spawned" else config.agent_session.auto_join_user_ids
+                    )
 
     async def test_spawned_session_never_falls_back_to_main_without_configured_second_channel(self) -> None:
         config = cast(
@@ -206,3 +205,15 @@ class SessionRoutingTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await create_session_thread(cast(Any, FakeBot(config, channel=main)), hello)
         self.assertFalse(main.sent_messages)
+
+    async def test_unavailable_second_parent_cannot_be_mistaken_for_no_existing_thread(self) -> None:
+        config = cast(
+            Config, SimpleNamespace(agent_session=AgentSessionConfig(), discord=DiscordConfig(), conversation=ConversationConfig())
+        )
+        config.agent_session.channel_id = 321
+        config.agent_session.spawned_channel_id = 654
+        main = FakeTextChannel(321, [])
+        bridge = AgentSessionBridge(cast(Any, FakeBot(config, channel=main)))
+        with self.assertRaises(DiscoveryIncomplete):
+            await bridge.session_threads.find_or_create_session_thread(make_hello())
+        self.assertFalse(main.threads)

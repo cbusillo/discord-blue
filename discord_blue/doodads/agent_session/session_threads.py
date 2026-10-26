@@ -145,7 +145,7 @@ class SessionThreads:
         self._attaching_threads[thread.id] += 1
         try:
             if thread.archived or thread.locked or self.bridge.threads.closing(thread.id) or record.status in {"closing", "closed"}:
-                thread = await self.bridge.threads.open(thread, add_members=not hello.spawned)
+                thread = await self.bridge.threads.open(thread)
             notification_id = record.notification_id
             try:
                 channel = await threads_module.get_agent_session_channel(self.bridge.bot, thread.parent_id)
@@ -204,7 +204,7 @@ class SessionThreads:
         self._attaching_threads[thread.id] += 1
         try:
             try:
-                thread = await self.bridge.threads.open(thread, add_members=not hello.spawned)
+                thread = await self.bridge.threads.open(thread)
             except discord.NotFound as exc:
                 if exc.code == DISCORD_UNKNOWN_CHANNEL:
                     raise CandidateGone(thread.id) from exc

@@ -132,3 +132,13 @@ spawned_channel_id = 654
         prompt.assert_called_once()
         self.assertEqual(config.discord.token, "local-input")
         self.assertEqual(tomllib.loads(self.config_path.read_text())["discord"]["token"], "local-input")
+
+    def test_invalid_spawned_channel_refuses_startup_before_saving(self) -> None:
+        for spawned, main in ((-1, 321), (321, 321), (456, 0)):
+            with self.subTest(spawned=spawned, main=main):
+                initial = '[discord]\ntoken="local-bot"\nguild_id=123\nbot_channel_id=456\n'
+                self.config_path.write_text(initial)
+                os.environ["DISCORD_BLUE_RUNTIME_CONFIG"] = f"[agent_session]\nchannel_id={main}\nspawned_channel_id={spawned}"
+                with self.assertRaises(ValueError):
+                    Config()
+                self.assertEqual(self.config_path.read_text(), initial)
