@@ -23,6 +23,7 @@ The client sends JSON text messages. Start each connection with:
   "cwd": "/workspace/example",
   "branch": "feature/example",
   "pid": 123,
+  "session_kind": "spawned",
   "assistant_message": "Optional last completed assistant answer",
   "origin": {
     "kind": "launchplane",
@@ -33,6 +34,14 @@ The client sends JSON text messages. Start each connection with:
   }
 }
 ```
+
+`session_kind` is an explicit launcher label. Only `spawned` selects
+`agent_session.spawned_channel_id` and suppresses adding configured users.
+Omitted labels and `director` select the main session channel and add configured
+users. The label never changes an existing thread's parent. Both configured
+channels share discovery and recovery; each thread's notifications remain in
+its actual parent. A new spawned thread requires a distinct second channel.
+The second channel ID comes from Launchplane-managed runtime configuration.
 
 `origin`, `assistant_message`, `title`, and `harness` are optional. `title` is a short
 human-readable task name used in the Discord thread name. It is not part of
@@ -84,7 +93,7 @@ and reattachment restores its membership. The bot needs Discord’s
 `Manage Threads` and `Read Message History` permissions for private-thread
 recovery. Existing session metadata must still match before a thread is reused.
 If Discord denies access to all private archives, discovery falls back to private
-archives the bot has joined. Discovery keeps one index of the channel's threads
+archives the bot has joined. Discovery keeps one index of both configured channels' threads
 for every session: it lists every page once and reads each thread's opening
 messages once, and a restart's reconnects share one scan. A listing page or read
 that fails or is rate limited leaves the index incomplete. The attach refreshes

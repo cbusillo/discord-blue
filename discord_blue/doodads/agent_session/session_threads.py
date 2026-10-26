@@ -109,8 +109,13 @@ class SessionThreads:
             self.bridge.discovery.forget(record.thread_id)
             return None
         # Other Discord failures remain failures, not evidence permitting a duplicate creation.
-        parent_id = self.bridge.bot.config.agent_session.channel_id or self.bridge.bot.config.discord.bot_channel_id
-        if not isinstance(thread, discord.Thread) or thread.parent_id != parent_id or thread.owner_id != self.bridge.bot_user_id():
+        parent_ids = threads_module.agent_session_channel_ids(self.bridge.bot)
+        if (
+            not isinstance(thread, discord.Thread)
+            or thread.parent_id not in parent_ids
+            or thread.guild.id != self.bridge.bot.config.discord.guild_id
+            or thread.owner_id != self.bridge.bot_user_id()
+        ):
             self.forget_stored_hint(session_id, record)
             return None
         opening = [
@@ -140,10 +145,10 @@ class SessionThreads:
         self._attaching_threads[thread.id] += 1
         try:
             if thread.archived or thread.locked or self.bridge.threads.closing(thread.id) or record.status in {"closing", "closed"}:
-                thread = await self.bridge.threads.open(thread)
+                thread = await self.bridge.threads.open(thread, add_members=not hello.spawned)
             notification_id = record.notification_id
             try:
-                channel = await threads_module.get_agent_session_channel(self.bridge.bot)
+                channel = await threads_module.get_agent_session_channel(self.bridge.bot, thread.parent_id)
                 if notification_id is not None:
                     try:
                         notification = await channel.fetch_message(notification_id)
@@ -199,7 +204,7 @@ class SessionThreads:
         self._attaching_threads[thread.id] += 1
         try:
             try:
-                thread = await self.bridge.threads.open(thread)
+                thread = await self.bridge.threads.open(thread, add_members=not hello.spawned)
             except discord.NotFound as exc:
                 if exc.code == DISCORD_UNKNOWN_CHANNEL:
                     raise CandidateGone(thread.id) from exc
@@ -274,20 +279,20 @@ class SessionThreads:
                 logger.warning("Giving up on duplicate Agent session threads of %s", check.created_id)
 
     async def ensure_session_notification(self, hello: SessionHello, thread: discord.Thread) -> int | None:
-        existing_message_id = await self.find_session_notification_for_thread(thread.id)
+        existing_message_id = await self.find_session_notification_for_thread(thread.id, thread.parent_id)
         if existing_message_id is not None:
             return existing_message_id
         try:
-            channel = await threads_module.get_agent_session_channel(self.bridge.bot)
+            channel = await threads_module.get_agent_session_channel(self.bridge.bot, thread.parent_id)
             message = await send_agent_session_message(channel, threads_module.session_notification_message(hello, thread))
         except (discord.DiscordException, ValueError):
             logger.warning("Unable to create Agent session notification for thread %s", thread.id)
             return None
         return message.id
 
-    async def find_session_notification_for_thread(self, thread_id: int) -> int | None:
+    async def find_session_notification_for_thread(self, thread_id: int, parent_id: int | None = None) -> int | None:
         try:
-            channel = await threads_module.get_agent_session_channel(self.bridge.bot)
+            channel = await threads_module.get_agent_session_channel(self.bridge.bot, parent_id)
         except ValueError:
             return None
         bot_user = self.bridge.bot.user
@@ -314,14 +319,19 @@ class SessionThreads:
         incomplete the attach fails with DiscoveryIncomplete rather than creating a second thread.
         """
         try:
-            channel = await threads_module.get_agent_session_channel(self.bridge.bot)
+            channels = tuple(
+                [
+                    await threads_module.get_agent_session_channel(self.bridge.bot, channel_id)
+                    for channel_id in threads_module.agent_session_channel_ids(self.bridge.bot)
+                ]
+            )
         except ValueError:
             logger.warning("Unable to find reusable Agent session thread: channel is unavailable")
-            return None
+            raise DiscoveryIncomplete("Agent session channel is unavailable") from None
         for attempt, delay in enumerate((0.0, *DISCOVERY_RETRY_DELAYS_SECONDS)):
             if delay:
                 await asyncio.sleep(delay)
-            await self.bridge.discovery.fresh(channel, force=attempt > 0)
+            await self.bridge.discovery.fresh(channels[0], force=attempt > 0, additional_channels=channels[1:])
             if self.bridge.discovery.complete:
                 return await self.match_session_thread(hello, complete=True)
         # Still incomplete: an exact match is still this session's thread (the best of those read), but neither a

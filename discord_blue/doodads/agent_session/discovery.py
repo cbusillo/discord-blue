@@ -44,17 +44,31 @@ class DiscoveryIndex:
     complete: bool = False
     refreshed_at: float | None = None
     _refreshing: asyncio.Task[None] | None = None
+    _channel_ids: tuple[int, ...] = ()
 
-    async def fresh(self, channel: discord.TextChannel, *, force: bool = False) -> None:
+    async def fresh(
+        self, channel: discord.TextChannel, *, force: bool = False, additional_channels: tuple[discord.TextChannel, ...] = ()
+    ) -> None:
         """Refresh unless a refresh finished moments ago; concurrent callers share one refresh."""
         recent = self.refreshed_at is not None and self.clock() - self.refreshed_at < INDEX_REUSE_SECONDS
-        if recent and self.complete and not force:
+        channel_ids = tuple(item.id for item in (channel, *additional_channels))
+        if recent and self.complete and not force and self._channel_ids == channel_ids:
             return
         if self._refreshing is None:
-            self._refreshing = asyncio.create_task(self.refresh(channel), name="agent-session-discovery-index")
+            self._refreshing = asyncio.create_task(
+                self.refresh_channels((channel, *additional_channels)), name="agent-session-discovery-index"
+            )
             self._refreshing.add_done_callback(self._refresh_done)
         # Shielded: a waiter that is cancelled leaves the shared refresh (and its Discord reads) running.
         await asyncio.shield(self._refreshing)
+
+    async def refresh_channels(self, channels: tuple[discord.TextChannel, ...]) -> None:
+        complete = True
+        for channel in channels:
+            await self.refresh(channel)
+            complete = self.complete and complete
+        self.complete = complete
+        self._channel_ids = tuple(channel.id for channel in channels)
 
     def _refresh_done(self, task: asyncio.Task[None]) -> None:
         if self._refreshing is task:

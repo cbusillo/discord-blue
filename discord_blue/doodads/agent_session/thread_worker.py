@@ -105,12 +105,12 @@ class ThreadWorker:
 
     # Requests from callers. None of them waits on Discord.
 
-    def open(self, thread: discord.Thread) -> asyncio.Future[discord.Thread]:
+    def open(self, thread: discord.Thread, *, add_members: bool = True) -> asyncio.Future[discord.Thread]:
         self.thread = thread
         self.wanted = "open"
         # A close in progress stops before its next step; what it already did is undone by the reopen.
         self.finish_close()
-        self.open_steps = ["reopen", "join", "members"]
+        self.open_steps = ["reopen", "join", *(["members"] if add_members else [])]
         waiter: asyncio.Future[discord.Thread] = asyncio.get_running_loop().create_future()
         self.open_waiters.append(waiter)
         self.start()
@@ -412,9 +412,9 @@ class ThreadWorkers:
             worker = self.workers[thread_id] = ThreadWorker(self, thread_id)
         return worker
 
-    async def open(self, thread: discord.Thread) -> discord.Thread:
+    async def open(self, thread: discord.Thread, *, add_members: bool = True) -> discord.Thread:
         """Reopen, unlock and join the thread and add its configured members; raises if Discord refuses."""
-        return await asyncio.shield(self.worker(thread.id).open(thread))
+        return await asyncio.shield(self.worker(thread.id).open(thread, add_members=add_members))
 
     async def close(self, thread: discord.Thread, steps: set[CleanupStep], timeout: float | None = None) -> set[CleanupStep]:
         """One pass over the close steps; `steps` keeps what remains, and keeps shrinking after a timeout."""

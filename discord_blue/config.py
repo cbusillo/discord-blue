@@ -68,6 +68,7 @@ class AgentSessionConfig(Serializable):
     listen_port: int = 8787
     token: str = ""
     channel_id: int = 0
+    spawned_channel_id: int = 0
     operator_role_name: str = ""
     auto_join_user_ids: list[int]
     heartbeat_timeout_seconds: int = 120

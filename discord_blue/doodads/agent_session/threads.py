@@ -162,8 +162,16 @@ def session_notification_message(hello: SessionHello, thread: discord.Thread) ->
     return f"{prefix} for `{repo}`{branch}: <#{thread.id}>"
 
 
-async def get_agent_session_channel(bot: BlueBot) -> discord.TextChannel:
-    channel_id = bot.config.agent_session.channel_id or bot.config.discord.bot_channel_id
+def agent_session_channel_ids(bot: BlueBot) -> tuple[int, ...]:
+    main = bot.config.agent_session.channel_id or bot.config.discord.bot_channel_id
+    spawned = bot.config.agent_session.spawned_channel_id
+    return (main, spawned) if spawned and spawned != main else (main,)
+
+
+async def get_agent_session_channel(bot: BlueBot, channel_id: int | None = None) -> discord.TextChannel:
+    channel_id = channel_id if channel_id is not None else agent_session_channel_ids(bot)[0]
+    if channel_id not in agent_session_channel_ids(bot):
+        raise ValueError("Agent session channel is not configured")
     channel = bot.get_channel(channel_id)
     if isinstance(channel, discord.TextChannel) and channel.guild.id == bot.config.discord.guild_id:
         return channel
@@ -204,7 +212,10 @@ async def create_session_thread(
     With a token, the thread's name carries it: the only field Discord sets atomically with a private thread, so a
     duplicate made by discord.py retrying the create can be told apart from other sessions' threads.
     """
-    channel = await get_agent_session_channel(bot)
+    channel_id = bot.config.agent_session.spawned_channel_id if hello.spawned else agent_session_channel_ids(bot)[0]
+    if hello.spawned and (not channel_id or channel_id == agent_session_channel_ids(bot)[0]):
+        raise ValueError("Spawned sessions need a separate agent_session.spawned_channel_id")
+    channel = await get_agent_session_channel(bot, channel_id)
     while True:
         if stopping is not None and stopping.is_set():
             raise ThreadCreationStopped
@@ -231,11 +242,14 @@ async def create_session_thread(
         await settle(thread)
     notification = await send_agent_session_message(channel, session_notification_message(hello, thread))
     await send_agent_session_message(thread, session_start_message(hello))
-    await auto_join_configured_users(bot, thread)
+    if not hello.spawned:
+        await auto_join_configured_users(bot, thread)
     return SessionThread(thread=thread, notification_message_id=notification.id)
 
 
 async def auto_join_configured_users(bot: BlueBot, thread: discord.Thread) -> None:
+    if thread.parent_id == bot.config.agent_session.spawned_channel_id:
+        return
     for user_id in bot.config.agent_session.auto_join_user_ids:
         try:
             await thread.add_user(discord.Object(id=user_id))

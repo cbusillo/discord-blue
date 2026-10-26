@@ -70,6 +70,7 @@ class Identity:
     pid: int
     # False when the session was launched without the development-channels flag for this plugin.
     channel: bool = True
+    spawned: bool = False
 
     @classmethod
     def from_environment(cls) -> Identity | None:
@@ -79,7 +80,14 @@ class Identity:
             return None
         cwd = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
         channel = loaded_as_channel(ancestry(os.getpid())) is not False
-        return cls(session_id=session_id, cwd=cwd, branch=git_branch(cwd), pid=os.getppid(), channel=channel)
+        return cls(
+            session_id=session_id,
+            cwd=cwd,
+            branch=git_branch(cwd),
+            pid=os.getppid(),
+            channel=channel,
+            spawned=os.environ.get("DISCORD_BLUE_SESSION_KIND") == "spawned",
+        )
 
 
 def git_branch(cwd: str) -> str | None:
@@ -144,6 +152,7 @@ class ClaudeSession(AgentSessionClient):
             pid=self.identity.pid,
             capabilities=self.controls,
             harness="claude",
+            session_kind="spawned" if self.identity.spawned else "director",
         )
         optional = {"branch": self.identity.branch, "title": self.label.current}
         return {**hello, **{key: value for key, value in optional.items() if value}}
