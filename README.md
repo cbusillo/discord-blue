@@ -712,7 +712,13 @@ controls. A terminal-only approval names the native terminal in the waiting
 card. Ordinary status updates edit the existing card; prompts and answers keep
 controls next to the latest exchange. Status cards suppress notifications and
 mentions. Assistant answers remain separate so thread-history recovery can
-recognize them after a restart.
+recognize them after a restart. Long answers continue inline across ordered
+cards, with code fences reopened on each card. Up to ten 3,600-character answer
+chunks stay inline. Larger output uses an `answer.md` attachment and shows all
+bold Q-number question sections inline, including their recommendations and
+options through the next heading or numbered question. If there are no numbered
+questions, the first chunk stays inline. If attachments are unavailable, the
+inline content remains readable and the complete answer stays in the terminal.
 
 [Local phone layout preview](docs/assets/dui/status-390.png) renders serialized
 component payloads; final typography and spacing are controlled by Discord.

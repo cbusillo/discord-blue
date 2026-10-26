@@ -11,10 +11,11 @@ import discord
 from discord.http import handle_message_parameters
 
 from discord_blue.doodads.agent_session.cards import (
-    ANSWER_PREVIEW_LIMIT,
-    ANSWER_PREVIEW_LINE_LIMIT,
+    ANSWER_CHUNK_LIMIT,
+    MAX_INLINE_ANSWER_CARDS,
     DASHBOARD_PAGE_SIZE,
     active_session_cards,
+    assistant_answer_cards,
 )
 from discord_blue.doodads.agent_session.formatting import is_assistant_message, mark_assistant_message
 from discord_blue.doodads.agent_session.protocol import SessionStatus
@@ -29,10 +30,10 @@ def text_in(view: discord.ui.LayoutView) -> str:
 
 
 class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
-    async def test_complete_and_recovered_answers_share_cards_and_full_file_for_both_harnesses(self) -> None:
+    async def test_complete_and_recovered_answers_share_inline_cards_for_both_harnesses(self) -> None:
         for harness in ("codex", "claude"):
-            for answer in ("Fixed the phone layout.", "```python\n" + 'print("hello")\n' * ANSWER_PREVIEW_LIMIT + "```"):
-                with self.subTest(harness=harness, long=len(answer) > ANSWER_PREVIEW_LIMIT), prompt_fixture() as fixture:
+            for answer in ("Fixed the phone layout.", "```python\n" + 'print("hello")\n' * 600 + "```"):
+                with self.subTest(harness=harness, long=len(answer) > ANSWER_CHUNK_LIMIT), prompt_fixture() as fixture:
                     bridge, session, thread = fixture.bridge, fixture.session, fixture.thread
                     session.hello.harness = harness
                     await bridge.status.handle_session_status(
@@ -53,7 +54,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                             for item in view.walk_children()
                         )
                     ]
-                    self.assertEqual(len(views), 1)
+                    self.assertGreaterEqual(len(views), 1)
                     view = views[0]
                     with handle_message_parameters(view=view, allowed_mentions=discord.AllowedMentions.none()) as params:
                         payload = params.payload
@@ -63,21 +64,21 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(payload["allowed_mentions"]["parse"])
                     answer_index = thread.sent_views.index(view)
                     self.assertFalse(thread.sent_kwargs[answer_index].get("silent", False))
-                    files = [item for item in view.walk_children() if isinstance(item, discord.ui.File)]
-                    if len(answer) > ANSWER_PREVIEW_LIMIT:
-                        self.assertEqual(thread.sent_files, [answer.encode()])
-                        self.assertEqual(len(files), 1)
-                        self.assertEqual(files[0].media.url, f"attachment://{thread.sent_filenames[0]}")
-                        self.assertLess(len(text_in(view)), len(answer))
-                    else:
-                        self.assertFalse(files)
-                        self.assertIn(answer, text_in(view))
+                    self.assertFalse(thread.sent_files)
+                    displayed = "\n".join(text_in(card) for card in views)
+                    self.assertIn('print("hello")' if answer.startswith("```") else answer, displayed)
+                    if answer.startswith("```"):
+                        self.assertEqual(displayed.count('print("hello")'), answer.count('print("hello")'))
+                    for card in views:
+                        self.assertLessEqual(len(text_in(card)), 4000)
+                        if answer.startswith("```"):
+                            self.assertEqual(text_in(card).count("```"), 2)
                     posted = len(thread.sent_messages)
                     session.hello.assistant_message = answer
                     await bridge.session_threads.backfill_latest_assistant_message(cast(discord.Thread, thread), session.hello)
                     self.assertEqual(len(thread.sent_messages), posted, "V2 history must prevent duplicate backfill")
 
-    async def test_blank_answers_do_not_send_or_notify_and_line_dense_answers_stay_compact(self) -> None:
+    async def test_blank_answers_do_not_send_and_line_dense_answers_remain_inline(self) -> None:
         with prompt_fixture() as fixture:
             for answer in ("", "  ", "\n", mark_assistant_message("  ")):
                 await fixture.bridge.status.post_assistant_message(fixture.thread.id, answer)
@@ -86,15 +87,15 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                     cast(discord.Thread, fixture.thread), fixture.session.hello
                 )
             self.assertFalse(fixture.thread.sent_messages)
-            answer = "short line\n" * (ANSWER_PREVIEW_LINE_LIMIT + 1)
+            answer = "short line\n" * 30
             await fixture.bridge.status.post_assistant_message(fixture.thread.id, answer)
-            self.assertEqual(fixture.thread.sent_files, [answer.encode()])
-            self.assertLess(len(fixture.thread.sent_messages[0].splitlines()), len(answer.splitlines()))
+            self.assertFalse(fixture.thread.sent_files)
+            self.assertIn(answer.strip(), fixture.thread.sent_messages[0])
 
     async def test_denied_attachment_preserves_text_delivery_and_completion_controls(self) -> None:
         with prompt_fixture() as fixture:
             fixture.thread.deny_attachments = True
-            answer = "fallback line\n" * (ANSWER_PREVIEW_LINE_LIMIT + 1)
+            answer = "fallback line\n" * (ANSWER_CHUNK_LIMIT * MAX_INLINE_ANSWER_CARDS) + "\n**Q901:** Ship this?\nRecommend yes."
             await fixture.bridge.status.handle_session_status(
                 "turn_complete",
                 SessionStatus(
@@ -104,7 +105,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                     assistant_message=answer,
                 ),
             )
-            self.assertEqual(fixture.thread.sent_messages[0], mark_assistant_message(answer.strip()))
+            self.assertIn("**Q901:** Ship this?", "\n".join(fixture.thread.sent_messages))
             self.assertFalse(fixture.thread.sent_files)
             self.assertIsNotNone(fixture.session.control_message_id)
             self.assertEqual(fixture.session.display_state, "done")
@@ -115,6 +116,60 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                 cast(discord.Thread, fixture.thread), fixture.session.hello
             )
             self.assertEqual(len(fixture.thread.sent_messages), count)
+
+    async def test_huge_answers_attach_full_source_and_keep_every_question_inline(self) -> None:
+        with prompt_fixture() as fixture:
+            questions = [
+                "**Q901:** Shall we ship?\n\nRecommend yes. The ongoing cost is one release.",
+                "### **Q902**: Keep the fallback?\n- Yes\n- No",
+                "**Q903: Choose the next step.**\n" + "A long question detail. " * 250,
+            ]
+            filler = "Background detail. " * (ANSWER_CHUNK_LIMIT * MAX_INLINE_ANSWER_CARDS)
+            answer = f"{filler}\n\n" + "\n\n## Next topic\n\n".join(questions)
+            await fixture.bridge.status.post_assistant_message(fixture.thread.id, answer)
+            self.assertEqual(fixture.thread.sent_files, [answer.encode()])
+            views = [view for view in fixture.thread.sent_views if isinstance(view, discord.ui.LayoutView)]
+            displayed = "\n".join(text_in(view) for view in views)
+            self.assertLess(displayed.index("Q901"), displayed.index("Q902"))
+            self.assertLess(displayed.index("Q902"), displayed.index("Q903"))
+            self.assertIn("Recommend yes. The ongoing cost is one release.", displayed)
+            self.assertIn("- Yes\n- No", displayed)
+            bodies = " ".join(
+                item.content.removesuffix(mark_assistant_message(""))
+                for view in views
+                for item in view.walk_children()
+                if isinstance(item, discord.ui.TextDisplay) and is_assistant_message(item.content)
+            )
+            self.assertEqual(" ".join(bodies.split()).count("A long question detail."), 250)
+            self.assertNotIn("Background detail.", displayed)
+            for view in views:
+                self.assertLessEqual(len(text_in(view)), 4000)
+                self.assertFalse(any(isinstance(item, discord.ui.Button) for item in view.walk_children()))
+
+    def test_inline_boundary_keeps_complete_text_and_huge_output_attaches(self) -> None:
+        for length in (
+            ANSWER_CHUNK_LIMIT - 1,
+            ANSWER_CHUNK_LIMIT,
+            ANSWER_CHUNK_LIMIT + 1,
+            ANSWER_CHUNK_LIMIT * MAX_INLINE_ANSWER_CARDS,
+            ANSWER_CHUNK_LIMIT * MAX_INLINE_ANSWER_CARDS + 1,
+        ):
+            with self.subTest(length=length):
+                answer = "x" * length
+                views, attached = assistant_answer_cards(answer)
+                bodies = [
+                    item.content.removesuffix(mark_assistant_message(""))
+                    for view in views
+                    for item in view.walk_children()
+                    if isinstance(item, discord.ui.TextDisplay) and is_assistant_message(item.content)
+                ]
+                if attached:
+                    self.assertLess(len("".join(bodies)), len(answer))
+                    self.assertTrue(any(isinstance(item, discord.ui.File) for view in views for item in view.walk_children()))
+                else:
+                    self.assertEqual("".join(bodies), answer)
+                for view in views:
+                    self.assertLessEqual(len(text_in(view)), 4000)
 
     async def test_only_bot_authored_cards_count_as_answers_in_history(self) -> None:
         with prompt_fixture() as fixture:

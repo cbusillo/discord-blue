@@ -2,21 +2,23 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 
 import discord
 
 from discord_blue.doodads.agent_session.chunks import split_discord_message
 from discord_blue.doodads.agent_session.formatting import convert_markdown_tables, mark_assistant_message
-from discord_blue.doodads.agent_session.formatting import strip_assistant_markers
+from discord_blue.doodads.agent_session.formatting import advance_code_fence, strip_assistant_markers
 from discord_blue.doodads.agent_session.sessions import AgentSession
 
 
 STATUS_CARD_COMPONENT_ID = 213
 ANSWER_CARD_COMPONENT_ID = 214
 ANSWER_FILENAME = "answer.md"
-ANSWER_PREVIEW_LIMIT = 1600
-ANSWER_PREVIEW_LINE_LIMIT = 12
+ANSWER_CHUNK_LIMIT = 3600
+MAX_INLINE_ANSWER_CARDS = 10
+QUESTION_NUMBER = re.compile(r"\*\*Q[0-9]+\b")
 DASHBOARD_PAGE_SIZE = 8
 STATUS_LABELS = {
     "working": ("🔄 Working", 0x758AFF),
@@ -27,26 +29,53 @@ STATUS_LABELS = {
 }
 
 
-def assistant_answer_card(text: str) -> tuple[discord.ui.LayoutView, bool]:
+def assistant_answer_cards(text: str) -> tuple[list[discord.ui.LayoutView], bool]:
     source = convert_markdown_tables(strip_assistant_markers(text)).strip()
-    preview_budget = min(ANSWER_PREVIEW_LIMIT, len("\n".join(source.splitlines()[:ANSWER_PREVIEW_LINE_LIMIT])))
-    long_answer = len(source) > preview_budget
-    preview = split_discord_message(source, max(1, preview_budget), max_chunks=1)
-    children: list[discord.ui.Item[discord.ui.LayoutView]] = [
-        discord.ui.TextDisplay("### Answer"),
-        discord.ui.Separator(),
-        discord.ui.TextDisplay(mark_assistant_message(preview[0] if preview else "")),
-    ]
-    if long_answer:
-        children.extend(
-            [
-                discord.ui.TextDisplay("-# Preview above · Full answer attached below"),
-                discord.ui.File(f"attachment://{ANSWER_FILENAME}"),
-            ]
-        )
+    chunks = split_discord_message(source, ANSWER_CHUNK_LIMIT, max_chunks=MAX_INLINE_ANSWER_CARDS + 1)
+    attached = len(chunks) > MAX_INLINE_ANSWER_CARDS
+    if attached:
+        questions = _answer_questions(source)
+        chunks = split_discord_message(questions, ANSWER_CHUNK_LIMIT) if questions else chunks[:1]
+    views = [_answer_card(chunk) for chunk in chunks]
+    if attached:
+        container = views[-1].children[0]
+        assert isinstance(container, discord.ui.Container)
+        container.add_item(discord.ui.TextDisplay("-# Huge output · Full answer attached below"))
+        container.add_item(discord.ui.File(f"attachment://{ANSWER_FILENAME}"))
+    return views, attached
+
+
+def _answer_questions(source: str) -> str:
+    sections: list[str] = []
+    current: list[str] = []
+    fence = None
+    for line in source.splitlines():
+        question = fence is None and QUESTION_NUMBER.search(line) is not None
+        heading = fence is None and line.lstrip().startswith("#")
+        if question or heading:
+            if current:
+                sections.append("\n".join(current).strip())
+            current = []
+        if question or current:
+            current.append(line)
+        fence = advance_code_fence(line, fence)
+    if current:
+        sections.append("\n".join(current).strip())
+    return "\n\n".join(sections)
+
+
+def _answer_card(chunk: str) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=None)
-    view.add_item(discord.ui.Container(*children, accent_color=STATUS_LABELS["done"][1], id=ANSWER_CARD_COMPONENT_ID))
-    return view, long_answer
+    view.add_item(
+        discord.ui.Container(
+            discord.ui.TextDisplay("### Answer"),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(mark_assistant_message(chunk)),
+            accent_color=STATUS_LABELS["done"][1],
+            id=ANSWER_CARD_COMPONENT_ID,
+        )
+    )
+    return view
 
 
 def _dashboard_text(text: str, limit: int) -> str:

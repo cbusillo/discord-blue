@@ -1898,7 +1898,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
-        assistant_message = "```python\n" + "print('hello')\n" * 180 + "```"
+        assistant_message = "```python\n" + "print('hello')\n" * 600 + "```"
 
         await bridge.status.handle_session_status(
             "turn_complete",
@@ -1911,10 +1911,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         assistant_messages = [message for message in thread.sent_messages if is_assistant_message(message)]
-        self.assertEqual(len(assistant_messages), 1)
-        self.assertEqual(thread.sent_files, [assistant_message.encode()])
+        self.assertGreater(len(assistant_messages), 1)
+        self.assertFalse(thread.sent_files)
         for message in assistant_messages:
-            self.assertLessEqual(len(message), bridge_module.DISCORD_MESSAGE_LIMIT)
+            self.assertLessEqual(len(message), 4000)
             body = message.removesuffix(mark_assistant_message(""))
             self.assertTrue(body.startswith("```python\n"))
             self.assertTrue(body.endswith("```"))
@@ -1945,15 +1945,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         assistant_messages = [message for message in thread.sent_messages if is_assistant_message(message)]
-        self.assertEqual(len(assistant_messages), 1)
-        self.assertEqual(thread.sent_files, [assistant_message.encode()])
+        self.assertGreater(len(assistant_messages), 1)
+        self.assertFalse(thread.sent_files)
         for message in assistant_messages:
-            self.assertLessEqual(len(message), bridge_module.DISCORD_MESSAGE_LIMIT)
+            self.assertLessEqual(len(message), 4000)
             self.assertNotIn("Assistant", message)
         posted = "\n".join(assistant_messages)
-        self.assertGreater(posted.count("- **`field_"), 0)
+        self.assertEqual(posted.count("- **`field_"), len(rows))
         self.assertNotIn("| `field_", posted)
-        self.assertIn(fenced, thread.sent_files[0].decode())
+        self.assertIn(fenced, posted)
 
     async def test_approval_request_posts_card_and_buttons(self) -> None:
         config = Config()
@@ -3074,7 +3074,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(completed, [mark_assistant_message(answer)])
                 else:
                     self.assertTrue(completed[0].startswith("Tag discussion:\n<system-reminder>\nThis literal tag"))
-                    self.assertTrue(all(len(message) <= bridge_module.DISCORD_MESSAGE_LIMIT for message in completed))
+                    self.assertTrue(all(len(message) <= 4000 for message in completed))
 
     async def test_injected_transcript_examples_are_plain_conversation(self) -> None:
         # Local Claude transcripts: d95ff8ce (task), 93610e3a (channel),
@@ -3625,9 +3625,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         posted = list(thread.sent_messages)
         self.assertEqual(len(posted), 1)
-        self.assertEqual(thread.sent_files, [answer.encode()])
+        self.assertFalse(thread.sent_files)
         for message in posted:
-            self.assertLessEqual(len(message), bridge_module.DISCORD_MESSAGE_LIMIT)
+            self.assertLessEqual(len(message), 4000)
             self.assertTrue(is_assistant_message(message))
             self.assertTrue(message.removesuffix(mark_assistant_message("")).endswith(fence))
         hello = make_hello()

@@ -6,8 +6,7 @@ from io import BytesIO
 
 import discord
 
-from discord_blue.doodads.agent_session.chunks import format_assistant_messages
-from discord_blue.doodads.agent_session.cards import ANSWER_FILENAME, assistant_answer_card, notice_card
+from discord_blue.doodads.agent_session.cards import ANSWER_FILENAME, assistant_answer_cards, notice_card
 from discord_blue.doodads.agent_session.formatting import ASSISTANT_MESSAGE_MARKER, strip_assistant_markers
 
 logger = logging.getLogger(__name__)
@@ -41,23 +40,29 @@ async def send_agent_session_message(
 
 
 async def send_assistant_message(destination: discord.abc.Messageable, message: str) -> discord.Message | None:
-    """Post a compact answer; long answers retain their full Markdown in an explicit file component."""
     if not strip_assistant_markers(message.replace(ASSISTANT_MESSAGE_MARKER, "")).strip():
         return None
-    view, attached = assistant_answer_card(message)
-    if attached:
-        file = discord.File(BytesIO(strip_assistant_markers(message).encode()), filename=ANSWER_FILENAME)
-        try:
-            return await destination.send(file=file, view=view, allowed_mentions=agent_session_allowed_mentions(), silent=False)
-        except discord.Forbidden:
-            logger.warning("Unable to attach the complete Agent session answer; sending text instead")
-            last_message = None
-            for chunk in format_assistant_messages(message):
-                last_message = await _send(destination, chunk, view=None)
-            return last_message
-        finally:
-            file.close()
-    return await destination.send(view=view, allowed_mentions=agent_session_allowed_mentions(), silent=False)
+    views, attached = assistant_answer_cards(message)
+    last_message = None
+    for index, view in enumerate(views):
+        if attached and index == len(views) - 1:
+            file = discord.File(BytesIO(strip_assistant_markers(message).encode()), filename=ANSWER_FILENAME)
+            try:
+                last_message = await destination.send(
+                    file=file, view=view, allowed_mentions=agent_session_allowed_mentions(), silent=False
+                )
+                continue
+            except discord.Forbidden:
+                logger.warning("Unable to attach the complete Agent session answer; keeping questions inline")
+                for item in list(view.walk_children()):
+                    if isinstance(item, discord.ui.File) and isinstance(item.parent, discord.ui.Container):
+                        item.parent.remove_item(item)
+                    elif isinstance(item, discord.ui.TextDisplay) and item.content.startswith("-# Huge output"):
+                        item.content = "-# Attachment unavailable · Full answer remains in the terminal"
+            finally:
+                file.close()
+        last_message = await destination.send(view=view, allowed_mentions=agent_session_allowed_mentions(), silent=False)
+    return last_message
 
 
 async def _send(
