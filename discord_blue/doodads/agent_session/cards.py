@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import discord
@@ -19,7 +20,7 @@ ANSWER_CONTINUATION_COMPONENT_ID = 215
 ANSWER_FILENAME = "answer.md"
 ANSWER_CHUNK_LIMIT = 1800
 MAX_INLINE_ANSWER_CARDS = 10
-QUESTION_NUMBER = re.compile(r"^\s{0,3}(?:#{1,6}\s+)?(?:[-*]\s+)?\*\*Q[0-9]+\b")
+QUESTION_NUMBER = re.compile(r"^[ \t]*(?:>[ \t]?)*[ \t]*(?:#{1,6}[ \t]+)?(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?\*\*Q[0-9]+\b")
 DASHBOARD_PAGE_SIZE = 8
 STATUS_LABELS = {
     "working": ("🔄 Working", 0x758AFF),
@@ -48,20 +49,47 @@ def assistant_answer_cards(text: str) -> tuple[list[discord.ui.LayoutView], bool
 
 def _answer_questions(source: str) -> str:
     sections: list[str] = []
-    include_context = False
-    fence = None
-    for paragraph in re.split(r"\n[ \t]*\n", source):
-        question = False
-        for line in paragraph.splitlines():
-            question |= fence is None and QUESTION_NUMBER.search(line) is not None
-            fence = advance_code_fence(line, fence)
-        if question:
-            sections.append(paragraph)
-        elif include_context and not paragraph.lstrip().startswith(("#", "```", "~~~", "---")):
-            context = split_discord_message(paragraph, ANSWER_CHUNK_LIMIT, max_chunks=1)
-            sections.extend(context)
-        include_context = question
+    current = ""
+    for block in _question_blocks(source):
+        if QUESTION_NUMBER.match(block):
+            if current:
+                sections.append(current)
+            chunks = split_discord_message(block, ANSWER_CHUNK_LIMIT, max_chunks=2)
+            current = chunks[0]
+            if len(chunks) > 1:
+                sections.append(f"{current}\n\n*Question context continues in the full answer.*")
+                current = ""
+        elif current:
+            if _question_boundary(block.split("\n", 1)[0]) or len(current) + len(block) + 2 > ANSWER_CHUNK_LIMIT:
+                sections.append(current)
+                current = ""
+            else:
+                current += f"\n\n{block}"
+    if current:
+        sections.append(current)
     return "\n\n".join(sections)
+
+
+def _question_boundary(line: str) -> bool:
+    plain = re.sub(r"^[ \t]*(?:>[ \t]?)*", "", line)
+    return plain.startswith("#") or re.fullmatch(r"(?:[-*_][ \t]*){3,}", plain) is not None
+
+
+def _question_blocks(source: str) -> Iterator[str]:
+    lines: list[str] = []
+    fence = None
+    for line in source.split("\n"):
+        plain = re.sub(r"^[ \t]*(?:>[ \t]?)*", "", line)
+        if fence is None and (not plain.strip() or QUESTION_NUMBER.match(line) or _question_boundary(line)):
+            if lines:
+                yield "\n".join(lines)
+                lines = []
+            if not plain.strip():
+                continue
+        lines.append(line)
+        fence = advance_code_fence(plain, fence)
+    if lines:
+        yield "\n".join(lines)
 
 
 def _answer_card(chunk: str, *, complete: bool) -> discord.ui.LayoutView:

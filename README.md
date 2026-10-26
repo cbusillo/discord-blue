@@ -715,7 +715,8 @@ mentions. Assistant answers remain separate so thread-history recovery can
 recognize them after a restart. Long answers continue inline across ordered
 cards, with code fences reopened on each card. Ordinary long answers
 stay inline. Huge output uses an `answer.md` attachment and shows all
-bold Q-number question sections inline, including the next paragraph of context and options. If there are no numbered
+bold Q-number question sections inline, with nearby recommendation and option blocks within a bounded excerpt per question.
+Every later question still appears. Oversized context continues in the full answer. If there are no numbered
 questions, the first chunk stays inline. If attachments are unavailable, the
 inline content remains readable and the complete answer stays in the terminal.
 Only the first card notifies. If delivery stops between cards, reconnect backfill

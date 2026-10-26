@@ -140,7 +140,8 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                 for item in view.walk_children()
                 if isinstance(item, discord.ui.TextDisplay) and is_assistant_message(item.content)
             )
-            self.assertEqual(" ".join(bodies.split()).count("A long question detail."), 250)
+            self.assertGreater(" ".join(bodies.split()).count("A long question detail."), 0)
+            self.assertLess(len(bodies), ANSWER_CHUNK_LIMIT * len(questions) * 2)
             self.assertNotIn("Background detail.", displayed)
             for view in views:
                 self.assertLessEqual(len(text_in(view)), 4000)
@@ -208,6 +209,39 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Recommend yes.", displayed)
         self.assertNotIn("report line", displayed)
         self.assertNotIn("Q902", displayed)
+
+    def test_huge_question_excerpts_preserve_lists_quotes_options_and_later_questions(self) -> None:
+        questions = [
+            "1. **Q901:** Ship?\n\nRecommend yes.\n\n- Option A\n- Option B",
+            "> **Q902:** Continue?\n>\n> Recommend yes.",
+            "> - **Q903:** Keep both?",
+            "+ **Q904:** Finish?\n```text\n\n**Q905:** This is code, not a question.\n```",
+        ]
+        source = "\n\n## Next section\n\n".join(questions)
+        source += "\n\n## Report\n" + "report line\n" * 10000
+        source += "\n**Q906:** Glued report?\n" + "report line\n" * 10000
+        source += "\n**Q907:** Is the tail visible?"
+        views, attached = assistant_answer_cards(source)
+        self.assertTrue(attached)
+        displayed = "\n".join(text_in(view) for view in views)
+        for number in (901, 902, 903, 904, 906, 907):
+            self.assertIn(f"**Q{number}", displayed)
+        self.assertLess(displayed.index("Q906"), displayed.index("Q907"))
+        self.assertIn("Recommend yes.", displayed)
+        self.assertIn("- Option A\n- Option B", displayed)
+        self.assertIn("**Q905:** This is code, not a question.", displayed)
+        self.assertLess(len(displayed), ANSWER_CHUNK_LIMIT * len(questions) * 2)
+
+    def test_huge_output_scans_all_questions_without_extracting_fenced_examples(self) -> None:
+        source = "```text\n**Q999:** Fenced example.\n```\n\n## Report\n" + "background\n" * 10000
+        numbers = list(range(100, 100 + MAX_INLINE_ANSWER_CARDS * 4))
+        source += "\n" + "\n".join(f"{index}. **Q{number}:** Continue?" for index, number in enumerate(numbers, 1))
+        views, attached = assistant_answer_cards(source)
+        self.assertTrue(attached)
+        displayed = "\n".join(text_in(view) for view in views)
+        self.assertNotIn("Q999", displayed)
+        for number in numbers:
+            self.assertIn(f"**Q{number}", displayed)
 
     def test_emoji_heavy_answers_fit_discord_text_budget(self) -> None:
         views, _ = assistant_answer_cards("🟢" * 4000)
