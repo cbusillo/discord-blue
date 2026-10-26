@@ -18,7 +18,10 @@ def source_revision(checkout: Path) -> str:
     dirty = subprocess.check_output(["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"], text=True)
     if dirty:
         raise ValueError("Bridge delivery requires a clean committed checkout")
-    return subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
+    subprocess.run(["git", "-C", str(checkout), "fetch", "origin", "main"], check=True, capture_output=True)
+    revision = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
+    subprocess.run(["git", "-C", str(checkout), "merge-base", "--is-ancestor", revision, "origin/main"], check=True)
+    return revision
 
 
 def verify_release(binaries: Path, revision: str) -> None:
@@ -73,7 +76,7 @@ def replace_link(path: Path, target: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def deliver(checkout: Path, home: Path, build_dir: Path) -> str:
+def deliver(checkout: Path, home: Path, build_dir: Path) -> tuple[str, int]:
     plist = home / "Library/LaunchAgents" / f"{LABEL}.plist"
     job = plistlib.loads(plist.read_bytes())
     args = job.get("ProgramArguments", [])
@@ -81,19 +84,26 @@ def deliver(checkout: Path, home: Path, build_dir: Path) -> str:
         raise ValueError("Unrecognized Codex bridge login item; preserve it and review its launch configuration")
     domain = f"gui/{os.getuid()}"
     service = f"{domain}/{LABEL}"
-    subprocess.run(["launchctl", "print", service], check=True, capture_output=True)
+    loaded = subprocess.run(["launchctl", "print", service], capture_output=True, text=True, timeout=30)
+    if loaded.returncode and "Could not find service" not in loaded.stderr:
+        loaded.check_returncode()
     release, revision = prepare_release(checkout, home, build_dir)
     binaries = home / ".local/bin"
     binaries.mkdir(parents=True, exist_ok=True)
     for name in BRIDGES:
         replace_link(binaries / name, release / "bin" / name)
-    if args[0] != str(release / "bin" / BRIDGES[0]):
-        job["ProgramArguments"] = [str(release / "bin" / BRIDGES[0]), *args[1:]]
+    launcher = str(binaries / BRIDGES[0])
+    if args[0] != launcher:
+        job["ProgramArguments"] = [launcher, *args[1:]]
         replace_bytes(plist, plistlib.dumps(job))
-        subprocess.run(["launchctl", "bootout", service], check=True, capture_output=True)
-        subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True)
+        if loaded.returncode == 0:
+            subprocess.run(["launchctl", "bootout", "--wait", service], check=True, capture_output=True, timeout=30)
+        loaded = subprocess.CompletedProcess([], 113)
+    if loaded.returncode:
+        subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True, timeout=30)
+    pid = subprocess.check_output(["launchctl", "kickstart", "-kp", service], text=True, timeout=30).strip()
     verify_release(binaries, revision)
-    return revision
+    return revision, int(pid)
 
 
 def main() -> None:
@@ -107,12 +117,16 @@ def main() -> None:
     try:
         with (state / "delivery.lock").open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            revision = deliver(args.checkout.resolve(), args.home.resolve(), args.build_dir.resolve())
+            revision, pid = deliver(args.checkout.resolve(), args.home.resolve(), args.build_dir.resolve())
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         parser.exit(
             1, f"Bridge delivery incomplete ({type(exc).__name__}); inspect the launch item and retained release before retrying.\n"
         )
-    print(json.dumps({"revision": revision, "claude": "next session launch", "codex": "launchd job loaded"}))
+    print(
+        json.dumps(
+            {"revision": revision, "claude": "next session launch", "codex_pid": pid, "codex": "reload requested; verify startup"}
+        )
+    )
 
 
 if __name__ == "__main__":

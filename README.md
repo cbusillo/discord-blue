@@ -603,53 +603,42 @@ release. Server deployment alone does not deliver the bridges. Chris does not
 build/install a wheel or restart a bridge. This command does not release or
 configure the Discord server; those operations retain their Launchplane gates.
 
-The command exports only the checkout's committed files, installs a non-editable
-runtime using `uv sync --frozen --no-dev --no-editable`, and verifies both
-executables report that source revision. It retains each runtime under
-`~/.local/share/discord-blue-bridges/<revision>/venv`; it never upgrades a running
-runtime in place. Builds use the supplied disposable artifact directory.
+The command fetches `origin/main` and refuses uncommitted changes or a HEAD
+outside its history. It snapshots committed files and installs using the lockfile
+into `~/.local/share/discord-blue-bridges/<revision>/venv`. Neither running
+runtimes nor token/config files are modified. Rollback uses the same command
+from a clean checkout at the previous release revision.
 
-It switches `~/.local/bin/discord-blue-claude-channel` and
-`~/.local/bin/discord-blue-codex-bridge` to that runtime. The existing DUI plugin's
-command already resolves the former through PATH, so the next ordinary Claude
-session launch receives the release. Active Claude sessions keep their loaded
-runtime and finish normally; this command never kills or resumes them.
+Both `~/.local/bin/discord-blue-*` launchers select that runtime. The existing
+DUI plugin uses the Claude launcher through PATH, so the next ordinary session
+gets the release; active Claude sessions finish on their previous runtime.
+The older `uv tool` install is superseded. Retain it while old Claude sessions
+use it, and do not run `uv tool install`, `upgrade` or `uninstall discord-blue`:
+those commands can replace these launchers. Use this delivery command instead.
 
-For Codex, the command preserves the existing login item's arguments,
-environment and account selection, changes only its executable, and reloads
-that job through launchd. The bridge reconnects existing sessions within the
-server's reconnect grace period; it does not restart Codex daemons or TUIs.
-The login item must already be loaded as
+For Codex, the command migrates the existing login item to the stable launcher
+once, preserving its other arguments and environment. Subsequent deliveries
+use `launchctl kickstart -kp` to replace only the bridge. Open Discord controls
+expire and sessions reconnect with new epochs during the brief interruption.
+Codex's native daemons run in separate process groups; their TUIs keep running.
+The existing login item must be recognized as
 `com.shinycomputers.discord-blue-codex-bridge` in the signed-in user's GUI domain.
-An unrecognized or unloaded item refuses delivery before installing anything.
-The existing token/config files are used in place and are never copied.
+An unloaded recognized job is bootstrapped automatically, including recovery
+from interrupted delivery. A reload failure reports incomplete delivery.
 
-Concurrent deliveries refuse. Repeating a completed delivery of the same
-revision verifies both commands and leaves the Codex job running. A build or
-revision-check failure leaves the launch paths unchanged. A launchd failure
-reports incomplete delivery; inspect the job and retained runtime before
-recovery, rather than treating the installation as success. Retained runtimes
-also support rollback: deliver from a clean checkout at the previously selected
-release. Do not remove a retained runtime while a Claude session still uses it.
-
-Verify the installed executables without loading credentials or connecting:
+The command prints the selected revision and launchd's new bridge PID. That is
+a reload receipt, not proof that startup completed. The release agent checks
+that PID and its new `Bridge source <version> <revision>` startup log line,
+and verifies the next Claude launch's startup line. Both installed commands
+also support a credential-free revision check:
 
 ```sh
 ~/.local/bin/discord-blue-codex-bridge --version
 ~/.local/bin/discord-blue-claude-channel --version
 ```
 
-Both must report the selected source SHA. Both also log `Bridge source` at
-startup, letting the release agent distinguish a running process from an
-installed command. Confirm the Codex job's new PID and startup receipt, then
-verify the next Claude launch's startup receipt. Existing Claude sessions may
-still report the previous release until they exit normally.
-
-The delivery regression test exercises two successive committed releases,
-executes both installed launch paths after the switch, and checks that the
-previous runtime still executes its original revision. This enforces the
-invariant missing from the old wheel-install instructions: a successful bridge
-delivery advances both clients together without modifying active runtimes.
+Retain previous runtimes until no active session uses them. Repeating delivery
+replaces the Codex bridge again; it does not restart active Claude sessions.
 
 ## Launchplane/Dokploy production deployment
 
