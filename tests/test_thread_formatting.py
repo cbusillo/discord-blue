@@ -6,10 +6,8 @@ from collections.abc import Callable
 from types import FrameType
 import unittest
 
-from discord_blue.doodads.agent_session.chunks import ASSISTANT_TRUNCATED_NOTICE
 from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
-from discord_blue.doodads.agent_session.chunks import MAX_ASSISTANT_CHUNKS
-from discord_blue.doodads.agent_session.chunks import format_assistant_messages
+from discord_blue.doodads.agent_session.chunks import split_discord_message
 from discord_blue.doodads.agent_session.formatting import LEGACY_ASSISTANT_LABEL
 from discord_blue.doodads.agent_session.formatting import USER_MESSAGE_PREFIX
 from discord_blue.doodads.agent_session.formatting import WAITING_FOR_DIRECTION
@@ -17,7 +15,6 @@ from discord_blue.doodads.agent_session.formatting import convert_markdown_table
 from discord_blue.doodads.agent_session.formatting import format_user_message
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
 from discord_blue.doodads.agent_session.formatting import mark_assistant_message
-from discord_blue.doodads.agent_session.formatting import strip_assistant_markers
 
 
 type TraceFunction = Callable[[FrameType, str, object], "TraceFunction | None"]
@@ -197,29 +194,12 @@ class MarkdownTableTests(unittest.TestCase):
 
         started = time.process_time()
         converted = convert_markdown_tables(text)
-        messages = format_assistant_messages(text)
+        messages = split_discord_message(converted, DISCORD_MESSAGE_LIMIT, max_chunks=10)
         duration = time.process_time() - started
 
         self.assertEqual(converted, text)
-        self.assertLessEqual(len(messages), MAX_ASSISTANT_CHUNKS)
+        self.assertTrue(all(len(message) <= DISCORD_MESSAGE_LIMIT for message in messages))
         self.assertLess(duration, 2.0)
-
-
-class AssistantChunkTests(unittest.TestCase):
-    def test_long_answers_stop_at_the_chunk_cap_with_a_notice(self) -> None:
-        messages = format_assistant_messages("word " * 100_000)
-
-        self.assertEqual(len(messages), MAX_ASSISTANT_CHUNKS)
-        self.assertTrue(strip_assistant_markers(messages[-1]).rstrip("\u200b").endswith(ASSISTANT_TRUNCATED_NOTICE))
-        for message in messages:
-            self.assertLessEqual(len(message), DISCORD_MESSAGE_LIMIT)
-            self.assertTrue(is_assistant_message(message))
-
-    def test_pasted_markers_are_removed_from_the_answer_body(self) -> None:
-        pasted = mark_assistant_message("quoted")
-        (message,) = format_assistant_messages(f"{pasted} and more")
-
-        self.assertEqual(message, mark_assistant_message("quoted\u200b and more"))
 
 
 if __name__ == "__main__":

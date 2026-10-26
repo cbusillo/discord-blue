@@ -1,20 +1,22 @@
 from __future__ import annotations
 
+import time
 import unittest
 from collections.abc import Awaitable, Callable
 from aiohttp import web
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import discord
 from discord.http import handle_message_parameters
 
 from discord_blue.doodads.agent_session.cards import (
-    ANSWER_PREVIEW_LIMIT,
-    ANSWER_PREVIEW_LINE_LIMIT,
+    ANSWER_CHUNK_LIMIT,
+    MAX_INLINE_ANSWER_CARDS,
     DASHBOARD_PAGE_SIZE,
     active_session_cards,
+    assistant_answer_cards,
 )
 from discord_blue.doodads.agent_session.formatting import is_assistant_message, mark_assistant_message
 from discord_blue.doodads.agent_session.protocol import SessionStatus
@@ -29,10 +31,10 @@ def text_in(view: discord.ui.LayoutView) -> str:
 
 
 class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
-    async def test_complete_and_recovered_answers_share_cards_and_full_file_for_both_harnesses(self) -> None:
+    async def test_complete_and_recovered_answers_share_inline_cards_for_both_harnesses(self) -> None:
         for harness in ("codex", "claude"):
-            for answer in ("Fixed the phone layout.", "```python\n" + 'print("hello")\n' * ANSWER_PREVIEW_LIMIT + "```"):
-                with self.subTest(harness=harness, long=len(answer) > ANSWER_PREVIEW_LIMIT), prompt_fixture() as fixture:
+            for answer in ("Fixed the phone layout.", "```python\n" + 'print("hello")\n' * 600 + "```"):
+                with self.subTest(harness=harness, long=len(answer) > ANSWER_CHUNK_LIMIT), prompt_fixture() as fixture:
                     bridge, session, thread = fixture.bridge, fixture.session, fixture.thread
                     session.hello.harness = harness
                     await bridge.status.handle_session_status(
@@ -53,7 +55,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                             for item in view.walk_children()
                         )
                     ]
-                    self.assertEqual(len(views), 1)
+                    self.assertGreaterEqual(len(views), 1)
                     view = views[0]
                     with handle_message_parameters(view=view, allowed_mentions=discord.AllowedMentions.none()) as params:
                         payload = params.payload
@@ -63,21 +65,21 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(payload["allowed_mentions"]["parse"])
                     answer_index = thread.sent_views.index(view)
                     self.assertFalse(thread.sent_kwargs[answer_index].get("silent", False))
-                    files = [item for item in view.walk_children() if isinstance(item, discord.ui.File)]
-                    if len(answer) > ANSWER_PREVIEW_LIMIT:
-                        self.assertEqual(thread.sent_files, [answer.encode()])
-                        self.assertEqual(len(files), 1)
-                        self.assertEqual(files[0].media.url, f"attachment://{thread.sent_filenames[0]}")
-                        self.assertLess(len(text_in(view)), len(answer))
-                    else:
-                        self.assertFalse(files)
-                        self.assertIn(answer, text_in(view))
+                    self.assertFalse(thread.sent_files)
+                    displayed = "\n".join(text_in(card) for card in views)
+                    self.assertIn('print("hello")' if answer.startswith("```") else answer, displayed)
+                    if answer.startswith("```"):
+                        self.assertEqual(displayed.count('print("hello")'), answer.count('print("hello")'))
+                    for card in views:
+                        self.assertLessEqual(len(text_in(card)), 4000)
+                        if answer.startswith("```"):
+                            self.assertEqual(text_in(card).count("```"), 2)
                     posted = len(thread.sent_messages)
                     session.hello.assistant_message = answer
                     await bridge.session_threads.backfill_latest_assistant_message(cast(discord.Thread, thread), session.hello)
                     self.assertEqual(len(thread.sent_messages), posted, "V2 history must prevent duplicate backfill")
 
-    async def test_blank_answers_do_not_send_or_notify_and_line_dense_answers_stay_compact(self) -> None:
+    async def test_blank_answers_do_not_send_and_line_dense_answers_remain_inline(self) -> None:
         with prompt_fixture() as fixture:
             for answer in ("", "  ", "\n", mark_assistant_message("  ")):
                 await fixture.bridge.status.post_assistant_message(fixture.thread.id, answer)
@@ -86,15 +88,15 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                     cast(discord.Thread, fixture.thread), fixture.session.hello
                 )
             self.assertFalse(fixture.thread.sent_messages)
-            answer = "short line\n" * (ANSWER_PREVIEW_LINE_LIMIT + 1)
+            answer = "short line\n" * 30
             await fixture.bridge.status.post_assistant_message(fixture.thread.id, answer)
-            self.assertEqual(fixture.thread.sent_files, [answer.encode()])
-            self.assertLess(len(fixture.thread.sent_messages[0].splitlines()), len(answer.splitlines()))
+            self.assertFalse(fixture.thread.sent_files)
+            self.assertIn(answer.strip(), fixture.thread.sent_messages[0])
 
     async def test_denied_attachment_preserves_text_delivery_and_completion_controls(self) -> None:
         with prompt_fixture() as fixture:
             fixture.thread.deny_attachments = True
-            answer = "fallback line\n" * (ANSWER_PREVIEW_LINE_LIMIT + 1)
+            answer = "fallback line\n" * (ANSWER_CHUNK_LIMIT * MAX_INLINE_ANSWER_CARDS) + "\n**Q901:** Ship this?\nRecommend yes."
             await fixture.bridge.status.handle_session_status(
                 "turn_complete",
                 SessionStatus(
@@ -104,7 +106,15 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                     assistant_message=answer,
                 ),
             )
-            self.assertEqual(fixture.thread.sent_messages[0], mark_assistant_message(answer.strip()))
+            self.assertIn("**Q901:** Ship this?", "\n".join(fixture.thread.sent_messages))
+            self.assertFalse(
+                any(
+                    isinstance(item, discord.ui.File)
+                    for view in fixture.thread.sent_views
+                    if isinstance(view, discord.ui.LayoutView)
+                    for item in view.walk_children()
+                )
+            )
             self.assertFalse(fixture.thread.sent_files)
             self.assertIsNotNone(fixture.session.control_message_id)
             self.assertEqual(fixture.session.display_state, "done")
@@ -115,6 +125,147 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                 cast(discord.Thread, fixture.thread), fixture.session.hello
             )
             self.assertEqual(len(fixture.thread.sent_messages), count)
+
+    async def test_huge_answers_attach_full_source_and_keep_every_question_inline(self) -> None:
+        with prompt_fixture() as fixture:
+            questions = [
+                "**Q901:** Shall we ship?\n\nRecommend yes. The ongoing cost is one release.",
+                "### **Q902**: Keep the fallback?\n- Yes\n- No",
+                "**Q903: Choose the next step.**\n" + "A long question detail. " * 250,
+            ]
+            filler = "Background detail. " * (ANSWER_CHUNK_LIMIT * MAX_INLINE_ANSWER_CARDS)
+            answer = f"{filler}\n\n" + "\n\n## Next topic\n\n".join(questions)
+            await fixture.bridge.status.post_assistant_message(fixture.thread.id, answer)
+            self.assertEqual(fixture.thread.sent_files, [answer.encode()])
+            views = [view for view in fixture.thread.sent_views if isinstance(view, discord.ui.LayoutView)]
+            displayed = "\n".join(text_in(view) for view in views)
+            self.assertLess(displayed.index("Q901"), displayed.index("Q902"))
+            self.assertLess(displayed.index("Q902"), displayed.index("Q903"))
+            self.assertIn("Recommend yes. The ongoing cost is one release.", displayed)
+            self.assertIn("- Yes\n- No", displayed)
+            bodies = " ".join(
+                item.content.removesuffix(mark_assistant_message(""))
+                for view in views
+                for item in view.walk_children()
+                if isinstance(item, discord.ui.TextDisplay) and is_assistant_message(item.content)
+            )
+            self.assertGreater(" ".join(bodies.split()).count("A long question detail."), 0)
+            self.assertLess(len(bodies), ANSWER_CHUNK_LIMIT * len(questions) * 2)
+            self.assertNotIn("Background detail.", displayed)
+            for view in views:
+                self.assertLessEqual(len(text_in(view)), 4000)
+                self.assertFalse(any(isinstance(item, discord.ui.Button) for item in view.walk_children()))
+
+    def test_inline_boundary_keeps_complete_text_and_huge_output_attaches(self) -> None:
+        for length in (
+            ANSWER_CHUNK_LIMIT - 1,
+            ANSWER_CHUNK_LIMIT,
+            ANSWER_CHUNK_LIMIT + 1,
+            ANSWER_CHUNK_LIMIT * MAX_INLINE_ANSWER_CARDS,
+            ANSWER_CHUNK_LIMIT * MAX_INLINE_ANSWER_CARDS + 1,
+        ):
+            with self.subTest(length=length):
+                answer = "x" * length
+                views, attached = assistant_answer_cards(answer)
+                bodies = [
+                    item.content.removesuffix(mark_assistant_message(""))
+                    for view in views
+                    for item in view.walk_children()
+                    if isinstance(item, discord.ui.TextDisplay) and is_assistant_message(item.content)
+                ]
+                if attached:
+                    self.assertLess(len("".join(bodies)), len(answer))
+                    self.assertTrue(any(isinstance(item, discord.ui.File) for view in views for item in view.walk_children()))
+                else:
+                    self.assertEqual("".join(bodies), answer)
+                for view in views:
+                    self.assertLessEqual(len(text_in(view)), 4000)
+
+    async def test_multipart_answer_notifies_once_and_recovers_missing_tail_after_partial_send(self) -> None:
+        with prompt_fixture() as fixture:
+            await fixture.bridge.status.post_assistant_message(fixture.thread.id, "Previous complete answer")
+            answer = "A new answer. " * 500 + "\n\n**Q999:** Is the recovered tail readable?"
+            original_send = fixture.thread.send
+            attempts = 0
+
+            async def fail_second(content: str | None = None, **kwargs: object) -> object:
+                nonlocal attempts
+                attempts += 1
+                if attempts == 2:
+                    raise RuntimeError("Interrupted delivery")
+                return await original_send(content, **kwargs)
+
+            with patch.object(fixture.thread, "send", side_effect=fail_second), self.assertRaises(RuntimeError):
+                await fixture.bridge.status.post_assistant_message(fixture.thread.id, answer)
+            self.assertFalse(await fixture.bridge.session_threads.thread_has_assistant_message(cast(discord.Thread, fixture.thread)))
+            fixture.session.hello.assistant_message = answer
+            start = len(fixture.thread.sent_messages)
+            await fixture.bridge.session_threads.backfill_latest_assistant_message(
+                cast(discord.Thread, fixture.thread), fixture.session.hello
+            )
+            self.assertIn("**Q999:** Is the recovered tail readable?", "\n".join(fixture.thread.sent_messages[start:]))
+            self.assertEqual(sum(not kwargs["silent"] for kwargs in fixture.thread.sent_kwargs[start:]), 1)
+            self.assertTrue(await fixture.bridge.session_threads.thread_has_assistant_message(cast(discord.Thread, fixture.thread)))
+
+    def test_huge_output_keeps_questions_without_unrelated_report_or_inline_references(self) -> None:
+        answer = "**Q901:** May we continue?\n\nRecommend yes.\n\n" + "report line\n" * 10000
+        answer += "\n\nAs noted in **Q902** above, this is a reference."
+        views, attached = assistant_answer_cards(answer)
+        self.assertTrue(attached)
+        self.assertEqual(len(views), 1)
+        displayed = text_in(views[0])
+        self.assertIn("**Q901:** May we continue?", displayed)
+        self.assertIn("Recommend yes.", displayed)
+        self.assertNotIn("report line", displayed)
+        self.assertNotIn("Q902", displayed)
+
+    def test_huge_question_excerpts_preserve_lists_quotes_options_and_later_questions(self) -> None:
+        questions = [
+            "1. **Q901:** Ship?\n\nRecommend yes.\n\n- Option A\n- Option B",
+            "> **Q902:** Continue?\n>\n> Recommend yes.",
+            "> - **Q903:** Keep both?",
+            "+ **Q904:** Finish?\n```text\n\n**Q905:** This is code, not a question.\n```",
+        ]
+        source = "\n\n## Next section\n\n".join(questions)
+        source += "\n\n## Report\n" + "report line\n" * 10000
+        source += "\n**Q906:** Glued report?\n" + "report line\n" * 10000
+        source += "\n**Q907:** Is the tail visible?"
+        views, attached = assistant_answer_cards(source)
+        self.assertTrue(attached)
+        displayed = "\n".join(text_in(view) for view in views)
+        for number in (901, 902, 903, 904, 906, 907):
+            self.assertIn(f"**Q{number}", displayed)
+        self.assertLess(displayed.index("Q906"), displayed.index("Q907"))
+        self.assertIn("Recommend yes.", displayed)
+        self.assertIn("- Option A\n- Option B", displayed)
+        self.assertIn("**Q905:** This is code, not a question.", displayed)
+        self.assertLess(len(displayed), ANSWER_CHUNK_LIMIT * len(questions) * 2)
+
+    def test_huge_output_scans_all_questions_without_extracting_fenced_examples(self) -> None:
+        source = "```text\n**Q999:** Fenced example.\n```\n\n## Report\n" + "background\n" * 10000
+        numbers = list(range(100, 100 + MAX_INLINE_ANSWER_CARDS * 4))
+        source += "\n" + "\n".join(f"{index}. **Q{number}:** Continue?" for index, number in enumerate(numbers, 1))
+        views, attached = assistant_answer_cards(source)
+        self.assertTrue(attached)
+        displayed = "\n".join(text_in(view) for view in views)
+        self.assertNotIn("Q999", displayed)
+        for number in numbers:
+            self.assertIn(f"**Q{number}", displayed)
+
+    def test_huge_report_indentation_does_not_stall_question_extraction(self) -> None:
+        source = "Background. " * 10000 + "\n" + " " * 20000 + "ordinary report\n**Q901:** Continue?"
+        source += "\n" + ">" + "\t>" * 20000 + "ordinary quoted report\n> **Q902:** Quoted tail?"
+        started = time.process_time()
+        views, attached = assistant_answer_cards(source)
+        self.assertTrue(attached)
+        self.assertIn("**Q901:** Continue?", "\n".join(text_in(view) for view in views))
+        self.assertIn("**Q902:** Quoted tail?", "\n".join(text_in(view) for view in views))
+        self.assertLess(time.process_time() - started, 1.0)
+
+    def test_emoji_heavy_answers_fit_discord_text_budget(self) -> None:
+        views, _ = assistant_answer_cards("🟢" * 4000)
+        for view in views:
+            self.assertLessEqual(len(text_in(view).encode("utf-16-le")) // 2, 4000)
 
     async def test_only_bot_authored_cards_count_as_answers_in_history(self) -> None:
         with prompt_fixture() as fixture:

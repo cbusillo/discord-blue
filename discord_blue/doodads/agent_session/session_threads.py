@@ -16,7 +16,7 @@ from typing import Protocol
 import discord
 
 from discord_blue.doodads.agent_session import threads as threads_module
-from discord_blue.doodads.agent_session.cards import ANSWER_CARD_COMPONENT_ID
+from discord_blue.doodads.agent_session.cards import ANSWER_CARD_COMPONENT_ID, ANSWER_CONTINUATION_COMPONENT_ID
 from discord_blue.doodads.agent_session.cleanup import PENDING_CLEANUP_MAX_ATTEMPTS, THREAD_CLOSE_WAIT_SECONDS, SessionCleanups
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
@@ -434,6 +434,11 @@ class SessionThreads:
             isinstance(component, discord.Container) and component.id == ANSWER_CARD_COMPONENT_ID for component in message.components
         ):
             return True
+        if any(
+            isinstance(component, discord.Container) and component.id == ANSWER_CONTINUATION_COMPONENT_ID
+            for component in message.components
+        ):
+            return False
         # Also recognize marked cards from before the explicit component ID.
         return any(
             isinstance(child, discord.TextDisplay) and is_assistant_message(child.content)
@@ -445,6 +450,16 @@ class SessionThreads:
     async def thread_has_assistant_message(self, thread: discord.Thread) -> bool:
         try:
             async for message in thread.history(limit=50):
+                bot_user = self.bridge.bot.user
+                if (
+                    bot_user is not None
+                    and message.author.id == bot_user.id
+                    and any(
+                        isinstance(component, discord.Container) and component.id == ANSWER_CONTINUATION_COMPONENT_ID
+                        for component in message.components
+                    )
+                ):
+                    return False
                 if self.is_bot_assistant_message(message):
                     return True
         except discord.DiscordException:
