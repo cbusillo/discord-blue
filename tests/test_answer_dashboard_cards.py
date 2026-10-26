@@ -253,7 +253,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(f"**Q{number}", displayed)
 
     def test_huge_report_indentation_does_not_stall_question_extraction(self) -> None:
-        source = "Background.\n" + " " * 20000 + "ordinary report\n**Q901:** Continue?"
+        source = "Background. " * 10000 + "\n" + " " * 20000 + "ordinary report\n**Q901:** Continue?"
         started = time.process_time()
         views, attached = assistant_answer_cards(source)
         self.assertTrue(attached)
