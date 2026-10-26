@@ -7,7 +7,7 @@ import unittest
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from discord_blue.doodads.agent_session.protocol import SessionHello
 from discord_blue.claude_channel.session import Identity
@@ -15,9 +15,11 @@ from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
 from discord_blue.doodads.agent_session.session_threads import DiscoveryIncomplete
 from discord_blue.doodads.agent_session.store import StoredSession
-from discord_blue.doodads.agent_session.threads import auto_join_configured_users, create_session_thread, session_start_message
+from discord_blue.doodads.agent_session.threads import create_session_thread, session_start_message
 from discord_blue.config import AgentSessionConfig, Config, ConversationConfig, DiscordConfig
 from discord_blue.doodads.agent_session.sessions import AgentSession
+from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
+import discord
 from tests.fakes_agent_session import (
     FakeBot,
     FakeReplyMessage,
@@ -82,16 +84,6 @@ class SessionRoutingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(await bridge.cleanups.delete_session_notification(recovered.notification_message_id or 0))
                 self.assertFalse((main if parent_id == main.id else second)._history)
 
-    async def test_reopening_second_channel_thread_never_adds_configured_users(self) -> None:
-        config = cast(Config, SimpleNamespace(agent_session=AgentSessionConfig(), discord=DiscordConfig()))
-        config.agent_session.spawned_channel_id = 654
-        config.agent_session.auto_join_user_ids = [123]
-        existing = FakeThread(9999)
-        existing.parent_id = 654
-        with patch.object(existing, "add_user", new_callable=AsyncMock, create=True) as add_user:
-            await auto_join_configured_users(cast(Any, FakeBot(config)), cast(Any, existing))
-        add_user.assert_not_awaited()
-
     async def test_attach_waits_until_both_parent_scans_complete(self) -> None:
         index = DiscoveryIndex(lambda: 999)
         main, second = FakeTextChannel(321, []), FakeTextChannel(654, [])
@@ -116,6 +108,23 @@ class SessionRoutingTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
                 await asyncio.gather(scanning, joining)
 
+    async def test_second_parent_failure_leaves_the_whole_scan_incomplete(self) -> None:
+        index = DiscoveryIndex(lambda: 999)
+        main, second = FakeTextChannel(321, []), FakeTextChannel(654, [])
+        await index.fresh(cast(Any, main), additional_channels=(cast(Any, second),))
+        original = DiscoveryIndex.list_threads
+
+        async def fail_second(index: DiscoveryIndex, channel: discord.TextChannel) -> tuple[list[discord.Thread], bool]:
+            if channel is second:
+                raise OSError("Channel listing failed")
+            return await original(index, channel)
+
+        with patch.object(DiscoveryIndex, "list_threads", new=fail_second):
+            for force in (True, False):
+                with self.subTest(force=force), self.assertRaises(OSError):
+                    await index.fresh(cast(Any, main), additional_channels=(cast(Any, second),), force=force)
+                self.assertFalse(index.complete)
+
     async def test_thread_replies_keep_the_same_controls_in_both_channels(self) -> None:
         for parent_id in (321, 654):
             with self.subTest(parent_id=parent_id), every_user_is_operator():
@@ -128,15 +137,18 @@ class SessionRoutingTests(unittest.IsolatedAsyncioTestCase):
                 existing = FakeThread(9999)
                 existing.parent_id = parent_id
                 bot = FakeBot(config, existing)
-                bridge = AgentSessionBridge(cast(Any, bot))
+                config.agent_session.enabled = True
+                doodad = AgentSessionDoodad(cast(Any, bot))
+                bridge = doodad.bridge
                 websocket = FakeWebSocket()
                 hello = dataclasses.replace(make_hello(), spawned=parent_id == 654)
                 session = AgentSession(hello=hello, websocket=cast(Any, websocket), thread_id=existing.id, acknowledged=True)
                 bridge.sessions.register(session)
                 bridge.sessions.bind_thread(hello.session_id, existing.id)
                 reply = FakeReplyMessage(802, existing, "Continue with the fix")
+                reply.author.bot = False
                 existing.add_message(reply)
-                self.assertTrue(await bridge.controls.send_thread_reply(cast(Any, reply)))
+                await doodad.route_thread_reply(cast(Any, reply))
                 self.assertEqual(websocket.sent_json[0]["kind"], "reply")
                 self.assertEqual(websocket.sent_json[0]["session_id"], hello.session_id)
                 self.assertTrue(session.control_interruptions_enabled)

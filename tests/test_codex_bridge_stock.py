@@ -163,7 +163,9 @@ class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
                 await eventually(lambda: codex.calls > 0)
                 read = (await rpc.request("thread/read", {"threadId": started["id"]}))["thread"]
                 config = BridgeConfig("ws://127.0.0.1/agent-session/connect", TOKEN, codex.socket_path, "fixture")
-                for native in (started, read):
+                forked = (await rpc.request("thread/fork", {"threadId": started["id"], "threadSource": "spawned"}))["thread"]
+                fork_read = (await rpc.request("thread/read", {"threadId": forked["id"]}))["thread"]
+                for native in (started, read, forked, fork_read):
                     session = ThreadSession(config, rpc, native, {})
                     self.assertTrue(SessionHello.from_payload(session.hello(first=True)).spawned)
                     self.assertTrue(SessionHello.from_payload(session.hello(first=False)).spawned)
