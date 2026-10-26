@@ -506,14 +506,13 @@ These commands are future-launch setup, not a procedure to restart an active
 bridge or convert running embedded sessions. Closing and resuming an existing
 session on a daemon needs coordination with the Director (the person whose
 direction the agents follow).
-An installed, non-editable `uv tool` copy does not pick up repository changes
-automatically. Build the merged wheel (`uv build --wheel --clear`, so `dist/` holds only it) and install it
-(`uv tool install --force dist/discord_blue-*-py3-none-any.whl`) as part of
-the next planned bridge launch, after the current bridge has stopped.
-`uv run discord-blue-codex-bridge` uses the checkout version instead.
+Use [routine bridge delivery](#routine-bridge-delivery) to deliver merged client
+changes to both launch paths. `uv run discord-blue-codex-bridge` uses the checkout
+version for development.
 If launchd owns the bridge, put `--supervisor-config` and the absolute path of
-the launcher's private config in its existing `ProgramArguments` at the next
-planned launch. Set `--codex-bin` to the absolute installed Codex executable
+the launcher's private config in its existing `ProgramArguments`, then run the
+routine delivery command to reload that definition. Set `--codex-bin` to the
+absolute installed Codex executable
 because launchd has a minimal PATH; replace `CODEX_BIN` in the template. For
 standalone use, repeat `--codex-home` instead. Do not
 start an additional manual process against the same daemon.
@@ -543,8 +542,8 @@ thread says which tool is waiting; approve or deny it in the terminal. The threa
 One-time setup on the Mac:
 
 ```sh
-uv build --wheel --clear  # in the discord-blue checkout; dist/ then holds one wheel
-uv tool install --force dist/discord_blue-*.whl  # provides discord-blue-claude-channel
+uv build --wheel --clear  # initial installation only
+uv tool install --force dist/discord_blue-*.whl
 claude plugin marketplace add ~/Developer/discord-blue
 claude plugin install dui@discord-blue
 # In ~/.zshrc, add the channel flag to the existing alias:
@@ -589,6 +588,59 @@ Behaviour and limits:
   model tool-use ID are ignored.
 - Background sessions claimed from the Claude Code daemon do not show their
   launch flags, so they are assumed to have the channel.
+
+## Routine bridge delivery
+
+The release agent runs one local command from a clean, committed checkout of
+merged `main`, after fetching and verifying the selected release revision:
+
+```sh
+uv run python scripts/deliver_bridges.py \
+  --checkout /path/to/discord-blue \
+  --build-dir /Volumes/Developer-Artifacts/task-evidence/discord-blue/bridge-delivery/build
+```
+
+This is the supported delivery step for **both** local clients in every DUI
+release. Server deployment alone does not deliver the bridges. Chris does not
+build/install a wheel or restart a bridge. This command does not release or
+configure the Discord server; those operations retain their Launchplane gates.
+
+The command fetches `origin/main` and refuses uncommitted changes or a HEAD
+outside its history. It snapshots committed files and installs using the lockfile
+into `~/.local/share/discord-blue-bridges/<revision>/venv`. Neither running
+runtimes nor token/config files are modified. Rollback uses the same command
+from a clean checkout at the previous release revision.
+
+Both `~/.local/bin/discord-blue-*` launchers select that runtime. The existing
+DUI plugin uses the Claude launcher through PATH, so the next ordinary session
+gets the release; active Claude sessions finish on their previous runtime.
+The older `uv tool` install is superseded. Retain it while old Claude sessions
+use it, and do not run `uv tool install`, `upgrade` or `uninstall discord-blue`:
+those commands can replace these launchers. Use this delivery command instead.
+
+For Codex, the command points the existing login item at the stable launcher,
+preserving its other arguments and environment. Every delivery unloads that
+job with a bounded `launchctl bootout --wait`, then bootstraps its disk definition.
+This also applies argument/environment edits and recovers interrupted updates. Open Discord controls
+expire and sessions reconnect with new epochs during the brief interruption.
+Codex's native daemons run in separate process groups; their TUIs keep running.
+The existing login item must be recognized as
+`com.shinycomputers.discord-blue-codex-bridge` in the signed-in user's GUI domain.
+An unloaded recognized job is bootstrapped automatically, including recovery
+from interrupted delivery. A reload failure reports incomplete delivery.
+
+The command prints the selected revision and a reload receipt. That is not
+proof that startup completed. The release agent checks the new job PID and its `Bridge source <version> <revision>` startup log line,
+and verifies the next Claude launch's startup line. Both installed commands
+also support a credential-free revision check:
+
+```sh
+~/.local/bin/discord-blue-codex-bridge --version
+~/.local/bin/discord-blue-claude-channel --version
+```
+
+Retain previous runtimes until no active session uses them. Repeating delivery
+replaces the Codex bridge again; it does not restart active Claude sessions.
 
 ## Launchplane/Dokploy production deployment
 

@@ -16,6 +16,7 @@ import aiohttp
 from discord_blue.claude_channel.mcp import LINE_LIMIT, ChannelServer, Json, Output
 from discord_blue.claude_channel.conversation import CMConversation, INSTRUCTIONS as CM_INSTRUCTIONS, REPLY_TOOL
 from discord_blue.claude_channel.session import HOOK_TOOL, PERMISSION_REQUEST, ClaudeSession, Identity, host_label
+from discord_blue.bridge_version import bridge_version
 from discord_blue.codex_bridge.config import DEFAULT_CONFIG_PATH, BridgeConfig, load_config
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,7 @@ async def run_channel(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Claude Code channel that mirrors this session into Discord Blue.")
+    parser.add_argument("--version", action="version", version=bridge_version())
     parser.add_argument(
         "--config",
         type=Path,
@@ -94,6 +96,7 @@ def main() -> None:
     args = parser.parse_args()
     # stdout carries the MCP protocol; Claude Code keeps stderr in its MCP logs.
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logger.info("Bridge source %s", bridge_version())
     config: BridgeConfig | None = None
     identity = Identity.from_environment()
     if identity is None:
