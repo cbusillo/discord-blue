@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import dataclasses
+import asyncio
 import os
 import unittest
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
@@ -10,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 from discord_blue.doodads.agent_session.protocol import SessionHello
 from discord_blue.claude_channel.session import Identity
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
+from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
 from discord_blue.doodads.agent_session.store import StoredSession
 from discord_blue.doodads.agent_session.threads import auto_join_configured_users, create_session_thread, session_start_message
 from discord_blue.config import AgentSessionConfig, Config, ConversationConfig, DiscordConfig
@@ -88,6 +91,30 @@ class SessionRoutingTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(existing, "add_user", new_callable=AsyncMock, create=True) as add_user:
             await auto_join_configured_users(cast(Any, FakeBot(config)), cast(Any, existing))
         add_user.assert_not_awaited()
+
+    async def test_attach_waits_until_both_parent_scans_complete(self) -> None:
+        index = DiscoveryIndex(lambda: 999)
+        main, second = FakeTextChannel(321, []), FakeTextChannel(654, [])
+        await index.fresh(cast(Any, main), additional_channels=(cast(Any, second),))
+        started, release = asyncio.Event(), asyncio.Event()
+        original = second.archived_threads
+
+        async def slow_archive(**kwargs: object) -> AsyncIterator[FakeThread]:
+            started.set()
+            await release.wait()
+            async for item in original(**kwargs):
+                yield item
+
+        with patch.object(second, "archived_threads", new=slow_archive):
+            scanning = asyncio.create_task(index.fresh(cast(Any, main), additional_channels=(cast(Any, second),), force=True))
+            await started.wait()
+            joining = asyncio.create_task(index.fresh(cast(Any, main), additional_channels=(cast(Any, second),)))
+            try:
+                await asyncio.sleep(0)
+                self.assertFalse(joining.done())
+            finally:
+                release.set()
+                await asyncio.gather(scanning, joining)
 
     async def test_thread_replies_keep_the_same_controls_in_both_channels(self) -> None:
         for parent_id in (321, 654):

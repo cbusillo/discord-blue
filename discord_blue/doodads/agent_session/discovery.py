@@ -52,7 +52,7 @@ class DiscoveryIndex:
         """Refresh unless a refresh finished moments ago; concurrent callers share one refresh."""
         recent = self.refreshed_at is not None and self.clock() - self.refreshed_at < INDEX_REUSE_SECONDS
         channel_ids = tuple(item.id for item in (channel, *additional_channels))
-        if recent and self.complete and not force and self._channel_ids == channel_ids:
+        if recent and self.complete and not force and self._channel_ids == channel_ids and self._refreshing is None:
             return
         if self._refreshing is None:
             self._refreshing = asyncio.create_task(
