@@ -20,7 +20,7 @@ ANSWER_CONTINUATION_COMPONENT_ID = 215
 ANSWER_FILENAME = "answer.md"
 ANSWER_CHUNK_LIMIT = 1800
 MAX_INLINE_ANSWER_CARDS = 10
-QUESTION_NUMBER = re.compile(r"^(?:[ \t]*>[ \t]?)*[ \t]*(?:#{1,6}[ \t]+)?(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?\*\*Q[0-9]+\b")
+QUESTION_NUMBER = re.compile(r"^(?:#{1,6}[ \t]+)?(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?\*\*Q[0-9]+\b")
 DASHBOARD_PAGE_SIZE = 8
 STATUS_LABELS = {
     "working": ("🔄 Working", 0x758AFF),
@@ -51,7 +51,7 @@ def _answer_questions(source: str) -> str:
     sections: list[str] = []
     current = ""
     for block in _question_blocks(source):
-        if QUESTION_NUMBER.match(block):
+        if QUESTION_NUMBER.match(block.lstrip(" \t>")):
             if current:
                 sections.append(current)
             chunks = split_discord_message(block, ANSWER_CHUNK_LIMIT, max_chunks=2)
@@ -71,7 +71,7 @@ def _answer_questions(source: str) -> str:
 
 
 def _question_boundary(line: str) -> bool:
-    plain = re.sub(r"^[ \t]*(?:>[ \t]?)*", "", line)
+    plain = line.lstrip(" \t>")
     return plain.startswith("#") or re.fullmatch(r"(?:[-*_][ \t]*){3,}", plain) is not None
 
 
@@ -79,8 +79,8 @@ def _question_blocks(source: str) -> Iterator[str]:
     lines: list[str] = []
     fence = None
     for line in source.split("\n"):
-        plain = re.sub(r"^[ \t]*(?:>[ \t]?)*", "", line)
-        if fence is None and (not plain.strip() or QUESTION_NUMBER.match(line) or _question_boundary(line)):
+        plain = line.lstrip(" \t>")
+        if fence is None and (not plain.strip() or QUESTION_NUMBER.match(plain) or _question_boundary(plain)):
             if lines:
                 yield "\n".join(lines)
                 lines = []

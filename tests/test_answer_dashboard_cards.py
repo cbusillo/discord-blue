@@ -254,10 +254,12 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
 
     def test_huge_report_indentation_does_not_stall_question_extraction(self) -> None:
         source = "Background. " * 10000 + "\n" + " " * 20000 + "ordinary report\n**Q901:** Continue?"
+        source += "\n" + ">" + "\t>" * 20000 + "ordinary quoted report\n> **Q902:** Quoted tail?"
         started = time.process_time()
         views, attached = assistant_answer_cards(source)
         self.assertTrue(attached)
         self.assertIn("**Q901:** Continue?", "\n".join(text_in(view) for view in views))
+        self.assertIn("**Q902:** Quoted tail?", "\n".join(text_in(view) for view in views))
         self.assertLess(time.process_time() - started, 1.0)
 
     def test_emoji_heavy_answers_fit_discord_text_budget(self) -> None:
