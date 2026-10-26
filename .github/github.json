@@ -12,6 +12,7 @@
     "compose": "docker-compose.yml",
     "runtimeCompose": "compose.runtime.yml",
     "systemdService": "discord-blue.service",
+    "bridgeDelivery": "scripts/deliver_bridges.py",
     "agentSessionProtocol": "docs/agent-session-protocol.md",
     "cmConversation": "docs/cm-conversation.md"
   },
