@@ -510,8 +510,9 @@ Use [routine bridge delivery](#routine-bridge-delivery) to deliver merged client
 changes to both launch paths. `uv run discord-blue-codex-bridge` uses the checkout
 version for development.
 If launchd owns the bridge, put `--supervisor-config` and the absolute path of
-the launcher's private config in its existing `ProgramArguments` at the next
-planned launch. Set `--codex-bin` to the absolute installed Codex executable
+the launcher's private config in its existing `ProgramArguments`, then run the
+routine delivery command to reload that definition. Set `--codex-bin` to the
+absolute installed Codex executable
 because launchd has a minimal PATH; replace `CODEX_BIN` in the template. For
 standalone use, repeat `--codex-home` instead. Do not
 start an additional manual process against the same daemon.
@@ -541,7 +542,8 @@ thread says which tool is waiting; approve or deny it in the terminal. The threa
 One-time setup on the Mac:
 
 ```sh
-# Deliver the bridge runtime using the routine delivery command below first.
+uv build --wheel --clear  # initial installation only
+uv tool install --force dist/discord_blue-*.whl
 claude plugin marketplace add ~/Developer/discord-blue
 claude plugin install dui@discord-blue
 # In ~/.zshrc, add the channel flag to the existing alias:
@@ -616,9 +618,10 @@ The older `uv tool` install is superseded. Retain it while old Claude sessions
 use it, and do not run `uv tool install`, `upgrade` or `uninstall discord-blue`:
 those commands can replace these launchers. Use this delivery command instead.
 
-For Codex, the command migrates the existing login item to the stable launcher
-once, preserving its other arguments and environment. Subsequent deliveries
-use `launchctl kickstart -kp` to replace only the bridge. Open Discord controls
+For Codex, the command points the existing login item at the stable launcher,
+preserving its other arguments and environment. Every delivery unloads that
+job with a bounded `launchctl bootout --wait`, then bootstraps its disk definition.
+This also applies argument/environment edits and recovers interrupted updates. Open Discord controls
 expire and sessions reconnect with new epochs during the brief interruption.
 Codex's native daemons run in separate process groups; their TUIs keep running.
 The existing login item must be recognized as
@@ -626,9 +629,8 @@ The existing login item must be recognized as
 An unloaded recognized job is bootstrapped automatically, including recovery
 from interrupted delivery. A reload failure reports incomplete delivery.
 
-The command prints the selected revision and launchd's new bridge PID. That is
-a reload receipt, not proof that startup completed. The release agent checks
-that PID and its new `Bridge source <version> <revision>` startup log line,
+The command prints the selected revision and a reload receipt. That is not
+proof that startup completed. The release agent checks the new job PID and its `Bridge source <version> <revision>` startup log line,
 and verifies the next Claude launch's startup line. Both installed commands
 also support a credential-free revision check:
 

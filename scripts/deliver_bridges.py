@@ -76,7 +76,7 @@ def replace_link(path: Path, target: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def deliver(checkout: Path, home: Path, build_dir: Path) -> tuple[str, int]:
+def deliver(checkout: Path, home: Path, build_dir: Path) -> str:
     plist = home / "Library/LaunchAgents" / f"{LABEL}.plist"
     job = plistlib.loads(plist.read_bytes())
     args = job.get("ProgramArguments", [])
@@ -85,7 +85,7 @@ def deliver(checkout: Path, home: Path, build_dir: Path) -> tuple[str, int]:
     domain = f"gui/{os.getuid()}"
     service = f"{domain}/{LABEL}"
     loaded = subprocess.run(["launchctl", "print", service], capture_output=True, text=True, timeout=30)
-    if loaded.returncode and "Could not find service" not in loaded.stderr:
+    if loaded.returncode not in (0, 113):
         loaded.check_returncode()
     release, revision = prepare_release(checkout, home, build_dir)
     binaries = home / ".local/bin"
@@ -96,14 +96,11 @@ def deliver(checkout: Path, home: Path, build_dir: Path) -> tuple[str, int]:
     if args[0] != launcher:
         job["ProgramArguments"] = [launcher, *args[1:]]
         replace_bytes(plist, plistlib.dumps(job))
-        if loaded.returncode == 0:
-            subprocess.run(["launchctl", "bootout", "--wait", service], check=True, capture_output=True, timeout=30)
-        loaded = subprocess.CompletedProcess([], 113)
-    if loaded.returncode:
-        subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True, timeout=30)
-    pid = subprocess.check_output(["launchctl", "kickstart", "-kp", service], text=True, timeout=30).strip()
+    if loaded.returncode == 0:
+        subprocess.run(["launchctl", "bootout", "--wait", service], check=True, capture_output=True, timeout=30)
+    subprocess.run(["launchctl", "bootstrap", domain, str(plist)], check=True, capture_output=True, timeout=30)
     verify_release(binaries, revision)
-    return revision, int(pid)
+    return revision
 
 
 def main() -> None:
@@ -117,16 +114,14 @@ def main() -> None:
     try:
         with (state / "delivery.lock").open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            revision, pid = deliver(args.checkout.resolve(), args.home.resolve(), args.build_dir.resolve())
+            revision = deliver(args.checkout.resolve(), args.home.resolve(), args.build_dir.resolve())
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         parser.exit(
-            1, f"Bridge delivery incomplete ({type(exc).__name__}); inspect the launch item and retained release before retrying.\n"
+            1,
+            f"Bridge delivery incomplete ({type(exc).__name__}): {exc}. "
+            "Inspect the launch item and retained release before retrying.\n",
         )
-    print(
-        json.dumps(
-            {"revision": revision, "claude": "next session launch", "codex_pid": pid, "codex": "reload requested; verify startup"}
-        )
-    )
+    print(json.dumps({"revision": revision, "claude": "next session launch", "codex": "reloaded from disk; startup unverified"}))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import json
 import plistlib
@@ -39,12 +40,17 @@ class BridgeDeliveryTests(unittest.TestCase):
         self.plist.parent.mkdir(parents=True)
         self.job: dict[str, Any] = {
             "Label": deliver_bridges.LABEL,
-            "ProgramArguments": [f"/old/{deliver_bridges.BRIDGES[0]}", "--config", "/private/config"],
+            "ProgramArguments": [str(self.base / "old" / deliver_bridges.BRIDGES[0]), "--config", "/private/config"],
             "EnvironmentVariables": {"PATH": "/tools"},
             "KeepAlive": True,
         }
         self.plist.write_bytes(plistlib.dumps(self.job))
-        self.loaded = True
+        old = Path(self.job["ProgramArguments"][0])
+        old.parent.mkdir()
+        old.write_text(f"#!{sys.executable}\nprint('old-runtime')\n")
+        old.chmod(0o700)
+        self.loaded_definition: dict[str, Any] | None = copy.deepcopy(self.job)
+        self.current_pid = 100
         self.started: list[str] = []
         self.real_run = subprocess.run
 
@@ -54,19 +60,21 @@ class BridgeDeliveryTests(unittest.TestCase):
     def run_command(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         if args[0] == "launchctl":
             if args[1] == "print":
-                return subprocess.CompletedProcess(
-                    args, 0 if self.loaded else 113, "", "" if self.loaded else "Could not find service"
-                )
+                return subprocess.CompletedProcess(args, 0 if self.loaded_definition else 113, "", "")
             if args[1] == "bootout":
-                self.loaded = False
+                self.loaded_definition = None
+                self.current_pid = 0
             if args[1] == "bootstrap":
-                self.loaded = True
+                if self.loaded_definition is not None:
+                    raise subprocess.CalledProcessError(5, args)
+                self.loaded_definition = copy.deepcopy(plistlib.loads(self.plist.read_bytes()))
+                self.start_loaded_job()
             if args[1] == "kickstart":
-                if not self.loaded:
+                if self.loaded_definition is None:
                     raise subprocess.CalledProcessError(113, args)
-                launch = Path(plistlib.loads(self.plist.read_bytes())["ProgramArguments"][0])
-                self.started.append(subprocess.check_output([str(launch), "--version"], text=True).strip())
-            return subprocess.CompletedProcess(args, 0, str(len(self.started)), "")
+                if "k" in args[2] or not self.current_pid:
+                    self.start_loaded_job()
+            return subprocess.CompletedProcess(args, 0, str(self.current_pid), "")
         if args[:2] == ["uv", "sync"]:
             snapshot = Path(args[args.index("--project") + 1])
             revision = json.loads((snapshot / "discord_blue/bridge_release.json").read_text())["revision"]
@@ -79,13 +87,39 @@ class BridgeDeliveryTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, "", "")
         return cast(subprocess.CompletedProcess[str], self.real_run(args, **cast(Any, kwargs)))
 
+    def start_loaded_job(self) -> None:
+        assert self.loaded_definition is not None
+        launch = Path(self.loaded_definition["ProgramArguments"][0])
+        self.started.append(subprocess.check_output([str(launch), "--version"], text=True).strip())
+        self.current_pid += 1
+
+    def test_interrupted_publication_reloads_cached_definition_and_later_argument_environment_edits(self) -> None:
+        replace = deliver_bridges.replace_bytes
+
+        def interrupt_after_publication(path: Path, content: bytes) -> None:
+            replace(path, content)
+            raise InterruptedError
+
+        with patch.object(deliver_bridges.subprocess, "run", side_effect=self.run_command):
+            with patch.object(deliver_bridges, "replace_bytes", side_effect=interrupt_after_publication):
+                with self.assertRaises(InterruptedError):
+                    deliver_bridges.deliver(self.source, self.home, self.base / "builds")
+            deliver_bridges.deliver(self.source, self.home, self.base / "builds")
+            self.assertEqual(self.loaded_definition, plistlib.loads(self.plist.read_bytes()))
+            edited = plistlib.loads(self.plist.read_bytes())
+            edited["EnvironmentVariables"]["PATH"] = "/updated/tools"
+            edited["ProgramArguments"].extend(["--codex-home", "/updated/home"])
+            self.plist.write_bytes(plistlib.dumps(edited))
+            deliver_bridges.deliver(self.source, self.home, self.base / "builds")
+            self.assertEqual(self.loaded_definition, edited)
+
     def test_delivery_advances_both_launches_and_recovers_an_unloaded_job_without_modifying_previous_runtime(self) -> None:
         with patch.object(deliver_bridges.subprocess, "run", side_effect=self.run_command):
-            first, _ = deliver_bridges.deliver(self.source, self.home, self.base / "builds")
+            first = deliver_bridges.deliver(self.source, self.home, self.base / "builds")
             previous = (self.home / ".local/bin/discord-blue-claude-channel").resolve()
             self.tracked.write_text("label-carrying release")
             self.git("commit", "-qam", "labels")
-            second, _ = deliver_bridges.deliver(self.source, self.home, self.base / "builds")
+            second = deliver_bridges.deliver(self.source, self.home, self.base / "builds")
             for name in deliver_bridges.BRIDGES:
                 command = self.home / ".local/bin" / name
                 self.assertEqual(subprocess.check_output([str(command), "--version"], text=True).strip(), second)
@@ -94,9 +128,10 @@ class BridgeDeliveryTests(unittest.TestCase):
             self.assertEqual(updated["ProgramArguments"][1:], self.job["ProgramArguments"][1:])
             self.assertEqual(updated["EnvironmentVariables"], self.job["EnvironmentVariables"])
             self.assertEqual(self.started, [first, second])
-            self.loaded = False
+            self.loaded_definition = None
+            self.current_pid = 0
             deliver_bridges.deliver(self.source, self.home, self.base / "builds")
-            self.assertTrue(self.loaded)
+            self.assertIsNotNone(self.loaded_definition)
             self.assertEqual(self.started[-1], second)
             before = self.plist.read_bytes()
             with patch.object(deliver_bridges, "prepare_release", side_effect=RuntimeError):
