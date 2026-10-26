@@ -182,6 +182,7 @@ listen_host = "0.0.0.0"
 listen_port = 8787
 operator_role_name = "Agent Admin"
 auto_join_user_ids = [789]
+spawned_channel_id = 654
 ```
 
 Managed runtime mode requires a Discord token and positive guild/channel IDs
@@ -196,6 +197,26 @@ copy production state or credentials. Runtime overrides stay in memory and
 are excluded from subsequent TOML saves, which preserve existing local values.
 Without runtime inputs, local TOML and interactive setup retain their behavior.
 The local development Compose file does not deliver these inputs.
+
+`[agent_session].spawned_channel_id` is the separate channel for sessions the
+Supervisor or a lead launches. Set it in the lane's existing
+`DISCORD_BLUE_RUNTIME_CONFIG` through Launchplane's supported product-config
+dry-run/apply path. Use that lane's existing Discord guild and an already
+available channel; changing Discord access is a separate decision. Production
+uses the setting only through a decided, gated release.
+
+The launcher supplies `DISCORD_BLUE_SESSION_KIND=spawned`. Codex's daemon
+ingress persists it as native `threadSource=spawned`; the Codex bridge sends
+`session_kind=spawned` in hello. Claude's channel reads the inherited launcher
+label and sends the same field. Missing labels, including ordinary TUI sessions
+and the Director-opened Supervisor, use the main session channel and add
+`auto_join_user_ids`. Spawned threads never add those users, including on
+reopen. A new spawned session waits for a distinct configured second channel
+instead of falling back to the main channel. Existing threads retain their
+parent channel; recovery, replies, approvals and cleanup support both parents.
+For question routing, follow the [Supervisor question queue](https://github.com/cbusillo/codex-skills/blob/main/skills/supervisor/SKILL.md).
+The bridge mirrors the shared daemon's Codex sessions; embedded sessions retain
+their existing visibility limit.
 
 ### Managed runtime Compose
 

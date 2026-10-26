@@ -75,12 +75,16 @@ class SessionCleanups:
         self._deleted_notifications: dict[int, None] = {}
 
     async def cleanup_stale_session_notifications(self) -> None:
+        for channel_id in threads_module.agent_session_channel_ids(self.bridge.bot):
+            await self.cleanup_channel_notifications(channel_id)
+
+    async def cleanup_channel_notifications(self, channel_id: int) -> None:
         # An in-flight attachment may have published a notice before binding it.
         # Defer this sweep rather than pinning maintenance behind its network I/O.
         if self.bridge.attaching():
             return
         try:
-            channel = await asyncio.wait_for(threads_module.get_agent_session_channel(self.bridge.bot), timeout=3)
+            channel = await asyncio.wait_for(threads_module.get_agent_session_channel(self.bridge.bot, channel_id), timeout=3)
         except Exception:
             logger.warning("Unable to clean Agent session notifications: channel is unavailable", exc_info=True)
             return
@@ -162,9 +166,13 @@ class SessionCleanups:
             )
 
     async def cleanup_stale_session_threads(self) -> None:
+        for channel_id in threads_module.agent_session_channel_ids(self.bridge.bot):
+            await self.cleanup_channel_threads(channel_id)
+
+    async def cleanup_channel_threads(self, channel_id: int) -> None:
         self.bridge.record_maintenance_progress()
         try:
-            channel = await asyncio.wait_for(threads_module.get_agent_session_channel(self.bridge.bot), timeout=3)
+            channel = await asyncio.wait_for(threads_module.get_agent_session_channel(self.bridge.bot, channel_id), timeout=3)
         except Exception:
             logger.warning("Unable to clean Agent session threads: channel is unavailable", exc_info=True)
             return
@@ -293,7 +301,7 @@ class SessionCleanups:
             notification_id = record.notification_id
             if notification_id is not None:
                 try:
-                    channel = await threads_module.get_agent_session_channel(self.bridge.bot)
+                    channel = await threads_module.get_agent_session_channel(self.bridge.bot, thread.parent_id)
                     notification = await self.bridge.threads.bounded(
                         channel.fetch_message(notification_id), SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS
                     )
@@ -516,18 +524,21 @@ class SessionCleanups:
         return await self.bridge.threads.close(thread, steps, timeout=timeout)
 
     async def delete_session_notification(self, message_id: int) -> bool:
-        try:
-            channel = await threads_module.get_agent_session_channel(self.bridge.bot)
-            message = await channel.fetch_message(message_id)
-            if any(session.notification_message_id == message_id for session in self.bridge.sessions.by_session.values()):
-                return True  # A reconnect adopted it while this cleanup (perhaps no longer awaited) fetched it.
-            await self.delete_notification_message(message)
-        except discord.NotFound:
-            return True
-        except (discord.DiscordException, ValueError):
-            logger.warning("Unable to delete Agent session notification message %s", message_id)
-            return False
-        return True
+        complete = True
+        for channel_id in threads_module.agent_session_channel_ids(self.bridge.bot):
+            try:
+                channel = await threads_module.get_agent_session_channel(self.bridge.bot, channel_id)
+                message = await channel.fetch_message(message_id)
+                if any(session.notification_message_id == message_id for session in self.bridge.sessions.by_session.values()):
+                    return True
+                await self.delete_notification_message(message)
+                return True
+            except discord.NotFound:
+                continue
+            except (discord.DiscordException, ValueError):
+                logger.warning("Unable to delete Agent session notification message %s", message_id)
+                complete = False
+        return complete
 
     async def delete_notification_message(self, message: discord.Message) -> None:
         """Delete a notification; from the request on (a rate limit can hold it a while), no attach adopts it."""
@@ -553,8 +564,14 @@ class SessionCleanups:
         return message_id in self._notification_deletes or message_id in self._deleted_notifications
 
     async def delete_session_notification_for_thread(self, thread_id: int) -> bool:
+        complete = True
+        for channel_id in threads_module.agent_session_channel_ids(self.bridge.bot):
+            complete = await self.delete_channel_notification_for_thread(thread_id, channel_id) and complete
+        return complete
+
+    async def delete_channel_notification_for_thread(self, thread_id: int, channel_id: int) -> bool:
         try:
-            channel = await threads_module.get_agent_session_channel(self.bridge.bot)
+            channel = await threads_module.get_agent_session_channel(self.bridge.bot, channel_id)
         except ValueError:
             logger.warning("Unable to delete Agent session notification for thread %s: channel is unavailable", thread_id)
             return False

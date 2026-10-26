@@ -1,14 +1,3 @@
-"""One shared index of the parent channel's session threads, for every attach.
-
-Finding a session's thread means listing the channel's threads (active, plus archived public and private, every page)
-and reading each candidate's opening messages for its session marker. Doing that per hello cost about 30 s each and
-serialized a restart wave. The index lists once and reads each thread's opening messages once, then serves every
-session from memory; a refresh relists (cheap) and reads only threads it has not read yet.
-
-A failed or rate-limited listing page or read is never taken for "not this session": it leaves the index incomplete,
-and an attach may create a new thread only when a complete index has no match (#148, M6).
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -44,14 +33,20 @@ class DiscoveryIndex:
     complete: bool = False
     refreshed_at: float | None = None
     _refreshing: asyncio.Task[None] | None = None
+    _channel_ids: tuple[int, ...] = ()
 
-    async def fresh(self, channel: discord.TextChannel, *, force: bool = False) -> None:
+    async def fresh(
+        self, channel: discord.TextChannel, *, force: bool = False, additional_channels: tuple[discord.TextChannel, ...] = ()
+    ) -> None:
         """Refresh unless a refresh finished moments ago; concurrent callers share one refresh."""
         recent = self.refreshed_at is not None and self.clock() - self.refreshed_at < INDEX_REUSE_SECONDS
-        if recent and self.complete and not force:
+        channel_ids = tuple(item.id for item in (channel, *additional_channels))
+        if recent and self.complete and not force and self._channel_ids == channel_ids and self._refreshing is None:
             return
         if self._refreshing is None:
-            self._refreshing = asyncio.create_task(self.refresh(channel), name="agent-session-discovery-index")
+            self._refreshing = asyncio.create_task(
+                self.refresh(channel, additional_channels=additional_channels), name="agent-session-discovery-index"
+            )
             self._refreshing.add_done_callback(self._refresh_done)
         # Shielded: a waiter that is cancelled leaves the shared refresh (and its Discord reads) running.
         await asyncio.shield(self._refreshing)
@@ -62,8 +57,16 @@ class DiscoveryIndex:
         if not task.cancelled() and (exc := task.exception()) is not None:
             logger.warning("Agent session discovery index refresh failed: %r", exc)
 
-    async def refresh(self, channel: discord.TextChannel) -> None:
-        listed, complete = await self.list_threads(channel)
+    async def refresh(self, channel: discord.TextChannel, *, additional_channels: tuple[discord.TextChannel, ...] = ()) -> None:
+        self.complete = False
+        self.refreshed_at = None
+        channels = (channel, *additional_channels)
+        listed: list[discord.Thread] = []
+        complete = True
+        for parent in channels:
+            threads, parent_complete = await self.list_threads(parent)
+            listed.extend(threads)
+            complete = complete and parent_complete
         # A listing only adds and updates. A thread missing from it is not gone: discord.py caches a thread it just
         # created or reopened only once the gateway says so, and archive listings omit open threads. Only Discord
         # saying a thread does not exist removes one (forget), or empties what it matches (a NotFound read).
@@ -82,6 +85,7 @@ class DiscoveryIndex:
         results = await asyncio.gather(*(read(entry) for entry in unread))
         self.complete = complete and all(results)
         self.refreshed_at = self.clock()
+        self._channel_ids = tuple(parent.id for parent in channels)
         if not self.complete:
             logger.warning("Agent session discovery is incomplete: %s of %s candidate(s) unread", results.count(False), len(unread))
 

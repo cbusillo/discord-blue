@@ -131,6 +131,7 @@ class ThreadSession(AgentSessionClient):
         self.approval_responses: dict[RequestId, Json] = {}
         self.local_decisions: set[RequestId] = set()
         self.thread_id: str = thread["id"]
+        self.spawned = thread.get("threadSource") == "spawned"
         self.cwd = str(thread.get("cwd") or "")
         self.branch = (thread.get("gitInfo") or {}).get("branch")
         self.label = SessionLabel(name=thread.get("name"), prompt=thread.get("preview"))
@@ -447,7 +448,13 @@ class ThreadSession(AgentSessionClient):
 
     def hello(self, *, first: bool) -> Json:
         hello = self.event(
-            "hello", host_label=self.config.host_label, cwd=self.cwd, pid=0, capabilities=self.capabilities, harness="codex"
+            "hello",
+            host_label=self.config.host_label,
+            cwd=self.cwd,
+            pid=0,
+            capabilities=self.capabilities,
+            harness="codex",
+            session_kind="spawned" if self.spawned else "director",
         )
         optional = {"branch": self.branch, "title": self.label.current, "assistant_message": self.backfill if first else None}
         return {**hello, **{key: value for key, value in optional.items() if value}}

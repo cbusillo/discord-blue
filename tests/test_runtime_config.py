@@ -32,6 +32,7 @@ loaded_doodads = ["agent_session_doodad"]
 enabled = true
 operator_role_name = "Agent Admin"
 auto_join_user_ids = [789]
+spawned_channel_id = 654
 """,
         )
         with patch("builtins.input", side_effect=AssertionError("Runtime must not prompt")):
@@ -41,6 +42,7 @@ auto_join_user_ids = [789]
         self.assertEqual((config.discord.guild_id, config.discord.bot_channel_id), (123, 456))
         self.assertTrue(config.agent_session.enabled)
         self.assertEqual(config.agent_session.auto_join_user_ids, [789])
+        self.assertEqual(config.agent_session.spawned_channel_id, 654)
         config.debug = True
         config.save()
         stored = tomllib.loads(self.config_path.read_text())
@@ -49,6 +51,7 @@ auto_join_user_ids = [789]
         self.assertNotIn("token", stored["agent_session"])
         self.assertNotIn("guild_id", stored["discord"])
         self.assertNotIn("enabled", stored["agent_session"])
+        self.assertNotIn("spawned_channel_id", stored["agent_session"])
 
     def test_runtime_override_preserves_existing_local_config(self) -> None:
         self.config_path.write_text(
@@ -129,3 +132,13 @@ auto_join_user_ids = [789]
         prompt.assert_called_once()
         self.assertEqual(config.discord.token, "local-input")
         self.assertEqual(tomllib.loads(self.config_path.read_text())["discord"]["token"], "local-input")
+
+    def test_invalid_spawned_channel_refuses_startup_before_saving(self) -> None:
+        for spawned, main in ((-1, 321), (321, 321), (456, 0)):
+            with self.subTest(spawned=spawned, main=main):
+                initial = '[discord]\ntoken="local-bot"\nguild_id=123\nbot_channel_id=456\n'
+                self.config_path.write_text(initial)
+                os.environ["DISCORD_BLUE_RUNTIME_CONFIG"] = f"[agent_session]\nchannel_id={main}\nspawned_channel_id={spawned}"
+                with self.assertRaises(ValueError):
+                    Config()
+                self.assertEqual(self.config_path.read_text(), initial)

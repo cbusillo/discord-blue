@@ -25,7 +25,7 @@ from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.codex_bridge.rpc import AppServerClient
 from discord_blue.codex_bridge.session import ThreadSession
 from tests.stock_codex import ASK_QUESTIONS, SANDBOX_POLICY, UNLOAD_DELAY_SECONDS, StockCodex
-from discord_blue.doodads.agent_session.protocol import SERVER_FEATURES
+from discord_blue.doodads.agent_session.protocol import SERVER_FEATURES, SessionHello
 from tests.fakes_discord_blue import TOKEN, FakeDiscordBlue
 
 Json = dict[str, Any]
@@ -154,6 +154,22 @@ async def eventually(condition: Callable[[], bool], seconds: float = 30) -> None
 
 @unittest.skipUnless(CODEX_BIN and sys.platform == "darwin", "set CODEX_BIN to a stock codex binary (macOS sandbox-exec)")
 class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_spawned_source_survives_native_persistence_and_bridge_reconnect(self) -> None:
+        async with StockCodex(CODEX_BIN) as codex:
+            async with AppServerClient(codex.socket_path) as rpc:
+                await rpc.initialize({"name": "spawned_source_fixture", "version": "0"})
+                started = (await rpc.request("thread/start", {"cwd": str(codex.work), "threadSource": "spawned"}))["thread"]
+                await rpc.request("turn/start", {"threadId": started["id"], "input": [{"type": "text", "text": "Label fixture"}]})
+                await eventually(lambda: codex.calls > 0)
+                read = (await rpc.request("thread/read", {"threadId": started["id"]}))["thread"]
+                config = BridgeConfig("ws://127.0.0.1/agent-session/connect", TOKEN, codex.socket_path, "fixture")
+                forked = (await rpc.request("thread/fork", {"threadId": started["id"], "threadSource": "spawned"}))["thread"]
+                fork_read = (await rpc.request("thread/read", {"threadId": forked["id"]}))["thread"]
+                for native in (started, read, forked, fork_read):
+                    session = ThreadSession(config, rpc, native, {})
+                    self.assertTrue(SessionHello.from_payload(session.hello(first=True)).spawned)
+                    self.assertTrue(SessionHello.from_payload(session.hello(first=False)).spawned)
+
     async def test_slice_two_approvals_and_new_session(self) -> None:
         discord = FakeDiscordBlue(sorted(SERVER_FEATURES))
         app = web.Application()

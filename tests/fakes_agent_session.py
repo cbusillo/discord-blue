@@ -159,6 +159,10 @@ class FakeThread:
         self._messages[message.id] = message
         self._history.append(message)
 
+    async def add_user(self, user: discord.Object) -> None:
+        if user.id not in self._member_ids:
+            self._member_ids.append(user.id)
+
     def permissions_for(self, _member: object) -> object:
         return SimpleNamespace(manage_messages=self._manage_messages)
 
@@ -333,6 +337,7 @@ class FakeTextChannel:
 
     async def create_thread(self, **_kwargs: object) -> FakeThread:
         thread = FakeThread(9000 + len(self._threads), manage_messages=self._manage_messages)
+        thread.parent_id = self.id
         self._threads.append(thread)
         return thread
 

@@ -110,6 +110,7 @@ class SessionHello:
     harness: str | None = None
     # Opt-in: older clients expect hello_ack as the first reply.
     hello_pending: bool = False
+    spawned: bool = False
 
     def supports(self, action: str) -> bool:
         return action in REMOTE_ACTIONS and (self.capabilities is None or action in self.capabilities)
@@ -131,6 +132,7 @@ class SessionHello:
             assistant_message=str(payload["assistant_message"]) if payload.get("assistant_message") else None,
             title=str(payload["title"]) if payload.get("title") else None,
             harness=payload["harness"] if isinstance(payload.get("harness"), str) else None,
+            spawned=payload.get("session_kind") == "spawned",
         )
 
 
