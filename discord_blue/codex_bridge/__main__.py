@@ -13,6 +13,7 @@ from time import monotonic
 
 from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.accounts import supervisor_homes
+from discord_blue.bridge_version import bridge_version
 from discord_blue.codex_bridge.config import DEFAULT_CONFIG_PATH, BridgeConfig, load_config, socket_for_home
 from discord_blue.codex_bridge.daemon import start_daemon
 
@@ -70,6 +71,7 @@ async def run_bridges(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Mirror live stock Codex threads into Discord Blue agent sessions.")
+    parser.add_argument("--version", action="version", version=bridge_version())
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="TOML config file")
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument(
@@ -85,6 +87,7 @@ def main() -> None:
     parser.add_argument("--codex-bin", default="codex", help="Codex executable for native daemon start (absolute path for launchd)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logger.info("Bridge source %s", bridge_version())
     try:
         config = load_config(args.config)
         homes = supervisor_homes(args.supervisor_config) if args.supervisor_config else args.codex_home
