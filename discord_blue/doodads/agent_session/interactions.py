@@ -33,6 +33,7 @@ from discord_blue.doodads.agent_session.protocol import (
     format_content_approval,
     payload_string,
 )
+from discord_blue.doodads.agent_session.question_modal import AnswerTogetherButton, questionnaire_fits_modal
 from discord_blue.doodads.agent_session.sessions import (
     AgentSession,
     AgentSessionRegistry,
@@ -201,6 +202,8 @@ class RequestUserInputView(discord.ui.LayoutView):
             if not question.options or question.is_other:
                 children.append(discord.ui.ActionRow(RequestUserInputAnswerButton(self, question)))
         children.append(discord.ui.Separator())
+        if questionnaire_fits_modal(request):
+            children.append(discord.ui.ActionRow(AnswerTogetherButton(self)))
         children.append(discord.ui.ActionRow(RequestUserInputSubmitButton(self), RequestUserInputCancelButton(self)))
         self.add_item(discord.ui.Container(*children, accent_color=0xF0B232))
 
