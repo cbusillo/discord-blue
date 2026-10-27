@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 import discord
 
@@ -14,6 +14,8 @@ from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.cards import assistant_answer_cards, notice_card
 from discord_blue.doodads.agent_session.interactions import RequestUserInputView
 from discord_blue.doodads.agent_session.question_modal import AnswerTogetherButton, AnswerTogetherModal, questionnaire_fits_modal
+from discord_blue.doodads.agent_session import reply_modal as reply_module
+from discord_blue.doodads.agent_session.formatting import format_user_message
 from discord_blue.doodads.agent_session.reply_modal import ReplyAboutModal, answer_excerpt, open_reply_modal
 from tests.fakes_agent_prompts import prompt_fixture
 from tests.fakes_agent_session import FakeInteraction, FakeReplyMessage, FakeThread
@@ -186,6 +188,55 @@ class InteractiveModalTests(unittest.IsolatedAsyncioTestCase):
                     await modal.on_submit(cast(Any, interaction))
                 self.assertEqual(self.fixture.socket.sent_json, [])
                 self.assertTrue(interaction.response.messages)
+
+    async def test_context_reply_reserves_message_budget_for_multiline_context_and_emoji(self) -> None:
+        source = self.source("A\n" * 300)
+        source.created_at = self.fixture.session.attached_at - timedelta(days=1)
+        modal = await self.reply_form(source)
+        modal.reply._value = "😀" * cast(int, modal.reply.max_length)
+        await modal.on_submit(cast(Any, FakeInteraction(self.fixture.thread)))
+        text = format_user_message(str(self.fixture.socket.sent_json[0]["text"]))
+        self.assertLessEqual(len(text.encode("utf-16-le")) // 2, 2000)
+
+    async def test_context_reply_reports_post_publish_failures_in_thread(self) -> None:
+        original = reply_module.send_agent_session_message
+
+        async def reconnect(destination: discord.abc.Messageable, content: str | None = None) -> discord.Message:
+            message = await original(destination, content)
+            self.fixture.session.hello = replace(self.fixture.session.hello, session_epoch="after-post")
+            return message
+
+        for fail in ("reconnected", "dispatch"):
+            with self.subTest(fail=fail):
+                source = self.source()
+                modal = await self.reply_form(source)
+                modal.reply._value = "Please explain."
+                if fail == "dispatch":
+                    with patch.object(self.fixture.bridge.controls, "send_reply", new=AsyncMock(return_value="Connection failed")):
+                        await modal.on_submit(cast(Any, FakeInteraction(self.fixture.thread)))
+                else:
+                    with patch.object(reply_module, "send_agent_session_message", side_effect=reconnect):
+                        await modal.on_submit(cast(Any, FakeInteraction(self.fixture.thread)))
+                posted = next(m for m in reversed(self.fixture.thread._messages.values()) if m.content.startswith(">>>"))
+                self.assertTrue(posted.replies)
+                self.assertFalse(posted.reply_mentions[-1])
+
+    async def test_context_reply_handles_unavailable_thread(self) -> None:
+        modal = await self.reply_form(self.source())
+        modal.reply._value = "Please explain."
+        interaction = FakeInteraction(self.fixture.thread)
+        with patch.object(self.fixture.bridge, "thread_channel", return_value=None):
+            await modal.on_submit(cast(Any, interaction))
+        self.assertTrue(interaction.response.messages)
+        self.assertEqual(self.fixture.socket.sent_json, [])
+
+    async def test_blank_option_label_uses_picker_fallback(self) -> None:
+        view = await self.questionnaire()
+        question = view.request.questions[0]
+        request = replace(
+            view.request, questions=[replace(question, options=[replace(question.options[0], label=""), question.options[1]])]
+        )
+        self.assertFalse(questionnaire_fits_modal(request))
 
     async def test_context_menu_rejects_foreign_messages_and_notices(self) -> None:
         source = self.source()

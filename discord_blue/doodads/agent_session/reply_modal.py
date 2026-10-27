@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, cast
+import logging
+from typing import TYPE_CHECKING
 
 import discord
 
+from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
 from discord_blue.doodads.agent_session.cards import ANSWER_CARD_COMPONENT_ID, ANSWER_CONTINUATION_COMPONENT_ID
 from discord_blue.doodads.agent_session.formatting import (
     ASSISTANT_MESSAGE_MARKER,
@@ -21,6 +23,7 @@ if TYPE_CHECKING:
     from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 
 
+logger = logging.getLogger(__name__)
 QUOTE_LIMIT = 500
 
 
@@ -80,13 +83,18 @@ class ReplyAboutModal(discord.ui.Modal):
         identity = discord.utils.escape_markdown(session.thread_name or session.hello.title or session.session_id)[:100]
         age = " · Earlier context" if self.older else ""
         self.add_item(discord.ui.TextDisplay(f"**{identity}{age}**\n{self.quote()}\n[Open answer]({self.jump_url})"))
+        context_size = len(format_user_message(self.reply_text("x")).encode("utf-16-le")) // 2 - 1
         self.reply: discord.ui.TextInput[ReplyAboutModal] = discord.ui.TextInput[ReplyAboutModal](
-            style=discord.TextStyle.paragraph, max_length=1500
+            style=discord.TextStyle.paragraph, max_length=(DISCORD_MESSAGE_LIMIT - context_size) // 2
         )
         self.add_item(discord.ui.Label(text="Your reply", component=self.reply))
 
     def quote(self) -> str:
         return "\n".join(f"> {line}" for line in self.excerpt.splitlines())
+
+    def reply_text(self, reply: str) -> str:
+        age = " (earlier context)" if self.older else ""
+        return f"About this answer{age}: {self.jump_url}\n{self.quote()}\n\n{reply.strip()}"
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         error = reply_context_error(self.bridge, interaction, self.session, self.epoch)
@@ -101,7 +109,10 @@ class ReplyAboutModal(discord.ui.Modal):
             if self.submitted:
                 await interaction.followup.send("This reply form has already been submitted.", ephemeral=True)
                 return
-            thread = cast(discord.Thread, self.bridge.thread_channel(self.session.thread_id or 0))
+            thread = self.bridge.thread_channel(self.session.thread_id or 0)
+            if not isinstance(thread, discord.Thread):
+                await interaction.followup.send("The session thread is unavailable; reply was not sent.", ephemeral=True)
+                return
             try:
                 source = await thread.fetch_message(self.source_id)
             except discord.DiscordException:
@@ -115,17 +126,20 @@ class ReplyAboutModal(discord.ui.Modal):
                 await interaction.followup.send(error, ephemeral=True)
                 return
             self.submitted = True
-            age = " (earlier context)" if self.older else ""
-            text = f"About this answer{age}: {self.jump_url}\n{self.quote()}\n\n{self.reply.value.strip()}"
+            text = self.reply_text(self.reply.value)
             try:
                 message = await send_agent_session_message(thread, format_user_message(text))
             except discord.DiscordException:
                 await interaction.followup.send("Discord could not post the reply; it was not sent to the session.", ephemeral=True)
                 return
-            if error := reply_context_error(self.bridge, interaction, self.session, self.epoch):
-                await interaction.followup.send(error, ephemeral=True)
-                return
-            error = await self.bridge.controls.send_reply(self.session, thread, interaction.user, text, message.id)
+            error = reply_context_error(self.bridge, interaction, self.session, self.epoch)
+            if error is None:
+                error = await self.bridge.controls.send_reply(self.session, thread, interaction.user, text, message.id)
+            if error is not None:
+                try:
+                    await message.reply(error, mention_author=False)
+                except discord.DiscordException:
+                    logger.warning("Unable to post contextual reply failure for message %s", message.id)
             await interaction.followup.send(error or "Reply queued for this session.", ephemeral=True)
 
 

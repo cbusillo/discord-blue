@@ -605,7 +605,9 @@ that message, and its jump link. Your submitted reply includes that context in
 the thread and goes through ordinary reply delivery. Earlier answers are marked
 as earlier context. Reconnecting, deleting or changing the source answer, or
 losing operator access invalidates the open form. It expires after ten minutes.
-For a long answer, choose the card containing the passage you mean.
+For a long answer, choose the card containing the passage you mean. The form
+reserves space for the context in Discord's message limit; use an ordinary
+thread reply for longer text.
 
 A small questionnaire offers **Answer together**, with one radio group per
 choice question and an optional text field only where Other is allowed. Choose
@@ -618,8 +620,7 @@ use the picker instead of a shortened form. These forms require discord.py 2.7.
 Reply about this works with Codex and enabled Claude channels; Claude still
 holds busy replies until idle. Answer together is for Codex structured questions.
 It does not add Claude native question responses or permission decisions.
-[Phone layout preview](docs/assets/dui/interactions-preview.html) uses serialized
-Discord payloads; Discord controls the final appearance on a phone.
+Discord controls the final appearance on a phone.
 
 ## Routine bridge delivery
 
