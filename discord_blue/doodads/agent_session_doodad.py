@@ -18,6 +18,15 @@ class AgentSessionDoodad(commands.Cog):
     def __init__(self, bot: BlueBot) -> None:
         self.bot = bot
         self.bridge = AgentSessionBridge(bot)
+        self.reply_about_command = app_commands.ContextMenu(name="Reply about this", callback=self.reply_about_message)
+
+    async def cog_load(self) -> None:
+        self.bot.tree.add_command(self.reply_about_command)
+
+    async def reply_about_message(self, interaction: discord.Interaction[BlueBot], message: discord.Message) -> None:
+        from discord_blue.doodads.agent_session.reply_modal import open_reply_modal
+
+        await open_reply_modal(self.bridge, interaction, message)
 
     @commands.Cog.listener("on_ready")
     async def start_bridge(self) -> None:
@@ -182,6 +191,7 @@ class AgentSessionDoodad(commands.Cog):
         await interaction.response.send_message(response, ephemeral=True)
 
     async def cog_unload(self) -> None:
+        self.bot.tree.remove_command(self.reply_about_command.name, type=self.reply_about_command.type)
         await self.bridge.stop()
 
 

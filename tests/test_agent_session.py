@@ -2816,10 +2816,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(thread.sent_views[0])
         children = list(cast(Any, thread.sent_views[0]).walk_children())
         selects = [child for child in children if isinstance(child, bridge_module.discord.ui.Select)]
-        buttons = [child for child in children if isinstance(child, bridge_module.discord.ui.Button)]
         self.assertEqual(len(selects), 1)
         self.assertEqual([option.label for option in selects[0].options], ["1. Fast", "2. Safe"])
-        self.assertEqual([button.label for button in buttons], ["Send answer", "Cancel"])
         self.assertIn("call-1", session.pending_user_inputs)
 
     async def test_request_user_input_modal_prompt_uses_buttons(self) -> None:

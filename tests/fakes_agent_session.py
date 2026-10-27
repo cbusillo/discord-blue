@@ -70,6 +70,7 @@ class FakeReplyMessage:
         created_at: datetime | None = None,
     ) -> None:
         self.id = message_id
+        self.jump_url = f"https://discord.com/channels/{GUILD_ID}/{channel.id}/{message_id}"
         self.created_at = created_at or datetime.now(UTC)
         self.channel = channel
         self.content = content
@@ -357,9 +358,13 @@ class FakeInteractionResponse:
         self.edit_kwargs: list[dict[str, object]] = []
         self.modals: list[object] = []
         self.deferred = False
+        self.ephemeral = False
+        self.thinking = False
 
-    async def defer(self) -> None:
+    async def defer(self, *, ephemeral: bool = False, thinking: bool = False) -> None:
         self.deferred = True
+        self.ephemeral = ephemeral
+        self.thinking = thinking
 
     async def send_message(self, content: str, *, ephemeral: bool) -> None:
         self.messages.append((content, ephemeral))

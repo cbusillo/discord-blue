@@ -218,17 +218,30 @@ class SessionControls:
             await message.reply("Agent session is reconnecting; send the reply again in a moment.", mention_author=False)
             return True
 
+        error = await self.send_reply(session, thread, message.author, text, message.id)
+        if error is not None:
+            await message.reply(error, mention_author=False)
+        return True
+
+    async def send_reply(
+        self,
+        session: AgentSession,
+        thread: discord.Thread,
+        user: discord.User | discord.Member,
+        text: str,
+        message_id: int,
+    ) -> str | None:
         command = RemoteCommand(
             command_id=str(uuid.uuid4()),
             session_id=session.session_id,
             session_epoch=session.session_epoch,
             kind="reply",
             text=text,
-            issued_by=str(message.author.id),
+            issued_by=str(user.id),
         )
         pending = PendingRemoteCommand(
-            thread_id=message.channel.id,
-            message_id=message.id,
+            thread_id=thread.id,
+            message_id=message_id,
             kind="reply",
         )
         queued = False
@@ -236,7 +249,7 @@ class SessionControls:
         async def show_queued() -> None:
             nonlocal queued
             queued = True
-            await self.set_message_reaction(thread.id, message.id, REACTION_QUEUED)
+            await self.set_message_reaction(thread.id, message_id, REACTION_QUEUED)
             await self.show_active_session_controls(session, thread, REACTION_QUEUED)
 
         delivered = False
@@ -245,13 +258,11 @@ class SessionControls:
             delivered = error is None
         finally:
             if queued and not delivered:
-                await self.clear_message_transient_reactions(thread.id, message.id)
+                await self.clear_message_transient_reactions(thread.id, message_id)
                 if self.bridge.sessions.get(session.session_id) is session and session.control_status_reaction == REACTION_QUEUED:
                     self.restore_command_status(session, pending)
                     await self.show_or_refresh_session_controls(session, thread)
-        if error is not None:
-            await message.reply(error, mention_author=False)
-        return True
+        return error
 
     async def send_continue_autonomously(self, channel: object, user: discord.User | discord.Member) -> str:
         return await self.send_session_control(channel, user, GO_AHEAD_CONTROL)

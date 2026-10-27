@@ -597,6 +597,30 @@ Behaviour and limits:
 - Background sessions claimed from the Claude Code daemon do not show their
   launch flags, so they are assumed to have the channel.
 
+## Replying with context and answering together
+
+Long-press one of the bot's answer messages in a session thread and choose
+**Apps → Reply about this**. The form shows the session, a bounded excerpt of
+that message, and its jump link. Your submitted reply includes that context in
+the thread and goes through ordinary reply delivery. Earlier answers are marked
+as earlier context. Reconnecting, deleting or changing the source answer, or
+losing operator access invalidates the open form. It expires after ten minutes.
+For a long answer, choose the card containing the passage you mean.
+
+A small questionnaire offers **Answer together**, with one radio group per
+choice question and an optional text field only where Other is allowed. Choose
+Other to send that written answer. Submit once to send all answers. Closing the
+form leaves the request waiting. The existing pickers and **Send answer** stay
+available, including after the form expires. Long questions or option meanings,
+secret questions, too many fields, and choices beyond Discord's radio limits
+use the picker instead of a shortened form. These forms require discord.py 2.7.
+
+Reply about this works with Codex and enabled Claude channels; Claude still
+holds busy replies until idle. Answer together is for Codex structured questions.
+It does not add Claude native question responses or permission decisions.
+[Phone layout preview](docs/assets/dui/interactions-preview.html) uses serialized
+Discord payloads; Discord controls the final appearance on a phone.
+
 ## Routine bridge delivery
 
 The release agent runs one local command from a clean, committed checkout of
