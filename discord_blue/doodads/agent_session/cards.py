@@ -107,7 +107,11 @@ def _answer_card(chunk: str, *, complete: bool) -> discord.ui.LayoutView:
 
 
 def _dashboard_text(text: str, limit: int) -> str:
-    escaped = discord.utils.escape_markdown(strip_assistant_markers(text))[:limit]
+    escaped = (
+        discord.utils.escape_markdown(strip_assistant_markers(text))
+        .encode("utf-16-le")[: limit * 2]
+        .decode("utf-16-le", errors="ignore")
+    )
     # A cut between an escape and its character must not leave a lone backslash.
     trailing_slashes = len(escaped) - len(escaped.rstrip("\\"))
     return escaped[:-1] if trailing_slashes % 2 else escaped

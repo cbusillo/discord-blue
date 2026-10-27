@@ -18,7 +18,7 @@ from discord_blue.doodads.agent_session.cards import (
     DASHBOARD_PAGE_SIZE,
     assistant_answer_cards,
 )
-from discord_blue.doodads.agent_session.dashboard import ActiveSessionDashboard, DashboardButton, DashboardFilter
+from discord_blue.doodads.agent_session.dashboard import ActiveSessionDashboard, DashboardButton
 from discord_blue.doodads.agent_session.formatting import is_assistant_message, mark_assistant_message
 from discord_blue.doodads.agent_session.protocol import SessionStatus
 from discord_blue.doodads.agent_session.sessions import AgentSession
@@ -298,12 +298,12 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                 hello.session_id = str(index)
                 hello.title = f"Session {index}"
                 hello.harness = "codex" if index % 2 else "claude"
-                hello.host_label = "Host " + "h" * 1000
+                hello.host_label = "Host " + "🏠" * 1000
                 session = AgentSession(
                     hello=hello, websocket=cast(web.WebSocketResponse, cast(object, FakeWebSocket())), thread_id=1000 + index
                 )
                 session.display_state = "working" if index < DASHBOARD_PAGE_SIZE * 3 else "unknown"
-                session.last_status_message = mark_assistant_message("Details " + "d" * 1000)
+                session.last_status_message = mark_assistant_message("Details " + "🔎" * 1000)
                 fixture.bridge.sessions.register(session)
                 sessions.append(session)
             dashboard = ActiveSessionDashboard(fixture.bridge, 123, 42)
@@ -317,7 +317,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(payload.get("content"))
                 items = list(dashboard.walk_children())
                 self.assertLessEqual(len(items), 40)
-                self.assertLessEqual(len(text_in(dashboard)), 4000)
+                self.assertLessEqual(len(text_in(dashboard).encode("utf-16-le")) // 2, 4000)
                 self.assertFalse(is_assistant_message(text_in(dashboard)))
                 links.extend(cast(discord.ui.Button, item).url for item in items if isinstance(item, discord.ui.Button) and item.url)
                 if page < 3:
@@ -327,9 +327,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertCountEqual(links, [f"https://discord.com/channels/42/{session.thread_id}" for session in sessions])
             last = next(item for item in dashboard.walk_children() if isinstance(item, DashboardButton) and item.action == "next")
             self.assertTrue(cast(DashboardButton, last).disabled)
-            status = next(item for item in dashboard.walk_children() if isinstance(item, DashboardFilter) and item.kind == "status")
-            status._values = ["waiting"]
-            await status.callback(cast(discord.Interaction, cast(object, interaction)))
+            await dashboard.update(cast(discord.Interaction, cast(object, interaction)), "status", "waiting")
             self.assertEqual(dashboard.page, 0)
             self.assertEqual(
                 [
