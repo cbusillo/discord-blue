@@ -335,8 +335,16 @@ both new answer cards and older text answers, so it does not repost them.
 `/code active` shows operators a private dashboard snapshot, with sessions
 waiting on you first, then uncertain or failed sessions, working sessions and
 completed sessions. Each attached session has an **Open thread** button.
-Disconnected sessions are excluded. Large lists arrive as numbered pages;
-run the command again for a fresh snapshot.
+Disconnected sessions are excluded. Status and Harness menus filter both Codex
+and Claude sessions. **Waiting on you** includes unconfirmed approvals that
+need a terminal check. **Previous**, **Next**, and **Refresh** update the same
+private message from the live session list. Changing a filter returns to page
+one; Refresh preserves the current page when it still exists. The snapshot
+time shows when the list was read. Controls expire after ten minutes idle;
+run `/code active` again to open a new dashboard.
+
+[Phone layout preview](docs/assets/dui/answers-dashboard-preview.html) uses
+serialized component payloads. Discord controls final typography and sizing.
 
 ## Codex bridge (runs on the Mac next to Codex)
 
