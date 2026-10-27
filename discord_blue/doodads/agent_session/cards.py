@@ -113,46 +113,30 @@ def _dashboard_text(text: str, limit: int) -> str:
     return escaped[:-1] if trailing_slashes % 2 else escaped
 
 
-def active_session_cards(sessions: list[AgentSession], guild_id: int) -> list[discord.ui.LayoutView]:
+def active_session_rows(sessions: list[AgentSession], guild_id: int) -> list[discord.ui.Item[discord.ui.LayoutView]]:
     from discord_blue.doodads.agent_session.threads import session_thread_name
 
-    priority = {state: position for position, state in enumerate(("waiting", "unknown", "failed", "working", "done"))}
-    ordered = sorted(sessions, key=lambda entry: (priority[entry.display_state], session_thread_name(entry.hello)))
-    pages = [ordered[index : index + DASHBOARD_PAGE_SIZE] for index in range(0, len(ordered), DASHBOARD_PAGE_SIZE)] or [[]]
-    views = []
-    for index, page in enumerate(pages):
-        children: list[discord.ui.Item[discord.ui.LayoutView]] = [
-            discord.ui.TextDisplay(f"### Live agent sessions · {len(ordered)}"),
-            discord.ui.Separator(),
-        ]
-        if not page:
-            children.append(discord.ui.TextDisplay("No live agent sessions."))
-        for session in page:
-            title = _dashboard_text(session_thread_name(session.hello), 150)
-            host = _dashboard_text(session.hello.host_label, 80)
-            detail = _dashboard_text(session.last_status_message or "", 160)
-            label = STATUS_LABELS[session.display_state][0]
-            text = f"**{label}** · {title}\n-# {host}"
-            if detail:
-                text += f"\n{detail}"
-            if session.thread_id is not None and guild_id:
-                children.append(
-                    discord.ui.Section(
-                        discord.ui.TextDisplay(text),
-                        accessory=discord.ui.Button(
-                            label="Open thread", url=f"https://discord.com/channels/{guild_id}/{session.thread_id}"
-                        ),
-                    )
+    rows: list[discord.ui.Item[discord.ui.LayoutView]] = []
+    for session in sessions:
+        title = _dashboard_text(session_thread_name(session.hello), 150)
+        host = _dashboard_text(session.hello.host_label, 80)
+        detail = _dashboard_text(session.last_status_message or "", 160)
+        label = STATUS_LABELS[session.display_state][0]
+        text = f"**{label}** · {title}\n-# {host}"
+        if detail:
+            text += f"\n{detail}"
+        if session.thread_id is not None and guild_id:
+            rows.append(
+                discord.ui.Section(
+                    discord.ui.TextDisplay(text),
+                    accessory=discord.ui.Button(
+                        label="Open thread", url=f"https://discord.com/channels/{guild_id}/{session.thread_id}"
+                    ),
                 )
-            else:
-                children.append(discord.ui.TextDisplay(f"{text}\n-# Thread is attaching"))
-        children.append(
-            discord.ui.TextDisplay(f"-# Page {index + 1} of {len(pages)} · Snapshot <t:{int(datetime.now(UTC).timestamp())}:R>")
-        )
-        view = discord.ui.LayoutView(timeout=None)
-        view.add_item(discord.ui.Container(*children, accent_color=0x758AFF))
-        views.append(view)
-    return views
+            )
+        else:
+            rows.append(discord.ui.TextDisplay(f"{text}\n-# Thread is attaching"))
+    return rows
 
 
 def notice_card(content: str) -> discord.ui.LayoutView:

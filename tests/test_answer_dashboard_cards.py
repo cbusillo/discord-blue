@@ -11,13 +11,14 @@ from unittest.mock import AsyncMock, patch
 import discord
 from discord.http import handle_message_parameters
 
+from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.cards import (
     ANSWER_CHUNK_LIMIT,
     MAX_INLINE_ANSWER_CARDS,
     DASHBOARD_PAGE_SIZE,
-    active_session_cards,
     assistant_answer_cards,
 )
+from discord_blue.doodads.agent_session.dashboard import ActiveSessionDashboard, DashboardButton, DashboardFilter
 from discord_blue.doodads.agent_session.formatting import is_assistant_message, mark_assistant_message
 from discord_blue.doodads.agent_session.protocol import SessionStatus
 from discord_blue.doodads.agent_session.sessions import AgentSession
@@ -287,37 +288,79 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
             await message.edit(view=discord.ui.LayoutView())
             self.assertFalse(fixture.bridge.session_threads.is_bot_assistant_message(cast(discord.Message, message)))
 
-    async def test_dashboard_prioritizes_attention_and_includes_every_thread_in_bounded_pages(self) -> None:
-        sessions = []
-        for index in range(DASHBOARD_PAGE_SIZE * 3 + 1):
-            hello = make_hello()
-            hello.title = f"Session {index}"
-            hello.session_id = str(index)
-            hello.host_label = "Host " + "h" * 1000
-            session = AgentSession(
-                hello=hello, websocket=cast(web.WebSocketResponse, cast(object, FakeWebSocket())), thread_id=1000 + index
+    async def test_dashboard_pages_in_place_with_live_filters_and_churn(self) -> None:
+        with prompt_fixture() as fixture:
+            fixture.bridge.bot.config.agent_session.enabled = True
+            fixture.bridge.sessions.by_session.clear()
+            sessions = []
+            for index in range(DASHBOARD_PAGE_SIZE * 3 + 1):
+                hello = make_hello()
+                hello.session_id = str(index)
+                hello.title = f"Session {index}"
+                hello.harness = "codex" if index % 2 else "claude"
+                hello.host_label = "Host " + "h" * 1000
+                session = AgentSession(
+                    hello=hello, websocket=cast(web.WebSocketResponse, cast(object, FakeWebSocket())), thread_id=1000 + index
+                )
+                session.display_state = "working" if index < DASHBOARD_PAGE_SIZE * 3 else "unknown"
+                session.last_status_message = mark_assistant_message("Details " + "d" * 1000)
+                fixture.bridge.sessions.register(session)
+                sessions.append(session)
+            dashboard = ActiveSessionDashboard(fixture.bridge, 123, 42)
+            self.assertIn(sessions[-1].hello.title, text_in(dashboard))
+            interaction = SimpleNamespace(response=SimpleNamespace(defer=AsyncMock()), edit_original_response=AsyncMock())
+            links: list[str | None] = []
+            for page in range(4):
+                with handle_message_parameters(view=dashboard) as params:
+                    payload = params.payload
+                    assert payload is not None
+                    self.assertFalse(payload.get("content"))
+                items = list(dashboard.walk_children())
+                self.assertLessEqual(len(items), 40)
+                self.assertLessEqual(len(text_in(dashboard)), 4000)
+                self.assertFalse(is_assistant_message(text_in(dashboard)))
+                links.extend(cast(discord.ui.Button, item).url for item in items if isinstance(item, discord.ui.Button) and item.url)
+                if page < 3:
+                    button = next(item for item in items if isinstance(item, DashboardButton) and item.action == "next")
+                    self.assertFalse(cast(DashboardButton, button).disabled)
+                    await button.callback(cast(discord.Interaction, cast(object, interaction)))
+            self.assertCountEqual(links, [f"https://discord.com/channels/42/{session.thread_id}" for session in sessions])
+            last = next(item for item in dashboard.walk_children() if isinstance(item, DashboardButton) and item.action == "next")
+            self.assertTrue(cast(DashboardButton, last).disabled)
+            status = next(item for item in dashboard.walk_children() if isinstance(item, DashboardFilter) and item.kind == "status")
+            status._values = ["waiting"]
+            await status.callback(cast(discord.Interaction, cast(object, interaction)))
+            self.assertEqual(dashboard.page, 0)
+            self.assertEqual(
+                [
+                    cast(discord.ui.Button, item).url
+                    for item in dashboard.walk_children()
+                    if isinstance(item, discord.ui.Button) and item.url
+                ],
+                [f"https://discord.com/channels/42/{sessions[-1].thread_id}"],
             )
-            session.display_state = "working" if index < DASHBOARD_PAGE_SIZE * 3 else "waiting"
-            session.last_status_message = mark_assistant_message("Details " + "d" * 1000)
-            sessions.append(session)
-        views = active_session_cards(sessions, guild_id=42)
-        self.assertIn(sessions[-1].hello.title, text_in(views[0]))
-        links: list[str | None] = []
-        for view in views:
-            with handle_message_parameters(view=view) as params:
-                assert params.payload is not None
-                self.assertFalse(params.payload.get("content"))
-            items = list(view.walk_children())
-            self.assertLessEqual(len(items), 40)  # Discord API component limit.
-            self.assertLessEqual(len(text_in(view)), 4000)  # Discord V2 aggregate text limit.
-            self.assertFalse(is_assistant_message(text_in(view)))
-            links.extend(item.url for item in items if isinstance(item, discord.ui.Button))
-        self.assertCountEqual(links, [f"https://discord.com/channels/42/{session.thread_id}" for session in sessions])
-        empty = active_session_cards([], guild_id=42)
-        self.assertEqual(len(empty), 1)
-        self.assertFalse(any(isinstance(item, discord.ui.Button) for item in empty[0].walk_children()))
+            await dashboard.update(cast(discord.Interaction, cast(object, interaction)), "status", "working")
+            await dashboard.update(cast(discord.Interaction, cast(object, interaction)), "harness", "codex")
+            await dashboard.update(cast(discord.Interaction, cast(object, interaction)), "next")
+            self.assertEqual(dashboard.page, 1)
+            for session in sessions[1:]:
+                cast(FakeWebSocket, cast(object, session.websocket)).closed = True
+            await dashboard.update(cast(discord.Interaction, cast(object, interaction)), "refresh")
+            self.assertEqual(dashboard.page, 0)
+            self.assertFalse(any(isinstance(item, discord.ui.Button) and item.url for item in dashboard.walk_children()))
+            await dashboard.update(cast(discord.Interaction, cast(object, interaction)), "harness", "all")
+            self.assertIn(sessions[0].hello.title, text_in(dashboard))
+            sessions[0].display_state = "failed"
+            await dashboard.update(cast(discord.Interaction, cast(object, interaction)), "status", "failed")
+            self.assertIn(sessions[0].hello.title, text_in(dashboard))
+            await dashboard.update(cast(discord.Interaction, cast(object, interaction)), "status", "done")
+            self.assertFalse(any(isinstance(item, discord.ui.Button) and item.url for item in dashboard.walk_children()))
+            for call in interaction.edit_original_response.call_args_list:
+                self.assertIs(call.kwargs["view"], dashboard)
+                self.assertEqual(call.kwargs["allowed_mentions"].to_dict()["parse"], [])
+            self.assertEqual(interaction.response.defer.await_count, interaction.edit_original_response.await_count)
 
-    async def test_active_command_pages_privately_and_excludes_disconnected_sessions(self) -> None:
+    async def test_active_command_sends_one_private_dashboard_and_rechecks_operator(self) -> None:
         with prompt_fixture() as fixture:
             fixture.bridge.bot.config.agent_session.enabled = True
             fixture.bridge.bot.config.discord.guild_id = 0
@@ -343,17 +386,20 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
             await cast(Callable[[AgentSessionDoodad, discord.Interaction], Awaitable[None]], command.callback)(
                 cast(AgentSessionDoodad, cast(object, cog)), cast(discord.Interaction, cast(object, interaction))
             )
-            calls = interaction.response.send_message.call_args_list + interaction.followup.send.call_args_list
-            self.assertGreater(len(calls), 1)
-            text = ""
-            for call in calls:
-                self.assertTrue(call.kwargs["ephemeral"])
-                self.assertEqual(call.kwargs["allowed_mentions"].to_dict()["parse"], [])
-                text += text_in(call.kwargs["view"])
-                for item in call.kwargs["view"].walk_children():
-                    if isinstance(item, discord.ui.Button):
-                        assert item.url is not None
-                        self.assertIn("/42/", item.url)
-            self.assertNotIn("dashboard-0", text)
-            for index in range(1, DASHBOARD_PAGE_SIZE + 2):
-                self.assertIn(f"dashboard-{index}", text)
+            interaction.response.send_message.assert_awaited_once()
+            interaction.followup.send.assert_not_awaited()
+            kwargs = interaction.response.send_message.call_args.kwargs
+            self.assertTrue(kwargs["ephemeral"])
+            self.assertEqual(kwargs["allowed_mentions"].to_dict()["parse"], [])
+            dashboard = kwargs["view"]
+            self.assertIsInstance(dashboard, ActiveSessionDashboard)
+            self.assertNotIn("dashboard-0", text_in(dashboard))
+            self.assertTrue(await dashboard.interaction_check(cast(discord.Interaction, cast(object, interaction))))
+            interaction.user.id = 456
+            self.assertFalse(await dashboard.interaction_check(cast(discord.Interaction, cast(object, interaction))))
+            interaction.user.id = 123
+            with patch.object(AgentSessionBridge, "is_operator", return_value=False):
+                self.assertFalse(await dashboard.interaction_check(cast(discord.Interaction, cast(object, interaction))))
+            fixture.bridge.bot.config.agent_session.enabled = False
+            self.assertFalse(await dashboard.interaction_check(cast(discord.Interaction, cast(object, interaction))))
+            dashboard.stop()
