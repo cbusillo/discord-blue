@@ -648,12 +648,93 @@ publication and delivery never retry automatically.
 
 ## Routine bridge delivery
 
-The release agent runs one local command from a clean, committed checkout of
-merged `main`, after fetching and verifying the selected release revision:
+The registered Mac reconciles with the source identity served by the gated
+production release every minute and at login. Testing and preview identities
+cannot request delivery. It invokes the supported delivery command below with
+the exact production revision, rather than delivering whichever commit is newest.
+It selects that same committed revision in the registered in-place Claude hook
+source, including on rollback. When the revision changes, the clean source
+checkout becomes detached at the release; named branches keep their existing
+tips. Dirty files, unmerged commits, other task branches and untracked-file
+collisions are preserved and leave delivery pending. Nothing is reset or forced.
+
+After this change lands, the release agent registers the Mac once from its clean
+`main` checkout (use the checkout already registered as the local Claude marketplace):
+
+```sh
+uv run python scripts/reconcile_bridge_delivery.py --register \
+  --registration ~/.local/share/discord-blue-bridges/mac.json \
+  --checkout /path/to/discord-blue \
+  --build-dir /Volumes/Developer-Artifacts/task-evidence/discord-blue/bridge-delivery/build
+```
+
+Registration prepares an immutable runtime through the existing updater without
+changing either bridge launcher, then installs the
+`com.shinycomputers.discord-blue-delivery` login item from that prepared source.
+The scheduled reconciler and updater therefore survive source rollback.
+After an acknowledged new installation, its stable automation link selects the new
+prepared source on the next scheduled run. A rollback to an older release
+without reconciliation code retains the existing automation runtime.
+It reads the existing bridge config and token in place; it creates no credential
+or inbound Mac listener. Repeating the same registration recovers an interrupted
+login-item installation, preserving the existing job environment. If the hook
+checkout has rolled back before this command existed, execute the script from
+the prepared `source` path recorded in the registration JSON, with the original
+`--checkout` and other destination arguments. Explicit re-registration restores
+that prepared automation runtime, even when a newer reconciler is broken.
+Observation of the same installed release leaves this recovery choice in place;
+the next newly installed release advances automation normally. Existing sessions
+keep running throughout registration.
+For this recovery, use the recorded interpreter as well as the recorded source:
+`RECORDED_RUNTIME/bin/python RECORDED_SOURCE/scripts/reconcile_bridge_delivery.py --register`
+with the original registration and destination arguments. Do not create a new
+virtual environment inside the prepared source.
+The login item follows the accepted release's production identity using the
+existing authenticated server connection origin. It does not call Launchplane,
+promote a release, or change server settings.
+
+`GET /agent-session/delivery` with the existing bridge bearer token reports the
+target and each registered Mac's receipt. `/health` separately reports
+`components.local_delivery` as pending or delivered. Server health does not
+stand in for client delivery. A missing Mac, failed update, unavailable target,
+or unverified startup remains pending. The next scheduled reconciliation
+retries when the Mac returns. The local receipt and bounded failure messages
+are beside the registration; `reconciliation.log` holds the login item's output.
+An acknowledged delivery records the exact launcher revision, the hook artifact's
+SHA-256, and the running Codex bridge's PID and source revision. A lost receipt
+acknowledgement is reposted after verification without another bridge reload.
+The bridge writes its PID/source startup receipt atomically after configuration
+validation. Delivery verifies this file against the current job and installed
+runtime; growing, rotating or deleting the log cannot erase this proof. A failed
+receipt write leaves delivery pending and lets the bridge continue running.
+An ordinary bridge restart refreshes the observed PID without a reload. Missing
+startup evidence for an already installed/running revision never triggers a
+reload loop. Failed installer attempts for the same revision wait at least
+15 minutes before another install. A successful installer with unverified startup
+is observed again without another install, regardless of elapsed time; use the
+documented manual delivery command to reconcile an interrupted or uncertain
+attempt if observation cannot settle it. Receipts distinguish `source_unavailable`,
+`startup_unverified` and `delivery_failed`.
+An interrupted attempt can resume after the same 15-minute delay only when the
+existing installer's lock is free. New hooks are selected after the target
+launchers are installed or already verified, so a failed build leaves the old
+hook/channel pair together. A manual delivery or lost acknowledgement may leave
+automation on its older working source until the next actual installation.
+Testing and preview identities report `local_delivery: not_applicable`.
+
+To retire a Mac's receipt, unload only its delivery login item with
+`launchctl bootout gui/$(id -u)/com.shinycomputers.discord-blue-delivery`, then
+send an authenticated `DELETE /agent-session/delivery` with its `host_id`.
+This forgets delivery tracking and leaves all bridge credentials and sessions
+alone. A still-running reconciler registers itself again on its next pass.
+
+For a supported manual reconciliation, the release agent may still run this
+command from a clean, committed checkout after verifying the selected revision:
 
 ```sh
 uv run python scripts/deliver_bridges.py \
   --checkout /path/to/discord-blue \
+  --revision FULL_RELEASED_COMMIT \
   --build-dir /Volumes/Developer-Artifacts/task-evidence/discord-blue/bridge-delivery/build
 ```
 
@@ -662,8 +743,8 @@ release. Server deployment alone does not deliver the bridges. Chris does not
 build/install a wheel or restart a bridge. This command does not release or
 configure the Discord server; those operations retain their Launchplane gates.
 
-The command fetches `origin/main` and refuses uncommitted changes or a HEAD
-outside its history. It snapshots committed files and installs using the lockfile
+The command fetches `origin/main` and refuses uncommitted changes or a revision
+outside its history. Without `--revision` it selects HEAD. It snapshots committed files and installs using the lockfile
 into `~/.local/share/discord-blue-bridges/<revision>/venv`. Neither running
 runtimes nor token/config files are modified. Rollback uses the same command
 from a clean checkout at the previous release revision.

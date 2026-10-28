@@ -5,6 +5,7 @@ import copy
 import io
 import json
 import plistlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -150,6 +151,21 @@ class BridgeDeliveryTests(unittest.TestCase):
             run.assert_not_called()
         self.assertFalse((self.home / ".local/bin").exists())
 
+    def test_cached_runtime_gains_its_source_snapshot_without_reinstalling_existing_files(self) -> None:
+        with patch.object(deliver_bridges.subprocess, "run", side_effect=self.run_command):
+            runtime, revision = deliver_bridges.prepare_release(self.source, self.home, self.base / "builds")
+            before = {
+                name: ((runtime / "bin" / name).read_bytes(), (runtime / "bin" / name).stat().st_mtime_ns)
+                for name in deliver_bridges.BRIDGES
+            }
+            shutil.rmtree(runtime.parent / "source")
+            recovered, selected = deliver_bridges.prepare_release(self.source, self.home, self.base / "builds")
+        self.assertEqual((recovered, selected), (runtime, revision))
+        for name, evidence in before.items():
+            command = runtime / "bin" / name
+            self.assertEqual((command.read_bytes(), command.stat().st_mtime_ns), evidence)
+        self.assertEqual((runtime.parent / "source/discord_blue/bridge.py").read_bytes(), self.tracked.read_bytes())
+
     def test_dirty_and_unmerged_source_refuse(self) -> None:
         self.tracked.write_text("uncommitted")
         with self.assertRaises(ValueError):
@@ -158,6 +174,27 @@ class BridgeDeliveryTests(unittest.TestCase):
         self.git("commit", "-qam", "unreleased")
         with self.assertRaises(subprocess.CalledProcessError):
             deliver_bridges.source_revision(self.source)
+
+    def test_requested_revision_is_selected_for_archive(self) -> None:
+        selected = subprocess.check_output(["git", "-C", str(self.source), "rev-parse", "HEAD"], text=True).strip()
+        self.tracked.write_text("later release")
+        self.git("commit", "-qam", "later")
+        with patch.object(deliver_bridges.subprocess, "run", side_effect=self.run_command):
+            delivered = deliver_bridges.deliver(self.source, self.home, self.base / "builds", selected)
+        self.assertEqual(delivered, selected)
+        self.assertEqual(self.started, [selected])
+
+    def test_invalid_and_non_main_requested_revisions_refuse(self) -> None:
+        with patch.object(deliver_bridges.subprocess, "run", side_effect=self.run_command):
+            with self.assertRaises(ValueError):
+                deliver_bridges.source_revision(self.source, "HEAD")
+        self.git("checkout", "-qb", "work/unreleased")
+        self.tracked.write_text("unreleased")
+        self.git("commit", "-qam", "unreleased")
+        selected = subprocess.check_output(["git", "-C", str(self.source), "rev-parse", "HEAD"], text=True).strip()
+        with patch.object(deliver_bridges.subprocess, "run", side_effect=self.run_command):
+            with self.assertRaises(subprocess.CalledProcessError):
+                deliver_bridges.source_revision(self.source, selected)
 
     def test_both_real_entrypoints_report_packaged_revision_before_loading_config(self) -> None:
         revision = subprocess.check_output(["git", "-C", str(self.source), "rev-parse", "HEAD"], text=True).strip()
