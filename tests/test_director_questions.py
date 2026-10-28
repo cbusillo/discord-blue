@@ -306,3 +306,61 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertTrue(await self.fixture.bridge.accept_hello(current, previous))
         self.assertEqual(cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key)).state, QuestionState.CLOSED)
+
+    async def test_transient_source_read_failure_keeps_form_retryable(self) -> None:
+        modal = await self.card("**Q18.** Proceed?")
+        modal.fields[0]._value = "Yes"
+        with patch.object(FakeThread, "fetch_message", new=AsyncMock(side_effect=TimeoutError)):
+            await modal.on_submit(cast(Any, FakeInteraction(self.parent)))
+        self.assertEqual(cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key)).state, QuestionState.WAITING)
+        await modal.on_submit(cast(Any, FakeInteraction(self.parent)))
+        self.assertEqual(len(self.fixture.socket.sent_json), 1)
+
+    async def test_slow_card_does_not_block_another_card(self) -> None:
+        first = await self.card("**Q18.** Proceed?")
+        second = await self.card("**Q19.** Proceed?")
+        first.fields[0]._value = second.fields[0]._value = "Yes"
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = self.fixture.thread.fetch_message
+
+        async def fetch(message_id: int) -> FakeReplyMessage:
+            if message_id == first.question.sources[0][0]:
+                entered.set()
+                await release.wait()
+            return await original(message_id)
+
+        with patch.object(FakeThread, "fetch_message", side_effect=fetch):
+            pending = asyncio.create_task(first.on_submit(cast(Any, FakeInteraction(self.parent))))
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+                await asyncio.wait_for(second.on_submit(cast(Any, FakeInteraction(self.parent))), 1)
+                self.assertEqual(len(self.fixture.socket.sent_json), 1)
+            finally:
+                release.set()
+                await pending
+        self.assertEqual(len(self.fixture.socket.sent_json), 2)
+
+    async def test_session_closure_during_publication_keeps_the_card_closed(self) -> None:
+        original = self.parent.send
+
+        async def close_during_send(content: str | None = None, **kwargs: object) -> FakeReplyMessage:
+            await self.fixture.bridge.questions.close(self.fixture.session.session_id)
+            return await original(content, **kwargs)
+
+        source_text = "**Q20.** Proceed?"
+        await self.fixture.bridge.status.post_assistant_message(self.fixture.thread.id, source_text)
+        source = self.fixture.thread._history[0]
+        changed_source = await self.fixture.thread.send(view=source.view)
+        with patch.object(FakeThread, "send", side_effect=close_during_send):
+            await self.fixture.bridge.questions.post(
+                self.fixture.session, cast(discord.Thread, self.fixture.thread), source_text, [cast(discord.Message, changed_source)]
+            )
+        question = self.fixture.bridge.store.records[self.fixture.session.session_id].questions[-1]
+        self.assertEqual(question.state, QuestionState.CLOSED)
+        self.assertTrue(
+            next(
+                item
+                for item in cast(discord.ui.LayoutView, self.parent._history[-1].view).walk_children()
+                if isinstance(item, QuestionAnswerButton)
+            ).disabled
+        )

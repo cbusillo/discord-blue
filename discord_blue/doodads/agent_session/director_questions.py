@@ -56,7 +56,10 @@ def source_signature(message: discord.Message, bot_id: int) -> str:
 class QuestionCards:
     def __init__(self, bridge: AgentSessionBridge) -> None:
         self.bridge = bridge
-        self.lock = asyncio.Lock()
+        self.locks: dict[str, asyncio.Lock] = {}
+
+    def lock(self, key: str) -> asyncio.Lock:
+        return self.locks.setdefault(key, asyncio.Lock())
 
     def record(self, session_id: str, key: str) -> StoredQuestion | None:
         stored = self.bridge.store.records.get(session_id)
@@ -125,71 +128,77 @@ class QuestionCards:
         if not questions or not isinstance(parent, discord.TextChannel):
             return
         key = hashlib.sha256(f"{session.session_id}\0{sources[0].id}".encode()).hexdigest()[:32]
-        async with self.lock:
-            if self.record(session.session_id, key) is not None:
+        if self.record(session.session_id, key) is not None:
+            return
+        if session.session_id not in self.bridge.store.records:
+            self.bridge.save_session(session, "live")
+        question = StoredQuestion(
+            key,
+            session.session_epoch,
+            thread.id,
+            parent.id,
+            sources[0].jump_url,
+            questions,
+            tuple((source.id, source_signature(source, self.bridge.bot_user_id() or 0)) for source in sources),
+        )
+        question = replace(
+            question,
+            has_attachment=sum(len(body.encode("utf-16-le")) // 2 for _, body in questions) + 2 * (len(questions) - 1) > 3000,
+        )
+        publication_started = False
+        try:
+            if not self.save(session.session_id, question) or not await self.persist():
+                await send_agent_session_message(
+                    thread, "The Question card could not be saved. Reply in this session thread instead.", silent=True
+                )
                 return
-            if session.session_id not in self.bridge.store.records:
-                self.bridge.save_session(session, "live")
-            question = StoredQuestion(
-                key,
-                session.session_epoch,
-                thread.id,
-                parent.id,
-                sources[0].jump_url,
-                questions,
-                tuple((source.id, source_signature(source, self.bridge.bot_user_id() or 0)) for source in sources),
-            )
-            question = replace(
-                question,
-                has_attachment=sum(len(body.encode("utf-16-le")) // 2 for _, body in questions) + 2 * (len(questions) - 1) > 3000,
-            )
-            publication_started = False
-            try:
-                if not self.save(session.session_id, question) or not await self.persist():
+            current = self.record(session.session_id, key)
+            if current is None or current.state != QuestionState.WAITING:
+                return
+            view = self.view(session.session_id, question)
+            full = "\n\n".join(body for _, body in questions)
+            publication_started = True
+            if len(full.encode("utf-16-le")) // 2 > 3000:
+                attachment = discord.File(BytesIO(full.encode()), filename="questions.md")
+                try:
+                    message = await parent.send(
+                        view=view, file=attachment, silent=True, allowed_mentions=agent_session_allowed_mentions()
+                    )
+                except discord.Forbidden:
+                    question = replace(self.record(session.session_id, key) or question, has_attachment=False)
+                    self.save(session.session_id, question)
+                    message = await send_agent_session_message(parent, view=self.view(session.session_id, question), silent=True)
+                finally:
+                    attachment.close()
+            else:
+                message = await send_agent_session_message(parent, view=view, silent=True)
+            current = self.record(session.session_id, key) or question
+            current = replace(current, message_id=message.id)
+            self.save(session.session_id, current)
+            if current.state != QuestionState.WAITING:
+                await self.refresh(session.session_id, [current])
+        except (OSError, discord.DiscordException) as exc:
+            logger.exception("Unable to confirm Question card publication for session %s", session.session_id)
+            if not publication_started or (isinstance(exc, discord.HTTPException) and 400 <= exc.status < 500):
+                stored = self.bridge.store.records[session.session_id]
+                self.bridge.store.put(
+                    session.session_id, replace(stored, questions=tuple(q for q in stored.questions if q.key != key))
+                )
+                try:
                     await send_agent_session_message(
-                        thread, "The Question card could not be saved. Reply in this session thread instead.", silent=True
+                        thread,
+                        "The Question card could not be posted in the channel. Reply in this session thread instead.",
+                        silent=True,
                     )
-                    return
-                view = self.view(session.session_id, question)
-                full = "\n\n".join(body for _, body in questions)
-                publication_started = True
-                if len(full.encode("utf-16-le")) // 2 > 3000:
-                    attachment = discord.File(BytesIO(full.encode()), filename="questions.md")
-                    try:
-                        message = await parent.send(
-                            view=view, file=attachment, silent=True, allowed_mentions=agent_session_allowed_mentions()
-                        )
-                    except discord.Forbidden:
-                        question = replace(question, has_attachment=False)
-                        self.save(session.session_id, question)
-                        message = await send_agent_session_message(parent, view=self.view(session.session_id, question), silent=True)
-                    finally:
-                        attachment.close()
-                else:
-                    message = await send_agent_session_message(parent, view=view, silent=True)
-                self.save(session.session_id, replace(question, message_id=message.id))
-            except (OSError, discord.DiscordException) as exc:
-                logger.exception("Unable to confirm Question card publication for session %s", session.session_id)
-                if not publication_started or (isinstance(exc, discord.HTTPException) and 400 <= exc.status < 500):
-                    stored = self.bridge.store.records[session.session_id]
-                    self.bridge.store.put(
-                        session.session_id, replace(stored, questions=tuple(q for q in stored.questions if q.key != key))
+                except (OSError, discord.DiscordException):
+                    logger.exception("Unable to report failed Question card publication")
+            else:
+                try:
+                    await send_agent_session_message(
+                        thread, "The Question card may not have posted. Check the channel or reply in this thread.", silent=True
                     )
-                    try:
-                        await send_agent_session_message(
-                            thread,
-                            "The Question card could not be posted in the channel. Reply in this session thread instead.",
-                            silent=True,
-                        )
-                    except (OSError, discord.DiscordException):
-                        logger.exception("Unable to report failed Question card publication")
-                else:
-                    try:
-                        await send_agent_session_message(
-                            thread, "The Question card may not have posted. Check the channel or reply in this thread.", silent=True
-                        )
-                    except (OSError, discord.DiscordException):
-                        logger.warning("Unable to report uncertain Question publication")
+                except (OSError, discord.DiscordException):
+                    logger.warning("Unable to report uncertain Question publication")
 
     async def close(self, session_id: str, *, current_epoch: str | None = None) -> None:
         stored = self.bridge.store.records.get(session_id)
@@ -267,7 +276,7 @@ class QuestionAnswerModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
-        async with self.cards.lock:
+        async with self.cards.lock(self.question.key):
             question = self.cards.record(self.session_id, self.question.key)
             error = self.cards.context_error(interaction, self.session_id, question)
             if error or interaction.user.id != self.user_id:
@@ -299,6 +308,7 @@ class QuestionAnswerModal(discord.ui.Modal):
                 await interaction.followup.send("The session thread is unavailable; answer was not sent.", ephemeral=True)
                 return
             dispatch_started = False
+            reserved = False
             message = None
             try:
                 for message_id, signature in question.sources:
@@ -317,6 +327,7 @@ class QuestionAnswerModal(discord.ui.Modal):
                     await interaction.followup.send(error, ephemeral=True)
                     return
                 await self.cards.outcome(self.session_id, question.key, QuestionState.UNCERTAIN)
+                reserved = True
                 if not await self.cards.persist():
                     await self.cards.outcome(self.session_id, question.key, QuestionState.NOT_DELIVERED)
                     await interaction.followup.send("The answer could not be saved; it was not delivered.", ephemeral=True)
@@ -339,7 +350,7 @@ class QuestionAnswerModal(discord.ui.Modal):
                 logger.exception("Unable to confirm Question answer submission")
                 error = DELIVERY_UNCONFIRMED if dispatch_started else "Answer was not delivered."
             if error is not None:
-                if error != DELIVERY_UNCONFIRMED:
+                if reserved and error != DELIVERY_UNCONFIRMED:
                     try:
                         await self.cards.outcome(self.session_id, question.key, QuestionState.NOT_DELIVERED)
                     except OSError:
