@@ -79,8 +79,8 @@ class SessionRoutingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(recovered)
                 assert recovered is not None
                 self.assertIs(recovered.thread, existing)
-                self.assertEqual(bool(main.sent_messages), parent_id == main.id)
-                self.assertEqual(bool(second.sent_messages), parent_id == second.id)
+                self.assertEqual(main.sent_messages, [])
+                self.assertEqual(second.sent_messages, [])
                 self.assertTrue(await bridge.cleanups.delete_session_notification(recovered.notification_message_id or 0))
                 self.assertFalse((main if parent_id == main.id else second)._history)
 
@@ -196,8 +196,9 @@ class SessionRoutingTests(unittest.IsolatedAsyncioTestCase):
                         }
                     )
                     created = await create_session_thread(cast(Any, bot), hello)
-                    self.assertEqual(bool(spawned.sent_messages), label == "spawned")
-                    self.assertEqual(bool(main.sent_messages), label != "spawned")
+                    self.assertEqual(spawned.sent_messages, [])
+                    self.assertEqual(main.sent_messages, [])
+                    self.assertEqual(created.thread.parent_id, spawned.id if label == "spawned" else main.id)
                     self.assertEqual(
                         cast(Any, created.thread)._member_ids, [] if label == "spawned" else config.agent_session.auto_join_user_ids
                     )

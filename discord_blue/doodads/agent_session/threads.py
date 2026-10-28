@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import hashlib
 import re
 import secrets
 from collections.abc import Awaitable, Callable
@@ -19,6 +20,8 @@ DISCORD_THREAD_NAME_LIMIT = 100
 # The thread-name icon for each agent a client reports in hello's `harness`; others get none.
 HARNESS_ICONS = {"claude": "\u2734\ufe0f", "codex": "\U0001f537"}
 DEFAULT_BRANCH_NAMES = {"main", "master", "develop", "development", "dev", "trunk"}
+SESSION_IDENTITY_PREFIX = "dui-session:"
+SESSION_IDENTITY_RE = re.compile(rf"{re.escape(SESSION_IDENTITY_PREFIX)}[0-9a-f]{{64}}:[0-9a-f]{{16}}\Z")
 SESSION_START_PREFIX = "Agent session connected"
 SESSION_NOTIFICATION_PREFIX = "Agent session connected for "
 SESSION_NOTIFICATION_PREFIXES = (
@@ -126,7 +129,7 @@ def session_start_message(hello: SessionHello) -> str:
 
 
 def expected_session_start_messages(hello: SessionHello) -> set[str]:
-    return {session_start_message(hello)}
+    return {session_start_message(hello), session_identity(hello)}
 
 
 def session_start_messages_without_pid(starts: set[str]) -> set[str]:
@@ -134,6 +137,8 @@ def session_start_messages_without_pid(starts: set[str]) -> set[str]:
 
 
 def session_start_without_pid(content: str) -> str | None:
+    if SESSION_IDENTITY_RE.fullmatch(content):
+        return content.split(":")[1]
     lines = content.splitlines()
     if not lines or lines[0] != SESSION_START_PREFIX:
         return None
@@ -141,7 +146,31 @@ def session_start_without_pid(content: str) -> str | None:
         return None
     if not lines[-1].startswith("pid: `"):
         return None
-    return "\n".join(lines[:-1])
+    return hashlib.sha256("\n".join(lines[:-1]).encode()).hexdigest()
+
+
+def session_identity(hello: SessionHello) -> str:
+    marker = session_start_message(hello)
+    identity = session_start_without_pid(marker)
+    process = hashlib.sha256(marker.encode()).hexdigest()[:16]
+    return f"{SESSION_IDENTITY_PREFIX}{identity}:{process}"
+
+
+def session_identity_view(hello: SessionHello) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(label="Session details", custom_id=session_identity(hello)))
+    return view
+
+
+def session_message_markers(message: discord.Message) -> list[str]:
+    markers = [message.content]
+    for component in message.components:
+        if not isinstance(component, discord.ActionRow):
+            continue
+        for child in component.children:
+            if isinstance(child, discord.Button) and child.custom_id and SESSION_IDENTITY_RE.fullmatch(child.custom_id):
+                markers.append(child.custom_id)
+    return markers
 
 
 def notification_thread_id(content: str) -> int | None:
@@ -149,17 +178,6 @@ def notification_thread_id(content: str) -> int | None:
     if match is None:
         return None
     return int(match.group("thread_id"))
-
-
-def session_notification_message(hello: SessionHello, thread: discord.Thread) -> str:
-    repo = Path(hello.cwd).name or "session"
-    prefix = "Agent session connected"
-    if hello.origin and hello.origin.kind in {"launchplane", "agent_session"} and hello.origin.repository:
-        issue = f"#{hello.origin.issue_number}" if hello.origin.issue_number is not None else ""
-        repo = f"{hello.origin.repository}{issue}"
-        prefix = "Automated agent session connected"
-    branch = f" on `{hello.branch}`" if session_branch_is_title_worthy(hello.branch) else ""
-    return f"{prefix} for `{repo}`{branch}: <#{thread.id}>"
 
 
 def agent_session_channel_ids(bot: BlueBot) -> tuple[int, ...]:
@@ -240,16 +258,25 @@ async def create_session_thread(
                     raise ThreadCreationStopped from exc
     if settle is not None:
         await settle(thread)
-    notification = await send_agent_session_message(channel, session_notification_message(hello, thread))
-    await send_agent_session_message(thread, session_start_message(hello))
+    await send_agent_session_message(thread, view=session_identity_view(hello), silent=True)
     await auto_join_configured_users(bot, thread)
-    return SessionThread(thread=thread, notification_message_id=notification.id)
+    return SessionThread(thread=thread, notification_message_id=None)
 
 
 async def auto_join_configured_users(bot: BlueBot, thread: discord.Thread) -> None:
     if thread.parent_id in agent_session_channel_ids(bot)[1:]:
         return
-    for user_id in bot.config.agent_session.auto_join_user_ids:
+    user_ids = bot.config.agent_session.auto_join_user_ids
+    if not user_ids:
+        return
+    try:
+        joined = {member.id for member in await thread.fetch_members()}
+    except discord.DiscordException:
+        logger.warning("Unable to inspect Agent session members; ensuring configured access", exc_info=True)
+        joined = set()
+    for user_id in user_ids:
+        if user_id in joined:
+            continue
         try:
             await thread.add_user(discord.Object(id=user_id))
         except discord.DiscordException:

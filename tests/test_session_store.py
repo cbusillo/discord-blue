@@ -398,10 +398,15 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 socket = await running.connect(http)
                 await socket.send_json(hello)
                 await socket.receive_json(timeout=10)
-                notice = fake.parent_messages[0]
+                thread_id = running.bridge.sessions.get(hello["session_id"]).thread_id  # type: ignore[union-attr]
+                notice = FakeMessage(next(fake.ids), PARENT_ID, f"Agent session connected for legacy: <#{thread_id}>")
+                fake.parent_messages.append(notice)
                 fake.parent_messages.append(FakeMessage(next(fake.ids), PARENT_ID, notice.content))
                 await running.bridge.cleanups.cleanup_stale_session_notifications()
-                self.assertEqual([message.id for message in fake.parent_messages], [notice.id])
+                self.assertEqual(len(fake.parent_messages), 1)
+                session = running.bridge.sessions.get(hello["session_id"])
+                assert session is not None
+                self.assertEqual(session.notification_message_id, fake.parent_messages[0].id)
                 await socket.close()
 
     async def test_an_expired_hint_cannot_close_an_unrelated_thread(self) -> None:
@@ -533,7 +538,8 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     await second.bridge.cleanups.cleanup_stale_session_notifications()
                     await second.bridge.cleanups.cleanup_stale_session_threads()
                     self.assertFalse(thread.archived)
-                    self.assertTrue(any(message.id == notification_id for message in fake.parent_messages))
+                    self.assertIsNone(notification_id)
+                    self.assertEqual(fake.parent_messages, [])
                     record = second.bridge.store.records[hello["session_id"]]
                     second.bridge.store.put(hello["session_id"], replace(record, grace_until=time.time() - 1))
                     await second.bridge.cleanups.recover_stored_cleanups()
@@ -541,7 +547,7 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     await second.bridge.cleanups.recover_stored_cleanups()
                 self.assertEqual([message.id for message in thread.messages], before_messages)
 
-    async def test_deleted_thread_hint_is_replaced_and_missing_notification_is_recreated(self) -> None:
+    async def test_deleted_thread_hint_is_replaced_and_reconnect_needs_no_notification(self) -> None:
         fake = FakeDiscord(latency=0.002)
         hello = hello_for("deleted")
         thread = fake.add_thread("deleted", marker=marker(hello), members={BOT_ID})
@@ -570,5 +576,5 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     socket = await third.connect(http)
                     await socket.send_json({**hello, "session_epoch": "e3"})
                     self.assertEqual((await socket.receive_json(timeout=10))["thread_id"], ack["thread_id"])
-                    self.assertEqual(len(fake.parent_messages), 1)
+                    self.assertEqual(fake.parent_messages, [])
                     await socket.close()

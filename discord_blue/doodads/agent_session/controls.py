@@ -24,6 +24,7 @@ from discord_blue.doodads.agent_session.sessions import (
     RejectedCommandMessage,
 )
 from discord_blue.doodads.agent_session.threads import session_thread_name
+from discord_blue.doodads.agent_session.store import SessionStore
 from discord_blue.doodads.agent_session.thread_worker import ThreadWorkers
 from discord_blue.plugs.discord_plug import BlueBot
 
@@ -125,6 +126,7 @@ class ControlHooks(Protocol):
 
     bot: BlueBot
     sessions: AgentSessionRegistry
+    store: SessionStore
     threads: ThreadWorkers
 
     def is_operator(self, user: discord.User | discord.Member) -> bool: ...
@@ -329,6 +331,9 @@ class SessionControls:
 
         session = self.bridge.sessions.get_by_thread(channel.id)
         if session is None:
+            for record in self.bridge.store.records.values():
+                if record.thread_id == channel.id:
+                    return f"Session disconnected\n{record.marker}"
             return "This thread is not attached to a live agent session."
 
         title = session_thread_name(session.hello)
@@ -339,6 +344,10 @@ class SessionControls:
                 f"Agent session `{title}`",
                 f"state: {state}",
                 f"host: {session.hello.host_label}",
+                f"cwd: `{session.hello.cwd}`",
+                f"branch: `{session.hello.branch or 'unknown'}`",
+                f"session: `{session.session_id}`",
+                f"pid: `{session.hello.pid}`",
                 f"status: {status}",
             ]
         )
@@ -454,11 +463,7 @@ class SessionControls:
                 await self.bridge.post_thread_notice(thread.id, response)
             return True
         if emoji == REACTION_CONTROL_STATUS:
-            await self.remove_message_reaction(thread, message_id, emoji, user)
-            await self.bridge.post_thread_notice(
-                thread.id,
-                self.session_status_summary(thread, user),
-            )
+            await self.refresh_session_controls(session, thread, remove_user_reaction=(emoji, user))
             return True
         if emoji == REACTION_CONTROL_PAUSE:
             response = await self.send_pause_current_turn(thread, user)

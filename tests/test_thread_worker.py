@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from collections.abc import AsyncIterator
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import discord
@@ -17,6 +17,7 @@ from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session import cleanup as cleanup_module
 from discord_blue.doodads.agent_session import threads as threads_module
 from discord_blue.doodads.agent_session.sessions import AgentSession, CleanupStep
+from discord_blue.doodads.agent_session.session_threads import SessionThreads
 from discord_blue.doodads.agent_session.thread_worker import RenameTarget, ThreadWorkers
 from tests.fakes_agent_session import (
     FakeReplyMessage,
@@ -218,14 +219,14 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(AgentSession(hello=hello, websocket=cast(web.WebSocketResponse, FakeWebSocket())))
         posting, release = asyncio.Event(), asyncio.Event()
 
-        async def slow_notification(_hello: object, _thread: object) -> int:
+        async def slow_notification(_self: SessionThreads, _thread_id: int, _parent_id: int | None = None) -> int:
             posting.set()
             await release.wait()
             return 7
 
         with (
             patch.object(bridge.session_threads, "find_existing_session_thread", new=AsyncMock(return_value=thread)),
-            patch.object(bridge.session_threads, "ensure_session_notification", new=slow_notification),
+            patch.object(SessionThreads, "find_session_notification_for_thread", new=slow_notification),
         ):
             attaching = asyncio.create_task(bridge.session_threads.find_or_create_session_thread(hello))
             await asyncio.wait_for(posting.wait(), timeout=1)
@@ -302,9 +303,12 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
         removing, release = asyncio.Event(), asyncio.Event()
         membership: list[str] = []
 
+        original_remove = thread.remove_user
+
         async def slow_remove(user: object) -> None:
             removing.set()
             await release.wait()
+            await original_remove(cast(Any, user))
             membership.append("removed")
 
         async def add_user(user: object) -> None:

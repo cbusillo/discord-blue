@@ -39,8 +39,8 @@ The client sends JSON text messages. Start each connection with:
 `agent_session.spawned_channel_id` and suppresses adding configured users.
 Omitted labels and `director` select the main session channel and add configured
 users. The label never changes an existing thread's parent. Both configured
-channels share discovery and recovery; each thread's notifications remain in
-its actual parent. A new spawned thread requires a distinct second channel.
+channels share discovery and recovery. Legacy notifications remain in
+their actual parent; new connections post no parent announcement. A new spawned thread requires a distinct second channel.
 The second channel ID comes from Launchplane-managed runtime configuration.
 
 `origin`, `assistant_message`, `title`, and `harness` are optional. `title` is a short
@@ -55,7 +55,9 @@ is `launchplane` or `agent_session` use `Auto <repo>#<issue>` when
 The issue suffix is omitted when no issue number is supplied. These base names
 omit the task title and branch, but collisions can add the branch or short
 session ID as above. They include the harness icon when supplied. Every `hello`
-renames a reused thread whose name is out of date. Older servers ignore
+requests the current thread name. Cosmetic changes to capitalization, whitespace
+or trailing sentence punctuation do not rename it; new tokened threads wait
+briefly to settle their first useful title. Older servers ignore
 `harness`. Omit `origin` for an interactive
 session without an automation request. `session_id` must be stable across
 reconnections; `session_epoch` identifies the current running session instance.
@@ -164,7 +166,7 @@ only their WebSockets. On startup, live, attaching and grace records receive
 at least a fresh disconnect-grace window (five minutes), preserving a longer
 stored deadline. Sweeps and thread workers leave these threads and notifications
 alone. A returning session fetches its thread and checks the parent, bot owner,
-and opening marker before reusing it; a missing notification is recreated.
+and opening marker before reusing it. Missing notifications stay absent.
 A deleted or mismatched hint falls back to the existing discovery rules.
 A hint Discord refuses with Forbidden also falls back; transient read errors
 fail the attach without treating the thread as absent.
@@ -227,8 +229,15 @@ reconnect metadata-matching rules or delete conversation history. Background
 progress and pending cleanup state are visible in `/health`, with warnings for
 failed operations. A dead or stalled monitor is reported as unhealthy.
 
-Reconnect with the same session identity and metadata. Thread recovery matches
-persisted session markers; a changed PID can be tolerated only for one matching
+Reconnect with the same session identity and metadata. New threads persist a
+`Session details` button whose custom ID carries the SHA-256 fingerprint of the
+legacy marker without PID, plus a bounded fingerprint of the complete marker.
+This keeps machine identity out of the reading path and preserves exact and
+PID-relaxed matching. The button opens the operator-only private status response,
+with stored details available after disconnect. Discovery and orphan cleanup
+recognize both this component representation and old text markers. An unread
+candidate still blocks duplicate creation. Parent announcements are not required.
+Thread recovery matches persisted session markers; a changed PID can be tolerated only for one matching
 stable session ID. The optional assistant snapshot backfills a thread only when
 it has no assistant message. The server recognises its own assistant messages by
 an invisible trailing marker, which it removes from every other message it

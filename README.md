@@ -738,6 +738,21 @@ Claude uses the orange eight-pointed star (✴️), and Codex uses the blue diam
 
 ## Session status cards
 
+New threads start with a **Session details** button instead of a machine identity
+block. It and `/code status` show host, folder, branch, session and process
+privately to operators, including stored details after disconnect. The button's
+persisted identity fingerprint supports recovery without the local store; old
+text markers remain recognized. Routine parent connection announcements are no
+longer posted. Use `/code active` and **Open thread** to find or reopen private
+sessions. Configured users already in a thread are not added again; completed
+session cleanup still removes members, archives and locks the thread.
+
+A new thread briefly settles its initial name before renaming, so a title learned
+just after connection can replace the temporary name in one edit. Later changes
+to capitalization, spacing or trailing sentence punctuation do not rename it.
+The information reaction refreshes and acknowledges on the live card without a
+public status echo. Questions, approvals and failures still get new messages.
+
 Codex and Claude session threads use one persistent Components V2 status card:
 **Working**, **Waiting on you**, **Turn finished**, **Failed**, or **Disconnected**.
 A finished turn or disconnected session does not claim that a task succeeded.
@@ -761,7 +776,7 @@ the input visible. This display choice
 does not change input delivery to either agent.
 
 Assistant answers remain separate so thread-history recovery can
-recognize them after a restart. Long answers continue inline across ordered
+recognize them after a restart. Long answers have one Answer heading and continue inline across ordered
 cards, with code fences reopened on each card. Ordinary long answers
 stay inline. Huge output uses an `answer.md` attachment and shows all
 bold Q-number question sections inline, with nearby recommendation and option blocks within a bounded excerpt per question.

@@ -113,7 +113,12 @@ PendingRemoteApproval = sessions_module.PendingRemoteApproval
 cleanup_module = importlib.import_module("discord_blue.doodads.agent_session.cleanup")
 threads_module = importlib.import_module("discord_blue.doodads.agent_session.threads")
 create_session_thread = threads_module.create_session_thread
-session_notification_message = threads_module.session_notification_message
+
+
+def session_notification_message(_hello: object, thread: FakeThread) -> str:
+    return f"Agent session connected for legacy: <#{thread.id}>"
+
+
 session_start_message = threads_module.session_start_message
 session_thread_name = threads_module.session_thread_name
 
@@ -355,7 +360,7 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
 
         session_thread = await create_session_thread(FakeBot(config, channel=channel), make_hello())
 
-        self.assertTrue(channel.sent_kwargs[0]["suppress_embeds"])
+        self.assertEqual(channel.sent_kwargs, [])
         self.assertTrue(session_thread.thread.sent_kwargs[0]["suppress_embeds"])
 
     async def test_create_session_thread_warns_when_manage_messages_missing(self) -> None:
@@ -365,8 +370,7 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
 
         session_thread = await create_session_thread(FakeBot(config, channel=channel), make_hello())
 
-        self.assertNotIn("suppress_embeds", channel.sent_kwargs[0])
-        self.assertIn("missing the `Manage Messages` permission", channel.sent_messages[1])
+        self.assertEqual(channel.sent_kwargs, [])
         self.assertNotIn("suppress_embeds", session_thread.thread.sent_kwargs[0])
         self.assertIn("missing the `Manage Messages` permission", session_thread.thread.sent_messages[1])
 
@@ -415,13 +419,8 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
 
     def test_session_thread_text_uses_repo_branch_and_no_mentions(self) -> None:
         hello = make_hello()
-        thread = SimpleNamespace(id=555)
 
         self.assertEqual(session_thread_name(hello), "project")
-        self.assertEqual(
-            session_notification_message(hello, thread),
-            "Agent session connected for `project`: <#555>",
-        )
         self.assertEqual(
             session_start_message(hello),
             "\n".join(
@@ -446,38 +445,23 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
             branch=None,
             pid=0,
         )
-        thread = SimpleNamespace(id=555)
 
         self.assertEqual(session_thread_name(hello), "session")
-        self.assertEqual(
-            session_notification_message(hello, thread),
-            "Agent session connected for `session`: <#555>",
-        )
         self.assertIn("branch: `unknown`", session_start_message(hello))
 
     def test_session_thread_text_includes_non_default_branch(self) -> None:
         hello = make_hello()
         hello.branch = "code/project-task"
-        thread = SimpleNamespace(id=555)
 
         self.assertEqual(session_thread_name(hello), "project · code/project-task")
-        self.assertEqual(
-            session_notification_message(hello, thread),
-            "Agent session connected for `project` on `code/project-task`: <#555>",
-        )
 
     def test_session_thread_text_omits_common_default_branch_names(self) -> None:
-        thread = SimpleNamespace(id=555)
 
         for branch in ["main", "master", "develop", "development", "dev", "trunk", "MAIN"]:
             hello = make_hello()
             hello.branch = branch
 
             self.assertEqual(session_thread_name(hello), "project")
-            self.assertEqual(
-                session_notification_message(hello, thread),
-                "Agent session connected for `project`: <#555>",
-            )
 
     def test_session_title_names_thread_without_changing_reconnect_identity(self) -> None:
         untitled = make_hello()
@@ -504,15 +488,10 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
                 issue_url="https://github.com/cbusillo/sellyouroutboard/issues/67",
             ),
         )
-        thread = SimpleNamespace(id=555)
 
         self.assertEqual(
             session_thread_name(hello),
             "Auto sellyouroutboard#67",
-        )
-        self.assertEqual(
-            session_notification_message(hello, thread),
-            "Automated agent session connected for `cbusillo/sellyouroutboard#67` on `agent/cbusillo-syo-67`: <#555>",
         )
         start_message = session_start_message(hello)
         self.assertIn("origin: `Launchplane automation`", start_message)
@@ -3327,6 +3306,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     "Agent session `project`",
                     "state: online",
                     "host: Mac Studio",
+                    f"cwd: `{session.hello.cwd}`",
+                    f"branch: `{session.hello.branch or 'unknown'}`",
+                    f"session: `{session.session_id}`",
+                    f"pid: `{session.hello.pid}`",
                     "status: Turn started",
                 ]
             ),
@@ -3366,6 +3349,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     "Agent session `Auto sellyouroutboard#67`",
                     "state: online",
                     "host: Mac Studio",
+                    f"cwd: `{session.hello.cwd}`",
+                    f"branch: `{session.hello.branch or 'unknown'}`",
+                    f"session: `{session.session_id}`",
+                    f"pid: `{session.hello.pid}`",
                     "status: No status update received yet.",
                 ]
             ),
@@ -3386,8 +3373,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         session_thread = await bridge.session_threads.find_or_create_session_thread(hello)
 
         self.assertIs(session_thread.thread, original_thread)
-        self.assertEqual(session_thread.notification_message_id, 801)
-        self.assertEqual(channel.sent_messages, [session_notification_message(hello, original_thread)])
+        self.assertIsNone(session_thread.notification_message_id)
+        self.assertEqual(channel.sent_messages, [])
         self.assertFalse(original_thread.archived)
         self.assertFalse(original_thread.locked)
         self.assertEqual(
@@ -3456,7 +3443,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         session_thread = await bridge.session_threads.find_or_create_session_thread(hello)
 
         self.assertIs(session_thread.thread, original_thread)
-        self.assertEqual(session_thread.notification_message_id, 801)
+        self.assertIsNone(session_thread.notification_message_id)
 
     async def test_reconnect_does_not_reuse_ambiguous_pid_relaxed_threads(self) -> None:
         config = Config()
@@ -3535,7 +3522,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIs(session_thread.thread, original_thread)
-        self.assertEqual(session_thread.notification_message_id, 801)
+        self.assertIsNone(session_thread.notification_message_id)
         self.assertIsNone(bridge.sessions.remove_if_current(old_session))
         self.assertIs(bridge.sessions.get(hello.session_id), new_session)
 
