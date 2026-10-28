@@ -13,15 +13,15 @@ from unittest.mock import patch
 
 import aiohttp
 
-from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN
 from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.cards import STATUS_CARD_COMPONENT_ID, STATUS_LABELS
 from discord_blue.doodads.agent_session.cleanup import PENDING_CLEANUP_MAX_ATTEMPTS, THREAD_LOOKUP_TIMEOUT_SECONDS
-from discord_blue.doodads.agent_session.store import SessionStore, StoredSession
+from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN
+from discord_blue.doodads.agent_session.store import QuestionState, SessionStore, StoredQuestion, StoredSession
 from tests.fake_discord import BOT_ID, PARENT_ID, FakeDiscord, FakeMessage, Fault
 from tests.test_attach_scenarios import hello_for, marker, scenario, until
-from tests.test_session_grace import CHURN
 from tests.test_session_cleanup_failures import make_bridge
+from tests.test_session_grace import CHURN
 
 
 class SessionStoreTests(unittest.IsolatedAsyncioTestCase):
@@ -541,9 +541,11 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(notification_id)
                     self.assertEqual(fake.parent_messages, [])
                     record = second.bridge.store.records[hello["session_id"]]
-                    second.bridge.store.put(hello["session_id"], replace(record, grace_until=time.time() - 1))
+                    question = StoredQuestion("key", "epoch", thread.id, 1, "source", (("Q1", "Proceed?"),))
+                    second.bridge.store.put(hello["session_id"], replace(record, grace_until=time.time() - 1, questions=(question,)))
                     await second.bridge.cleanups.recover_stored_cleanups()
                     self.assertTrue(await until(lambda: thread.archived and thread.locked, 5))
+                    self.assertEqual(second.bridge.store.records[hello["session_id"]].questions[0].state, QuestionState.CLOSED)
                     await second.bridge.cleanups.recover_stored_cleanups()
                 self.assertEqual([message.id for message in thread.messages], before_messages)
 

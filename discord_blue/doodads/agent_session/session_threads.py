@@ -11,7 +11,7 @@ import dataclasses
 import logging
 from collections import Counter
 from functools import partial
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import discord
 
@@ -27,6 +27,9 @@ from discord_blue.doodads.agent_session.store import SessionStore, StoredSession
 from discord_blue.doodads.agent_session.thread_worker import ThreadWorkers
 from discord_blue.doodads.agent_session.threads import SESSION_NOTIFICATION_PREFIXES, SessionThread
 from discord_blue.plugs.discord_plug import BlueBot
+
+if TYPE_CHECKING:
+    from discord_blue.doodads.agent_session.director_questions import QuestionCards
 
 logger = logging.getLogger(__name__)
 # Before giving up on an incomplete discovery (a failed read or listing page), refresh it again after these waits.
@@ -63,6 +66,8 @@ class SessionThreadHooks(Protocol):
     sessions: AgentSessionRegistry
     store: SessionStore
     threads: ThreadWorkers
+
+    questions: QuestionCards
 
     def bot_user_id(self) -> int | None: ...
 
@@ -382,7 +387,11 @@ class SessionThreads:
         assistant_message = hello.assistant_message
         if assistant_message is None:
             return
-        await send_assistant_message(thread, assistant_message)
+        sources: list[discord.Message] = []
+        source = await send_assistant_message(thread, assistant_message, sources=sources)
+        session = self.bridge.sessions.get(hello.session_id)
+        if source is not None and session is not None:
+            await self.bridge.questions.post(session, thread, assistant_message, sources)
 
     def is_bot_assistant_message(self, message: discord.Message) -> bool:
         bot_user = self.bridge.bot.user

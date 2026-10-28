@@ -43,7 +43,7 @@ from discord_blue.doodads.agent_session.interactions import SessionInteractions
 from discord_blue.doodads.agent_session.session_status import SessionStatusUpdates
 
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
-from discord_blue.doodads.agent_session.store import SessionState, SessionStore, StoredSession
+from discord_blue.doodads.agent_session.store import SESSION_STORE_WAIT_TIMEOUT_SECONDS, SessionState, SessionStore, StoredSession
 from discord_blue.doodads.agent_session.thread_worker import RenameTarget, ThreadWorkers
 from discord_blue.doodads.agent_session.threads import SessionThread
 from discord_blue.doodads.agent_session.threads import auto_join_configured_users
@@ -57,7 +57,6 @@ logger = logging.getLogger(__name__)
 # A connection that drops without a clean session_end (including a failed hello_ack) keeps its thread untouched
 # this long, so a reconnect resumes it without an archive, member changes or notices.
 SESSION_DISCONNECT_GRACE_SECONDS = 300
-SESSION_STORE_WAIT_TIMEOUT_SECONDS = 1
 
 STARTUP_RECONNECT_GRACE_SECONDS = 20
 # After a start, sessions from before it reconnect over this long, and until they do nothing marks their threads as
@@ -112,6 +111,9 @@ class AgentSessionBridge:
         self._attached_threads: dict[int, discord.Thread] = {}
         self.controls = SessionControls(self)
         self.interactions = SessionInteractions(self)
+        from discord_blue.doodads.agent_session.director_questions import QuestionCards
+
+        self.questions = QuestionCards(self)
         self.status = SessionStatusUpdates(self)
         self._monitor_started_at = time.monotonic()
         self._monitor_last_progress = self._monitor_started_at
@@ -139,6 +141,7 @@ class AgentSessionBridge:
         self._maintenance_has_run = False
 
         await self.store.start()
+        self.questions.restore()
         now = time.time()
         for session_id, record in list(self.store.records.items()):
             if record.status in {"attaching", "live", "grace"}:
@@ -376,6 +379,7 @@ class AgentSessionBridge:
                     grace_until,
                     time.time(),
                     control_message_id=session.control_message_id,
+                    questions=self.store.records[session.session_id].questions if session.session_id in self.store.records else (),
                 ),
             )
 
@@ -445,6 +449,7 @@ class AgentSessionBridge:
                     self.cleanups.remember_pending_cleanup(residual)
                 else:
                     self.save_session(removed, "closed")
+                await self.questions.close(removed.session_id)
                 return True
             except asyncio.CancelledError:
                 self.cleanups.save_cleanup(fallback_cleanup)
@@ -694,6 +699,7 @@ class AgentSessionBridge:
             return False
         # Heartbeats start after the ack, so the watchdog's clock starts here too.
         session.acknowledged = True
+        await self.questions.close(session.session_id, current_epoch=session.session_epoch)
         session.touch()
         if self.sessions.get(session.session_id) is session and not self._stopping:
             self.save_session(session, "live")

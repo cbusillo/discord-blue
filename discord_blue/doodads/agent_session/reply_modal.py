@@ -27,13 +27,13 @@ logger = logging.getLogger(__name__)
 QUOTE_LIMIT = 500
 
 
-def answer_excerpt(message: discord.Message, bot_id: int) -> str:
+def answer_text(message: discord.Message, bot_id: int) -> str:
     if message.author.id != bot_id:
         return ""
     if is_assistant_message(message.content):
         return strip_assistant_markers(
             message.content.removeprefix(LEGACY_ASSISTANT_LABEL).replace(ASSISTANT_MESSAGE_MARKER, "")
-        ).strip()[:QUOTE_LIMIT]
+        ).strip()
     texts: list[str] = []
     for component in message.components:
         if not isinstance(component, discord.Container):
@@ -45,7 +45,11 @@ def answer_excerpt(message: discord.Message, bot_id: int) -> str:
             answer_card = component.id in {ANSWER_CARD_COMPONENT_ID, ANSWER_CONTINUATION_COMPONENT_ID}
             if marked or (answer_card and child.content != "### Answer"):
                 texts.append(child.content)
-    return strip_assistant_markers("\n".join(texts).replace(ASSISTANT_MESSAGE_MARKER, "")).strip()[:QUOTE_LIMIT]
+    return strip_assistant_markers("\n".join(texts).replace(ASSISTANT_MESSAGE_MARKER, "")).strip()
+
+
+def answer_excerpt(message: discord.Message, bot_id: int) -> str:
+    return answer_text(message, bot_id)[:QUOTE_LIMIT]
 
 
 def reply_context_error(
@@ -53,15 +57,22 @@ def reply_context_error(
     interaction: discord.Interaction,
     session: AgentSession | None,
     epoch: str,
+    *,
+    thread_id: int | None = None,
+    reopen_action: str = "Reply about this",
 ) -> str | None:
     if not bridge.bot.config.agent_session.enabled:
         return "Agent sessions are not enabled."
     if not bridge.is_operator(interaction.user):
         return "Only agent session operators can reply."
-    if session is None or bridge.sessions.get_by_thread(getattr(interaction.channel, "id", 0)) is not session:
+    if (
+        session is None
+        or bridge.sessions.get_by_thread(thread_id if thread_id is not None else getattr(interaction.channel, "id", 0))
+        is not session
+    ):
         return "Use this on an answer in a bound session thread."
     if session.session_epoch != epoch or not session.acknowledged:
-        return "The session reconnected; open Reply about this again."
+        return f"The session reconnected; open {reopen_action} again."
     return bridge.controls.dispatch_error(session, "reply")
 
 

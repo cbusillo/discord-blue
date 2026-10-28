@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import math
@@ -11,6 +12,7 @@ import tempfile
 import time
 import weakref
 from dataclasses import asdict, dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import ClassVar, Literal, get_args, cast
 
@@ -18,6 +20,54 @@ from discord_blue.doodads.agent_session.sessions import CleanupStep
 
 logger = logging.getLogger(__name__)
 SessionState = Literal["attaching", "live", "grace", "closing", "closed"]
+
+
+SESSION_STORE_WAIT_TIMEOUT_SECONDS = 1
+
+
+class QuestionState(StrEnum):
+    WAITING = "Waiting"
+    UNCERTAIN = "Uncertain"
+    DELIVERED = "Delivered"
+    NOT_DELIVERED = "Not delivered"
+    CLOSED = "Closed"
+
+
+@dataclass(frozen=True, slots=True)
+class StoredQuestion:
+    key: str
+    epoch: str
+    thread_id: int
+    parent_id: int
+    source_url: str
+    questions: tuple[tuple[str, str], ...]
+    sources: tuple[tuple[int, str], ...] = ()
+    message_id: int | None = None
+    state: QuestionState = QuestionState.WAITING
+    has_attachment: bool = False
+
+    @classmethod
+    def parse(cls, value: object) -> StoredQuestion:
+        if not isinstance(value, dict):
+            raise ValueError("invalid question record")
+        question = cls(**value)
+        if (
+            not all(isinstance(v, str) for v in (question.key, question.epoch, question.source_url, question.state))
+            or type(question.thread_id) is not int
+            or type(question.parent_id) is not int
+            or (question.message_id is not None and type(question.message_id) is not int)
+            or not isinstance(question.questions, (list, tuple))
+            or any(
+                not isinstance(q, (list, tuple)) or len(q) != 2 or not all(isinstance(v, str) for v in q) for q in question.questions
+            )
+        ):
+            raise ValueError("invalid question fields")
+        return dataclasses.replace(
+            question,
+            questions=tuple((number, body) for number, body in question.questions),
+            sources=tuple((int(message_id), str(signature)) for message_id, signature in question.sources),
+            state=QuestionState(question.state),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +81,7 @@ class StoredSession:
     pending_steps: tuple[CleanupStep, ...] | None = None
     recovery_attempts: int = 0
     control_message_id: int | None = None
+    questions: tuple[StoredQuestion, ...] = ()
 
     @classmethod
     def parse(cls, value: object) -> StoredSession:
@@ -70,6 +121,7 @@ class StoredSession:
             cast(tuple[CleanupStep, ...], tuple(steps)) if steps is not None else None,
             attempts,
             control,
+            tuple(StoredQuestion.parse(q) for q in value.get("questions", [])),
         )
 
 
@@ -131,8 +183,12 @@ class SessionStore:
             logger.warning("Unable to load Agent session store; using Discord discovery", exc_info=True)
         return {}
 
+    @property
+    def accepts_writes(self) -> bool:
+        return self._writer is not None and not self._closing
+
     def put(self, session_id: str, record: StoredSession) -> None:
-        if self._writer is None or self._closing:
+        if not self.accepts_writes:
             return  # Bridges served directly by transport tests have no persistent lifecycle.
         self.records[session_id] = record
         self.enqueue_snapshot()

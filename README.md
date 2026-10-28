@@ -622,6 +622,30 @@ holds busy replies until idle. Answer together is for Codex structured questions
 It does not add Claude native question responses or permission decisions.
 Discord controls the final appearance on a phone.
 
+## Numbered Question cards
+
+An answer containing a top-level bold numbered question ending in a question mark, such as `**Q123.** Ship it?`
+posts one silent **Question** card in that session's parent text channel. It keeps
+all questions from the answer together with their recommendation, cost and
+alternatives, and links to the session answer. No mentions or push notifications
+are sent. Discord controls unread indicators and phone rendering.
+
+Tap **Answer** to answer every question in one form. Submission sends one reply,
+with the Q numbers, through the session's normal reply controls. More than four
+questions use one field; keep every Q number with its answer. Large question
+context is attached as `questions.md` rather than shortened. Quoted, tabled,
+indented and fenced examples do not create cards. One-tap options and an open
+questions dashboard are not included in this first version.
+
+Only session operators can submit. Changed source answers or sessions refuse
+stale forms. Closing a form leaves the card waiting. Each card allows one
+submission across operators and restarts. **Delivered** means the native session
+acknowledged the reply; **Not delivered** means it was refused or never sent.
+**Uncertain** means check the native session before replying again. Claude may
+hold a busy reply until idle. Completed sessions close their waiting cards.
+A publication failure gets a silent notice in the session thread. Uncertain
+publication and delivery never retry automatically.
+
 ## Routine bridge delivery
 
 The release agent runs one local command from a clean, committed checkout of
