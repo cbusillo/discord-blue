@@ -22,7 +22,6 @@ MIRRORED = ("user_message", "title_changed", "turn_complete", "approval_resolved
 
 
 async def hook(claude: FakeClaudeCode, event: str, *, meta: Json | None = None, **fields: str) -> str:
-    """Call the hook tool with the arguments the plugin's hooks.json substitutes, as Claude Code 2.1.284 sent them."""
     params: Json = {"name": HOOK_TOOL["name"], "arguments": {"event": event, "session_id": IDENTITY.session_id, **fields}}
     if meta is not None:
         params["_meta"] = meta
@@ -89,7 +88,7 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
         prompt = "Check the build and report any failures"
         for origin, meta, record_id, hook_id, expected in (
             ("scheduled", True, "scheduled-1", "scheduled-1", []),
-            ("user", False, "human-1", "human-1", [("title_changed", prompt), ("user_message", prompt)]),
+            ("human", False, "human-1", "human-1", [("title_changed", prompt), ("user_message", prompt)]),
             ("scheduled", True, "earlier-1", "human-1", [("title_changed", prompt), ("user_message", prompt)]),
             ("scheduled", True, "earlier-1", "", [("title_changed", prompt), ("user_message", prompt)]),
             ("scheduled", False, "human-1", "human-1", [("title_changed", prompt), ("user_message", prompt)]),
@@ -102,7 +101,7 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
                         "promptId": record_id,
                         "turnOrigin": origin,
                         "isMeta": meta,
-                        "promptSource": "system" if meta else "user",
+                        "promptSource": "system" if meta else "typed",
                         "message": {"role": "user", "content": prompt},
                     }
                     transcript.write_text(json.dumps(record) + "\n")
@@ -113,6 +112,32 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
                         await hook(claude, "Stop", last_assistant_message="Build passed")
                         events = await mirrored(claude, discord)
                 self.assertEqual(events, [*expected, ("turn_complete", "Build passed")])
+
+    async def test_scheduled_provenance_can_arrive_after_the_submit_hook(self) -> None:
+        prompt = "Check the build and report any failures"
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "session.jsonl"
+            transcript.write_text("")
+            async with running_channel() as (claude, discord):
+                await claude.initialize()
+                await discord.next("hello")
+                await hook(claude, "UserPromptSubmit", prompt=prompt, prompt_id="scheduled-1", transcript_path=str(transcript))
+                transcript.write_text(
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "promptId": "scheduled-1",
+                            "isMeta": True,
+                            "promptSource": "system",
+                            "turnOrigin": "scheduled",
+                        }
+                    )
+                    + "\n"
+                )
+                await hook(claude, "PreToolUse")
+                await hook(claude, "Stop", last_assistant_message="Build passed")
+                events = await mirrored(claude, discord)
+        self.assertEqual(events, [("turn_complete", "Build passed")])
 
     async def test_hooks_mirror_typed_prompts_and_answers_but_not_injected_replies(self) -> None:
         async with running_channel() as (claude, discord):

@@ -777,10 +777,16 @@ Resumed launches, disabled session persistence and unreadable or long transcript
 the input visible. Claude scheduled wakeups also stay out of the conversation and
 thread labels when the current hook's prompt ID matches a native transcript record
 marked as scheduled system input. Human input with the same words stays visible.
-Missing IDs, unreadable transcripts and records not yet written keep the input visible;
-these checks never delay a prompt waiting for the transcript to catch up. The DUI
+Claude writes transcript records asynchronously, so identified input waits locally
+until the next native hook or permission event before its mirror and fallback label
+are decided. The agent starts immediately; visible input still precedes its answer.
+Missing IDs or provenance still unavailable at that next event keep the input visible. The DUI
 plugin and local Claude channel must both be updated, and active Claude sessions
-must resume with the updated plugin/channel to use this behavior. This display choice
+must resume with the updated plugin/channel to use this behavior. For a locally
+installed marketplace, `claude plugin list --json` reports `readFromFolder` as the
+plugin source for the next session; an old cache `installPath` alone does not mean
+that source is stale. Confirm the source includes the new hook fields before rollover.
+This display choice
 does not change input delivery to either agent.
 
 Assistant answers remain separate so thread-history recovery can

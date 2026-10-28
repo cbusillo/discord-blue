@@ -137,6 +137,7 @@ class ClaudeSession(AgentSessionClient):
         self.label = SessionLabel()
         self.transcript = TranscriptTitles()
         self.launch_brief_pending = identity.spawned and identity.launch_prompt is not None
+        self.pending_input: tuple[dict[str, str], str] | None = None
         self.conversation_id: str | None = identity.session_id
         self.controls = CAPABILITIES if identity.channel else ["status_request"]
         # Discord replies held while a turn runs: Claude Code queues channel messages and would deliver
@@ -165,6 +166,7 @@ class ClaudeSession(AgentSessionClient):
     # Claude Code -> Discord
 
     async def on_permission_request(self, params: Json) -> None:
+        await self.flush_pending_input()
         # Never answered from here: the terminal dialog is the only place to approve or deny. Nothing else
         # from the request reaches Discord: Claude Code leaves some secrets in its preview unmasked.
         self.waiting_locally = True
@@ -182,6 +184,7 @@ class ClaudeSession(AgentSessionClient):
         return ""
 
     async def on_hook(self, fields: dict[str, str]) -> None:
+        await self.flush_pending_input()
         event = fields.get("event")
         launch_brief = (
             self.launch_brief_pending
@@ -215,10 +218,15 @@ class ClaudeSession(AgentSessionClient):
             echo = prompt.lstrip().startswith("<channel") and any(f'command_id="{c}"' in prompt for c in self.injected)
             # Claude Code also fires this hook for prompts it injects itself, such as task notifications.
             typed = None if echo else typed_prompt(prompt)
-            titles = await self.retitle(fields, prompt=typed)
+            titles = await self.retitle(fields, prompt=None if fields.get("prompt_id") else typed)
             if typed is not None and typed.strip() and fields.get("prompt_id") not in titles.scheduled_prompt_ids:
-                origin = {"input_origin": LAUNCH_BRIEF_ORIGIN} if launch_brief and titles.before_first_prompt else {}
-                self.publish("user_message", message=clip(typed), **origin)
+                if launch_brief and titles.before_first_prompt:
+                    await self.retitle(fields, prompt=typed)
+                    self.publish("user_message", message=clip(typed), input_origin=LAUNCH_BRIEF_ORIGIN)
+                elif fields.get("prompt_id"):
+                    self.pending_input = (fields, typed)
+                else:
+                    self.publish("user_message", message=clip(typed))
         elif event == "Stop":
             self.waiting_locally = False
             self.publish(
@@ -235,6 +243,15 @@ class ClaudeSession(AgentSessionClient):
             await self.release_held()
         elif event == "SessionStart":
             await self.retitle(fields)
+
+    async def flush_pending_input(self) -> None:
+        pending, self.pending_input = self.pending_input, None
+        if pending is None:
+            return
+        fields, typed = pending
+        titles = await self.retitle(fields, prompt=typed)
+        if fields["prompt_id"] not in titles.scheduled_prompt_ids:
+            self.publish("user_message", message=clip(typed))
 
     async def switch_conversation(self, conversation: str | None) -> None:
         """Start a new epoch so Discord controls meant for the previous conversation are rejected."""
