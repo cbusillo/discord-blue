@@ -59,7 +59,7 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self.fixture.bridge.store.close)
         self.parent = FakeThread(777)
         cast(Any, self.parent).get_partial_message = self.parent._messages.__getitem__
-        cast(Any, self.fixture.thread).parent = self.parent
+        setattr(self.fixture.thread, "parent", self.parent)
         self.fixture.thread.parent_id = self.parent.id
         self.enterContext(patch.object(discord, "TextChannel", FakeThread))
         self.enterContext(
@@ -69,7 +69,7 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=lambda key: self.parent if key == self.parent.id else self.fixture.thread,
             )
         )
-        cast(Any, self.fixture.bridge.bot).add_view = Mock()
+        setattr(self.fixture.bridge.bot, "add_view", Mock())
 
     async def card(
         self,
@@ -147,12 +147,12 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         recovered.restore()
         await recovered.post(
             self.fixture.session,
-            cast(Any, self.fixture.thread),
+            cast(discord.Thread, self.fixture.thread),
             (
                 "**Q12.** Ship it?\nRecommendation: yes.\nCost: upkeep.\nAlternative: wait.\n\n"
                 "**Q13.** Keep both?\nRecommendation: yes."
             ),
-            cast(Any, self.fixture.thread._history[0]),
+            cast(discord.Message, self.fixture.thread._history[0]),
         )
         self.assertEqual(len(self.parent.sent_messages), 1)
         self.assertEqual(cast(StoredQuestion, recovered.record(modal.session_id, modal.question.key)).state, "Uncertain")
