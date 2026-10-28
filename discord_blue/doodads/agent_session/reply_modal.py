@@ -55,6 +55,7 @@ def reply_context_error(
     epoch: str,
     *,
     thread_id: int | None = None,
+    reopen_action: str = "Reply about this",
 ) -> str | None:
     if not bridge.bot.config.agent_session.enabled:
         return "Agent sessions are not enabled."
@@ -67,7 +68,7 @@ def reply_context_error(
     ):
         return "Use this on an answer in a bound session thread."
     if session.session_epoch != epoch or not session.acknowledged:
-        return "The session reconnected; open Reply about this again."
+        return f"The session reconnected; open {reopen_action} again."
     return bridge.controls.dispatch_error(session, "reply")
 
 

@@ -160,18 +160,28 @@ def convert_markdown_tables(text: str) -> str:
             output.append(line)
             index += 1
             continue
-        headers = _table_cells(line)
-        delimiter = _table_cells(lines[index + 1])
-        if headers is None or delimiter is None or len(headers) != len(delimiter) or not _is_delimiter_row(delimiter):
+        end = markdown_table_end(lines, index)
+        if end is None:
             output.append(line)
             index += 1
             continue
-        end = index + 2
-        while end < len(lines) and code_fence_opening(lines[end]) is None and "|" in lines[end]:
-            end += 1
+        headers = _table_cells(line)
+        assert headers is not None
         output.extend(_convert_table(headers, lines[index:end]))
         index = end
     return "\n".join(output)
+
+
+def markdown_table_end(lines: list[str], index: int) -> int | None:
+    if index + 1 >= len(lines):
+        return None
+    headers, delimiter = _table_cells(lines[index]), _table_cells(lines[index + 1])
+    if headers is None or delimiter is None or len(headers) != len(delimiter) or not _is_delimiter_row(delimiter):
+        return None
+    end = index + 2
+    while end < len(lines) and code_fence_opening(lines[end]) is None and "|" in lines[end]:
+        end += 1
+    return end
 
 
 def _convert_table(headers: list[str], table_lines: list[str]) -> list[str]:

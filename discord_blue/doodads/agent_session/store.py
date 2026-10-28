@@ -29,7 +29,7 @@ class StoredQuestion:
     parent_id: int
     source_url: str
     questions: tuple[tuple[str, str], ...]
-    source_signature: str = ""
+    sources: tuple[tuple[int, str], ...] = ()
     message_id: int | None = None
     state: str = "Waiting"
 
@@ -39,21 +39,22 @@ class StoredQuestion:
             raise ValueError("invalid question record")
         question = cls(**value)
         if (
-            not all(
-                isinstance(v, str)
-                for v in (question.key, question.epoch, question.source_url, question.state, question.source_signature)
-            )
+            not all(isinstance(v, str) for v in (question.key, question.epoch, question.source_url, question.state))
             or type(question.thread_id) is not int
             or type(question.parent_id) is not int
             or (question.message_id is not None and type(question.message_id) is not int)
-            or question.state not in {"Waiting", "Uncertain", "Delivered", "Not delivered"}
+            or question.state not in {"Waiting", "Uncertain", "Delivered", "Not delivered", "Closed"}
             or not isinstance(question.questions, (list, tuple))
             or any(
                 not isinstance(q, (list, tuple)) or len(q) != 2 or not all(isinstance(v, str) for v in q) for q in question.questions
             )
         ):
             raise ValueError("invalid question fields")
-        return dataclasses.replace(question, questions=tuple((number, body) for number, body in question.questions))
+        return dataclasses.replace(
+            question,
+            questions=tuple((number, body) for number, body in question.questions),
+            sources=tuple((int(message_id), str(signature)) for message_id, signature in question.sources),
+        )
 
 
 @dataclass(frozen=True, slots=True)

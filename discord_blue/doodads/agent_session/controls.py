@@ -26,12 +26,13 @@ from discord_blue.doodads.agent_session.sessions import (
     PendingRemoteUserInput,
     RejectedCommandMessage,
 )
-from discord_blue.doodads.agent_session.threads import session_thread_name
 from discord_blue.doodads.agent_session.store import SessionStore
 from discord_blue.doodads.agent_session.thread_worker import ThreadWorkers
+from discord_blue.doodads.agent_session.threads import session_thread_name
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
+DELIVERY_UNCONFIRMED = "Agent session connection failed; action delivery could not be confirmed. Check the native TUI."
 REPLY_BEFORE_RECONNECT = (
     "This reply was written before the agent session reconnected (for example after `/clear` or `/resume`), "
     "so it was not delivered. Send it again if it still applies."
@@ -196,7 +197,7 @@ class SessionControls:
             try:
                 await session.websocket.send_json(command.to_message())
             except (OSError, RuntimeError):
-                return "Agent session connection failed; action delivery could not be confirmed. Check the native TUI."
+                return DELIVERY_UNCONFIRMED
             delivered = True
             return None
         finally:

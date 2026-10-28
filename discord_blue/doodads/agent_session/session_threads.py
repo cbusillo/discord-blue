@@ -19,8 +19,8 @@ from discord_blue.doodads.agent_session import threads as threads_module
 from discord_blue.doodads.agent_session.cards import ANSWER_CARD_COMPONENT_ID, ANSWER_CONTINUATION_COMPONENT_ID
 from discord_blue.doodads.agent_session.cleanup import PENDING_CLEANUP_MAX_ATTEMPTS, THREAD_CLOSE_WAIT_SECONDS, SessionCleanups
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
-from discord_blue.doodads.agent_session.messages import send_assistant_message
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
+from discord_blue.doodads.agent_session.messages import send_assistant_message
 from discord_blue.doodads.agent_session.protocol import SessionHello
 from discord_blue.doodads.agent_session.sessions import AgentSessionRegistry
 from discord_blue.doodads.agent_session.store import SessionStore, StoredSession
@@ -387,10 +387,11 @@ class SessionThreads:
         assistant_message = hello.assistant_message
         if assistant_message is None:
             return
-        source = await send_assistant_message(thread, assistant_message)
+        sources: list[discord.Message] = []
+        source = await send_assistant_message(thread, assistant_message, sources=sources)
         session = self.bridge.sessions.get(hello.session_id)
         if source is not None and session is not None:
-            await self.bridge.questions.post(session, thread, assistant_message, source)
+            await self.bridge.questions.post(session, thread, assistant_message, sources)
 
     def is_bot_assistant_message(self, message: discord.Message) -> bool:
         bot_user = self.bridge.bot.user

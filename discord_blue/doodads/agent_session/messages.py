@@ -39,7 +39,9 @@ async def send_agent_session_message(
     return await _send(destination, None if content is None else strip_assistant_markers(content), view=view, silent=silent)
 
 
-async def send_assistant_message(destination: discord.abc.Messageable, message: str) -> discord.Message | None:
+async def send_assistant_message(
+    destination: discord.abc.Messageable, message: str, *, sources: list[discord.Message] | None = None
+) -> discord.Message | None:
     if not strip_assistant_markers(message.replace(ASSISTANT_MESSAGE_MARKER, "")).strip():
         return None
     views, attached = assistant_answer_cards(message)
@@ -51,6 +53,8 @@ async def send_assistant_message(destination: discord.abc.Messageable, message: 
                 last_message = await destination.send(
                     file=file, view=view, allowed_mentions=agent_session_allowed_mentions(), silent=index > 0
                 )
+                if sources is not None:
+                    sources.append(last_message)
                 continue
             except discord.Forbidden:
                 logger.warning("Unable to attach the complete Agent session answer; keeping questions inline")
@@ -63,6 +67,8 @@ async def send_assistant_message(destination: discord.abc.Messageable, message: 
             finally:
                 file.close()
         last_message = await destination.send(view=view, allowed_mentions=agent_session_allowed_mentions(), silent=index > 0)
+        if sources is not None:
+            sources.append(last_message)
     return last_message
 
 

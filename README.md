@@ -624,7 +624,7 @@ Discord controls the final appearance on a phone.
 
 ## Numbered Question cards
 
-An answer containing a top-level bold numbered question such as `**Q123.** Ship it?`
+An answer containing a top-level bold numbered question ending in a question mark, such as `**Q123.** Ship it?`
 posts one silent **Question** card in that session's parent text channel. It keeps
 all questions from the answer together with their recommendation, cost and
 alternatives, and links to the session answer. No mentions or push notifications
@@ -644,8 +644,8 @@ submission across operators and restarts. **Uncertain** means check the native
 session before replying again; it never retries automatically. **Delivered**
 requires the native session's acknowledgement; **Not delivered** means the client
 rejected it. Claude may hold a busy reply until idle. Delivery is not a decision
-being acted on. Recovery records prevent reposting an identical question answer;
-an ambiguous card-publication failure is not automatically retried.
+being acted on. Recovery records bind each card to its source messages and prevent reposting the same source;
+an ambiguous card-publication failure is not automatically retried. Definite failures show a silent notice in the session thread. Completed sessions close their waiting cards.
 
 ## Routine bridge delivery
 

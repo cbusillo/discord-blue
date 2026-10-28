@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING
 import discord
 
 from discord_blue.doodads.agent_session.cards import notice_card
-from discord_blue.doodads.agent_session.formatting import advance_code_fence, format_user_message
+from discord_blue.doodads.agent_session.controls import DELIVERY_UNCONFIRMED
+from discord_blue.doodads.agent_session.formatting import advance_code_fence, format_user_message, markdown_table_end
 from discord_blue.doodads.agent_session.messages import agent_session_allowed_mentions, send_agent_session_message
 from discord_blue.doodads.agent_session.reply_modal import answer_excerpt, reply_context_error
 from discord_blue.doodads.agent_session.store import StoredQuestion
@@ -28,10 +29,19 @@ def detect_questions(text: str) -> tuple[tuple[str, str], ...]:
     starts: list[tuple[int, str]] = []
     lines = text.splitlines()
     fence = None
-    for index, line in enumerate(lines):
-        if fence is None and (match := QUESTION_START.match(line)) and "?" in line:
-            starts.append((index, match[1]))
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if fence is None:
+            if line.startswith(">>>"):
+                break
+            if (end := markdown_table_end(lines, index)) is not None:
+                index = end
+                continue
+            if (match := QUESTION_START.match(line)) and line.rstrip("* ").endswith("?"):
+                starts.append((index, match[1]))
         fence = advance_code_fence(line, fence)
+        index += 1
     return tuple(
         (number, "\n".join(lines[start : starts[index + 1][0] if index + 1 < len(starts) else len(lines)]).strip())
         for index, (start, number) in enumerate(starts)
@@ -82,7 +92,9 @@ class QuestionCards:
         if question is None:
             return "This question is no longer available."
         session = self.bridge.sessions.get(session_id)
-        error = reply_context_error(self.bridge, interaction, session, question.epoch, thread_id=question.thread_id)
+        error = reply_context_error(
+            self.bridge, interaction, session, question.epoch, thread_id=question.thread_id, reopen_action="the Question card"
+        )
         if error:
             return error
         if getattr(interaction.channel, "id", None) != question.parent_id:
@@ -93,12 +105,12 @@ class QuestionCards:
             return f"This answer was already submitted: {question.state}. Check the session before replying again."
         return None
 
-    async def post(self, session: AgentSession, thread: discord.Thread, text: str, source: discord.Message) -> None:
+    async def post(self, session: AgentSession, thread: discord.Thread, text: str, sources: list[discord.Message]) -> None:
         questions = detect_questions(text)
         parent = getattr(thread, "parent", None)
         if not questions or not isinstance(parent, discord.TextChannel):
             return
-        key = hashlib.sha256(f"{session.session_id}\0{text}".encode()).hexdigest()[:32]
+        key = hashlib.sha256(f"{session.session_id}\0{sources[0].id}".encode()).hexdigest()[:32]
         async with self.lock:
             if self.record(session.session_id, key) is not None:
                 return
@@ -109,32 +121,60 @@ class QuestionCards:
                 session.session_epoch,
                 thread.id,
                 parent.id,
-                source.jump_url,
+                sources[0].jump_url,
                 questions,
-                source_signature(source, self.bridge.bot_user_id() or 0),
+                tuple((source.id, source_signature(source, self.bridge.bot_user_id() or 0)) for source in sources),
             )
+            publication_started = False
             try:
                 await self.save(session.session_id, question)
                 view = self.view(session.session_id, question)
                 full = "\n\n".join(body for _, body in questions)
+                publication_started = True
                 if len(full.encode("utf-16-le")) // 2 > 3000:
                     attachment = discord.File(BytesIO(full.encode()), filename="questions.md")
                     try:
                         message = await parent.send(
                             view=view, file=attachment, silent=True, allowed_mentions=agent_session_allowed_mentions()
                         )
+                    except discord.Forbidden:
+                        for item in view.walk_children():
+                            if isinstance(item, discord.ui.TextDisplay):
+                                item.content = item.content.replace(
+                                    "are in questions.md attached to this card.",
+                                    "remain at Open session answer; Discord refused the attachment.",
+                                )
+                        message = await send_agent_session_message(parent, view=view, silent=True)
                     finally:
                         attachment.close()
                 else:
                     message = await send_agent_session_message(parent, view=view, silent=True)
                 await self.save(session.session_id, replace(question, message_id=message.id))
-            except (OSError, discord.DiscordException):
+            except (OSError, discord.DiscordException) as exc:
                 logger.exception("Unable to confirm Question card publication for session %s", session.session_id)
+                if not publication_started or isinstance(exc, (discord.Forbidden, discord.NotFound)):
+                    stored = self.bridge.store.records[session.session_id]
+                    self.bridge.store.put(
+                        session.session_id, replace(stored, questions=tuple(q for q in stored.questions if q.key != key))
+                    )
+                    try:
+                        await self.bridge.store.flush()
+                        await send_agent_session_message(
+                            thread,
+                            "The Question card could not be posted in the channel. Reply in this session thread instead.",
+                            silent=True,
+                        )
+                    except (OSError, discord.DiscordException):
+                        logger.exception("Unable to report failed Question card publication")
 
-    def context_error_for_delivery(self, session: AgentSession, question: StoredQuestion) -> str | None:
-        if session.session_epoch != question.epoch or not session.acknowledged or session.thread_id != question.thread_id:
-            return "The session changed; answer was not sent."
-        return self.bridge.controls.dispatch_error(session, "reply")
+    async def close(self, session_id: str) -> None:
+        stored = self.bridge.store.records.get(session_id)
+        for question in stored.questions if stored else ():
+            if question.state == "Waiting":
+                try:
+                    await self.outcome(session_id, question.key, "Closed")
+                except (OSError, discord.DiscordException):
+                    logger.exception("Unable to close Question card %s", question.message_id)
 
     async def outcome(self, session_id: str, key: str, state: str) -> None:
         question = self.record(session_id, key)
@@ -171,6 +211,7 @@ class QuestionAnswerModal(discord.ui.Modal):
     def __init__(self, cards: QuestionCards, session_id: str, question: StoredQuestion, user_id: int) -> None:
         super().__init__(title="Answer questions", timeout=600)
         self.cards, self.session_id, self.question, self.user_id = cards, session_id, question, user_id
+        self.session = cards.bridge.sessions.get(session_id)
         self.fields: list[discord.ui.TextInput[QuestionAnswerModal]] = []
         self.combined = len(question.questions) > 4
         self.add_item(discord.ui.TextDisplay(f"[Read questions and recommendations]({question.source_url})"))
@@ -209,30 +250,61 @@ class QuestionAnswerModal(discord.ui.Modal):
                 await interaction.followup.send("Keep each Q number followed by a colon and its answer.", ephemeral=True)
                 return
             assert question is not None
-            session = self.cards.bridge.sessions.get(self.session_id)
-            assert session is not None
+            session = self.session
+            if session is None or self.cards.bridge.sessions.get(self.session_id) is not session:
+                await interaction.followup.send("The session reconnected; reopen the Question card.", ephemeral=True)
+                return
             thread = self.cards.bridge.thread_channel(question.thread_id)
             if not isinstance(thread, discord.Thread):
                 await interaction.followup.send("The session thread is unavailable; answer was not sent.", ephemeral=True)
                 return
+            dispatch_started = False
+            message = None
             try:
-                source = await thread.fetch_message(int(question.source_url.rsplit("/", 1)[1]))
-                if source_signature(source, self.cards.bridge.bot_user_id() or 0) != question.source_signature:
-                    await interaction.followup.send("The source answer changed; answer was not sent.", ephemeral=True)
-                    return
-                if error := self.cards.context_error_for_delivery(session, question):
+                for message_id, signature in question.sources:
+                    source = await thread.fetch_message(message_id)
+                    if source_signature(source, self.cards.bridge.bot_user_id() or 0) != signature:
+                        await interaction.followup.send("The source answer changed; answer was not sent.", ephemeral=True)
+                        return
+                if error := reply_context_error(
+                    self.cards.bridge,
+                    interaction,
+                    session,
+                    question.epoch,
+                    thread_id=question.thread_id,
+                    reopen_action="the Question card",
+                ):
                     await interaction.followup.send(error, ephemeral=True)
                     return
                 await self.cards.outcome(self.session_id, question.key, "Uncertain")
                 message = await send_agent_session_message(thread, format_user_message(text), silent=True)
-                error = self.cards.context_error_for_delivery(session, question)
+                error = reply_context_error(
+                    self.cards.bridge,
+                    interaction,
+                    session,
+                    question.epoch,
+                    thread_id=question.thread_id,
+                    reopen_action="the Question card",
+                )
                 if error is None:
+                    dispatch_started = True
                     error = await self.cards.bridge.controls.send_reply(
                         session, thread, interaction.user, text, message.id, question_key=question.key
                     )
             except (OSError, discord.DiscordException):
                 logger.exception("Unable to confirm Question answer submission")
-                error = "Answer delivery is uncertain. Check the session before replying again."
+                error = DELIVERY_UNCONFIRMED if dispatch_started else "Answer was not delivered."
+            if error is not None:
+                if error != DELIVERY_UNCONFIRMED:
+                    try:
+                        await self.cards.outcome(self.session_id, question.key, "Not delivered")
+                    except OSError:
+                        logger.exception("Unable to persist definite Question answer failure")
+                if message is not None:
+                    try:
+                        await send_agent_session_message(thread, error, silent=True)
+                    except discord.DiscordException:
+                        logger.warning("Unable to post Question answer failure in thread %s", thread.id)
             await interaction.followup.send(
                 error or "Answer sent; waiting for native confirmation. The card shows its status.", ephemeral=True
             )

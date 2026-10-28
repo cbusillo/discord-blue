@@ -450,6 +450,7 @@ class AgentSessionBridge:
                     self.cleanups.remember_pending_cleanup(residual)
                 else:
                     self.save_session(removed, "closed")
+                await self.questions.close(removed.session_id)
                 return True
             except asyncio.CancelledError:
                 self.cleanups.save_cleanup(fallback_cleanup)
