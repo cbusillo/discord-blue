@@ -47,3 +47,25 @@ def loaded_as_channel(command_lines: list[str]) -> bool | None:
         flagged = any(word == CHANNEL_FLAG or word.startswith(f"{CHANNEL_FLAG}=") for word in words)
         return flagged and PLUGIN_ENTRY in line
     return None
+
+
+def launch_prompt(command_lines: list[str]) -> str | None:
+    for line in command_lines:
+        options, separator, prompt = line.partition(" -- ")
+        words = options.split()
+        if not words or not os.path.basename(words[0]).startswith("claude"):
+            continue
+        if len(words) > 1 and words[1].startswith("bg-"):
+            return None
+        if any(
+            word.split("=", 1)[0]
+            in {"--resume", "--continue", "--fork-session", "--from-pr", "--no-session-persistence", "-r", "-c"}
+            for word in words
+        ):
+            return None
+        return prompt if separator and prompt.strip() else None
+    return None
+
+
+def matches_launch_prompt(rendered: str | None, prompt: str | None) -> bool:
+    return rendered is not None and prompt is not None and rendered in {prompt, prompt.replace("\n", r"\012").replace("\t", r"\011")}

@@ -240,11 +240,19 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
                 first = await running.connect(http)
                 await first.send_json(ending)
                 await first.receive_json(timeout=10)
-                # The close notice meets a global rate limit: 100 s, scaled to 1 s, far longer than teardown waits.
-                fake.faults.append(Fault("POST", "/channels/{channel}/messages", status=429, retry_after=100, is_global=True))
+                fake.faults.append(
+                    Fault(
+                        "PATCH",
+                        "/channels/{channel}",
+                        status=429,
+                        retry_after=100,
+                        is_global=True,
+                        body=lambda body: body.get("archived") is True,
+                    )
+                )
                 await first.send_json({"type": "session_end", "session_id": "ending", "session_epoch": "e1"})
                 await first.close()
-                self.assertTrue(await until(lambda: not fake.faults, timeout=5), "the close notice was never sent")
+                self.assertTrue(await until(lambda: not fake.faults, timeout=5), "the archive request was never sent")
                 await asyncio.sleep(0.3)  # Teardown has stopped waiting; discord.py is still in the global sleep.
                 second = await running.connect(http)
                 await second.send_json(arriving)

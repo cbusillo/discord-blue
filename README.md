@@ -738,13 +738,29 @@ Claude uses the orange eight-pointed star (✴️), and Codex uses the blue diam
 
 ## Session status cards
 
-Codex and Claude session threads use the same Components V2 status card:
-**Working**, **Waiting on you**, **Done**, or **Failed**. The card includes the
-session label, latest status detail, and a legend for the available reaction
-controls. A terminal-only approval names the native terminal in the waiting
-card. Ordinary status updates edit the existing card; prompts and answers keep
-controls next to the latest exchange. Status cards suppress notifications and
-mentions. Assistant answers remain separate so thread-history recovery can
+Codex and Claude session threads use one persistent Components V2 status card:
+**Working**, **Waiting on you**, **Turn finished**, **Failed**, or **Disconnected**.
+A finished turn or disconnected session does not claim that a task succeeded.
+The card includes the session label, latest status detail, reaction controls and
+a relative update time. Ordinary terminal input and turn completion edit it in
+place. Its message ID is saved with session recovery hints, so reconnect can
+find it even after a long conversation. Legacy recovery searches thread history;
+a read or edit failure keeps the anchor, and confirmed deletion permits a replacement.
+Status-card edits suppress mentions; initial cards suppress notifications too.
+Questions, approvals, terminal-action requests and errors remain new messages.
+Routine session closure updates the card and keeps the existing archive/reopen
+lifecycle, without another session-ended post.
+
+A spawned session omits an automated launch brief only when its client marks
+that exact input with native launch provenance. The card says where to read the full input in the native
+terminal. Later human terminal input remains visible. Existing, resumed or uncertain inputs keep their mirrors. Codex proves the
+first turn from native pagination. Claude matches the explicit CLI launch brief against the first hook input, with a
+new transcript not yet created by Claude, or a fully read transcript containing no prior prompt.
+Resumed launches, disabled session persistence and unreadable or long transcripts keep
+the input visible. This display choice
+does not change input delivery to either agent.
+
+Assistant answers remain separate so thread-history recovery can
 recognize them after a restart. Long answers continue inline across ordered
 cards, with code fences reopened on each card. Ordinary long answers
 stay inline. Huge output uses an `answer.md` attachment and shows all
@@ -757,9 +773,9 @@ reposts the answer so its tail is not lost; the delivered prefix may repeat.
 
 [Local phone layout preview](docs/assets/dui/status-390.png) renders serialized
 component payloads; final typography and spacing are controlled by Discord.
-The update time makes stale cards visible. On a reconnect, the bridge replaces
-its latest marked status card in the recent thread history with a new anchor;
-old reaction controls remain inactive. Paused turns return to a waiting card,
+The update time makes stale cards visible. On a reconnect, the bridge recovers
+its existing status card and shows that state is unconfirmed until the next native update. Reaction controls remain
+bound to the current connection and epoch. Paused turns return to a waiting card,
 and Codex decision completion returns the card to working. Claude permission
 previews have no tool-call identifier, so subsequent tool activity shows
 **Check terminal** until completion confirms the outcome; parallel tools cannot

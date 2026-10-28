@@ -153,11 +153,15 @@ class SessionStatus:
         )
 
 
+LAUNCH_BRIEF_ORIGIN = "launch_brief"
+
+
 @dataclass(slots=True)
 class UserMessage:
     session_id: str
     session_epoch: str
     message: str
+    input_origin: str | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "UserMessage":
@@ -165,6 +169,7 @@ class UserMessage:
             session_id=str(payload["session_id"]),
             session_epoch=str(payload["session_epoch"]),
             message=str(payload.get("message") or ""),
+            input_origin=LAUNCH_BRIEF_ORIGIN if payload.get("input_origin") == LAUNCH_BRIEF_ORIGIN else None,
         )
 
 

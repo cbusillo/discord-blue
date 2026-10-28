@@ -2,8 +2,8 @@
 
 `HttpBot`, `HttpChannel` and `HttpThread` subclass the in-memory fakes, so the
 bridge's type checks still pass. Thread lifecycle, membership, discovery and
-message send/delete/history use real `discord.http.HTTPClient` requests against
-`FakeDiscord`; message edits and reactions remain in-memory fakes. That puts discord.py's
+message send/edit/delete/history use real `discord.http.HTTPClient` requests against
+`FakeDiscord`; reactions remain in-memory fakes. That puts discord.py's
 own rate-limit buckets, 429 sleeps and 5xx retries between the bridge and the
 fake server. `get_channel` mirrors discord.py's cache: a thread is cached while a
 gateway event says it is open, and removed when an event says it is archived.
@@ -40,6 +40,11 @@ class HttpMessage(FakeReplyMessage):
         super().__init__(int(data["id"]), channel, str(data.get("content") or ""), author_id=int(data["author"]["id"]))
         self.http = channel.http
         self.components = [discord.Container(data=component, state=None) for component in data.get("components", [])]
+
+    async def edit(self, content: str | None = None, **kwargs: object) -> None:
+        with handle_message_parameters(content=content, **cast(Any, kwargs)) as params:
+            await self.http.edit_message(self.channel.id, self.id, params=params)
+        await super().edit(content, **kwargs)
 
     async def delete(self) -> None:
         await self.http.delete_message(self.channel.id, self.id)

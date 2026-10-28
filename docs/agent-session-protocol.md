@@ -126,6 +126,26 @@ the next sweep, allowing other stale sessions to be cleaned up.
 
 ### Disconnect cleanup and recovery
 
+The session store also preserves the status-card message ID. Reconnect restores
+it only for the same validated thread. Ordinary inputs and completed
+turns edit that card; only a confirmed missing message permits replacement.
+Older store records remain readable and use bot-authored card discovery from
+thread history. A failed history read does not authorize creating another card. Complete legacy
+discovery and card writes run as one coalesced task per connection, with a
+bounded non-canceling caller wait; later updates share the task and refresh the
+latest state, so slow history does not hold native heartbeats.
+A reused thread with uncertain input provenance keeps its input visible.
+
+A native client drop marks the card Disconnected during its reconnect grace.
+Bridge shutdown saves grace first, then makes a bounded non-canceling attempt to
+update the card outside lifecycle locks; that remote edit is best-effort if
+Discord is slow or unavailable.
+Reattachment shows unconfirmed state until a native event arrives. Routine
+closure edits the card instead of sending a session-ended notice; answers and
+failure events remain in the transcript. The stored legacy `disconnect_notice`
+cleanup step now updates the card, preserving restart and residual-step recovery.
+
+
 The bridge persists bound session IDs, thread and notification IDs, the session
 marker, lifecycle state, UTC grace deadlines and remaining cleanup steps in `$HOME/agent-sessions.json`.
 The production container's HOME is its existing `/var/lib/discord-blue` mount.
@@ -273,6 +293,20 @@ an ID or epoch that differs from the connection's current session.
 | `request_user_input`          | `call_id`, `turn_id`, `questions`: question objects described below.                                                                                                                                                                                                                                                                                                                                                   |
 | `title_changed`               | `title`: a title learned after `hello`, such as a new name or prompt; the thread is renamed in the background. Discord allows about two renames per thread in ten minutes, so the server renames only when the name changes, keeps only the latest pending name, and waits for the window to reopen.                                                                                                                   |
 | `notice`                      | `message`: plain text posted in the thread, such as why controls are unavailable.                                                                                                                                                                                                                                                                                                                                      |
+
+`user_message` may include `input_origin: "launch_brief"`. The server suppresses
+that exact input mirror only for an explicitly spawned session. Older clients
+and unmarked inputs remain visible. Codex marks the initial native user item
+only when its complete first-turn page proves launch provenance. Claude marks
+the first hook input only when it matches the explicit CLI launch brief, with a new transcript
+not yet created by Claude or a fully read transcript containing no prior user or assistant record.
+Resumed launches and disabled session persistence do not supply launch provenance. Neither the thread's
+age nor the session's background label alone hides an input. Full input remains
+in the native terminal. The marker affects display only, never agent delivery.
+
+Clients use `notice` for a new terminal-only action request. Routine waiting or
+unconfirmed status edits the card without posting a second request. Errors keep
+their own new message.
 
 Older bridges ignore these unknown resolution, title and notice events.
 

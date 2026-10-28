@@ -28,6 +28,7 @@ READ_TIMEOUT_SECONDS = 1.0
 class Titles:
     custom: str | None = None
     ai: str | None = None
+    before_first_prompt: bool = False
 
 
 class TranscriptTitles:
@@ -54,6 +55,8 @@ class TranscriptTitles:
     def read_now(self, path: str) -> Titles:
         try:
             status = os.stat(path)
+        except FileNotFoundError:
+            return Titles(before_first_prompt=True)
         except OSError:
             return Titles()
         if not stat.S_ISREG(status.st_mode):
@@ -78,17 +81,22 @@ class TranscriptTitles:
         if start:
             lines = lines[1:]  # The first line was cut by the seek.
         custom = ai = None
+        before_first_prompt = not start
         for line in lines:
-            if b'"ai-title"' not in line and b'"custom-title"' not in line:
+            if not line.strip():
                 continue
             try:
                 record = json.loads(line)
             except ValueError:
+                before_first_prompt = False
                 continue
             if not isinstance(record, dict):
+                before_first_prompt = False
                 continue
+            if record.get("type") in {"assistant", "user"}:
+                before_first_prompt = False
             if record.get("type") == "ai-title" and isinstance(record.get("aiTitle"), str):
                 ai = record["aiTitle"]
             elif record.get("type") == "custom-title" and isinstance(record.get("customTitle"), str):
                 custom = record["customTitle"]
-        return Titles(custom=custom, ai=ai)
+        return Titles(custom=custom, ai=ai, before_first_prompt=before_first_prompt)

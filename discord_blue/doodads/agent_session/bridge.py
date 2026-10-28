@@ -14,6 +14,8 @@ from pathlib import Path
 import discord
 from aiohttp import WSMsgType, web
 
+from discord_blue.doodads.agent_session.cards import disconnected_status_card
+from discord_blue.doodads.agent_session.messages import agent_session_allowed_mentions
 from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
 from discord_blue.doodads.agent_session.messages import send_agent_session_message
 from discord_blue.doodads.agent_session.protocol import (
@@ -56,7 +58,6 @@ logger = logging.getLogger(__name__)
 # this long, so a reconnect resumes it without an archive, member changes or notices.
 SESSION_DISCONNECT_GRACE_SECONDS = 300
 SESSION_STORE_WAIT_TIMEOUT_SECONDS = 1
-SESSION_ENDED_NOTICE = "Session ended"
 
 STARTUP_RECONNECT_GRACE_SECONDS = 20
 # After a start, sessions from before it reconnect over this long, and until they do nothing marks their threads as
@@ -64,6 +65,7 @@ STARTUP_RECONNECT_GRACE_SECONDS = 20
 STARTUP_SWEEP_HOLD_SECONDS = 600
 SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 1
 MAINTENANCE_INTERVAL_SECONDS = 300
+SHUTDOWN_CARD_WAIT_TIMEOUT_SECONDS = 1
 SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
 SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = 5
 SHUTDOWN_ATTACH_SETTLE_SECONDS = 10
@@ -347,14 +349,20 @@ class AgentSessionBridge:
         async with self.session_lifecycle_lock(session.session_id):
             if self.sessions.get(session.session_id) is not session:
                 return
+            self.set_disconnected_status(session)
             self.save_session(session, "grace", grace_until=time.time() + SESSION_DISCONNECT_GRACE_SECONDS)
             # Retain ownership until the socket closes: its handler's finally must not finalize this thread.
             if not session.websocket.closed:
                 await self.close_session_websocket(
                     session.session_id, session, message=b"bridge shutdown", timeout=SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
                 )
+        try:
+            await self.threads.bounded(self.refresh_lifecycle_card(session), SHUTDOWN_CARD_WAIT_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.info("Agent session %s disconnected card is still updating during shutdown", session.session_id)
+        finally:
             self.sessions.remove_if_current(session)
-            logger.info("Kept Agent session %s thread %s open for restart", session.session_id, session.thread_id)
+        logger.info("Kept Agent session %s thread %s open for restart", session.session_id, session.thread_id)
 
     def save_session(self, session: AgentSession, status: SessionState, *, grace_until: float = 0) -> None:
         if session.thread_id is not None:
@@ -367,6 +375,19 @@ class AgentSessionBridge:
                     status,
                     grace_until,
                     time.time(),
+                    control_message_id=session.control_message_id,
+                ),
+            )
+
+    def remember_control_anchor(self, session: AgentSession) -> None:
+        record = self.store.records.get(session.session_id)
+        if record is not None and record.thread_id == session.thread_id and self.sessions.get(session.session_id) is session:
+            self.store.put(
+                session.session_id,
+                dataclasses.replace(
+                    record,
+                    control_message_id=session.control_message_id,
+                    updated_at=time.time(),
                 ),
             )
 
@@ -578,6 +599,9 @@ class AgentSessionBridge:
                     # registered here so the finally below ends it however the attach turns out.
                     previous = self.sessions.get(hello.session_id)
                     session = opened = AgentSession(hello=hello, websocket=websocket)
+                    if previous is not None:
+                        opened.control_anchor_lock = previous.control_anchor_lock
+                        opened.control_card_lock = previous.control_card_lock
                     self.sessions.register(opened)
                     if not await self.accept_hello(opened, previous):
                         break
@@ -676,6 +700,14 @@ class AgentSessionBridge:
         # Attached, acknowledged and outside every lock: bring the thread's name up to date in the
         # background. The thread's worker coalesces and rate-limits; nothing here waits on Discord.
         self.request_thread_name(session)
+        if (session.control_message_id is not None or session.control_update_pending) and self.sessions.get(
+            session.session_id
+        ) is session:
+            session.display_state = "reconnecting"
+            session.last_status_message = "Reconnected. Waiting for the next status update."
+            session.control_status_reaction = None
+            session.control_interruptions_enabled = False
+            self.schedule_card_refresh(session)
         return True
 
     async def handle_event(self, session: AgentSession, message_type: object, payload: dict[str, object]) -> None:
@@ -763,6 +795,12 @@ class AgentSessionBridge:
             self._attached_threads[session_thread.thread.id] = session_thread.thread
             current = self.sessions.get(session_id)
             if current is not None:
+                record = self.store.records.get(session_id)
+                if previous is not None and previous.thread_id == current.thread_id:
+                    current.control_message_id = previous.control_message_id
+                    current.control_update_pending = previous.control_update_task is not None
+                elif record is not None and record.thread_id == current.thread_id:
+                    current.control_message_id = record.control_message_id
                 self.save_session(current, "attaching")
                 try:
                     await self.threads.bounded(self.store.flush(), SESSION_STORE_WAIT_TIMEOUT_SECONDS)
@@ -796,11 +834,43 @@ class AgentSessionBridge:
         if not session.websocket.closed:
             with suppress(Exception):
                 await asyncio.wait_for(session.websocket.close(), timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS)
-        self.start_grace(session)
+        if self.sessions.get(session.session_id) is session:
+            self.start_grace(session)
+
+    def schedule_card_refresh(self, session: AgentSession) -> None:
+        task = asyncio.create_task(self.refresh_lifecycle_card(session), name=f"agent-session-card-{session.session_id}")
+        self.threads.background.add(task)
+        task.add_done_callback(self.threads.request_done)
+
+    async def refresh_lifecycle_card(self, session: AgentSession) -> None:
+        if session.thread_id is None or self.sessions.get(session.session_id) is not session:
+            return
+        thread = self.thread_channel(session.thread_id)
+        if isinstance(thread, discord.Thread):
+            try:
+                if session.control_message_id is None:
+                    if session.control_update_task is not None or session.control_update_pending:
+                        await self.controls.show_or_refresh_session_controls(session, thread)
+                    return
+                await self.controls.refresh_session_controls(session, thread)
+            except discord.DiscordException:
+                logger.warning("Unable to update Agent session lifecycle card %s", session.session_id)
+
+    @staticmethod
+    def set_disconnected_status(session: AgentSession) -> None:
+        session.display_state = "disconnected"
+        session.last_status_message = "The session is disconnected. Waiting for it to reconnect."
+        session.control_status_reaction = None
+        session.control_interruptions_enabled = False
+        session.pending_control_confirmation = None
+        if session.control_update_task is not None:
+            session.control_update_pending = True
 
     def start_grace(self, session: AgentSession) -> None:
         if session.grace_task is None:
+            self.set_disconnected_status(session)
             self.save_session(session, "grace", grace_until=time.time() + SESSION_DISCONNECT_GRACE_SECONDS)
+            self.schedule_card_refresh(session)
             session.grace_task = asyncio.create_task(self.expire_grace(session), name=f"agent-session-grace-{session.session_id}")
             self._grace_tasks.add(session.grace_task)
             session.grace_task.add_done_callback(self._grace_tasks.discard)
@@ -924,9 +994,23 @@ class AgentSessionBridge:
         channel = self.thread_channel(thread_id)
         return channel if isinstance(channel, discord.Thread) else None
 
-    @staticmethod
-    async def post_close_notice(thread: discord.Thread) -> None:
-        await send_agent_session_message(thread, SESSION_ENDED_NOTICE)
+    async def post_close_notice(self, thread: discord.Thread) -> None:
+        record = next((record for record in self.store.records.values() if record.thread_id == thread.id), None)
+        anchor = record.control_message_id if record is not None else None
+        if anchor is None:
+            anchor = await self.controls.previous_status_card(thread)
+        if anchor is None:
+            return
+        try:
+            message = await thread.fetch_message(anchor)
+            if message.author.id != self.bot_user_id():
+                return
+            await message.edit(
+                content=None, embeds=[], view=disconnected_status_card(), allowed_mentions=agent_session_allowed_mentions()
+            )
+            await self.controls.clear_message_reactions(message)
+        except discord.NotFound:
+            return
 
     def bot_user_id(self) -> int | None:
         return self.bot.user.id if self.bot.user is not None else None

@@ -7,7 +7,7 @@ import shlex
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Sequence, Callable, Awaitable
 from contextlib import asynccontextmanager
 from itertools import pairwise
 from pathlib import Path
@@ -23,6 +23,7 @@ from discord_blue.codex_bridge.config import BridgeConfig, load_config, socket_f
 from discord_blue.codex_bridge import session as session_module
 from discord_blue.codex_bridge.session import ThreadSession
 from discord_blue.doodads.agent_session.protocol import (
+    LAUNCH_BRIEF_ORIGIN,
     APPROVAL_COMMAND_DISPLAY_LIMIT,
     REMOTE_ACTIONS,
     SERVER_FEATURES,
@@ -227,6 +228,55 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
         # Discord shows command_text; servers that predate it still get an argv.
         self.assertEqual((approval.command_text, approval.command), (command_line, shlex.split(command_line)))
 
+    async def test_native_first_turn_provenance_marks_only_the_launch_input(self) -> None:
+        for cursor in (None, "older-turns"):
+            rpc = FakeRpc(
+                thread("root", threadSource="spawned"),
+                latest_turn={
+                    "id": "first",
+                    "status": "inProgress",
+                    "items": [{"type": "userMessage", "id": "launch", "content": [{"type": "text", "text": "Brief"}]}],
+                },
+            )
+            original = rpc.request
+
+            async def request(
+                method: str,
+                params: Json | None = None,
+                *,
+                native_request: Callable[[str, Json | None], Awaitable[Json]] = original,
+                next_cursor: str | None = cursor,
+            ) -> Json:
+                response = await native_request(method, params)
+                return {**response, "nextCursor": next_cursor} if method == "thread/turns/list" else response
+
+            with patch.object(rpc, "request", new=request):
+                async with running_bridge(rpc) as (bridge, discord):
+                    await discord.next("hello")
+                    session = bridge.sessions["root"]
+                    session.on_item_completed(
+                        "first", {"type": "userMessage", "id": "launch", "content": [{"type": "text", "text": "Brief"}]}
+                    )
+                    launch = await discord.next("user_message")
+                    session.on_item_completed(
+                        "next", {"type": "userMessage", "id": "human", "content": [{"type": "text", "text": "Human input"}]}
+                    )
+                    human = await discord.next("user_message")
+                    self.assertEqual(launch.get("input_origin"), LAUNCH_BRIEF_ORIGIN if cursor is None else None)
+                    self.assertNotIn("input_origin", human)
+
+    async def test_itemless_first_turn_catchup_never_marks_a_later_human_steer(self) -> None:
+        rpc = FakeRpc(thread("root", threadSource="spawned"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            session = bridge.sessions["root"]
+            session.initial_turn_id = "first"
+            session.catch_up({"id": "first", "status": "inProgress", "items": []})
+            session.on_item_completed(
+                "first", {"type": "userMessage", "id": "steer", "content": [{"type": "text", "text": "Human input"}]}
+            )
+            self.assertNotIn("input_origin", await discord.next("user_message"))
+
     async def test_a_server_that_does_not_list_command_text_gets_no_approvals(self) -> None:
         # An older server would show shlex.join of the argv: longer, re-quoted, possibly with a fence.
         rpc = FakeRpc(thread("root"))
@@ -236,11 +286,13 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
             await bridge.dispatch({"id": 7, "method": "item/commandExecution/requestApproval", "params": params})
             await discord.next("hello")
             await bridge.dispatch({"id": 8, "method": "item/commandExecution/requestApproval", "params": params})
-            events = [await discord.next() for _ in range(2)]
+            events = [await discord.next() for _ in range(4)]
             self.assertTrue(discord.received.empty())
 
-        waiting = ("status_changed", "Waiting on a decision in the Codex TUI")
-        self.assertEqual([(event["type"], event["message"]) for event in events], [waiting, waiting])
+        waiting = session_module.WAITING_LOCALLY
+        self.assertEqual(
+            [(event["type"], event["message"]) for event in events], [("notice", waiting), ("status_changed", waiting)] * 2
+        )
         self.assertEqual(rpc.responses, [])
 
     async def test_approvals_discord_cannot_fully_show_stay_in_the_tui(self) -> None:
@@ -260,8 +312,10 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
             for request_id, (case, params) in enumerate(tui_only.items()):
                 with self.subTest(case):
                     await bridge.dispatch({"id": request_id, "method": "item/commandExecution/requestApproval", "params": params})
-                    event = await discord.next()
-                    self.assertEqual((event["type"], event["message"]), ("status_changed", "Waiting on a decision in the Codex TUI"))
+                    notice = await discord.next("notice")
+                    event = await discord.next("status_changed")
+                    self.assertEqual(notice["message"], session_module.WAITING_LOCALLY)
+                    self.assertEqual(event["message"], notice["message"])
             await bridge.dispatch({"id": 99, "method": "item/commandExecution/requestApproval", "params": {**base, "command": fits}})
             self.assertEqual((await discord.next())["command"], [fits])
 

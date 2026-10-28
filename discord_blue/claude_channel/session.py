@@ -30,11 +30,12 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN
 from discord_blue.agent_client import DEFERRED, PROMPT_EVENTS, AgentSessionClient, Json, Rejected
 from discord_blue.codex_bridge.config import BridgeConfig
-from discord_blue.claude_channel.launch import ancestry, loaded_as_channel
+from discord_blue.claude_channel.launch import launch_prompt, matches_launch_prompt, ancestry, loaded_as_channel
 from discord_blue.codex_bridge.session import REPLY_LIMIT, TEXT_LIMIT, TURN_DONE
-from discord_blue.claude_channel.transcript import TranscriptTitles
+from discord_blue.claude_channel.transcript import TranscriptTitles, Titles
 from discord_blue.session_titles import SessionLabel, typed_prompt
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ class Identity:
     # False when the session was launched without the development-channels flag for this plugin.
     channel: bool = True
     spawned: bool = False
+    launch_prompt: str | None = None
 
     @classmethod
     def from_environment(cls) -> Identity | None:
@@ -79,7 +81,8 @@ class Identity:
         if not session_id:
             return None
         cwd = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
-        channel = loaded_as_channel(ancestry(os.getpid())) is not False
+        command_lines = ancestry(os.getpid())
+        channel = loaded_as_channel(command_lines) is not False
         return cls(
             session_id=session_id,
             cwd=cwd,
@@ -87,6 +90,7 @@ class Identity:
             pid=os.getppid(),
             channel=channel,
             spawned=os.environ.get("DISCORD_BLUE_SESSION_KIND") == "spawned",
+            launch_prompt=launch_prompt(command_lines),
         )
 
 
@@ -132,6 +136,7 @@ class ClaudeSession(AgentSessionClient):
         # session_title in hook input is a user-set name (-n or /rename); 2.1.284 exposes no separate auto title.
         self.label = SessionLabel()
         self.transcript = TranscriptTitles()
+        self.launch_brief_pending = identity.spawned and identity.launch_prompt is not None
         self.conversation_id: str | None = identity.session_id
         self.controls = CAPABILITIES if identity.channel else ["status_request"]
         # Discord replies held while a turn runs: Claude Code queues channel messages and would deliver
@@ -178,6 +183,12 @@ class ClaudeSession(AgentSessionClient):
 
     async def on_hook(self, fields: dict[str, str]) -> None:
         event = fields.get("event")
+        launch_brief = (
+            self.launch_brief_pending
+            and event == "UserPromptSubmit"
+            and matches_launch_prompt(self.identity.launch_prompt, fields.get("prompt"))
+        )
+        self.launch_brief_pending = False
         conversation = fields.get("session_id") or None
         if event == "SessionEnd":
             # /clear or /resume ends this conversation; the next hook names the one that follows.
@@ -204,9 +215,10 @@ class ClaudeSession(AgentSessionClient):
             echo = prompt.lstrip().startswith("<channel") and any(f'command_id="{c}"' in prompt for c in self.injected)
             # Claude Code also fires this hook for prompts it injects itself, such as task notifications.
             typed = None if echo else typed_prompt(prompt)
-            await self.retitle(fields, prompt=typed)
+            titles = await self.retitle(fields, prompt=typed)
             if typed is not None and typed.strip():
-                self.publish("user_message", message=clip(typed))
+                origin = {"input_origin": LAUNCH_BRIEF_ORIGIN} if launch_brief and titles.before_first_prompt else {}
+                self.publish("user_message", message=clip(typed), **origin)
         elif event == "Stop":
             self.waiting_locally = False
             self.publish(
@@ -245,12 +257,13 @@ class ClaudeSession(AgentSessionClient):
                 "notice", message=f"{waiting} and {'was' if dropped == 1 else 'were'} not delivered. Send again if still needed."
             )
 
-    async def retitle(self, fields: dict[str, str], prompt: str | None = None) -> None:
+    async def retitle(self, fields: dict[str, str], prompt: str | None = None) -> Titles:
         """Name first (hook session_title, else the transcript's custom title), then Claude's aiTitle, then the prompt."""
         titles = await self.transcript.read(fields.get("transcript_path", ""))
         name = fields.get("session_title") or titles.custom
         if (title := self.label.update(name=name, auto=titles.ai, prompt=prompt)) is not None:
             self.publish("title_changed", title=title)
+        return titles
 
     # Discord -> Claude Code
 

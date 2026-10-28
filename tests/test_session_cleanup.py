@@ -76,14 +76,14 @@ class SessionCleanupTests(unittest.IsolatedAsyncioTestCase):
         bridge = self.make_bridge(thread)
         cleanup = self.cleanup_record(555, "disconnect_notice", "archive", "leave")
         posting, release = asyncio.Event(), asyncio.Event()
-        original_send = thread.send
+        original_close = bridge.post_close_notice
 
-        async def slow_notice(content: str | None = None, **kwargs: object) -> object:
+        async def slow_notice(closing_thread: discord.Thread) -> None:
             posting.set()
             await release.wait()
-            return await original_send(content, **kwargs)
+            await original_close(closing_thread)
 
-        with patch.object(thread, "send", new=slow_notice):
+        with patch.object(bridge, "post_close_notice", new=slow_notice):
             cleanup_task = asyncio.create_task(bridge.cleanups.cleanup_session_artifacts(cleanup))
             await asyncio.wait_for(posting.wait(), timeout=1)
             # A reconnect takes the thread while the close's first request is still in flight.

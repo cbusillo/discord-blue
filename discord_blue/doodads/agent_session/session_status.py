@@ -18,7 +18,7 @@ from discord_blue.doodads.agent_session.controls import (
 from discord_blue.doodads.agent_session.formatting import filter_injected_tags, format_user_message
 from discord_blue.doodads.agent_session.interactions import SessionInteractions
 from discord_blue.doodads.agent_session.messages import send_agent_session_message, send_assistant_message
-from discord_blue.doodads.agent_session.protocol import SessionStatus, UserMessage
+from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN, SessionStatus, UserMessage
 from discord_blue.doodads.agent_session.sessions import AgentSession, AgentSessionRegistry
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,8 @@ class StatusHooks(Protocol):
     def thread_channel(self, thread_id: int) -> object | None: ...
 
     def request_thread_name(self, session: AgentSession) -> None: ...
+
+    async def post_thread_notice(self, thread_id: int, text: str) -> None: ...
 
 
 class SessionStatusUpdates:
@@ -83,6 +85,12 @@ class SessionStatusUpdates:
                 "Agent session stopped waiting on this prompt.",
             )
             await self.bridge.controls.update_session_status_reaction(session, REACTION_REJECTED)
+            try:
+                await self.bridge.post_thread_notice(
+                    session.thread_id, status.message or "The agent reported an error. Check the terminal."
+                )
+            except discord.DiscordException:
+                logger.warning("Unable to post Agent session error in thread %s; failure remains on its card", session.thread_id)
             return
 
         if message_type == "turn_complete" and status.assistant_message:
@@ -94,14 +102,6 @@ class SessionStatusUpdates:
                 session,
                 "Agent session is no longer waiting on this prompt.",
             )
-            if status.assistant_message and session.control_interruptions_enabled:
-                replaced = await self.bridge.controls.spawn_session_controls(
-                    session,
-                    reaction=None,
-                    interruptions_enabled=False,
-                )
-                if replaced:
-                    return
             await self.bridge.controls.post_session_controls(session)
 
     async def handle_user_message(self, user_message: UserMessage) -> None:
@@ -112,6 +112,7 @@ class SessionStatusUpdates:
         if user_message.session_epoch != session.session_epoch:
             logger.warning("Agent session user message for stale session epoch: %s", user_message.session_id)
             return
+        hide_brief = session.hello.spawned and user_message.input_origin == LAUNCH_BRIEF_ORIGIN
         message = filter_injected_tags(user_message.message)
         if not message:
             return
@@ -119,13 +120,16 @@ class SessionStatusUpdates:
         if not isinstance(channel, discord.Thread):
             return
 
-        await send_agent_session_message(
-            channel,
-            format_user_message(message)[:DISCORD_MESSAGE_LIMIT],
-        )
+        if not hide_brief:
+            await send_agent_session_message(channel, format_user_message(message)[:DISCORD_MESSAGE_LIMIT])
         session.status_revision += 1
         session.display_state = "working"
-        session.last_status_message = "Working on your request."
+        session.last_status_message = (
+            "Working on the automated launch brief. Full input remains in the native terminal."
+            if hide_brief
+            else "Working on your request."
+        )
+        session.pending_control_confirmation = None
         await self.bridge.controls.spawn_session_controls(
             session,
             reaction=REACTION_IN_PROGRESS,

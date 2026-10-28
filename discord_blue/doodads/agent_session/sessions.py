@@ -13,7 +13,7 @@ from aiohttp import web
 from discord_blue.doodads.agent_session.protocol import SessionHello
 
 
-DisplayState = Literal["working", "waiting", "done", "failed", "unknown"]
+DisplayState = Literal["working", "waiting", "done", "failed", "unknown", "disconnected", "reconnecting"]
 
 
 @dataclass(slots=True)
@@ -84,6 +84,9 @@ class AgentSession:
     last_status_message: str | None = None
     display_state: DisplayState = "waiting"
     status_revision: int = 0
+    control_anchor_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    control_update_task: asyncio.Task[bool] | None = None
+    control_update_pending: bool = False
     control_card_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     control_status_reaction: str | None = None
     control_interruptions_enabled: bool = False

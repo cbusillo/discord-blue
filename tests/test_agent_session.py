@@ -1812,7 +1812,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pending.kind, "new_session")
         self.assertEqual(pending.reject_notice, "Agent session could not start a new session")
 
-    async def test_tui_user_message_rebinds_pending_control_command_to_new_anchor(self) -> None:
+    async def test_tui_user_message_preserves_pending_command_anchor(self) -> None:
         config = Config()
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
@@ -1829,8 +1829,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
-        control_message = FakeReplyMessage(910, thread, WAITING_FOR_DIRECTION)
-        thread.add_message(control_message)
+        control_message = add_bot_message(thread, 910, WAITING_FOR_DIRECTION)
 
         await bridge.status.handle_user_message(
             protocol_module.UserMessage(
@@ -1840,16 +1839,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertTrue(control_message.deleted)
+        self.assertFalse(control_message.deleted)
         self.assertEqual(
             thread.sent_messages,
             [
                 format_user_message("Run the quick path"),
-                "",  # Components V2 carries visible text in the view.
             ],
         )
-        self.assertEqual(session.control_message_id, 902)
-        self.assertEqual(session.pending_commands["cmd-1"].message_id, 902)
+        self.assertEqual(session.control_message_id, 910)
+        self.assertEqual(session.pending_commands["cmd-1"].message_id, 910)
         self.assertTrue(session.control_interruptions_enabled)
 
     async def test_turn_complete_posts_contextual_controls(self) -> None:
@@ -2320,7 +2318,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_thread_reply_turn_complete_moves_controls_after_assistant(self) -> None:
+    async def test_thread_reply_turn_complete_keeps_controls_with_inline_assistant(self) -> None:
         config = Config()
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
@@ -2353,18 +2351,17 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        self.assertTrue(control_message.deleted)
+        self.assertFalse(control_message.deleted)
         self.assertEqual(reply_message.reactions, [])
         self.assertEqual(
             thread.sent_messages,
             [
                 mark_assistant_message("Done."),
-                "",  # Components V2 carries visible text in the view.
             ],
         )
-        new_control_message = await thread.fetch_message(902)
+        new_control_message = await thread.fetch_message(801)
         self.assertEqual(new_control_message.reactions, ["▶️", controls_module.REACTION_CONTROL_STATUS, "⏹️"])
-        self.assertEqual(session.control_message_id, 902)
+        self.assertEqual(session.control_message_id, 801)
         self.assertFalse(session.control_interruptions_enabled)
 
     async def test_turn_complete_clears_recovered_rejected_reply_reaction(self) -> None:
@@ -2406,7 +2403,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply_message.reactions, [])
         self.assertEqual(session.rejected_command_messages, [])
 
-    async def test_turn_complete_clears_stale_reactions_before_deleting_old_anchor(self) -> None:
+    async def test_turn_complete_clears_stale_reactions_on_existing_anchor(self) -> None:
         config = Config()
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
@@ -2435,10 +2432,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertFalse(control_message.deleted)
-        self.assertEqual(control_message.reactions, [])
-        new_control_message = await thread.fetch_message(902)
+        new_control_message = await thread.fetch_message(801)
         self.assertEqual(new_control_message.reactions, ["▶️", controls_module.REACTION_CONTROL_STATUS, "⏹️"])
-        self.assertEqual(session.control_message_id, 902)
+        self.assertEqual(session.control_message_id, 801)
         self.assertFalse(session.control_interruptions_enabled)
 
     async def test_turn_complete_restores_reaction_controls_on_existing_anchor(self) -> None:
@@ -2963,9 +2959,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
-        control_message = FakeReplyMessage(901, thread, "Waiting")
+        control_message = add_bot_message(thread, 901, "Waiting")
         reply_message = FakeReplyMessage(902, thread, "Continue")
-        thread.add_message(control_message)
         thread.add_message(reply_message)
         session = AgentSession(
             hello=make_hello(),
@@ -3008,9 +3003,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         config = Config()
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
-        control_message = FakeReplyMessage(901, thread, "Waiting")
+        control_message = add_bot_message(thread, 901, "Waiting")
         control_message.reactions = ["▶️", controls_module.REACTION_CONTROL_STATUS, "⏹️"]
-        thread.add_message(control_message)
         session = AgentSession(
             hello=make_hello(),
             websocket=FakeWebSocket(),
@@ -3259,7 +3253,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.control_message_id, 902)
         self.assertTrue(session.control_interruptions_enabled)
 
-    async def test_tui_user_message_turn_complete_moves_controls_after_assistant(self) -> None:
+    async def test_tui_user_message_turn_complete_keeps_controls_with_inline_assistant(self) -> None:
         config = Config()
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
@@ -3290,19 +3284,18 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        self.assertTrue(old_control_message.deleted)
+        self.assertFalse(old_control_message.deleted)
         self.assertEqual(
             thread.sent_messages,
             [
                 format_user_message("Run the quick path"),
                 "",  # Components V2 carries visible text in the view.
                 mark_assistant_message("Done."),
-                "",  # Components V2 carries visible text in the view.
             ],
         )
-        control_message = await thread.fetch_message(904)
+        control_message = await thread.fetch_message(902)
         self.assertEqual(control_message.reactions, ["▶️", controls_module.REACTION_CONTROL_STATUS, "⏹️"])
-        self.assertEqual(session.control_message_id, 904)
+        self.assertEqual(session.control_message_id, 902)
         self.assertFalse(session.control_interruptions_enabled)
 
     async def test_session_status_summary_uses_last_status(self) -> None:

@@ -30,12 +30,16 @@ class StoredSession:
     updated_at: float
     pending_steps: tuple[CleanupStep, ...] | None = None
     recovery_attempts: int = 0
+    control_message_id: int | None = None
 
     @classmethod
     def parse(cls, value: object) -> StoredSession:
         if not isinstance(value, dict):
             raise ValueError("record is not an object")
         thread, notification = value.get("thread_id"), value.get("notification_id")
+        control = value.get("control_message_id")
+        if control is not None and (type(control) is not int or control <= 0):
+            raise ValueError("invalid status anchor")
         marker, status = value.get("marker"), value.get("status")
         grace, updated = value.get("grace_until"), value.get("updated_at")
         if (
@@ -65,6 +69,7 @@ class StoredSession:
             float(updated),
             cast(tuple[CleanupStep, ...], tuple(steps)) if steps is not None else None,
             attempts,
+            control,
         )
 
 
