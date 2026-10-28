@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
+
+import aiohttp
 
 from discord_blue.claude_channel.launch import loaded_as_channel, launch_prompt, matches_launch_prompt
-from discord_blue.claude_channel.session import CHANNEL, HOOK_TOOL, MODEL_CALL, PERMISSION_REQUEST, waiting_message
+from discord_blue.claude_channel.session import CHANNEL, HOOK_TOOL, MODEL_CALL, PERMISSION_REQUEST, ClaudeSession, waiting_message
 from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN, SessionHello
 from tests.fakes_discord_blue import FakeDiscordBlue
 from tests.test_thread_titles import HARNESS_PROMPTS
@@ -138,6 +142,63 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
                 await hook(claude, "Stop", last_assistant_message="Build passed")
                 events = await mirrored(claude, discord)
         self.assertEqual(events, [("turn_complete", "Build passed")])
+
+    async def test_clean_eof_decides_pending_input_before_ending_the_session(self) -> None:
+        prompt = "Human request interrupted before a tool"
+        for scheduled in (False, True):
+            with self.subTest(scheduled=scheduled), tempfile.TemporaryDirectory() as directory:
+                transcript = Path(directory) / "session.jsonl"
+                transcript.write_text("")
+                async with running_channel() as (claude, discord):
+                    await claude.initialize()
+                    await discord.next("hello")
+                    await hook(claude, "UserPromptSubmit", prompt=prompt, prompt_id="pending-1", transcript_path=str(transcript))
+                    if scheduled:
+                        transcript.write_text(
+                            json.dumps(
+                                {
+                                    "type": "user",
+                                    "promptId": "pending-1",
+                                    "isMeta": True,
+                                    "promptSource": "system",
+                                    "turnOrigin": "scheduled",
+                                }
+                            )
+                            + "\n"
+                        )
+                events = []
+                while not discord.received.empty():
+                    events.append(discord.received.get_nowait())
+                inputs = [event for event in events if event["type"] == "user_message"]
+                self.assertEqual([event["message"] for event in inputs], [] if scheduled else [prompt])
+                self.assertEqual(events[-1]["type"], "session_end")
+                if inputs:
+                    self.assertLess(events.index(inputs[0]), len(events) - 1)
+                    self.assertEqual(inputs[0]["session_epoch"], events[-1]["session_epoch"])
+
+    async def test_clean_eof_stops_when_the_terminal_event_cannot_send(self) -> None:
+        terminal_send_started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocked_send(session: ClaudeSession, websocket: aiohttp.ClientWebSocketResponse, message: Json) -> None:
+            if message["type"] == "session_end":
+                terminal_send_started.set()
+                await release.wait()
+            await super(ClaudeSession, session).send(websocket, message)
+
+        async def close_channel() -> None:
+            async with running_channel() as (claude, discord):
+                await claude.initialize()
+                await discord.next("hello")
+                await hook(claude, "UserPromptSubmit", prompt="Human request", prompt_id="pending-1")
+            self.assertTrue(all(socket.closed for socket in discord.sockets))
+
+        with (
+            patch.object(ClaudeSession, "send", blocked_send),
+            patch("discord_blue.claude_channel.session.SESSION_END_TIMEOUT_SECONDS", 0.02),
+        ):
+            await asyncio.wait_for(close_channel(), timeout=1)
+        self.assertTrue(terminal_send_started.is_set())
 
     async def test_hooks_mirror_typed_prompts_and_answers_but_not_injected_replies(self) -> None:
         async with running_channel() as (claude, discord):

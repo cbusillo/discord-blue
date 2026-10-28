@@ -20,6 +20,7 @@ rejected.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -30,8 +31,10 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+import aiohttp
+
 from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN
-from discord_blue.agent_client import DEFERRED, PROMPT_EVENTS, AgentSessionClient, Json, Rejected
+from discord_blue.agent_client import DEFERRED, PROMPT_EVENTS, SESSION_END_TIMEOUT_SECONDS, AgentSessionClient, Json, Rejected
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.claude_channel.launch import launch_prompt, matches_launch_prompt, ancestry, loaded_as_channel
 from discord_blue.codex_bridge.session import REPLY_LIMIT, TEXT_LIMIT, TURN_DONE
@@ -138,6 +141,7 @@ class ClaudeSession(AgentSessionClient):
         self.transcript = TranscriptTitles()
         self.launch_brief_pending = identity.spawned and identity.launch_prompt is not None
         self.pending_input: tuple[dict[str, str], str] | None = None
+        self.ending: tuple[Json, asyncio.Event] | None = None
         self.conversation_id: str | None = identity.session_id
         self.controls = CAPABILITIES if identity.channel else ["status_request"]
         # Discord replies held while a turn runs: Claude Code queues channel messages and would deliver
@@ -252,6 +256,26 @@ class ClaudeSession(AgentSessionClient):
         titles = await self.retitle(fields, prompt=typed)
         if fields["prompt_id"] not in titles.scheduled_prompt_ids:
             self.publish("user_message", message=clip(typed))
+
+    async def send(self, websocket: aiohttp.ClientWebSocketResponse, message: Json) -> None:
+        await super().send(websocket, message)
+        if self.ending is not None and message is self.ending[0]:
+            self.ending[1].set()
+
+    async def end(self) -> None:
+        try:
+            async with asyncio.timeout(SESSION_END_TIMEOUT_SECONDS):
+                await self.flush_pending_input()
+                if self.websocket is not None and not self.websocket.closed and not self.stopped.is_set():
+                    terminal = self.event("session_end")
+                    sent = asyncio.Event()
+                    self.ending = (terminal, sent)
+                    self.enqueue(terminal)
+                    await sent.wait()
+        except TimeoutError:
+            logger.warning("Claude session ended before queued input and closure finished sending")
+        finally:
+            await self.stop()
 
     async def switch_conversation(self, conversation: str | None) -> None:
         """Start a new epoch so Discord controls meant for the previous conversation are rejected."""
