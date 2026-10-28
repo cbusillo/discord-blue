@@ -182,7 +182,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                 for view in views:
                     self.assertLessEqual(len(text_in(view)), 4000)
 
-    async def test_multipart_answer_notifies_once_and_recovers_missing_tail_after_partial_send(self) -> None:
+    async def test_silent_question_answer_recovers_missing_tail_after_partial_send(self) -> None:
         with prompt_fixture() as fixture:
             await fixture.bridge.status.post_assistant_message(fixture.thread.id, "Previous complete answer")
             answer = "A new answer. " * 500 + "\n\n**Q999:** Is the recovered tail readable?"

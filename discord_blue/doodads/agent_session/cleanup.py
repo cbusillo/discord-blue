@@ -510,6 +510,7 @@ class SessionCleanups:
             if resolved and thread is None:
                 cleanup.pending_steps.difference_update(thread_steps)
             elif thread is not None:
+                await self.bridge.questions.close(cleanup.session_id, thread=thread)
                 await self.close_thread(thread, cleanup.pending_steps, timeout=THREAD_CLOSE_WAIT_SECONDS)
 
         return cleanup if cleanup.pending_steps else None

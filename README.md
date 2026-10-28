@@ -627,8 +627,8 @@ Discord controls the final appearance on a phone.
 An answer containing a top-level bold numbered question ending in a question mark,
 such as `**Q123.** Ship it?`, puts that question in a silent **Question** card
 inside the session thread. Its recommendation, cost and alternatives stay with
-it. Surrounding prose stays chat. Each Q number appears once per conversation,
-even on backfill; the parent channel gets no question posts. Quoted, tabled,
+it. Surrounding prose stays chat. Each Q number keeps one card in its session,
+even on backfill or reconnection; the parent channel gets no question posts. Quoted, tabled,
 indented and fenced examples do not create cards. Large context is attached as
 `questions.md`. No mentions or push notifications are sent. Discord controls
 unread indicators and phone rendering.

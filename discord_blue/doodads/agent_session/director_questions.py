@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import logging
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from collections.abc import Iterator
 from io import BytesIO
 from typing import TYPE_CHECKING
@@ -12,11 +12,15 @@ from typing import TYPE_CHECKING
 import discord
 
 from discord_blue.doodads.agent_session.cards import (
+    ANSWER_CHUNK_LIMIT,
     ANSWER_CARD_COMPONENT_ID,
     ANSWER_CONTINUATION_COMPONENT_ID,
     STATUS_LABELS,
+    assistant_answer_cards,
     notice_card,
+    question_boundary,
 )
+from discord_blue.doodads.agent_session.chunks import split_discord_message
 from discord_blue.doodads.agent_session.controls import DELIVERY_UNCONFIRMED
 from discord_blue.doodads.agent_session.formatting import (
     advance_code_fence,
@@ -56,30 +60,40 @@ def top_level_lines(lines: list[str]) -> Iterator[tuple[int, str]]:
         index += 1
 
 
+@dataclass(frozen=True)
+class QuestionSection:
+    number: str
+    body: str
+    start: int
+    end: int
+
+
 def detect_questions(text: str) -> tuple[tuple[str, str], ...]:
-    lines = text.splitlines()
+    return tuple((section.number, section.body) for section in question_sections(text))
+
+
+def question_sections(text: str) -> Iterator[QuestionSection]:
+    source_lines = text.splitlines(keepends=True)
+    lines = [line.rstrip("\r\n") for line in source_lines]
+    offsets = [0]
+    for line in source_lines:
+        offsets.append(offsets[-1] + len(line))
     starts = []
     for index, line in top_level_lines(lines):
         match = QUESTION_START.match(line)
-        if match is not None and line.rstrip("* ").endswith("?"):
+        if match is not None and line.rstrip("* \r\n").endswith("?"):
             starts.append((index, match[1]))
-    questions = []
     for index, (start, number) in enumerate(starts):
         end = starts[index + 1][0] if index + 1 < len(starts) else len(lines)
         fence = None
         for position in range(start, end):
             line = lines[position]
-            if fence is None and not line.strip() and position + 1 < end:
-                following = lines[position + 1]
-                if following.strip() and not re.match(
-                    r"(?i)^(?:\*\*)?(?:recommendation|cost|ongoing cost|alternatives?|options?|why|trade-offs?)\b|^[-*+0-9]",
-                    following,
-                ):
-                    end = position
-                    break
+            if fence is None and position > start and question_boundary(line.strip()):
+                end = position
+                break
             fence = advance_code_fence(line, fence)
-        questions.append((number, "\n".join(lines[start:end]).strip()))
-    return tuple(questions)
+        body = "".join(source_lines[start:end]).strip()
+        yield QuestionSection(number, body, offsets[start], offsets[start] + len(body))
 
 
 def source_signature(message: discord.Message, bot_id: int) -> str:
@@ -91,6 +105,7 @@ class QuestionCards:
     def __init__(self, bridge: AgentSessionBridge) -> None:
         self.bridge = bridge
         self.locks: dict[str, asyncio.Lock] = {}
+        self.edit_locks: dict[str, asyncio.Lock] = {}
 
     def lock(self, key: str) -> asyncio.Lock:
         return self.locks.setdefault(key, asyncio.Lock())
@@ -119,9 +134,15 @@ class QuestionCards:
         for session_id, stored in self.bridge.store.records.items():
             for question in stored.questions:
                 if question.message_id is not None:
-                    self.bridge.bot.add_view(self.view(session_id, question), message_id=question.message_id)
+                    view = self.view(session_id, question)
+                    if question.legacy_parent_id is not None:
+                        view.add_item(discord.ui.ActionRow(QuestionAnswerButton(self, session_id, question)))
+                    self.bridge.bot.add_view(view, message_id=question.message_id)
 
     def view(self, session_id: str, question: StoredQuestion) -> discord.ui.LayoutView:
+        if question.legacy_parent_id is not None:
+            numbers = ", ".join(number for number, _ in question.questions)
+            return notice_card(f"**{numbers}** · Continue in the [session thread]({question.source_url}).")
         if question.state == QuestionState.ANSWERED:
             answer = discord.utils.escape_markdown(" ".join(question.answer.split())[:600])
             numbers = ", ".join(number for number, _ in question.questions)
@@ -136,7 +157,7 @@ class QuestionCards:
             text = " · ".join(body.split("\n", 1)[0] for _, body in question.questions)[:1000] + (
                 "\nFull questions, recommendations, costs and alternatives are attached below."
                 if question.has_attachment
-                else "\nFull context remains in the native terminal."
+                else "\nFull context continues in this thread."
             )
         view = notice_card("")
         container = view.children[0]
@@ -155,23 +176,44 @@ class QuestionCards:
 
     async def send_answer(self, session: AgentSession, thread: discord.Thread, text: str) -> None:
         await self.decisions(session.session_id, text, recorded=True)
-        questions = detect_questions(text)
-        remaining = text
-        for _number, body in questions:
-            before, _, remaining = remaining.partition(body)
-            if before.strip():
-                await send_assistant_message(thread, before, silent=True, complete=False, full_text=text)
-            await self.post(session, thread, body, complete=not remaining.strip())
-        if remaining.strip():
-            await send_assistant_message(thread, remaining, silent=bool(questions), full_text=text)
+        position = 0
+        parts: list[tuple[str, str | None]] = []
+        sections = list(question_sections(text))
+        for section in sections:
+            if (before := text[position : section.start]).strip():
+                parts.append((before, None))
+            parts.append((section.body, section.number))
+            position = section.end
+        if (remaining := text[position:]).strip():
+            parts.append((remaining, None))
+        last_new = max(
+            (
+                index
+                for index, (_, number) in enumerate(parts)
+                if number is None or self.record(session.session_id, self.key(session, number)) is None
+            ),
+            default=-1,
+        )
+        full_text = text
+        for index, (body, number) in enumerate(parts):
+            if number is not None:
+                await self.post(session, thread, body, complete=index == last_new or index == len(parts) - 1)
+            else:
+                await send_assistant_message(thread, body, silent=bool(sections), complete=index == last_new, full_text=full_text)
+                if assistant_answer_cards(body)[1]:
+                    full_text = ""
+
+    @staticmethod
+    def key(session: AgentSession, number: str) -> str:
+        return hashlib.sha256(f"{session.session_id}\0{number}".encode()).hexdigest()[:32]
 
     async def decisions(self, session_id: str, text: str, *, url: str = "", recorded: bool = False) -> None:
         stored = self.bridge.store.records.get(session_id)
         if stored is None:
             return
-        pattern = r"(?m)^(?:Director decision:[ \t]*)?(Q\d+)[.: \t]+([^\n]+)"
+        pattern = r"(?i)^(Q\d+)[.: \t]+([^\n]+)"
         if recorded:
-            pattern = r"(?m)^Director decision:[ \t]*(Q\d+)[.: \t]+([^\n]+)"
+            pattern = r"(?i)^(?:\*\*)?Director decision:(?:\*\*)?[ \t]*(?:\*\*)?(Q\d+)[.: \t*]+([^\n]+)"
         lines = text.splitlines()
         matches = []
         for index, line in top_level_lines(lines):
@@ -180,13 +222,15 @@ class QuestionCards:
                 matches.append((index, match))
         for index, (start, match) in enumerate(matches):
             end = matches[index + 1][0] if index + 1 < len(matches) else len(lines)
-            context = "\n".join(lines[start:end])
+            context = "\n".join(lines[start:end]).split("\n\n", 1)[0]
+            if not recorded and (match[2].rstrip().endswith("?") or re.search(r"(?i)\bQ\d+\b", match[2])):
+                continue
             link = re.search(r"https://github\.com/[^\s)]+#issuecomment-\d+", context) if recorded else None
             decision_url = link[0] if link else url
             if not decision_url:
                 continue
             for question in tuple(self.bridge.store.records[session_id].questions):
-                if question.state == QuestionState.ANSWERED or match[1] not in {number for number, _ in question.questions}:
+                if question.state == QuestionState.ANSWERED or match[1].upper() not in {number for number, _ in question.questions}:
                     continue
                 async with self.lock(question.key):
                     current = self.record(session_id, question.key)
@@ -219,8 +263,27 @@ class QuestionCards:
         questions = detect_questions(text)
         if not questions:
             return
-        key = hashlib.sha256(f"{session.session_id}\0{session.session_epoch}\0{questions[0][0]}".encode()).hexdigest()[:32]
-        if self.record(session.session_id, key) is not None:
+        key = self.key(session, questions[0][0])
+        current = self.record(session.session_id, key)
+        if current is not None:
+            if current.message_id is not None:
+                current = replace(
+                    current,
+                    questions=questions,
+                    complete=complete or current.complete,
+                    epoch=session.session_epoch,
+                    state=QuestionState.WAITING if current.state == QuestionState.CLOSED else current.state,
+                )
+                self.save(session.session_id, current)
+                await self.refresh(session.session_id, [current])
+                channel = self.bridge.thread_channel(current.thread_id)
+                if isinstance(channel, discord.Thread):
+                    assert current.message_id is not None
+                    message = await channel.fetch_message(current.message_id)
+                    current = replace(current, sources=((message.id, source_signature(message, self.bridge.bot_user_id() or 0)),))
+                    self.save(session.session_id, current)
+            else:
+                await send_assistant_message(thread, text, silent=True, complete=complete)
             return
         if session.session_id not in self.bridge.store.records:
             self.bridge.save_session(session, "live")
@@ -250,6 +313,7 @@ class QuestionCards:
             view = self.view(session.session_id, question)
             full = "\n\n".join(body for _, body in questions)
             publication_started = True
+            continuation_sources: list[discord.Message] = []
             if len(full.encode("utf-16-le")) // 2 > 3000:
                 attachment = discord.File(BytesIO(full.encode()), filename="questions.md")
                 try:
@@ -257,9 +321,15 @@ class QuestionCards:
                         view=view, file=attachment, silent=True, allowed_mentions=agent_session_allowed_mentions()
                     )
                 except discord.Forbidden:
-                    question = replace(self.record(session.session_id, key) or question, has_attachment=False)
+                    question = replace(self.record(session.session_id, key) or question, has_attachment=False, complete=False)
                     self.save(session.session_id, question)
                     message = await send_agent_session_message(thread, view=self.view(session.session_id, question), silent=True)
+                    context = full.split("\n", 1)[1] if "\n" in full else ""
+                    chunks = split_discord_message(context, ANSWER_CHUNK_LIMIT)
+                    for index, chunk in enumerate(chunks):
+                        await send_assistant_message(
+                            thread, chunk, silent=True, complete=complete and index == len(chunks) - 1, sources=continuation_sources
+                        )
                 finally:
                     attachment.close()
             else:
@@ -269,7 +339,10 @@ class QuestionCards:
                 current,
                 message_id=message.id,
                 source_url=message.jump_url,
-                sources=((message.id, source_signature(message, self.bridge.bot_user_id() or 0)),),
+                sources=tuple(
+                    (source.id, source_signature(source, self.bridge.bot_user_id() or 0))
+                    for source in [message, *continuation_sources]
+                ),
             )
             self.save(session.session_id, current)
             if current.state != QuestionState.WAITING:
@@ -282,6 +355,7 @@ class QuestionCards:
                     session.session_id, replace(stored, questions=tuple(q for q in stored.questions if q.key != key))
                 )
                 try:
+                    await send_assistant_message(thread, text, silent=True, complete=complete)
                     await send_agent_session_message(
                         thread,
                         "The Question card could not be posted in the thread. Reply in this session thread instead.",
@@ -291,13 +365,14 @@ class QuestionCards:
                     logger.exception("Unable to report failed Question card publication")
             else:
                 try:
+                    await send_assistant_message(thread, text, silent=True, complete=complete)
                     await send_agent_session_message(
                         thread, "The Question card may not have posted. Check this thread before replying.", silent=True
                     )
                 except (OSError, discord.DiscordException):
                     logger.warning("Unable to report uncertain Question publication")
 
-    async def close(self, session_id: str, *, current_epoch: str | None = None) -> None:
+    async def close(self, session_id: str, *, current_epoch: str | None = None, thread: discord.Thread | None = None) -> None:
         stored = self.bridge.store.records.get(session_id)
         closed = (
             [
@@ -310,7 +385,7 @@ class QuestionCards:
         )
         for question in closed:
             self.save(session_id, question)
-        await self.refresh(session_id, closed)
+        await self.refresh(session_id, closed, thread=thread)
 
     async def outcome(self, session_id: str, key: str, state: QuestionState) -> None:
         question = self.record(session_id, key)
@@ -319,17 +394,38 @@ class QuestionCards:
             self.save(session_id, question)
             await self.refresh(session_id, [question])
 
-    async def refresh(self, session_id: str, questions: list[StoredQuestion]) -> None:
+    async def refresh(self, session_id: str, questions: list[StoredQuestion], *, thread: discord.Thread | None = None) -> None:
         async def edit_cards() -> None:
             for question in questions:
-                channel = self.bridge.thread_channel(question.thread_id)
-                if isinstance(channel, discord.Thread) and question.message_id is not None:
-                    try:
-                        await channel.get_partial_message(question.message_id).edit(
-                            view=self.view(session_id, question), allowed_mentions=agent_session_allowed_mentions()
-                        )
-                    except (OSError, discord.DiscordException):
-                        logger.warning("Unable to update Question card %s", question.message_id)
+                async with self.edit_locks.setdefault(question.key, asyncio.Lock()):
+                    question = self.record(session_id, question.key) or question
+                    channel = (
+                        self.bridge.bot.get_channel(question.legacy_parent_id)
+                        if question.legacy_parent_id is not None
+                        else thread or self.bridge.thread_channel(question.thread_id)
+                    )
+                    if isinstance(channel, (discord.Thread, discord.TextChannel)) and question.message_id is not None:
+                        try:
+                            attachment = (
+                                discord.File(
+                                    BytesIO("\n\n".join(body for _, body in question.questions).encode()), filename="questions.md"
+                                )
+                                if question.has_attachment
+                                and question.state != QuestionState.ANSWERED
+                                and question.legacy_parent_id is None
+                                else None
+                            )
+                            try:
+                                await channel.get_partial_message(question.message_id).edit(
+                                    view=self.view(session_id, question),
+                                    allowed_mentions=agent_session_allowed_mentions(),
+                                    attachments=[attachment] if attachment is not None else [],
+                                )
+                            finally:
+                                if attachment is not None:
+                                    attachment.close()
+                        except (OSError, discord.DiscordException):
+                            logger.warning("Unable to update Question card %s", question.message_id)
 
         if questions:
             try:
@@ -345,6 +441,13 @@ class QuestionAnswerButton(discord.ui.Button[discord.ui.LayoutView]):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         current = self.cards.record(self.session_id, self.key)
+        if current is not None and current.legacy_parent_id is not None:
+            if not self.cards.bridge.is_operator(interaction.user):
+                await interaction.response.send_message("Only session operators can use this card.", ephemeral=True)
+                return
+            await self.cards.refresh(self.session_id, [current])
+            await interaction.response.send_message("Continue in the session thread linked on this earlier card.", ephemeral=True)
+            return
         error = self.cards.context_error(interaction, self.session_id, current)
         if error:
             await interaction.response.send_message(error, ephemeral=True)
@@ -359,42 +462,31 @@ class QuestionAnswerModal(discord.ui.Modal):
         self.cards, self.session_id, self.question, self.user_id = cards, session_id, question, user_id
         self.session = cards.bridge.sessions.get(session_id)
         self.fields: list[discord.ui.TextInput[QuestionAnswerModal]] = []
-        self.combined = len(question.questions) > 4
         self.add_item(discord.ui.TextDisplay(f"[Read questions and recommendations]({question.source_url})"))
-        groups = [("All answers with Q numbers", "")] if self.combined else list(question.questions)
+        groups = list(question.questions)
         for number, body in groups:
             field = discord.ui.TextInput[QuestionAnswerModal](
                 style=discord.TextStyle.paragraph, max_length=1800 // (2 * len(groups))
             )
             self.fields.append(field)
             self.add_item(discord.ui.Label(text=number[:45], description=body[:100] or None, component=field))
-        if self.combined:
-            self.fields[0].default = "\n".join(f"{number}: " for number, _ in question.questions)[:900]
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
         async with self.cards.lock(self.question.key):
             question = self.cards.record(self.session_id, self.question.key)
             error = self.cards.context_error(interaction, self.session_id, question)
+            if question is not None and (question.questions != self.question.questions or question.epoch != self.question.epoch):
+                error = "The question changed; reopen its Answer form."
             if error or interaction.user.id != self.user_id:
                 await interaction.followup.send(error or "This form belongs to another operator.", ephemeral=True)
                 return
             if any(not field.value.strip() for field in self.fields):
                 await interaction.followup.send("Answer every question before submitting.", ephemeral=True)
                 return
-            text = (
-                self.fields[0].value
-                if self.combined
-                else "\n\n".join(
-                    f"{number}: {field.value.strip()}"
-                    for (number, _), field in zip(self.question.questions, self.fields, strict=True)
-                )
+            text = "\n\n".join(
+                f"{number}: {field.value.strip()}" for (number, _), field in zip(self.question.questions, self.fields, strict=True)
             )
-            if self.combined and any(
-                re.search(rf"(?m)^{re.escape(number)}:[ \t]*\S[^\n]*$", text) is None for number, _ in self.question.questions
-            ):
-                await interaction.followup.send("Keep each Q number followed by a colon and its answer.", ephemeral=True)
-                return
             assert question is not None
             session = self.session
             if session is None or self.cards.bridge.sessions.get(self.session_id) is not session:

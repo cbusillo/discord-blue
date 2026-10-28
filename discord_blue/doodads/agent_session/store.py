@@ -48,18 +48,23 @@ class StoredQuestion:
     answer: str = ""
     decision_url: str = ""
     complete: bool = True
+    legacy_parent_id: int | None = None
 
     @classmethod
     def parse(cls, value: object) -> StoredQuestion:
         if not isinstance(value, dict):
             raise ValueError("invalid question record")
-        question = cls(**{key: field for key, field in value.items() if key != "parent_id"})
+        fields = {key: field for key, field in value.items() if key != "parent_id"}
+        if value.get("parent_id") not in {None, value.get("thread_id")}:
+            fields["legacy_parent_id"] = value["parent_id"]
+        question = cls(**fields)
         if (
             not all(
                 isinstance(v, str)
                 for v in (question.key, question.epoch, question.source_url, question.state, question.answer, question.decision_url)
             )
             or type(question.complete) is not bool
+            or (question.legacy_parent_id is not None and type(question.legacy_parent_id) is not int)
             or type(question.thread_id) is not int
             or (question.message_id is not None and type(question.message_id) is not int)
             or not isinstance(question.questions, (list, tuple))
