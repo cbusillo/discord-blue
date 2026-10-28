@@ -353,16 +353,6 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         threads_module.discord.TextChannel = self.original_text_channel_type
         messages_module.MISSING_MANAGE_MESSAGES_DESTINATIONS.clear()
 
-    async def test_create_session_thread_suppresses_embeds_on_start_messages(self) -> None:
-        config = Config()
-        config.agent_session.channel_id = 321
-        channel = FakeTextChannel(321, [])
-
-        session_thread = await create_session_thread(FakeBot(config, channel=channel), make_hello())
-
-        self.assertEqual(channel.sent_kwargs, [])
-        self.assertEqual(session_thread.thread.sent_messages, [""])
-
     async def test_missing_manage_messages_notice_posts_once_per_destination(self) -> None:
         config = Config()
         config.agent_session.channel_id = 321

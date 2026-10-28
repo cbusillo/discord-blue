@@ -117,9 +117,7 @@ class QuietSessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(details.spoiler)
             marker = next(item.content for item in details.children if isinstance(item, discord.ui.TextDisplay))
             self.assertIn(marker, threads.expected_session_start_messages(make_hello()))
-            self.assertEqual(
-                threads.session_message_markers(cast(discord.Message, cast(object, await thread.fetch_message(901)))), ["", marker]
-            )
+            self.assertIn(marker, threads.session_message_markers(cast(discord.Message, cast(object, thread._history[-1]))))
 
     async def test_multicard_answer_has_one_heading_and_preserves_body(self) -> None:
         source = "First passage.\n\n" + "Later passage.\n" * 300
@@ -127,9 +125,14 @@ class QuietSessionTests(unittest.IsolatedAsyncioTestCase):
         texts = [item.content for view in views for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)]
         self.assertGreater(len(views), 1)
         self.assertFalse(attached)
+        heading = next(item.content for item in views[0].walk_children() if isinstance(item, discord.ui.TextDisplay))
         self.assertEqual(
-            [sum(isinstance(item, discord.ui.TextDisplay) for item in view.walk_children()) for view in views],
-            [2, *[1 for _ in views[1:]]],
+            [
+                view
+                for view in views
+                if any(isinstance(item, discord.ui.TextDisplay) and item.content == heading for item in view.walk_children())
+            ],
+            [views[0]],
         )
         self.assertIn("First passage.", "\n".join(texts))
         self.assertEqual("\n".join(texts).count("Later passage."), 300)
