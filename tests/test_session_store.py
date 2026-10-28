@@ -20,7 +20,7 @@ from discord_blue.doodads.agent_session.cleanup import PENDING_CLEANUP_MAX_ATTEM
 from discord_blue.doodads.agent_session.store import SessionStore, StoredSession
 from tests.fake_discord import BOT_ID, PARENT_ID, FakeDiscord, FakeMessage, Fault
 from tests.test_attach_scenarios import hello_for, marker, scenario, until
-from tests.test_session_grace import CHURN, notices
+from tests.test_session_grace import CHURN
 from tests.test_session_cleanup_failures import make_bridge
 
 
@@ -197,7 +197,6 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(
                     any(STATUS_LABELS["disconnected"][0] in json.dumps(message.components, ensure_ascii=False) for message in cards)
                 )
-                self.assertEqual(notices(thread), [])
                 await socket.close()
 
     async def test_a_forbidden_stored_hint_falls_back_to_discovery(self) -> None:
@@ -273,7 +272,8 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
         fake = FakeDiscord(latency=0.002)
         hello = hello_for("partly-closed")
         thread = fake.add_thread("partly-closed", marker=marker(hello), archived=True, locked=True, members={7})
-        thread.messages.append(FakeMessage(next(fake.ids), thread.id, bridge_module.SESSION_ENDED_NOTICE))
+        thread.messages.append(FakeMessage(next(fake.ids), thread.id, "Session ended"))
+        before_messages = [message.id for message in thread.messages]
         with tempfile.TemporaryDirectory() as home:
             path = Path(home) / "agent-sessions.json"
             store = SessionStore(path)
@@ -283,7 +283,7 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
             async with scenario(fake, store_path=path, listen_host="127.0.0.1", listen_port=0) as running:
                 await running.bridge.start()
                 await running.bridge.cleanups.recover_stored_cleanups()
-                self.assertEqual(notices(thread), [bridge_module.SESSION_ENDED_NOTICE])
+                self.assertEqual([message.id for message in thread.messages], before_messages)
                 self.assertEqual(thread.members, set())
                 self.assertTrue(thread.archived and thread.locked)
 
@@ -339,7 +339,6 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 for _ in range(PENDING_CLEANUP_MAX_ATTEMPTS + 2):
                     await running.bridge.cleanups.recover_stored_cleanups()
                     await running.bridge.cleanups.retry_pending_cleanups()
-                self.assertEqual(notices(thread), [])
 
     async def test_a_forbidden_stored_thread_does_not_block_another_cleanup(self) -> None:
         fake = FakeDiscord(latency=0.002)
@@ -418,7 +417,6 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 await running.bridge.start()
                 await running.bridge.cleanups.recover_stored_cleanups()
                 self.assertFalse(thread.archived)
-                self.assertEqual(notices(thread), [])
                 self.assertNotIn("hint", running.bridge.store.records)
 
     async def test_a_discord_failure_during_store_lookup_does_not_create_another_thread(self) -> None:
@@ -478,7 +476,6 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     await expiry
                     await socket.receive_json(timeout=10)
                     self.assertEqual(running.archived, [])
-                    self.assertEqual(notices(thread), [])
                     await socket.close()
 
     async def test_eight_sessions_survive_three_restarts_without_archive_or_discovery(self) -> None:
@@ -513,7 +510,7 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                             await socket.close()
                         self.assertEqual(running.archived, [])
                     self.assertTrue(path.exists())
-                self.assertTrue(all(not thread.archived and not thread.locked and not notices(thread) for thread in threads))
+                self.assertTrue(all(not thread.archived and not thread.locked for thread in threads))
 
     async def test_startup_grace_protects_threads_and_notifications_then_expires(self) -> None:
         fake = FakeDiscord(latency=0.002)
@@ -528,22 +525,21 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     await socket.send_json(hello)
                     await socket.receive_json(timeout=10)
                     notification_id = first.bridge.sessions.get(hello["session_id"]).notification_message_id  # type: ignore[union-attr]
+                    before_messages = [message.id for message in thread.messages]
                     await first.bridge.stop()
                     await socket.close()
                 async with scenario(fake, store_path=path, listen_host="127.0.0.1", listen_port=0) as second:
                     await second.bridge.start()
                     await second.bridge.cleanups.cleanup_stale_session_notifications()
                     await second.bridge.cleanups.cleanup_stale_session_threads()
-                    self.assertEqual(notices(thread), [])
                     self.assertFalse(thread.archived)
                     self.assertTrue(any(message.id == notification_id for message in fake.parent_messages))
                     record = second.bridge.store.records[hello["session_id"]]
                     second.bridge.store.put(hello["session_id"], replace(record, grace_until=time.time() - 1))
                     await second.bridge.cleanups.recover_stored_cleanups()
                     self.assertTrue(await until(lambda: thread.archived and thread.locked, 5))
-                    self.assertEqual(notices(thread), [])
                     await second.bridge.cleanups.recover_stored_cleanups()
-                    self.assertEqual(notices(thread), [])
+                self.assertEqual([message.id for message in thread.messages], before_messages)
 
     async def test_deleted_thread_hint_is_replaced_and_missing_notification_is_recreated(self) -> None:
         fake = FakeDiscord(latency=0.002)

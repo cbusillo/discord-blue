@@ -58,7 +58,6 @@ logger = logging.getLogger(__name__)
 # this long, so a reconnect resumes it without an archive, member changes or notices.
 SESSION_DISCONNECT_GRACE_SECONDS = 300
 SESSION_STORE_WAIT_TIMEOUT_SECONDS = 1
-SESSION_ENDED_NOTICE = "Session ended"
 
 STARTUP_RECONNECT_GRACE_SECONDS = 20
 # After a start, sessions from before it reconnect over this long, and until they do nothing marks their threads as
@@ -701,7 +700,9 @@ class AgentSessionBridge:
         # Attached, acknowledged and outside every lock: bring the thread's name up to date in the
         # background. The thread's worker coalesces and rate-limits; nothing here waits on Discord.
         self.request_thread_name(session)
-        if session.control_message_id is not None and self.sessions.get(session.session_id) is session:
+        if (session.control_message_id is not None or session.control_update_pending) and self.sessions.get(
+            session.session_id
+        ) is session:
             session.display_state = "reconnecting"
             session.last_status_message = "Reconnected. Waiting for the next status update."
             session.control_status_reaction = None
@@ -797,6 +798,7 @@ class AgentSessionBridge:
                 record = self.store.records.get(session_id)
                 if previous is not None and previous.thread_id == current.thread_id:
                     current.control_message_id = previous.control_message_id
+                    current.control_update_pending = previous.control_update_task is not None
                 elif record is not None and record.thread_id == current.thread_id:
                     current.control_message_id = record.control_message_id
                 self.save_session(current, "attaching")
@@ -841,11 +843,15 @@ class AgentSessionBridge:
         task.add_done_callback(self.threads.request_done)
 
     async def refresh_lifecycle_card(self, session: AgentSession) -> None:
-        if session.thread_id is None or session.control_message_id is None or self.sessions.get(session.session_id) is not session:
+        if session.thread_id is None or self.sessions.get(session.session_id) is not session:
             return
         thread = self.thread_channel(session.thread_id)
         if isinstance(thread, discord.Thread):
             try:
+                if session.control_message_id is None:
+                    if session.control_update_task is not None or session.control_update_pending:
+                        await self.controls.show_or_refresh_session_controls(session, thread)
+                    return
                 await self.controls.refresh_session_controls(session, thread)
             except discord.DiscordException:
                 logger.warning("Unable to update Agent session lifecycle card %s", session.session_id)
@@ -857,6 +863,8 @@ class AgentSessionBridge:
         session.control_status_reaction = None
         session.control_interruptions_enabled = False
         session.pending_control_confirmation = None
+        if session.control_update_task is not None:
+            session.control_update_pending = True
 
     def start_grace(self, session: AgentSession) -> None:
         if session.grace_task is None:

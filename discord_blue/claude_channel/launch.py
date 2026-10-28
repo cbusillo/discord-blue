@@ -61,3 +61,7 @@ def launch_prompt(command_lines: list[str]) -> str | None:
             return None
         return prompt if separator and prompt.strip() else None
     return None
+
+
+def matches_launch_prompt(rendered: str | None, prompt: str | None) -> bool:
+    return rendered is not None and prompt is not None and rendered in {prompt, prompt.replace("\n", r"\012").replace("\t", r"\011")}

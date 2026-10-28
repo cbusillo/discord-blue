@@ -230,7 +230,14 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_first_turn_provenance_marks_only_the_launch_input(self) -> None:
         for cursor in (None, "older-turns"):
-            rpc = FakeRpc(thread("root", threadSource="spawned"), latest_turn={"id": "first", "status": "inProgress"})
+            rpc = FakeRpc(
+                thread("root", threadSource="spawned"),
+                latest_turn={
+                    "id": "first",
+                    "status": "inProgress",
+                    "items": [{"type": "userMessage", "id": "launch", "content": [{"type": "text", "text": "Brief"}]}],
+                },
+            )
             original = rpc.request
 
             async def request(
@@ -257,6 +264,18 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
                     human = await discord.next("user_message")
                     self.assertEqual(launch.get("input_origin"), LAUNCH_BRIEF_ORIGIN if cursor is None else None)
                     self.assertNotIn("input_origin", human)
+
+    async def test_itemless_first_turn_catchup_never_marks_a_later_human_steer(self) -> None:
+        rpc = FakeRpc(thread("root", threadSource="spawned"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            session = bridge.sessions["root"]
+            session.initial_turn_id = "first"
+            session.catch_up({"id": "first", "status": "inProgress", "items": []})
+            session.on_item_completed(
+                "first", {"type": "userMessage", "id": "steer", "content": [{"type": "text", "text": "Human input"}]}
+            )
+            self.assertNotIn("input_origin", await discord.next("user_message"))
 
     async def test_a_server_that_does_not_list_command_text_gets_no_approvals(self) -> None:
         # An older server would show shlex.join of the argv: longer, re-quoted, possibly with a fence.

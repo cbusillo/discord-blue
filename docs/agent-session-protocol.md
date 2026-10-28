@@ -130,7 +130,10 @@ The session store also preserves the status-card message ID. Reconnect restores
 it only for the same validated thread. Ordinary inputs and completed
 turns edit that card; only a confirmed missing message permits replacement.
 Older store records remain readable and use bot-authored card discovery from
-thread history. A failed history read does not authorize creating another card.
+thread history. A failed history read does not authorize creating another card. Complete legacy
+discovery and card writes run as one coalesced task per connection, with a
+bounded non-canceling caller wait; later updates share the task and refresh the
+latest state, so slow history does not hold native heartbeats.
 A reused thread with uncertain input provenance keeps its input visible.
 
 A native client drop marks the card Disconnected during its reconnect grace.

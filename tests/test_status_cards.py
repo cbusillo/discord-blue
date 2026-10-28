@@ -54,10 +54,10 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         for harness in ("codex", "claude"):
             self.session.hello.harness = harness
             for event, detail, state_word in (
-                ("status_changed", "Turn started", "Working"),
-                ("status_changed", "Claude Code is waiting for approval in the terminal (Bash)", "Waiting on you"),
+                ("status_changed", "Turn started", STATUS_LABELS["working"][0]),
+                ("status_changed", "Claude Code is waiting for approval in the terminal (Bash)", STATUS_LABELS["waiting"][0]),
                 ("turn_complete", "Waiting for direction", STATUS_LABELS["done"][0]),
-                ("error", "Connection refused; check the terminal.", "Failed"),
+                ("error", "Connection refused; check the terminal.", STATUS_LABELS["failed"][0]),
             ):
                 with self.subTest(harness=harness, event=event, detail=detail):
                     await self.status(event, detail)
@@ -79,7 +79,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.status.handle_user_message(
             UserMessage(session_id=self.session.session_id, session_epoch=self.session.session_epoch, message="Try again")
         )
-        self.assertIn("Working", visible_text(await self.current_card()))
+        self.assertIn(STATUS_LABELS["working"][0], visible_text(await self.current_card()))
         self.assertNotIn("Waiting for direction", visible_text(await self.current_card()))
 
     async def test_existing_text_anchor_converts_without_legacy_content_or_embeds(self) -> None:
@@ -97,7 +97,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(payload["content"])
             self.assertEqual(payload["embeds"], [])
             self.assertTrue(payload["flags"] & discord.MessageFlags(components_v2=True).value)
-        self.assertIn("Working", visible_text(view))
+        self.assertIn(STATUS_LABELS["working"][0], visible_text(view))
 
     async def test_v2_send_needs_no_manage_messages_and_does_not_ping(self) -> None:
         self.thread._manage_messages = False
@@ -143,10 +143,10 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         await self.status("status_changed", "Turn aborted")
         card = visible_text(await self.current_card())
         self.assertIn(STATUS_LABELS["waiting"][0], card)
-        self.assertNotIn("Failed", card)
+        self.assertNotIn(STATUS_LABELS["failed"][0], card)
         await self.bridge.controls.send_continue_autonomously(self.thread, cast(discord.User, SimpleNamespace(id=123)))
         self.assertIn("queued", visible_text(await self.current_card()))
-        self.assertIn("Working", visible_text(await self.current_card()))
+        self.assertIn(STATUS_LABELS["working"][0], visible_text(await self.current_card()))
 
     async def test_edit_failure_still_updates_confirmation_reactions(self) -> None:
         await self.bridge.controls.post_session_controls(self.session)
@@ -277,6 +277,48 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.thread.sent_messages.count(waiting_message({"tool_name": "Bash"})), 1)
         self.assertEqual(len(self.thread.sent_messages), 2)
 
+    async def test_updates_during_initial_send_coalesce_and_render_latest_state(self) -> None:
+        for final_state in ("done", "disconnected"):
+            with self.subTest(final_state=final_state):
+                self.fixture = self.enterContext(prompt_fixture())
+                self.bridge = self.fixture.bridge
+                self.session = self.fixture.session
+                self.thread = self.fixture.thread
+                try:
+                    await self.initial_send_receives_update(final_state)
+                finally:
+                    if self.session.grace_task is not None:
+                        self.session.grace_task.cancel()
+
+    async def initial_send_receives_update(self, final_state: str) -> None:
+        import asyncio
+
+        sending, release = asyncio.Event(), asyncio.Event()
+        original = self.thread.send
+
+        async def blocked_send(_thread: FakeThread, content: str | None = None, **kwargs: object) -> FakeReplyMessage:
+            sending.set()
+            await release.wait()
+            return await original(content, **kwargs)
+
+        with patch.object(FakeThread, "send", new=blocked_send), patch.object(controls_module, "CONTROL_CARD_WAIT_SECONDS", 0.01):
+            initial = asyncio.create_task(self.status("status_changed", "Turn started"))
+            try:
+                await asyncio.wait_for(sending.wait(), 1)
+                recovery = self.session.control_update_task
+                if final_state == "done":
+                    await self.status("turn_complete", "Turn complete")
+                else:
+                    self.bridge.start_grace(self.session)
+                self.assertIs(self.session.control_update_task, recovery)
+                await asyncio.wait_for(initial, 0.5)
+            finally:
+                release.set()
+            assert recovery is not None
+            await asyncio.wait_for(recovery, 1)
+        self.assertIn(STATUS_LABELS[final_state][0], visible_text(await self.current_card()))
+        self.assertEqual(len(self.thread.sent_messages), 1)
+
     async def test_ordinary_turn_keeps_anchor_and_inline_answer(self) -> None:
         await self.status("status_changed", "Turn started")
         anchor = self.session.control_message_id
@@ -398,22 +440,22 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         command = self.fixture.socket.sent_json[-1]
         await self.bridge.controls.handle_command_reject({**command, "reason": "Pause rejected"})
         message = await self.thread.fetch_message(cast(int, self.session.control_message_id))
-        self.assertIn("Working", visible_text(await self.current_card()))
+        self.assertIn(STATUS_LABELS["working"][0], visible_text(await self.current_card()))
         self.assertIn(controls_module.REACTION_CONTROL_PAUSE, message.reactions)
         await self.bridge.controls.send_pause_current_turn(self.thread, user)
         command = self.fixture.socket.sent_json[-1]
         await self.status("turn_complete", "Waiting for direction")
         await self.bridge.controls.handle_command_reject({**command, "reason": "No running turn"})
         self.assertIn(STATUS_LABELS["done"][0], visible_text(await self.current_card()))
-        self.assertNotIn("Failed", visible_text(await self.current_card()))
+        self.assertNotIn(STATUS_LABELS["failed"][0], visible_text(await self.current_card()))
 
     async def test_uncorrelated_claude_activity_does_not_claim_working_or_still_waiting(self) -> None:
         await self.status("status_changed", "Claude Code is waiting for approval in the terminal (Bash)")
         await self.status("status_changed", "Approval status unconfirmed; tools are active. Check the Claude Code terminal.")
         text = visible_text(await self.current_card())
         self.assertIn("Check terminal", text)
-        self.assertNotIn("Working", text)
-        self.assertNotIn("Waiting on you", text)
+        self.assertNotIn(STATUS_LABELS["working"][0], text)
+        self.assertNotIn(STATUS_LABELS["waiting"][0], text)
 
     async def test_pause_tap_does_not_overwrite_ack_arriving_during_card_update(self) -> None:
         await self.bridge.status.handle_user_message(

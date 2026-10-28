@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN
 from discord_blue.agent_client import DEFERRED, PROMPT_EVENTS, AgentSessionClient, Json, Rejected
 from discord_blue.codex_bridge.config import BridgeConfig
-from discord_blue.claude_channel.launch import launch_prompt, ancestry, loaded_as_channel
+from discord_blue.claude_channel.launch import launch_prompt, matches_launch_prompt, ancestry, loaded_as_channel
 from discord_blue.codex_bridge.session import REPLY_LIMIT, TEXT_LIMIT, TURN_DONE
 from discord_blue.claude_channel.transcript import TranscriptTitles, Titles
 from discord_blue.session_titles import SessionLabel, typed_prompt
@@ -184,7 +184,9 @@ class ClaudeSession(AgentSessionClient):
     async def on_hook(self, fields: dict[str, str]) -> None:
         event = fields.get("event")
         launch_brief = (
-            self.launch_brief_pending and event == "UserPromptSubmit" and fields.get("prompt") == self.identity.launch_prompt
+            self.launch_brief_pending
+            and event == "UserPromptSubmit"
+            and matches_launch_prompt(self.identity.launch_prompt, fields.get("prompt"))
         )
         self.launch_brief_pending = False
         conversation = fields.get("session_id") or None

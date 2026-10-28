@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from discord_blue.claude_channel.launch import loaded_as_channel, launch_prompt
+from discord_blue.claude_channel.launch import loaded_as_channel, launch_prompt, matches_launch_prompt
 from discord_blue.claude_channel.session import CHANNEL, HOOK_TOOL, MODEL_CALL, PERMISSION_REQUEST, waiting_message
 from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN, SessionHello
 from tests.fakes_discord_blue import FakeDiscordBlue
@@ -54,6 +54,12 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
             "/bin/claude -- ",
         ):
             self.assertIsNone(launch_prompt([command_line]))
+
+    def test_multiline_launch_matches_the_observed_macos_ps_rendering(self) -> None:
+        prompt = "Brief first line\nSecond line “hello” with a tab\tand literal \\012."
+        rendered = r"Brief first line\012Second line “hello” with a tab\011and literal \012."
+        self.assertTrue(matches_launch_prompt(rendered, prompt))
+        self.assertFalse(matches_launch_prompt(rendered, "Human correction"))
 
     async def test_launch_origin_requires_a_matching_brief_and_unused_transcript(self) -> None:
         for launch_text, transcript_record, expected in (

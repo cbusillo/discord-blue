@@ -9,9 +9,10 @@ from unittest.mock import patch
 import aiohttp
 
 from discord_blue.doodads.agent_session import bridge as bridge_module
+from discord_blue.doodads.agent_session import controls as controls_module
 from discord_blue.doodads.agent_session.sessions import AgentSession
 from tests.test_attach_scenarios import Scenario, hello_for, marker, scenario, until
-from tests.fake_discord import BOT_ID, FakeDiscord, FakeThreadState, Fault, Hold
+from tests.fake_discord import BOT_ID, FakeDiscord, Fault, Hold
 
 # Any of these on a session's thread is churn a reconnect within grace must not cause.
 CHURN = {
@@ -21,10 +22,6 @@ CHURN = {
     ("PATCH", "/channels/{channel}"),
 }
 OWNER_ID = 7
-
-
-def notices(thread: FakeThreadState) -> list[str]:
-    return [message.content for message in thread.messages if message.content == bridge_module.SESSION_ENDED_NOTICE]
 
 
 async def attach(running: Scenario, http: aiohttp.ClientSession, hello: dict[str, object]) -> aiohttp.ClientWebSocketResponse:
@@ -41,6 +38,37 @@ async def in_grace(running: Scenario, session_id: str) -> AgentSession:
 
 
 class SessionGraceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_history_scan_does_not_block_native_heartbeats(self) -> None:
+        fake = FakeDiscord(latency=0.002)
+        hello = hello_for("legacy-scan")
+        fake.add_thread("legacy-scan", marker=marker(hello), members={BOT_ID})
+        with patch.object(controls_module, "CONTROL_CARD_WAIT_SECONDS", 0.01):
+            async with scenario(fake, heartbeat_timeout_seconds=1) as running, aiohttp.ClientSession() as http:
+                socket = await attach(running, http, hello)
+                await socket.receive_json(timeout=5)
+                session = running.bridge.sessions.get(hello["session_id"])
+                assert session is not None
+                before = session.last_seen
+                requests_before = len(fake.requests)
+                hold = Hold("GET", "/channels/{channel}/messages")
+                fake.holds.append(hold)
+                try:
+                    await socket.send_json({**hello, "type": "status_changed", "message": "Turn started"})
+                    self.assertTrue(await until(lambda: session.control_update_task is not None, 1))
+                    recovery = session.control_update_task
+                    await socket.send_json({**hello, "type": "heartbeat"})
+                    self.assertTrue(await until(lambda: session.last_seen > before, 0.5))
+                    await socket.send_json({**hello, "type": "turn_complete", "message": "Turn complete"})
+                    self.assertTrue(await until(lambda: session.display_state == "done", 0.5))
+                    self.assertIs(session.control_update_task, recovery)
+                    self.assertEqual(fake.requests[requests_before:].count(("GET", "/channels/{channel}/messages")), 1)
+                    await running.bridge.close_timed_out_sessions()
+                    self.assertFalse(session.websocket.closed)
+                finally:
+                    hold.released.set()
+                self.assertTrue(await until(lambda: session.control_message_id is not None, 2))
+                await socket.close()
+
     async def test_reconnect_acknowledges_while_old_card_work_is_blocked(self) -> None:
         for blocked in ("anchor", "edit"):
             await self.reconnect_with_blocked_card(blocked)
@@ -98,7 +126,6 @@ class SessionGraceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ack["thread_id"], thread.id)
         self.assertEqual(churn, [])
         self.assertEqual(running.archived, [])
-        self.assertEqual(notices(thread), [])
 
     async def test_session_end_closes_without_new_notice(self) -> None:
         fake = FakeDiscord(latency=0.002)
@@ -108,13 +135,14 @@ class SessionGraceTests(unittest.IsolatedAsyncioTestCase):
             websocket = await running.connect(http)
             await websocket.send_json(hello)
             await websocket.receive_json(timeout=10)
+            before_messages = [message.id for message in thread.messages]
             await websocket.send_json({"type": "session_end", "session_id": "finishes", "session_epoch": "e1"})
             await websocket.close()  # As the clients do right after session_end.
             archived = await until(lambda: thread.archived and thread.locked, timeout=5)
 
         self.assertTrue(archived, "a clean session_end did not archive and lock the thread")
-        self.assertEqual(notices(thread), [])
         self.assertIsNone(running.bridge.sessions.get("finishes"))
+        self.assertEqual([message.id for message in thread.messages], before_messages)
 
     async def test_grace_expiry_archives_without_new_notice(self) -> None:
         fake = FakeDiscord(latency=0.002)
@@ -125,19 +153,20 @@ class SessionGraceTests(unittest.IsolatedAsyncioTestCase):
                 websocket = await running.connect(http)
                 await websocket.send_json(hello)
                 await websocket.receive_json(timeout=10)
+                before_messages = [message.id for message in thread.messages]
                 await websocket.close()
                 await asyncio.sleep(0.2)
-                during_grace = (thread.archived, notices(thread))
+                during_grace = thread.archived
                 archived = await until(lambda: thread.archived and thread.locked, timeout=5)
 
-        self.assertEqual(during_grace, (False, []))
+        self.assertFalse(during_grace)
         self.assertTrue(archived, "the thread stayed open after its grace period expired")
-        self.assertEqual(notices(thread), [])
+        self.assertEqual([message.id for message in thread.messages], before_messages)
 
     async def test_sweeps_leave_a_session_in_grace_alone(self) -> None:
         fake = FakeDiscord(latency=0.002)
         hello = hello_for("waiting")
-        thread = fake.add_thread("waiting", marker=marker(hello), members={BOT_ID})
+        fake.add_thread("waiting", marker=marker(hello), members={BOT_ID})
         async with (
             scenario(fake, heartbeat_timeout_seconds=0.1) as running,
             aiohttp.ClientSession() as http,
@@ -154,7 +183,6 @@ class SessionGraceTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.2)
 
         self.assertEqual(running.archived, [])
-        self.assertEqual(notices(thread), [])
         self.assertIs(running.bridge.sessions.get("waiting"), session)
 
     async def test_an_expiry_archive_that_lands_late_does_not_close_the_reconnected_thread(self) -> None:

@@ -254,6 +254,7 @@ class ThreadSession(AgentSessionClient):
             for item in turn.get("items") or []:
                 # Summary backfill is presentation-only, never an approval snapshot.
                 self.on_item_completed(turn_id, item)
+            self.launch_brief_seen = True
         else:
             self.on_turn_completed(turn)
 

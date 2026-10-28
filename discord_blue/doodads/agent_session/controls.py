@@ -24,6 +24,7 @@ from discord_blue.doodads.agent_session.sessions import (
     RejectedCommandMessage,
 )
 from discord_blue.doodads.agent_session.threads import session_thread_name
+from discord_blue.doodads.agent_session.thread_worker import ThreadWorkers
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,7 @@ REACTION_IN_PROGRESS = "🔄"
 REACTION_COMPACTING = "🧹"
 REACTION_FINISHED = "✅"
 REACTION_REJECTED = "❌"
+CONTROL_CARD_WAIT_SECONDS = 1
 STATUS_REACTIONS = {
     REACTION_QUEUED,
     REACTION_DELIVERED,
@@ -123,6 +125,7 @@ class ControlHooks(Protocol):
 
     bot: BlueBot
     sessions: AgentSessionRegistry
+    threads: ThreadWorkers
 
     def is_operator(self, user: discord.User | discord.Member) -> bool: ...
 
@@ -669,11 +672,29 @@ class SessionControls:
         channel = self.bridge.thread_channel(session.thread_id)
         if not isinstance(channel, discord.Thread):
             return False
+        session.control_status_reaction = reaction
+        session.control_interruptions_enabled = interruptions_enabled
+        session.control_update_pending = True
+        task = session.control_update_task
+        if task is not None and not task.done():
+            return False
+        task = session.control_update_task = asyncio.create_task(self.update_session_controls(session, channel))
+        self.bridge.threads.background.add(task)
+        task.add_done_callback(self.bridge.threads.request_done)
+        await asyncio.wait({task}, timeout=CONTROL_CARD_WAIT_SECONDS)
+        return task.result() if task.done() else False
+
+    async def update_session_controls(self, session: AgentSession, channel: discord.Thread) -> bool:
+        updated = False
+        while session.control_update_pending:
+            session.control_update_pending = False
+            updated = await self.update_session_controls_once(session, channel)
+        return updated
+
+    async def update_session_controls_once(self, session: AgentSession, channel: discord.Thread) -> bool:
         async with session.control_anchor_lock:
             if self.bridge.sessions.get(session.session_id) is not session:
                 return False
-            session.control_status_reaction = reaction
-            session.control_interruptions_enabled = interruptions_enabled
             if session.control_message_id is None:
                 try:
                     session.control_message_id = await self.previous_status_card(channel)
