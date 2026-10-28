@@ -20,6 +20,7 @@ rejected.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -30,8 +31,10 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+import aiohttp
+
 from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN
-from discord_blue.agent_client import DEFERRED, PROMPT_EVENTS, AgentSessionClient, Json, Rejected
+from discord_blue.agent_client import DEFERRED, PROMPT_EVENTS, SESSION_END_TIMEOUT_SECONDS, AgentSessionClient, Json, Rejected
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.claude_channel.launch import launch_prompt, matches_launch_prompt, ancestry, loaded_as_channel
 from discord_blue.codex_bridge.session import REPLY_LIMIT, TEXT_LIMIT, TURN_DONE
@@ -137,6 +140,8 @@ class ClaudeSession(AgentSessionClient):
         self.label = SessionLabel()
         self.transcript = TranscriptTitles()
         self.launch_brief_pending = identity.spawned and identity.launch_prompt is not None
+        self.pending_input: tuple[dict[str, str], str] | None = None
+        self.ending: tuple[Json, asyncio.Event] | None = None
         self.conversation_id: str | None = identity.session_id
         self.controls = CAPABILITIES if identity.channel else ["status_request"]
         # Discord replies held while a turn runs: Claude Code queues channel messages and would deliver
@@ -165,6 +170,7 @@ class ClaudeSession(AgentSessionClient):
     # Claude Code -> Discord
 
     async def on_permission_request(self, params: Json) -> None:
+        await self.flush_pending_input()
         # Never answered from here: the terminal dialog is the only place to approve or deny. Nothing else
         # from the request reaches Discord: Claude Code leaves some secrets in its preview unmasked.
         self.waiting_locally = True
@@ -182,6 +188,7 @@ class ClaudeSession(AgentSessionClient):
         return ""
 
     async def on_hook(self, fields: dict[str, str]) -> None:
+        await self.flush_pending_input()
         event = fields.get("event")
         launch_brief = (
             self.launch_brief_pending
@@ -215,10 +222,15 @@ class ClaudeSession(AgentSessionClient):
             echo = prompt.lstrip().startswith("<channel") and any(f'command_id="{c}"' in prompt for c in self.injected)
             # Claude Code also fires this hook for prompts it injects itself, such as task notifications.
             typed = None if echo else typed_prompt(prompt)
-            titles = await self.retitle(fields, prompt=typed)
-            if typed is not None and typed.strip():
-                origin = {"input_origin": LAUNCH_BRIEF_ORIGIN} if launch_brief and titles.before_first_prompt else {}
-                self.publish("user_message", message=clip(typed), **origin)
+            titles = await self.retitle(fields, prompt=None if fields.get("prompt_id") else typed)
+            if typed is not None and typed.strip() and fields.get("prompt_id") not in titles.scheduled_prompt_ids:
+                if launch_brief and titles.before_first_prompt:
+                    await self.retitle(fields, prompt=typed)
+                    self.publish("user_message", message=clip(typed), input_origin=LAUNCH_BRIEF_ORIGIN)
+                elif fields.get("prompt_id"):
+                    self.pending_input = (fields, typed)
+                else:
+                    self.publish("user_message", message=clip(typed))
         elif event == "Stop":
             self.waiting_locally = False
             self.publish(
@@ -235,6 +247,35 @@ class ClaudeSession(AgentSessionClient):
             await self.release_held()
         elif event == "SessionStart":
             await self.retitle(fields)
+
+    async def flush_pending_input(self) -> None:
+        pending, self.pending_input = self.pending_input, None
+        if pending is None:
+            return
+        fields, typed = pending
+        titles = await self.retitle(fields, prompt=typed)
+        if fields["prompt_id"] not in titles.scheduled_prompt_ids:
+            self.publish("user_message", message=clip(typed))
+
+    async def send(self, websocket: aiohttp.ClientWebSocketResponse, message: Json) -> None:
+        await super().send(websocket, message)
+        if self.ending is not None and message is self.ending[0]:
+            self.ending[1].set()
+
+    async def end(self) -> None:
+        try:
+            async with asyncio.timeout(SESSION_END_TIMEOUT_SECONDS):
+                await self.flush_pending_input()
+                if self.websocket is not None and not self.websocket.closed and not self.stopped.is_set():
+                    terminal = self.event("session_end")
+                    sent = asyncio.Event()
+                    self.ending = (terminal, sent)
+                    self.enqueue(terminal)
+                    await sent.wait()
+        except TimeoutError:
+            logger.warning("Claude session ended before queued input and closure finished sending")
+        finally:
+            await self.stop()
 
     async def switch_conversation(self, conversation: str | None) -> None:
         """Start a new epoch so Discord controls meant for the previous conversation are rejected."""
@@ -260,6 +301,8 @@ class ClaudeSession(AgentSessionClient):
     async def retitle(self, fields: dict[str, str], prompt: str | None = None) -> Titles:
         """Name first (hook session_title, else the transcript's custom title), then Claude's aiTitle, then the prompt."""
         titles = await self.transcript.read(fields.get("transcript_path", ""))
+        if fields.get("prompt_id") in titles.scheduled_prompt_ids:
+            prompt = None
         name = fields.get("session_title") or titles.custom
         if (title := self.label.update(name=name, auto=titles.ai, prompt=prompt)) is not None:
             self.publish("title_changed", title=title)

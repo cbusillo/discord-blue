@@ -47,6 +47,7 @@
               "session_id": "${session_id}",
               "session_title": "${session_title}",
               "prompt": "${prompt}",
+              "prompt_id": "${prompt_id}",
               "transcript_path": "${transcript_path}"
             }
           }
