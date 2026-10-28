@@ -13,8 +13,9 @@ from unittest.mock import patch
 
 import aiohttp
 
+from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN
 from discord_blue.doodads.agent_session import bridge as bridge_module
-from discord_blue.doodads.agent_session.cards import STATUS_CARD_COMPONENT_ID
+from discord_blue.doodads.agent_session.cards import STATUS_CARD_COMPONENT_ID, STATUS_LABELS
 from discord_blue.doodads.agent_session.cleanup import PENDING_CLEANUP_MAX_ATTEMPTS, THREAD_LOOKUP_TIMEOUT_SECONDS
 from discord_blue.doodads.agent_session.store import SessionStore, StoredSession
 from tests.fake_discord import BOT_ID, PARENT_ID, FakeDiscord, FakeMessage, Fault
@@ -133,7 +134,7 @@ class SessionStoreTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_restart_recovers_old_status_anchor_and_consumed_brief_provenance(self) -> None:
+    async def test_restart_recovers_old_status_anchor_and_keeps_human_input(self) -> None:
         fake = FakeDiscord(latency=0.002)
         hello = {**hello_for("quiet"), "session_kind": "spawned"}
         fake.add_thread("quiet", marker=marker(hello), members={BOT_ID})
@@ -150,8 +151,9 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 thread = fake.threads[ack["thread_id"]]
                 first_session = first.bridge.sessions.get("quiet")
                 assert first_session is not None
-                first_session.launch_brief_pending = True
-                await socket.send_json({**hello, "type": "user_message", "message": "Automated launch brief"})
+                await socket.send_json(
+                    {**hello, "type": "user_message", "message": "Automated launch brief", "input_origin": LAUNCH_BRIEF_ORIGIN}
+                )
                 self.assertTrue(await until(lambda: first.bridge.store.records["quiet"].control_message_id is not None, 5))
                 anchor = first.bridge.store.records["quiet"].control_message_id
                 self.assertFalse(any("Automated launch brief" in message.content for message in thread.messages))
@@ -159,10 +161,17 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     thread.messages.append(FakeMessage(next(fake.ids), thread.id, "Older conversation"))
                 await socket.close()
                 self.assertTrue(await until(lambda: first_session.grace_task is not None, 5))
-                self.assertTrue(any("Disconnected" in json.dumps(message.components) for message in thread.messages))
+                self.assertTrue(
+                    await until(
+                        lambda: any(
+                            STATUS_LABELS["disconnected"][0] in json.dumps(message.components, ensure_ascii=False)
+                            for message in thread.messages
+                        ),
+                        5,
+                    )
+                )
             record = json.loads(path.read_text())["quiet"]
             self.assertEqual(record["control_message_id"], anchor)
-            self.assertFalse(record["launch_brief_pending"])
             async with (
                 scenario(fake, store_path=path, listen_host="127.0.0.1", listen_port=0) as second,
                 aiohttp.ClientSession() as http,
@@ -185,7 +194,9 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([message.id for message in cards], [anchor])
                 await socket.send_json({**hello, "type": "session_end"})
                 self.assertTrue(await until(lambda: thread.archived and thread.locked, 5))
-                self.assertTrue(any("Disconnected" in json.dumps(message.components) for message in cards))
+                self.assertTrue(
+                    any(STATUS_LABELS["disconnected"][0] in json.dumps(message.components, ensure_ascii=False) for message in cards)
+                )
                 self.assertEqual(notices(thread), [])
                 await socket.close()
 

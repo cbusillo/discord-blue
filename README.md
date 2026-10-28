@@ -751,10 +751,12 @@ Questions, approvals, terminal-action requests and errors remain new messages.
 Routine session closure updates the card and keeps the existing archive/reopen
 lifecycle, without another session-ended post.
 
-A newly created thread for an explicitly spawned session omits its initial
-automated launch brief. The card says where to read the full input in the native
-terminal. Later human terminal input remains visible. Existing sessions whose
-launch provenance is uncertain keep their input mirrors. This display choice
+A spawned session omits an automated launch brief only when its client marks
+that exact input with native launch provenance. The card says where to read the full input in the native
+terminal. Later human terminal input remains visible. Existing, resumed or uncertain inputs keep their mirrors. Codex proves the
+first turn from native pagination. Claude requires a new native session ID and a
+fully read transcript with no prior prompt; a missing or long transcript keeps
+the input visible. This display choice
 does not change input delivery to either agent.
 
 Assistant answers remain separate so thread-history recovery can

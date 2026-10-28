@@ -26,7 +26,7 @@ from discord_blue.agent_client import AgentSessionClient, Rejected
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.codex_bridge.approvals import FILE_APPROVAL, PERMISSIONS_APPROVAL, content_snapshot
 from discord_blue.codex_bridge.rpc import RequestId, RpcError, TransportError
-from discord_blue.doodads.agent_session.protocol import command_text_displayable
+from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN, command_text_displayable
 from discord_blue.session_titles import SessionLabel
 
 Json = dict[str, Any]
@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 CAPABILITIES = ["new_session", "approval_decision", "pause_current_turn", "reply", "request_user_input_response", "status_request"]
 COMMAND_APPROVAL = "item/commandExecution/requestApproval"
 USER_INPUT = "item/tool/requestUserInput"
+WAITING_LOCALLY = "Waiting on a decision in the Codex TUI"
 LOCAL_DECISIONS = {"item/fileChange/requestApproval", "item/permissions/requestApproval", "mcpServer/elicitation/request"}
 # Command-approval fields Discord may leave unshown: routing, display hints, and amendments that a
 # plain `accept` never applies. Any other field set (additionalPermissions, networkApprovalContext,
@@ -121,6 +122,7 @@ class ThreadSession(AgentSessionClient):
         *,
         start_session: Callable[[str], Awaitable[None]] | None = None,
         owned: bool = False,
+        initial_turn_id: str | None = None,
     ) -> None:
         super().__init__(config, thread["id"])
         self.config: BridgeConfig = config
@@ -132,6 +134,8 @@ class ThreadSession(AgentSessionClient):
         self.local_decisions: set[RequestId] = set()
         self.thread_id: str = thread["id"]
         self.spawned = thread.get("threadSource") == "spawned"
+        self.initial_turn_id = initial_turn_id
+        self.launch_brief_seen = False
         self.cwd = str(thread.get("cwd") or "")
         self.branch = (thread.get("gitInfo") or {}).get("branch")
         self.label = SessionLabel(name=thread.get("name"), prompt=thread.get("preview"))
@@ -159,6 +163,8 @@ class ThreadSession(AgentSessionClient):
         if turn_id == self.active_turn_id or turn_id in self.reported_turns:
             return
         self.active_turn_id = turn_id
+        if self.initial_turn_id == "":
+            self.initial_turn_id = turn_id
         self.publish("status_changed", message="Turn started")
 
     def on_file_item(self, turn_id: str, item: Json) -> None:
@@ -188,10 +194,13 @@ class ThreadSession(AgentSessionClient):
                 return
             self.seen_items.append(str(item_id))
         if item.get("type") == "userMessage":
+            launch_brief = self.spawned and turn_id == self.initial_turn_id and not self.launch_brief_seen
+            self.launch_brief_seen = True
             if item.get("clientId") in self.echo_ids:
                 return
             if text := user_text(item).strip():
-                self.publish("user_message", message=text)
+                origin = {"input_origin": LAUNCH_BRIEF_ORIGIN} if launch_brief else {}
+                self.publish("user_message", message=text, **origin)
                 self.retitle(prompt=text)
         elif is_answer(item) and len(self.answers) < 64:
             self.answers.setdefault(turn_id, []).append((item.get("phase"), item["text"]))
@@ -349,8 +358,10 @@ class ThreadSession(AgentSessionClient):
                 self.wait_locally(request_id)
 
     def wait_locally(self, request_id: RequestId) -> None:
+        if request_id not in self.local_decisions:
+            self.publish("notice", message=WAITING_LOCALLY)
         self.local_decisions.add(request_id)
-        self.publish("status_changed", message="Waiting on a decision in the Codex TUI")
+        self.publish("status_changed", message=WAITING_LOCALLY)
 
     def on_server_request_resolved(self, request_id: RequestId) -> None:
         known = request_id in self.local_decisions or request_id in self.prompts

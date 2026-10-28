@@ -47,3 +47,17 @@ def loaded_as_channel(command_lines: list[str]) -> bool | None:
         flagged = any(word == CHANNEL_FLAG or word.startswith(f"{CHANNEL_FLAG}=") for word in words)
         return flagged and PLUGIN_ENTRY in line
     return None
+
+
+def is_new_session(command_lines: list[str], session_id: str) -> bool:
+    for line in command_lines:
+        words = line.split()
+        if not words or not os.path.basename(words[0]).startswith("claude"):
+            continue
+        if any(word.split("=", 1)[0] in {"--resume", "--continue", "--fork-session", "--from-pr", "-r", "-c"} for word in words):
+            return False
+        return any(
+            word == f"--session-id={session_id}" or (word == "--session-id" and words[index + 1 : index + 2] == [session_id])
+            for index, word in enumerate(words)
+        )
+    return False

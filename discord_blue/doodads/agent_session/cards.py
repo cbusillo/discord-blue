@@ -27,6 +27,7 @@ STATUS_LABELS = {
     "waiting": ("⏸ Waiting on you", 0xF0B232),
     "done": ("✅ Turn finished", 0x58BC8A),
     "failed": ("❌ Failed", 0xEF7279),
+    "reconnecting": ("⏸ Status unknown", 0x969BA4),
     "disconnected": ("⏹ Disconnected", 0x969BA4),
     "unknown": ("⏸ Check terminal", 0xF0B232),
 }
@@ -164,6 +165,7 @@ def session_status_card(session: AgentSession, reactions: list[str]) -> discord.
             "done": "Reply to start the next turn.",
             "failed": "Check the native terminal for the error.",
             "disconnected": "The session is disconnected.",
+            "reconnecting": "Waiting for the next status update.",
             "unknown": "Approval status is unconfirmed; check the native terminal.",
         }[state]
     )

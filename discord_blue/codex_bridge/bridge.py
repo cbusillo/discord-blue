@@ -220,7 +220,7 @@ class CodexBridge:
                     self.retry_join(thread_id)
                 return
             if thread_id in self.owned_threads and not thread.get("preview"):
-                page: Json = {"data": []}  # A new stock thread has no persisted turn history yet.
+                page: Json = {"data": [], "nextCursor": None}  # A new stock thread has no persisted turn history yet.
             else:
                 page = await rpc.request("thread/turns/list", {"threadId": thread_id, "limit": 1, "itemsView": "summary"})
         except RpcError as exc:
@@ -233,7 +233,13 @@ class CodexBridge:
         if thread_id in self.sessions or rpc is not self.rpc:
             return
         session = ThreadSession(
-            self.config, rpc, thread, latest_turn(page), start_session=self.start_session, owned=thread_id in self.owned_threads
+            self.config,
+            rpc,
+            thread,
+            latest_turn(page),
+            start_session=self.start_session,
+            owned=thread_id in self.owned_threads,
+            initial_turn_id=str(latest_turn(page).get("id") or "") if "nextCursor" in page and page["nextCursor"] is None else None,
         )
         assert self.http is not None
         self.sessions[thread_id] = session

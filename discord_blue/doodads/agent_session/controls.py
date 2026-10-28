@@ -675,7 +675,12 @@ class SessionControls:
             session.control_status_reaction = reaction
             session.control_interruptions_enabled = interruptions_enabled
             if session.control_message_id is None:
-                session.control_message_id = await self.previous_status_card(channel)
+                try:
+                    session.control_message_id = await self.previous_status_card(channel)
+                except discord.DiscordException:
+                    return False
+                if self.bridge.sessions.get(session.session_id) is not session:
+                    return False
                 self.bridge.remember_control_anchor(session)
             if session.control_message_id is not None:
                 await self.refresh_existing_anchor(session, channel)
@@ -694,6 +699,10 @@ class SessionControls:
 
     @staticmethod
     def session_control_reactions(session: AgentSession) -> list[str]:
+        if session.display_state == "disconnected":
+            return []
+        if session.display_state == "reconnecting":
+            return [REACTION_CONTROL_STATUS]
         if session.pending_control_confirmation is not None and session.hello.supports("end_session"):
             return [REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY]
         if session.control_status_reaction is not None:
@@ -796,11 +805,14 @@ class SessionControls:
         )
         if replaced or session.control_message_id != refreshed_id:
             return
-        session.control_message_id = None
-        message = await send_agent_session_message(
-            thread,
-            view=session_status_card(session, self.session_control_reactions(session)),
-        )
+        try:
+            message = await send_agent_session_message(
+                thread,
+                view=session_status_card(session, self.session_control_reactions(session)),
+            )
+        except discord.DiscordException:
+            logger.warning("Unable to replace missing Agent session status card %s", refreshed_id)
+            return
         session.control_message_id = message.id
         for command in session.pending_commands.values():
             if command.message_id == refreshed_id:

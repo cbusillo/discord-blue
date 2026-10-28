@@ -349,8 +349,9 @@ class AgentSessionBridge:
         async with self.session_lifecycle_lock(session.session_id):
             if self.sessions.get(session.session_id) is not session:
                 return
-            await self.mark_disconnected(session)
+            session.display_state = "disconnected"
             self.save_session(session, "grace", grace_until=time.time() + SESSION_DISCONNECT_GRACE_SECONDS)
+            self.schedule_card_refresh(session)
             # Retain ownership until the socket closes: its handler's finally must not finalize this thread.
             if not session.websocket.closed:
                 await self.close_session_websocket(
@@ -371,7 +372,6 @@ class AgentSessionBridge:
                     grace_until,
                     time.time(),
                     control_message_id=session.control_message_id,
-                    launch_brief_pending=session.launch_brief_pending,
                 ),
             )
 
@@ -383,7 +383,6 @@ class AgentSessionBridge:
                 dataclasses.replace(
                     record,
                     control_message_id=session.control_message_id,
-                    launch_brief_pending=session.launch_brief_pending,
                     updated_at=time.time(),
                 ),
             )
@@ -698,11 +697,11 @@ class AgentSessionBridge:
         # background. The thread's worker coalesces and rate-limits; nothing here waits on Discord.
         self.request_thread_name(session)
         if session.control_message_id is not None and self.sessions.get(session.session_id) is session:
-            session.display_state = "unknown"
+            session.display_state = "reconnecting"
             session.last_status_message = "Reconnected. Waiting for the next status update."
             session.control_status_reaction = None
             session.control_interruptions_enabled = False
-            await self.controls.refresh_session_controls(session, session_thread.thread)
+            self.schedule_card_refresh(session)
         return True
 
     async def handle_event(self, session: AgentSession, message_type: object, payload: dict[str, object]) -> None:
@@ -790,15 +789,12 @@ class AgentSessionBridge:
             self._attached_threads[session_thread.thread.id] = session_thread.thread
             current = self.sessions.get(session_id)
             if current is not None:
-                async with current.control_anchor_lock:
-                    record = self.store.records.get(session_id)
-                    if previous is not None and previous.thread_id == current.thread_id:
-                        current.control_message_id = previous.control_message_id
-                        current.launch_brief_pending = previous.launch_brief_pending
-                    elif record is not None and record.thread_id == current.thread_id:
-                        current.control_message_id = record.control_message_id
-                        current.launch_brief_pending = record.launch_brief_pending
-                    self.save_session(current, "attaching")
+                record = self.store.records.get(session_id)
+                if previous is not None and previous.thread_id == current.thread_id:
+                    current.control_message_id = previous.control_message_id
+                elif record is not None and record.thread_id == current.thread_id:
+                    current.control_message_id = record.control_message_id
+                self.save_session(current, "attaching")
                 try:
                     await self.threads.bounded(self.store.flush(), SESSION_STORE_WAIT_TIMEOUT_SECONDS)
                 except TimeoutError:
@@ -831,28 +827,33 @@ class AgentSessionBridge:
         if not session.websocket.closed:
             with suppress(Exception):
                 await asyncio.wait_for(session.websocket.close(), timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS)
-        async with self.session_lifecycle_lock(session.session_id):
-            if self.sessions.get(session.session_id) is session:
-                await self.mark_disconnected(session)
-                self.start_grace(session)
+        if self.sessions.get(session.session_id) is session:
+            self.start_grace(session)
 
-    async def mark_disconnected(self, session: AgentSession) -> None:
-        session.display_state = "disconnected"
-        session.last_status_message = "The session is disconnected. Waiting for it to reconnect."
-        session.control_status_reaction = None
-        session.control_interruptions_enabled = False
-        session.pending_control_confirmation = None
-        if session.thread_id is not None and session.control_message_id is not None:
-            thread = self.thread_channel(session.thread_id)
-            if isinstance(thread, discord.Thread):
-                try:
-                    await self.controls.refresh_control_card(session, thread, session.control_message_id, [])
-                except discord.DiscordException:
-                    logger.warning("Unable to mark disconnected Agent session %s", session.session_id)
+    def schedule_card_refresh(self, session: AgentSession) -> None:
+        task = asyncio.create_task(self.refresh_lifecycle_card(session), name=f"agent-session-card-{session.session_id}")
+        self.threads.background.add(task)
+        task.add_done_callback(self.threads.request_done)
+
+    async def refresh_lifecycle_card(self, session: AgentSession) -> None:
+        if session.thread_id is None or session.control_message_id is None or self.sessions.get(session.session_id) is not session:
+            return
+        thread = self.thread_channel(session.thread_id)
+        if isinstance(thread, discord.Thread):
+            try:
+                await self.controls.refresh_session_controls(session, thread)
+            except discord.DiscordException:
+                logger.warning("Unable to update Agent session lifecycle card %s", session.session_id)
 
     def start_grace(self, session: AgentSession) -> None:
         if session.grace_task is None:
+            session.display_state = "disconnected"
+            session.last_status_message = "The session is disconnected. Waiting for it to reconnect."
+            session.control_status_reaction = None
+            session.control_interruptions_enabled = False
+            session.pending_control_confirmation = None
             self.save_session(session, "grace", grace_until=time.time() + SESSION_DISCONNECT_GRACE_SECONDS)
+            self.schedule_card_refresh(session)
             session.grace_task = asyncio.create_task(self.expire_grace(session), name=f"agent-session-grace-{session.session_id}")
             self._grace_tasks.add(session.grace_task)
             session.grace_task.add_done_callback(self._grace_tasks.discard)

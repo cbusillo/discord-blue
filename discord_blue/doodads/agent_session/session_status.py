@@ -18,7 +18,7 @@ from discord_blue.doodads.agent_session.controls import (
 from discord_blue.doodads.agent_session.formatting import filter_injected_tags, format_user_message
 from discord_blue.doodads.agent_session.interactions import SessionInteractions
 from discord_blue.doodads.agent_session.messages import send_agent_session_message, send_assistant_message
-from discord_blue.doodads.agent_session.protocol import SessionStatus, UserMessage
+from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN, SessionStatus, UserMessage
 from discord_blue.doodads.agent_session.sessions import AgentSession, AgentSessionRegistry
 
 logger = logging.getLogger(__name__)
@@ -35,8 +35,6 @@ class StatusHooks(Protocol):
 
     def request_thread_name(self, session: AgentSession) -> None: ...
 
-    def remember_control_anchor(self, session: AgentSession) -> None: ...
-
 
 class SessionStatusUpdates:
     def __init__(self, bridge: StatusHooks) -> None:
@@ -50,7 +48,6 @@ class SessionStatusUpdates:
         if status.session_epoch != session.session_epoch:
             logger.warning("Agent session status for stale session epoch: %s", status.session_id)
             return
-        previous_state = (session.display_state, session.last_status_message)
         session.status_revision += 1
         session.last_status_message = status.message
         if message_type == "turn_complete":
@@ -64,12 +61,7 @@ class SessionStatusUpdates:
         else:
             session.display_state = "working"
 
-        if message_type == "error" or (
-            message_type == "status_changed"
-            and session.display_state in {"waiting", "unknown"}
-            and previous_state != (session.display_state, session.last_status_message)
-            and (status.message or "").lower() != "turn aborted"
-        ):
+        if message_type == "error":
             channel = self.bridge.thread_channel(session.thread_id)
             if isinstance(channel, discord.Thread):
                 await send_agent_session_message(channel, status.message or "The agent reported an error. Check the terminal.")
@@ -117,9 +109,7 @@ class SessionStatusUpdates:
         if user_message.session_epoch != session.session_epoch:
             logger.warning("Agent session user message for stale session epoch: %s", user_message.session_id)
             return
-        hide_brief = session.launch_brief_pending and session.hello.spawned
-        session.launch_brief_pending = False
-        self.bridge.remember_control_anchor(session)
+        hide_brief = session.hello.spawned and user_message.input_origin == LAUNCH_BRIEF_ORIGIN
         message = filter_injected_tags(user_message.message)
         if not message:
             return

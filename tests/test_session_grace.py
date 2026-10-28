@@ -11,7 +11,7 @@ import aiohttp
 from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session.sessions import AgentSession
 from tests.test_attach_scenarios import Scenario, hello_for, marker, scenario, until
-from tests.fake_discord import BOT_ID, FakeDiscord, FakeThreadState, Fault
+from tests.fake_discord import BOT_ID, FakeDiscord, FakeThreadState, Fault, Hold
 
 # Any of these on a session's thread is churn a reconnect within grace must not cause.
 CHURN = {
@@ -41,6 +41,40 @@ async def in_grace(running: Scenario, session_id: str) -> AgentSession:
 
 
 class SessionGraceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reconnect_acknowledges_while_old_card_work_is_blocked(self) -> None:
+        for blocked in ("anchor", "edit"):
+            await self.reconnect_with_blocked_card(blocked)
+
+    async def reconnect_with_blocked_card(self, blocked: str) -> None:
+        fake = FakeDiscord(latency=0.002)
+        hello = hello_for("quiet-reconnect")
+        thread = fake.add_thread("quiet-reconnect", marker=marker(hello), members={BOT_ID})
+        async with scenario(fake) as running, aiohttp.ClientSession() as http:
+            first = await attach(running, http, hello)
+            await first.receive_json(timeout=5)
+            await first.send_json({**hello, "type": "status_changed", "message": "Turn started"})
+            old = running.bridge.sessions.get(hello["session_id"])
+            assert old is not None
+            self.assertTrue(await until(lambda: old.control_message_id is not None, 5))
+            hold = Hold("PATCH", "/channels/{channel}/messages/{message}")
+            if blocked == "anchor":
+                await old.control_anchor_lock.acquire()
+            else:
+                fake.holds.append(hold)
+            try:
+                await first.close()
+                self.assertTrue(await until(lambda: old.grace_task is not None, 5))
+                second = await attach(running, http, {**hello, "session_epoch": "e2"})
+                ack = await second.receive_json(timeout=0.5)
+                self.assertEqual(ack["thread_id"], thread.id)
+            finally:
+                if blocked == "anchor":
+                    old.control_anchor_lock.release()
+                hold.released.set()
+            await second.close()
+            if blocked == "edit":
+                await asyncio.wait_for(hold.landed.wait(), 1)
+
     async def test_a_reconnect_within_grace_resumes_the_thread_without_churn(self) -> None:
         fake = FakeDiscord(latency=0.002)
         hello = hello_for("drops")
