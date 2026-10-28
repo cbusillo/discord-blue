@@ -126,6 +126,21 @@ the next sweep, allowing other stale sessions to be cleaned up.
 
 ### Disconnect cleanup and recovery
 
+The session store also preserves the status-card message ID and whether a new
+explicitly spawned session still has its initial launch brief pending. Reconnect
+restores both only for the same validated thread. Ordinary inputs and completed
+turns edit that card; only a confirmed missing message permits replacement.
+Older store records remain readable and use bot-authored card discovery from
+thread history. A failed history read does not authorize creating another card.
+A reused thread with uncertain input provenance keeps its input visible.
+
+A dropped connection marks the card Disconnected during its reconnect grace.
+Reattachment shows unconfirmed state until a native event arrives. Routine
+closure edits the card instead of sending a session-ended notice; answers and
+failure events remain in the transcript. The stored legacy `disconnect_notice`
+cleanup step now updates the card, preserving restart and residual-step recovery.
+
+
 The bridge persists bound session IDs, thread and notification IDs, the session
 marker, lifecycle state, UTC grace deadlines and remaining cleanup steps in `$HOME/agent-sessions.json`.
 The production container's HOME is its existing `/var/lib/discord-blue` mount.

@@ -25,8 +25,9 @@ DASHBOARD_PAGE_SIZE = 8
 STATUS_LABELS = {
     "working": ("🔄 Working", 0x758AFF),
     "waiting": ("⏸ Waiting on you", 0xF0B232),
-    "done": ("✅ Done", 0x58BC8A),
+    "done": ("✅ Turn finished", 0x58BC8A),
     "failed": ("❌ Failed", 0xEF7279),
+    "disconnected": ("⏹ Disconnected", 0x969BA4),
     "unknown": ("⏸ Check terminal", 0xF0B232),
 }
 
@@ -162,6 +163,7 @@ def session_status_card(session: AgentSession, reactions: list[str]) -> discord.
             "waiting": "Reply in this thread when you are ready.",
             "done": "Reply to start the next turn.",
             "failed": "Check the native terminal for the error.",
+            "disconnected": "The session is disconnected.",
             "unknown": "Approval status is unconfirmed; check the native terminal.",
         }[state]
     )
@@ -185,4 +187,18 @@ def session_status_card(session: AgentSession, reactions: list[str]) -> discord.
     children.append(discord.ui.TextDisplay(f"-# Updated <t:{int(datetime.now(UTC).timestamp())}:R>"))
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(discord.ui.Container(*children, accent_color=color, id=STATUS_CARD_COMPONENT_ID))
+    return view
+
+
+def disconnected_status_card() -> discord.ui.LayoutView:
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(
+        discord.ui.Container(
+            discord.ui.TextDisplay("### ⏹ Disconnected"),
+            discord.ui.TextDisplay("The session is disconnected. Its answers remain in this thread."),
+            discord.ui.TextDisplay(f"-# Updated <t:{int(datetime.now(UTC).timestamp())}:R>"),
+            accent_color=STATUS_LABELS["disconnected"][1],
+            id=STATUS_CARD_COMPONENT_ID,
+        )
+    )
     return view

@@ -52,7 +52,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
             for event, detail, state_word in (
                 ("status_changed", "Turn started", "Working"),
                 ("status_changed", "Claude Code is waiting for approval in the terminal (Bash)", "Waiting on you"),
-                ("turn_complete", "Waiting for direction", "Done"),
+                ("turn_complete", "Waiting for direction", "Turn finished"),
                 ("error", "Connection refused; check the terminal.", "Failed"),
             ):
                 with self.subTest(harness=harness, event=event, detail=detail):
@@ -61,7 +61,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn(state_word, text)
                     self.assertIn(detail, text)
                     self.assertFalse(is_assistant_message(text))
-            self.assertEqual(len(self.thread.sent_messages), 1)
+            self.assertEqual(sum(isinstance(view, discord.ui.LayoutView) for view in self.thread.sent_views), 1)
 
     async def test_stale_epoch_cannot_change_card_or_state(self) -> None:
         await self.status("status_changed", "Turn started")
@@ -131,7 +131,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(FakeReplyMessage, "edit", side_effect=error):
             await self.status("error", "Try the terminal")
         self.assertEqual(self.session.control_message_id, anchor)
-        self.assertEqual(len(self.thread.sent_messages), 1)
+        self.assertEqual(len(self.thread.sent_messages), 2)
         await self.status("error", "Try the terminal")
         self.assertIn("Failed", visible_text(await self.current_card()))
 
@@ -153,19 +153,92 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
             await self.bridge.controls.refresh_session_controls(self.session, cast(discord.Thread, self.thread))
         self.assertEqual(message.reactions, [controls_module.REACTION_APPROVAL_APPROVE, controls_module.REACTION_APPROVAL_DENY])
 
-    async def test_reconnect_replaces_old_card_without_reactivating_old_controls(self) -> None:
+    async def test_reconnect_recovers_and_edits_existing_card(self) -> None:
         await self.status("status_changed", "Turn started")
         old = await self.thread.fetch_message(cast(int, self.session.control_message_id))
-        self.session.control_message_id = None  # The replacement connection has no in-memory anchor.
+        self.session.control_message_id = None
         await self.status("status_changed", "Waiting on a decision in the Codex TUI")
-        self.assertTrue(old.deleted)
-        self.assertNotEqual(self.session.control_message_id, old.id)
+        self.assertFalse(old.deleted)
+        self.assertEqual(self.session.control_message_id, old.id)
         self.assertIn("Waiting on you", visible_text(await self.current_card()))
-        self.assertFalse(
-            await self.bridge.handle_thread_reaction(
-                cast(discord.Thread, self.thread), old.id, "⏸️", cast(discord.User, SimpleNamespace(id=123))
+
+    async def test_spawned_launch_brief_is_hidden_but_later_terminal_input_is_shown(self) -> None:
+        for harness in ("codex", "claude"):
+            self.session.hello.harness = harness
+            self.session.hello.spawned = True
+            self.session.launch_brief_pending = True
+            await self.bridge.status.handle_user_message(
+                UserMessage(self.session.session_id, self.session.session_epoch, "Automated task brief")
             )
+            self.assertFalse(any("Automated task brief" in message for message in self.thread.sent_messages))
+            self.assertIn("native terminal", visible_text(await self.current_card()))
+            await self.bridge.status.handle_user_message(
+                UserMessage(self.session.session_id, self.session.session_epoch, "Human correction")
+            )
+            self.assertTrue(any("Human correction" in message for message in self.thread.sent_messages))
+
+    async def test_director_launch_and_uncertain_reused_background_input_stay_visible(self) -> None:
+        for spawned, pending in ((False, True), (True, False)):
+            self.session.hello.spawned = spawned
+            self.session.launch_brief_pending = pending
+            await self.bridge.status.handle_user_message(
+                UserMessage(self.session.session_id, self.session.session_epoch, "Keep this input")
+            )
+            self.assertEqual(sum("Keep this input" in message for message in self.thread.sent_messages), 1 if not spawned else 2)
+
+    async def test_missing_anchor_is_recreated_once_and_pending_commands_follow_it(self) -> None:
+        from discord_blue.doodads.agent_session.sessions import PendingRemoteCommand
+
+        await self.status("status_changed", "Turn started")
+        old = cast(int, self.session.control_message_id)
+        self.thread.delete_message(old)
+        self.session.pending_commands["continue"] = PendingRemoteCommand(self.thread.id, old, "continue_autonomously")
+        import asyncio
+
+        await asyncio.gather(
+            *(self.bridge.controls.refresh_session_controls(self.session, cast(discord.Thread, self.thread)) for _ in range(2))
         )
+        self.assertNotEqual(self.session.control_message_id, old)
+        self.assertEqual(self.session.pending_commands["continue"].message_id, self.session.control_message_id)
+        self.assertEqual(len(self.thread.sent_messages), 2)
+
+    async def test_replaced_connection_cannot_edit_the_shared_anchor_after_fetch(self) -> None:
+        await self.status("status_changed", "Turn started")
+        anchor = cast(int, self.session.control_message_id)
+        message = await self.thread.fetch_message(anchor)
+        before = len(message.edits)
+        original = self.thread.fetch_message
+
+        async def replace_during_fetch(message_id: int) -> FakeReplyMessage:
+            fetched = await original(message_id)
+            replacement = AgentSession(
+                self.session.hello, self.session.websocket, thread_id=self.thread.id, control_message_id=anchor
+            )
+            self.bridge.sessions.register(replacement)
+            return fetched
+
+        with patch.object(self.thread, "fetch_message", new=replace_during_fetch):
+            await self.bridge.controls.refresh_session_controls(self.session, cast(discord.Thread, self.thread))
+        self.assertEqual(len(message.edits), before)
+        self.assertFalse(message.deleted)
+
+    async def test_ordinary_turn_keeps_anchor_and_inline_answer(self) -> None:
+        await self.status("status_changed", "Turn started")
+        anchor = self.session.control_message_id
+        await self.bridge.status.handle_user_message(UserMessage(self.session.session_id, self.session.session_epoch, "Try again"))
+        await self.bridge.status.handle_session_status(
+            "turn_complete", SessionStatus(self.session.session_id, self.session.session_epoch, "Waiting", "Useful answer")
+        )
+        self.assertEqual(self.session.control_message_id, anchor)
+        self.assertTrue(any("Useful answer" in message for message in self.thread.sent_messages))
+        self.assertIn("Turn finished", visible_text(await self.current_card()))
+
+    async def test_failure_and_terminal_approval_are_new_events(self) -> None:
+        await self.status("status_changed", "Turn started")
+        await self.status("status_changed", "Waiting for approval in the terminal")
+        self.assertIn("Waiting for approval in the terminal", self.thread.sent_messages)
+        await self.status("error", "Connection failed")
+        self.assertIn("Connection failed", self.thread.sent_messages)
 
     async def test_foreign_authored_card_is_never_replaced(self) -> None:
         await self.status("status_changed", "Turn started")
@@ -186,14 +259,14 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
             {"session_id": self.session.session_id, "command_id": "reply", "reason": "Session busy"}
         )
         text = visible_text(await self.current_card())
-        self.assertIn("Done", text)
+        self.assertIn("Turn finished", text)
         self.assertIn("Reply not delivered: Session busy", self.thread.sent_messages)
         self.session.acknowledged = True
         reply = FakeReplyMessage(123, self.thread, "Try again")
         self.thread.add_message(reply)
         with patch.object(FakeWebSocket, "send_json", side_effect=OSError("lost socket")):
             await self.bridge.controls.send_thread_reply(cast(discord.Message, reply))
-        self.assertIn("Done", visible_text(await self.current_card()))
+        self.assertIn("Turn finished", visible_text(await self.current_card()))
         self.assertIn("delivery could not be confirmed", reply.replies[0])
         self.assertNotIn("queued", visible_text(await self.current_card()))
 
@@ -213,7 +286,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.bridge.sessions.get(self.session.session_id), self.session)
         self.assertFalse(self.fixture.socket.closed)
         self.assertEqual(self.session.control_message_id, anchor)
-        self.assertEqual(len(self.thread.sent_messages), 1)
+        self.assertEqual(len(self.thread.sent_messages), 2)
 
     async def test_rejected_pause_preserves_running_controls_and_newer_completion(self) -> None:
         user = cast(discord.User, SimpleNamespace(id=123))
@@ -230,7 +303,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         command = self.fixture.socket.sent_json[-1]
         await self.status("turn_complete", "Waiting for direction")
         await self.bridge.controls.handle_command_reject({**command, "reason": "No running turn"})
-        self.assertIn("Done", visible_text(await self.current_card()))
+        self.assertIn("Turn finished", visible_text(await self.current_card()))
         self.assertNotIn("Failed", visible_text(await self.current_card()))
 
     async def test_uncorrelated_claude_activity_does_not_claim_working_or_still_waiting(self) -> None:

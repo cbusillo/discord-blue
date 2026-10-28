@@ -84,6 +84,24 @@ class SessionRoutingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(await bridge.cleanups.delete_session_notification(recovered.notification_message_id or 0))
                 self.assertFalse((main if parent_id == main.id else second)._history)
 
+    async def test_only_a_new_spawned_thread_marks_its_first_input_as_launch_brief(self) -> None:
+        for spawned in (False, True):
+            config = cast(Config, cast(object, SimpleNamespace(agent_session=AgentSessionConfig(), discord=DiscordConfig())))
+            config.agent_session.channel_id = 321
+            config.agent_session.spawned_channel_id = 654
+            main, background = FakeTextChannel(321, []), FakeTextChannel(654, [])
+            bot = FakeBot(config)
+            self.enterContext(patch.object(bot, "get_channel", side_effect={321: main, 654: background}.get))
+            bridge = AgentSessionBridge(cast(Any, bot))
+            hello = dataclasses.replace(make_hello(), spawned=spawned)
+            session = AgentSession(hello, cast(Any, FakeWebSocket()))
+            bridge.sessions.register(session)
+            try:
+                await bridge.session_threads.find_or_create_session_thread(hello)
+                self.assertEqual(session.launch_brief_pending, spawned)
+            finally:
+                bridge.threads.stop()
+
     async def test_attach_waits_until_both_parent_scans_complete(self) -> None:
         index = DiscoveryIndex(lambda: 999)
         main, second = FakeTextChannel(321, []), FakeTextChannel(654, [])

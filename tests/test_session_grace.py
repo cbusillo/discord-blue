@@ -66,7 +66,7 @@ class SessionGraceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(running.archived, [])
         self.assertEqual(notices(thread), [])
 
-    async def test_session_end_closes_the_thread_at_once_with_one_notice(self) -> None:
+    async def test_session_end_closes_without_new_notice(self) -> None:
         fake = FakeDiscord(latency=0.002)
         hello = hello_for("finishes")
         thread = fake.add_thread("finishes", marker=marker(hello), members={BOT_ID})
@@ -79,10 +79,10 @@ class SessionGraceTests(unittest.IsolatedAsyncioTestCase):
             archived = await until(lambda: thread.archived and thread.locked, timeout=5)
 
         self.assertTrue(archived, "a clean session_end did not archive and lock the thread")
-        self.assertEqual(notices(thread), [bridge_module.SESSION_ENDED_NOTICE])
+        self.assertEqual(notices(thread), [])
         self.assertIsNone(running.bridge.sessions.get("finishes"))
 
-    async def test_grace_expiry_posts_one_notice_and_archives(self) -> None:
+    async def test_grace_expiry_archives_without_new_notice(self) -> None:
         fake = FakeDiscord(latency=0.002)
         hello = hello_for("gone")
         thread = fake.add_thread("gone", marker=marker(hello), members={BOT_ID})
@@ -98,7 +98,7 @@ class SessionGraceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(during_grace, (False, []))
         self.assertTrue(archived, "the thread stayed open after its grace period expired")
-        self.assertEqual(notices(thread), [bridge_module.SESSION_ENDED_NOTICE])
+        self.assertEqual(notices(thread), [])
 
     async def test_sweeps_leave_a_session_in_grace_alone(self) -> None:
         fake = FakeDiscord(latency=0.002)

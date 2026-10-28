@@ -188,6 +188,9 @@ class SessionThreads:
                 settle=partial(self.delete_creation_duplicates, token),
                 stopping=self.creation_stopping,
             )
+            current = self.bridge.sessions.get(hello.session_id)
+            if current is not None:
+                current.launch_brief_pending = hello.spawned
             self.bridge.discovery.add(session_thread.thread, [threads_module.session_start_message(hello)])
             self.bridge.sessions.bind_thread(
                 hello.session_id,

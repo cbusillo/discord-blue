@@ -130,6 +130,8 @@ class ControlHooks(Protocol):
 
     def thread_channel(self, thread_id: int) -> object | None: ...
 
+    def remember_control_anchor(self, session: AgentSession) -> None: ...
+
 
 class SessionControls:
     def __init__(self, bridge: ControlHooks) -> None:
@@ -577,7 +579,7 @@ class SessionControls:
         session.control_status_reaction = REACTION_QUEUED
         session.control_interruptions_enabled = False
         if session.control_message_id is not None:
-            await self.refresh_control_card(session, thread, session.control_message_id, [REACTION_QUEUED])
+            await self.refresh_session_controls(session, thread)
         else:
             await self.show_or_refresh_session_controls(session, thread)
 
@@ -585,7 +587,7 @@ class SessionControls:
         if self.bridge.bot.user is None:
             return None
         try:
-            async for message in thread.history(limit=50):
+            async for message in thread.history(limit=None):
                 if message.author.id == self.bridge.bot.user.id and any(
                     isinstance(component, discord.Container) and component.id == STATUS_CARD_COMPONENT_ID
                     for component in getattr(message, "components", [])
@@ -593,6 +595,7 @@ class SessionControls:
                     return message.id
         except discord.DiscordException:
             logger.warning("Unable to recover Agent session status card in %s", thread.id)
+            raise
         return None
 
     async def show_or_refresh_session_controls(
@@ -600,10 +603,6 @@ class SessionControls:
         session: AgentSession,
         thread: discord.Thread,
     ) -> None:
-        if session.control_message_id is not None:
-            await self.refresh_session_controls(session, thread)
-            if session.control_message_id is not None:
-                return
         await self.spawn_session_controls(
             session,
             reaction=session.control_status_reaction,
@@ -656,32 +655,7 @@ class SessionControls:
         session.pending_control_confirmation = None
         session.control_status_reaction = None
         session.control_interruptions_enabled = False
-        if session.control_message_id is not None:
-            refreshed_id = session.control_message_id
-            replaced = await self.refresh_control_card(
-                session,
-                channel,
-                refreshed_id,
-                self.session_control_reactions(session),
-            )
-            if replaced or session.control_message_id != refreshed_id:
-                return
-            session.control_message_id = None
-
-        await self.spawn_session_controls(session, reaction=None, interruptions_enabled=False)
-
-    async def delete_session_message(self, thread_id: int, message_id: int) -> None:
-        channel = self.bridge.thread_channel(thread_id)
-        if not isinstance(channel, discord.Thread):
-            return
-        try:
-            message = await channel.fetch_message(message_id)
-            await self.clear_message_reactions(message)
-            await message.delete()
-        except discord.NotFound:
-            return
-        except discord.DiscordException:
-            logger.warning("Unable to clear Agent session control message %s", message_id)
+        await self.show_or_refresh_session_controls(session, channel)
 
     async def spawn_session_controls(
         self,
@@ -695,47 +669,28 @@ class SessionControls:
         channel = self.bridge.thread_channel(session.thread_id)
         if not isinstance(channel, discord.Thread):
             return False
-
-        old_control_message_id = session.control_message_id
-        if old_control_message_id is None:
-            old_control_message_id = await self.previous_status_card(channel)
-        old_pending_control_confirmation = session.pending_control_confirmation
-        old_control_status_reaction = session.control_status_reaction
-        old_control_interruptions_enabled = session.control_interruptions_enabled
-
-        session.pending_control_confirmation = None
-        session.control_status_reaction = reaction
-        session.control_interruptions_enabled = interruptions_enabled
-
-        try:
-            message = await send_agent_session_message(
-                channel,
-                view=session_status_card(session, self.session_control_reactions(session)),
-            )
-        except discord.DiscordException:
-            session.pending_control_confirmation = old_pending_control_confirmation
-            session.control_status_reaction = old_control_status_reaction
-            session.control_interruptions_enabled = old_control_interruptions_enabled
-            return False
-
-        session.control_message_id = message.id  # Before its reactions, so a tap on the first one counts.
-        replaced = old_control_message_id if old_control_message_id != message.id else None
-        if replaced is not None:
-            self.rebind_session_control_commands(session, replaced, message.id)
-        await self.write_message_reactions(message, self.session_control_reactions(session))
-        if replaced is not None:
-            await self.delete_session_message(session.thread_id, replaced)
-        return True
-
-    @staticmethod
-    def rebind_session_control_commands(
-        session: AgentSession,
-        old_message_id: int,
-        new_message_id: int,
-    ) -> None:
-        for command in session.pending_commands.values():
-            if command.message_id == old_message_id:
-                command.message_id = new_message_id
+        async with session.control_anchor_lock:
+            if self.bridge.sessions.get(session.session_id) is not session:
+                return False
+            session.control_status_reaction = reaction
+            session.control_interruptions_enabled = interruptions_enabled
+            if session.control_message_id is None:
+                session.control_message_id = await self.previous_status_card(channel)
+                self.bridge.remember_control_anchor(session)
+            if session.control_message_id is not None:
+                await self.refresh_existing_anchor(session, channel)
+                return True
+            try:
+                message = await send_agent_session_message(
+                    channel,
+                    view=session_status_card(session, self.session_control_reactions(session)),
+                )
+            except discord.DiscordException:
+                return False
+            session.control_message_id = message.id
+            self.bridge.remember_control_anchor(session)
+            await self.write_message_reactions(message, self.session_control_reactions(session))
+            return True
 
     @staticmethod
     def session_control_reactions(session: AgentSession) -> list[str]:
@@ -782,12 +737,20 @@ class SessionControls:
         remove_user_reaction: tuple[str, discord.User | discord.Member] | None = None,
     ) -> bool:
         async with session.control_card_lock:
+            if self.bridge.sessions.get(session.session_id) is not session:
+                return True
             try:
                 message = await thread.fetch_message(message_id)
             except discord.NotFound:
                 return False
             except discord.DiscordException:
                 logger.warning("Unable to fetch Agent session status card %s", message_id)
+                return True
+            if self.bridge.sessions.get(session.session_id) is not session:
+                return True
+            bot_user = self.bridge.bot.user
+            if bot_user is None or message.author.id != bot_user.id:
+                logger.warning("Agent session status anchor %s is not bot-authored", message_id)
                 return True
             try:
                 await message.edit(
@@ -811,6 +774,16 @@ class SessionControls:
         *,
         remove_user_reaction: tuple[str, discord.User | discord.Member] | None = None,
     ) -> None:
+        async with session.control_anchor_lock:
+            await self.refresh_existing_anchor(session, thread, remove_user_reaction=remove_user_reaction)
+
+    async def refresh_existing_anchor(
+        self,
+        session: AgentSession,
+        thread: discord.Thread,
+        *,
+        remove_user_reaction: tuple[str, discord.User | discord.Member] | None = None,
+    ) -> None:
         if session.control_message_id is None:
             return
         refreshed_id = session.control_message_id
@@ -828,7 +801,11 @@ class SessionControls:
             thread,
             view=session_status_card(session, self.session_control_reactions(session)),
         )
-        session.control_message_id = message.id  # Before its reactions, so a tap on the first one counts.
+        session.control_message_id = message.id
+        for command in session.pending_commands.values():
+            if command.message_id == refreshed_id:
+                command.message_id = message.id
+        self.bridge.remember_control_anchor(session)
         await self.write_message_reactions(message, self.session_control_reactions(session))
 
     async def clear_message_reactions(self, message: discord.Message) -> None:
