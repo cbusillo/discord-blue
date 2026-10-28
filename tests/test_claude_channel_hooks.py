@@ -49,6 +49,7 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
         for command_line in (
             f"/bin/claude --resume {IDENTITY.session_id} -- {brief}",
             f"/bin/claude --continue -- {brief}",
+            f"/bin/claude --no-session-persistence -- {brief}",
             "/bin/claude bg-session",
             "/bin/claude",
             "/bin/claude -- ",
@@ -63,6 +64,7 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_launch_origin_requires_a_matching_brief_and_unused_transcript(self) -> None:
         for launch_text, transcript_record, expected in (
+            ("Initial input", None, LAUNCH_BRIEF_ORIGIN),
             ("Initial input", {"type": "system"}, LAUNCH_BRIEF_ORIGIN),
             (None, {"type": "system"}, None),
             ("Different brief", {"type": "system"}, None),
@@ -70,14 +72,15 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
         ):
             with tempfile.TemporaryDirectory() as directory:
                 transcript = Path(directory) / "session.jsonl"
-                transcript.write_text(json.dumps(transcript_record) + "\n")
+                if transcript_record is not None:
+                    transcript.write_text(json.dumps(transcript_record) + "\n")
                 identity = dataclasses.replace(IDENTITY, spawned=True, launch_prompt=launch_text)
                 async with running_channel(identity=identity) as (claude, discord):
                     await claude.initialize()
                     await discord.next("hello")
                     await hook(claude, "UserPromptSubmit", prompt="Initial input", transcript_path=str(transcript))
                     first = await discord.next("user_message")
-                    await hook(claude, "UserPromptSubmit", prompt="Human correction", transcript_path=str(transcript))
+                    await hook(claude, "UserPromptSubmit", prompt="Initial input", transcript_path=str(transcript))
                     second = await discord.next("user_message")
                     self.assertEqual(first.get("input_origin"), expected)
                     self.assertNotIn("input_origin", second)

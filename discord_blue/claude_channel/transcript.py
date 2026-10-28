@@ -55,6 +55,8 @@ class TranscriptTitles:
     def read_now(self, path: str) -> Titles:
         try:
             status = os.stat(path)
+        except FileNotFoundError:
+            return Titles(before_first_prompt=True)
         except OSError:
             return Titles()
         if not stat.S_ISREG(status.st_mode):

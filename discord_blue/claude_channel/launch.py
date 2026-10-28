@@ -57,7 +57,11 @@ def launch_prompt(command_lines: list[str]) -> str | None:
             continue
         if len(words) > 1 and words[1].startswith("bg-"):
             return None
-        if any(word.split("=", 1)[0] in {"--resume", "--continue", "--fork-session", "--from-pr", "-r", "-c"} for word in words):
+        if any(
+            word.split("=", 1)[0]
+            in {"--resume", "--continue", "--fork-session", "--from-pr", "--no-session-persistence", "-r", "-c"}
+            for word in words
+        ):
             return None
         return prompt if separator and prompt.strip() else None
     return None

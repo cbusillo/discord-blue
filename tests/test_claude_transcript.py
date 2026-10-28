@@ -42,9 +42,11 @@ class TranscriptTitlesTests(unittest.IsolatedAsyncioTestCase):
             fifo = Path(directory) / "session.jsonl"
             os.mkfifo(fifo)  # Opening it would block; it must be refused without opening.
             titles = TranscriptTitles()
-            for path in ("", "/nonexistent/session.jsonl", "/etc/passwd", str(fifo)):
+            for path in ("", "/etc/passwd", str(fifo)):
                 with self.subTest(path=path):
                     self.assertEqual(await titles.read(path), Titles())
+            missing = Path(directory) / "not-created.jsonl"
+            self.assertEqual(await titles.read(str(missing)), Titles(before_first_prompt=True))
 
     async def test_a_read_that_stalls_gives_no_titles_without_blocking_the_event_loop(self) -> None:
         release = threading.Event()

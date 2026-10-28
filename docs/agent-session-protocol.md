@@ -298,8 +298,9 @@ an ID or epoch that differs from the connection's current session.
 that exact input mirror only for an explicitly spawned session. Older clients
 and unmarked inputs remain visible. Codex marks the initial native user item
 only when its complete first-turn page proves launch provenance. Claude marks
-the first hook input only when it matches the explicit CLI launch brief, with a fully read
-transcript containing no prior user or assistant record. Neither the thread's
+the first hook input only when it matches the explicit CLI launch brief, with a new transcript
+not yet created by Claude or a fully read transcript containing no prior user or assistant record.
+Resumed launches and disabled session persistence do not supply launch provenance. Neither the thread's
 age nor the session's background label alone hides an input. Full input remains
 in the native terminal. The marker affects display only, never agent delivery.
 
