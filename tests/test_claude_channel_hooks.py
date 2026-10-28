@@ -85,6 +85,35 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(first.get("input_origin"), expected)
                     self.assertNotIn("input_origin", second)
 
+    async def test_only_the_current_proven_scheduled_prompt_is_hidden(self) -> None:
+        prompt = "Check the build and report any failures"
+        for origin, meta, record_id, hook_id, expected in (
+            ("scheduled", True, "scheduled-1", "scheduled-1", []),
+            ("user", False, "human-1", "human-1", [("title_changed", prompt), ("user_message", prompt)]),
+            ("scheduled", True, "earlier-1", "human-1", [("title_changed", prompt), ("user_message", prompt)]),
+            ("scheduled", True, "earlier-1", "", [("title_changed", prompt), ("user_message", prompt)]),
+            ("scheduled", False, "human-1", "human-1", [("title_changed", prompt), ("user_message", prompt)]),
+        ):
+            with self.subTest(origin=origin, meta=meta, record_id=record_id, hook_id=hook_id):
+                with tempfile.TemporaryDirectory() as directory:
+                    transcript = Path(directory) / "session.jsonl"
+                    record = {
+                        "type": "user",
+                        "promptId": record_id,
+                        "turnOrigin": origin,
+                        "isMeta": meta,
+                        "promptSource": "system" if meta else "user",
+                        "message": {"role": "user", "content": prompt},
+                    }
+                    transcript.write_text(json.dumps(record) + "\n")
+                    async with running_channel() as (claude, discord):
+                        await claude.initialize()
+                        await discord.next("hello")
+                        await hook(claude, "UserPromptSubmit", prompt=prompt, prompt_id=hook_id, transcript_path=str(transcript))
+                        await hook(claude, "Stop", last_assistant_message="Build passed")
+                        events = await mirrored(claude, discord)
+                self.assertEqual(events, [*expected, ("turn_complete", "Build passed")])
+
     async def test_hooks_mirror_typed_prompts_and_answers_but_not_injected_replies(self) -> None:
         async with running_channel() as (claude, discord):
             await claude.initialize()

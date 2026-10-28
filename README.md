@@ -774,7 +774,13 @@ terminal. Later human terminal input remains visible. Existing, resumed or uncer
 first turn from native pagination. Claude matches the explicit CLI launch brief against the first hook input, with a
 new transcript not yet created by Claude, or a fully read transcript containing no prior prompt.
 Resumed launches, disabled session persistence and unreadable or long transcripts keep
-the input visible. This display choice
+the input visible. Claude scheduled wakeups also stay out of the conversation and
+thread labels when the current hook's prompt ID matches a native transcript record
+marked as scheduled system input. Human input with the same words stays visible.
+Missing IDs, unreadable transcripts and records not yet written keep the input visible;
+these checks never delay a prompt waiting for the transcript to catch up. The DUI
+plugin and local Claude channel must both be updated, and active Claude sessions
+must resume with the updated plugin/channel to use this behavior. This display choice
 does not change input delivery to either agent.
 
 Assistant answers remain separate so thread-history recovery can

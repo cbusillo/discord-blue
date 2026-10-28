@@ -29,6 +29,7 @@ class Titles:
     custom: str | None = None
     ai: str | None = None
     before_first_prompt: bool = False
+    scheduled_prompt_ids: frozenset[str] = frozenset()
 
 
 class TranscriptTitles:
@@ -81,6 +82,7 @@ class TranscriptTitles:
         if start:
             lines = lines[1:]  # The first line was cut by the seek.
         custom = ai = None
+        scheduled_prompt_ids: set[str] = set()
         before_first_prompt = not start
         for line in lines:
             if not line.strip():
@@ -93,10 +95,21 @@ class TranscriptTitles:
             if not isinstance(record, dict):
                 before_first_prompt = False
                 continue
+            if (
+                record.get("type") == "user"
+                and record.get("isMeta") is True
+                and record.get("promptSource") == "system"
+                and record.get("turnOrigin") == "scheduled"
+                and isinstance(prompt_id := record.get("promptId"), str)
+                and prompt_id
+            ):
+                scheduled_prompt_ids.add(prompt_id)
             if record.get("type") in {"assistant", "user"}:
                 before_first_prompt = False
             if record.get("type") == "ai-title" and isinstance(record.get("aiTitle"), str):
                 ai = record["aiTitle"]
             elif record.get("type") == "custom-title" and isinstance(record.get("customTitle"), str):
                 custom = record["customTitle"]
-        return Titles(custom=custom, ai=ai, before_first_prompt=before_first_prompt)
+        return Titles(
+            custom=custom, ai=ai, before_first_prompt=before_first_prompt, scheduled_prompt_ids=frozenset(scheduled_prompt_ids)
+        )

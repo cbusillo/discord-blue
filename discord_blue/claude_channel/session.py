@@ -216,7 +216,7 @@ class ClaudeSession(AgentSessionClient):
             # Claude Code also fires this hook for prompts it injects itself, such as task notifications.
             typed = None if echo else typed_prompt(prompt)
             titles = await self.retitle(fields, prompt=typed)
-            if typed is not None and typed.strip():
+            if typed is not None and typed.strip() and fields.get("prompt_id") not in titles.scheduled_prompt_ids:
                 origin = {"input_origin": LAUNCH_BRIEF_ORIGIN} if launch_brief and titles.before_first_prompt else {}
                 self.publish("user_message", message=clip(typed), **origin)
         elif event == "Stop":
@@ -260,6 +260,8 @@ class ClaudeSession(AgentSessionClient):
     async def retitle(self, fields: dict[str, str], prompt: str | None = None) -> Titles:
         """Name first (hook session_title, else the transcript's custom title), then Claude's aiTitle, then the prompt."""
         titles = await self.transcript.read(fields.get("transcript_path", ""))
+        if fields.get("prompt_id") in titles.scheduled_prompt_ids:
+            prompt = None
         name = fields.get("session_title") or titles.custom
         if (title := self.label.update(name=name, auto=titles.ai, prompt=prompt)) is not None:
             self.publish("title_changed", title=title)
