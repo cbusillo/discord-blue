@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import math
@@ -21,6 +22,41 @@ SessionState = Literal["attaching", "live", "grace", "closing", "closed"]
 
 
 @dataclass(frozen=True, slots=True)
+class StoredQuestion:
+    key: str
+    epoch: str
+    thread_id: int
+    parent_id: int
+    source_url: str
+    questions: tuple[tuple[str, str], ...]
+    source_signature: str = ""
+    message_id: int | None = None
+    state: str = "Waiting"
+
+    @classmethod
+    def parse(cls, value: object) -> StoredQuestion:
+        if not isinstance(value, dict):
+            raise ValueError("invalid question record")
+        question = cls(**value)
+        if (
+            not all(
+                isinstance(v, str)
+                for v in (question.key, question.epoch, question.source_url, question.state, question.source_signature)
+            )
+            or type(question.thread_id) is not int
+            or type(question.parent_id) is not int
+            or (question.message_id is not None and type(question.message_id) is not int)
+            or question.state not in {"Waiting", "Uncertain", "Delivered", "Not delivered"}
+            or not isinstance(question.questions, (list, tuple))
+            or any(
+                not isinstance(q, (list, tuple)) or len(q) != 2 or not all(isinstance(v, str) for v in q) for q in question.questions
+            )
+        ):
+            raise ValueError("invalid question fields")
+        return dataclasses.replace(question, questions=tuple((number, body) for number, body in question.questions))
+
+
+@dataclass(frozen=True, slots=True)
 class StoredSession:
     thread_id: int
     notification_id: int | None
@@ -31,6 +67,7 @@ class StoredSession:
     pending_steps: tuple[CleanupStep, ...] | None = None
     recovery_attempts: int = 0
     control_message_id: int | None = None
+    questions: tuple[StoredQuestion, ...] = ()
 
     @classmethod
     def parse(cls, value: object) -> StoredSession:
@@ -70,6 +107,7 @@ class StoredSession:
             cast(tuple[CleanupStep, ...], tuple(steps)) if steps is not None else None,
             attempts,
             control,
+            tuple(StoredQuestion.parse(q) for q in value.get("questions", [])),
         )
 
 

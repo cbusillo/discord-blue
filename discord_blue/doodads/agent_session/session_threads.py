@@ -11,7 +11,7 @@ import dataclasses
 import logging
 from collections import Counter
 from functools import partial
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import discord
 
@@ -19,14 +19,17 @@ from discord_blue.doodads.agent_session import threads as threads_module
 from discord_blue.doodads.agent_session.cards import ANSWER_CARD_COMPONENT_ID, ANSWER_CONTINUATION_COMPONENT_ID
 from discord_blue.doodads.agent_session.cleanup import PENDING_CLEANUP_MAX_ATTEMPTS, THREAD_CLOSE_WAIT_SECONDS, SessionCleanups
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
-from discord_blue.doodads.agent_session.formatting import is_assistant_message
 from discord_blue.doodads.agent_session.messages import send_assistant_message
+from discord_blue.doodads.agent_session.formatting import is_assistant_message
 from discord_blue.doodads.agent_session.protocol import SessionHello
 from discord_blue.doodads.agent_session.sessions import AgentSessionRegistry
 from discord_blue.doodads.agent_session.store import SessionStore, StoredSession
 from discord_blue.doodads.agent_session.thread_worker import ThreadWorkers
 from discord_blue.doodads.agent_session.threads import SESSION_NOTIFICATION_PREFIXES, SessionThread
 from discord_blue.plugs.discord_plug import BlueBot
+
+if TYPE_CHECKING:
+    from discord_blue.doodads.agent_session.director_questions import QuestionCards
 
 logger = logging.getLogger(__name__)
 # Before giving up on an incomplete discovery (a failed read or listing page), refresh it again after these waits.
@@ -63,6 +66,8 @@ class SessionThreadHooks(Protocol):
     sessions: AgentSessionRegistry
     store: SessionStore
     threads: ThreadWorkers
+
+    questions: QuestionCards
 
     def bot_user_id(self) -> int | None: ...
 
@@ -382,7 +387,10 @@ class SessionThreads:
         assistant_message = hello.assistant_message
         if assistant_message is None:
             return
-        await send_assistant_message(thread, assistant_message)
+        source = await send_assistant_message(thread, assistant_message)
+        session = self.bridge.sessions.get(hello.session_id)
+        if source is not None and session is not None:
+            await self.bridge.questions.post(session, thread, assistant_message, source)
 
     def is_bot_assistant_message(self, message: discord.Message) -> bool:
         bot_user = self.bridge.bot.user

@@ -112,6 +112,9 @@ class AgentSessionBridge:
         self._attached_threads: dict[int, discord.Thread] = {}
         self.controls = SessionControls(self)
         self.interactions = SessionInteractions(self)
+        from discord_blue.doodads.agent_session.director_questions import QuestionCards
+
+        self.questions = QuestionCards(self)
         self.status = SessionStatusUpdates(self)
         self._monitor_started_at = time.monotonic()
         self._monitor_last_progress = self._monitor_started_at
@@ -139,6 +142,7 @@ class AgentSessionBridge:
         self._maintenance_has_run = False
 
         await self.store.start()
+        self.questions.restore()
         now = time.time()
         for session_id, record in list(self.store.records.items()):
             if record.status in {"attaching", "live", "grace"}:
@@ -376,6 +380,7 @@ class AgentSessionBridge:
                     grace_until,
                     time.time(),
                     control_message_id=session.control_message_id,
+                    questions=self.store.records[session.session_id].questions if session.session_id in self.store.records else (),
                 ),
             )
 

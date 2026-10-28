@@ -9,9 +9,12 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 import discord
+
+if TYPE_CHECKING:
+    from discord_blue.doodads.agent_session.director_questions import QuestionCards
 
 from discord_blue.doodads.agent_session.cards import STATUS_CARD_COMPONENT_ID, session_status_card
 from discord_blue.doodads.agent_session.messages import agent_session_allowed_mentions, send_agent_session_message
@@ -125,6 +128,7 @@ class ControlHooks(Protocol):
     """What the controls need from the bridge."""
 
     bot: BlueBot
+    questions: QuestionCards
     sessions: AgentSessionRegistry
     store: SessionStore
     threads: ThreadWorkers
@@ -237,6 +241,8 @@ class SessionControls:
         user: discord.User | discord.Member,
         text: str,
         message_id: int,
+        *,
+        question_key: str | None = None,
     ) -> str | None:
         command = RemoteCommand(
             command_id=str(uuid.uuid4()),
@@ -250,6 +256,7 @@ class SessionControls:
             thread_id=thread.id,
             message_id=message_id,
             kind="reply",
+            question_key=question_key,
         )
         queued = False
 
@@ -360,6 +367,8 @@ class SessionControls:
         command = session.pending_commands.get(command_id)
         if command is not None:
             session.active_command_id = command_id
+            if command.question_key is not None:
+                await self.bridge.questions.outcome(session.session_id, command.question_key, "Delivered")
             await self.update_command_message_reaction(session, command, REACTION_DELIVERED)
             if command.kind == "reply" and command.status_revision == session.status_revision:
                 session.last_status_message = "Request delivered to the native session."
@@ -374,6 +383,8 @@ class SessionControls:
         if session.active_command_id == command_id:
             session.active_command_id = None
         if command is not None:
+            if command.question_key is not None:
+                await self.bridge.questions.outcome(session.session_id, command.question_key, "Not delivered")
             self.restore_command_status(session, command)
             await self.update_command_message_reaction(session, command, REACTION_REJECTED)
             if command.message_id is not None:

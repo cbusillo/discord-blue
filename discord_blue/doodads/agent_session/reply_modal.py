@@ -53,12 +53,18 @@ def reply_context_error(
     interaction: discord.Interaction,
     session: AgentSession | None,
     epoch: str,
+    *,
+    thread_id: int | None = None,
 ) -> str | None:
     if not bridge.bot.config.agent_session.enabled:
         return "Agent sessions are not enabled."
     if not bridge.is_operator(interaction.user):
         return "Only agent session operators can reply."
-    if session is None or bridge.sessions.get_by_thread(getattr(interaction.channel, "id", 0)) is not session:
+    if (
+        session is None
+        or bridge.sessions.get_by_thread(thread_id if thread_id is not None else getattr(interaction.channel, "id", 0))
+        is not session
+    ):
         return "Use this on an answer in a bound session thread."
     if session.session_epoch != epoch or not session.acknowledged:
         return "The session reconnected; open Reply about this again."

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import discord
 
@@ -21,12 +21,16 @@ from discord_blue.doodads.agent_session.messages import send_agent_session_messa
 from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN, SessionStatus, UserMessage
 from discord_blue.doodads.agent_session.sessions import AgentSession, AgentSessionRegistry
 
+if TYPE_CHECKING:
+    from discord_blue.doodads.agent_session.director_questions import QuestionCards
+
 logger = logging.getLogger(__name__)
 
 
 class StatusHooks(Protocol):
     """What status routing needs from the bridge."""
 
+    questions: QuestionCards
     sessions: AgentSessionRegistry
     controls: SessionControls
     interactions: SessionInteractions
@@ -140,7 +144,10 @@ class SessionStatusUpdates:
         channel = self.bridge.thread_channel(thread_id)
         if not isinstance(channel, discord.Thread):
             return
-        await send_assistant_message(channel, text)
+        source = await send_assistant_message(channel, text)
+        session = self.bridge.sessions.get_by_thread(thread_id)
+        if source is not None and session is not None:
+            await self.bridge.questions.post(session, channel, text, source)
 
     async def handle_title_changed(self, session: AgentSession, title: object) -> None:
         """Rename the session thread for a title the client learned after hello, such as its latest prompt."""
