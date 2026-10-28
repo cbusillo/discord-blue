@@ -40,7 +40,7 @@ def assistant_answer_cards(text: str) -> tuple[list[discord.ui.LayoutView], bool
     if attached:
         questions = _answer_questions(source)
         chunks = split_discord_message(questions, ANSWER_CHUNK_LIMIT) if questions else chunks[:1]
-    views = [_answer_card(chunk, complete=index == len(chunks) - 1) for index, chunk in enumerate(chunks)]
+    views = [_answer_card(chunk, first=index == 0, complete=index == len(chunks) - 1) for index, chunk in enumerate(chunks)]
     if attached:
         container = views[-1].children[0]
         assert isinstance(container, discord.ui.Container)
@@ -94,12 +94,11 @@ def _question_blocks(source: str) -> Iterator[str]:
         yield "\n".join(lines)
 
 
-def _answer_card(chunk: str, *, complete: bool) -> discord.ui.LayoutView:
+def _answer_card(chunk: str, *, first: bool, complete: bool) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(
         discord.ui.Container(
-            discord.ui.TextDisplay("### Answer"),
-            discord.ui.Separator(),
+            *([discord.ui.TextDisplay("### Answer"), discord.ui.Separator()] if first else []),
             discord.ui.TextDisplay(mark_assistant_message(chunk)),
             accent_color=STATUS_LABELS["done"][1],
             id=ANSWER_CARD_COMPONENT_ID if complete else ANSWER_CONTINUATION_COMPONENT_ID,

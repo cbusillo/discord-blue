@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Protocol, TYPE_CHECKING
+from typing import Any, Protocol, TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import discord
@@ -17,6 +17,21 @@ from discord_blue.health import DiscordGatewayHealth
 
 if TYPE_CHECKING:
     from discord_blue.config import Config
+
+
+def message_components(payload: list[dict[str, Any]]) -> list[discord.Component]:
+    components: list[discord.Component] = []
+    for item in payload:
+        match item["type"]:
+            case discord.ComponentType.action_row.value:
+                components.append(discord.ActionRow(cast(Any, item)))
+            case discord.ComponentType.text_display.value:
+                components.append(discord.TextDisplay(cast(Any, item)))
+            case discord.ComponentType.container.value:
+                components.append(discord.Container(data=cast(Any, item), state=None))
+            case _:
+                raise ValueError(f"Unsupported test component {item['type']}")
+    return components
 
 
 @contextmanager
@@ -75,7 +90,7 @@ class FakeReplyMessage:
         self.channel = channel
         self.content = content
         self.view: object = None
-        self.components: list[discord.Container] = []
+        self.components: list[discord.Component] = []
         self.author = SimpleNamespace(id=author_id)
         self.reactions: list[str] = []
         self.replies: list[str] = []
@@ -102,8 +117,8 @@ class FakeReplyMessage:
     async def edit(self, content: str | None = None, **kwargs: object) -> None:
         self.content = content or ""
         self.view = kwargs.get("view")
-        if isinstance(self.view, discord.ui.LayoutView):
-            self.components = [discord.Container(data=component, state=None) for component in self.view.to_components()]
+        if isinstance(self.view, (discord.ui.View, discord.ui.LayoutView)):
+            self.components = message_components(self.view.to_components())
         self.edits.append((self.content, self.view is None))
         self.edit_kwargs.append(kwargs)
 
@@ -232,8 +247,8 @@ class FakeThread:
         )
         self.add_message(message)
         message.view = kwargs.get("view")
-        if isinstance(message.view, discord.ui.LayoutView):
-            message.components = [discord.Container(data=component, state=None) for component in message.view.to_components()]
+        if isinstance(message.view, (discord.ui.View, discord.ui.LayoutView)):
+            message.components = message_components(message.view.to_components())
         return message
 
     async def edit(self, **kwargs: object) -> None:

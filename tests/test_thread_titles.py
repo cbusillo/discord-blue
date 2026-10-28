@@ -9,6 +9,7 @@ from collections.abc import Callable
 import discord
 
 from discord_blue.doodads.agent_session.thread_worker import (
+    INITIAL_TITLE_SETTLE_SECONDS,
     RENAME_RETRY_DELAYS_SECONDS,
     RENAME_WINDOW_SECONDS,
     ThreadWorkers,
@@ -324,7 +325,7 @@ class ThreadRenameTests(unittest.IsolatedAsyncioTestCase):
         workers = self.workers(lambda _thread_id, _epoch: thread, clock)
         thread.fail_once = OSError("connection reset")
         workers.rename(1, "name", "epoch-1")
-        await self.settle()
+        await self.pass_time(workers, clock, INITIAL_TITLE_SETTLE_SECONDS)
         self.assertEqual(thread.edits, [])
         await self.pass_time(workers, clock, RENAME_RETRY_DELAYS_SECONDS[0])
         self.assertEqual(thread.edits, ["name"])

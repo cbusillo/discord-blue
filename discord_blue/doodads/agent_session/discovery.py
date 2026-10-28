@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 
 import discord
 
+from discord_blue.doodads.agent_session.threads import session_message_markers
+
 logger = logging.getLogger(__name__)
 
 # A refresh this recent is reused, so a restart wave's attaches share one scan.
@@ -123,9 +125,10 @@ class DiscoveryIndex:
             return False
         try:
             entry.opening = [
-                message.content
+                marker
                 async for message in entry.thread.history(limit=OPENING_MESSAGES, oldest_first=True)
                 if message.author.id == bot_user_id
+                for marker in session_message_markers(message)
             ]
         except (discord.NotFound, discord.Forbidden):
             # Deleted since the listing, or not readable by the bot (so not a thread it could reattach): nothing to

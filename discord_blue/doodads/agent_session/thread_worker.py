@@ -26,6 +26,7 @@ from typing import Any, Literal, Protocol, TypeVar, cast
 import discord
 
 from discord_blue.doodads.agent_session.sessions import CleanupStep
+from discord_blue.doodads.agent_session.threads import has_creation_token
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -33,6 +34,7 @@ T = TypeVar("T")
 THREAD_CLOSE_STEPS: frozenset[CleanupStep] = frozenset({"disconnect_notice", "members", "archive", "leave"})
 # Requests in flight across all threads: a restart wave queues here rather than inside discord.py's buckets.
 CONCURRENT_THREAD_REQUESTS = 4
+INITIAL_TITLE_SETTLE_SECONDS = 2.0
 RENAME_WINDOW_SECONDS = 600.0
 RENAMES_PER_WINDOW = 2
 # A rename that failed for a reason that may pass (a 5xx that outlasted discord.py's own retries, a network error)
@@ -136,6 +138,9 @@ class ThreadWorker:
         return waiter
 
     def rename(self, name: str, epoch: str) -> None:
+        target = self.pool.hooks.rename_target(self.thread_id, epoch)
+        if self.applied_name is None and not self.rename_not_before and target is not None and has_creation_token(target.name or ""):
+            self.rename_not_before = self.pool.clock() + INITIAL_TITLE_SETTLE_SECONDS
         self.name = (name, epoch)
         self.start()
 
@@ -314,13 +319,18 @@ class ThreadWorker:
         name, epoch = self.name
         target = self.pool.hooks.rename_target(self.thread_id, epoch)
         # The last name we gave decides, not the cache: discord.py's cached name lags behind a successful edit.
-        if target is None or (self.applied_name if self.applied_name is not None else target.name) == name:
+        current = self.applied_name if self.applied_name is not None else target.name if target is not None else ""
+        if target is None or self.name_meaning(current or "") == self.name_meaning(name):
             self.name = None
             return None
         if self.rename_delay():
             return None  # run() waits for the window, or for a newer request.
         self.name = None
         return self.send_rename(target, name, epoch)
+
+    @staticmethod
+    def name_meaning(name: str) -> str:
+        return " ".join(name.split()).casefold().rstrip(" .!?")
 
     async def send_rename(self, target: RenameTarget, name: str, epoch: str) -> None:
         try:

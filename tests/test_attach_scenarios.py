@@ -28,7 +28,7 @@ from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session import cleanup as cleanup_module
 from discord_blue.doodads.agent_session import session_threads as session_threads_module
 from discord_blue.doodads.agent_session.protocol import SessionHello
-from discord_blue.doodads.agent_session.threads import session_start_message
+from discord_blue.doodads.agent_session.threads import session_start_message, expected_session_start_messages
 from discord_blue.plugs.discord_plug import MAX_RATELIMIT_SLEEP_SECONDS
 from tests.discord_http import HttpBot, discord_bot, scaled_discord_sleeps
 from tests.fake_discord import BOT_ID, PARENT_ID, FakeDiscord, FakeThreadState, Fault
@@ -70,7 +70,16 @@ class Scenario:
         return await http.ws_connect(self.url, headers={"Authorization": f"Bearer {TOKEN}"})
 
     def threads_marked_for(self, hello: Json) -> list[FakeThreadState]:
-        return [t for t in self.fake.threads.values() if any(m.content == marker(hello) for m in t.messages)]
+        expected = expected_session_start_messages(SessionHello.from_payload(hello))
+        return [
+            t
+            for t in self.fake.threads.values()
+            if any(
+                m.content in expected
+                or any(child.get("content") in expected for component in m.components for child in component.get("components", []))
+                for m in t.messages
+            )
+        ]
 
 
 @contextlib.asynccontextmanager

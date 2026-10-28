@@ -6,8 +6,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
-from collections.abc import AsyncIterator
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import discord
@@ -19,7 +18,6 @@ from discord_blue.doodads.agent_session import threads as threads_module
 from discord_blue.doodads.agent_session.sessions import AgentSession, CleanupStep
 from discord_blue.doodads.agent_session.thread_worker import RenameTarget, ThreadWorkers
 from tests.fakes_agent_session import (
-    FakeReplyMessage,
     FakeTextChannel,
     FakeThread,
     FakeWebSocket,
@@ -186,31 +184,6 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(busy.archived, "stopping kept a close from finishing")
         self.assertTrue(idle.archived, "a reopen asked for before the stop was sent after it")
 
-    async def test_a_notification_whose_delete_is_still_pending_is_not_adopted(self) -> None:
-        bridge = make_bridge()
-        channel = FakeTextChannel(321, [])
-        notice = add_bot_message(channel, 101, "Agent session connected for `repo`: <#501>")
-        deleting, release = asyncio.Event(), asyncio.Event()
-        original_delete = notice.delete
-
-        async def rate_limited_delete() -> None:
-            deleting.set()
-            await release.wait()  # discord.py sleeping through the DELETE's rate limit.
-            await original_delete()
-
-        with (
-            patch.object(threads_module, "get_agent_session_channel", return_value=channel),
-            patch.object(notice, "delete", new=rate_limited_delete),
-        ):
-            with self.assertRaises(TimeoutError):
-                await bridge.threads.bounded(bridge.cleanups.delete_session_notification(notice.id), 0.01)
-            await asyncio.wait_for(deleting.wait(), timeout=1)
-            adopted = await bridge.session_threads.find_session_notification_for_thread(501)
-            release.set()
-            await asyncio.sleep(0.05)
-
-        self.assertIsNone(adopted, "an attach adopted a notification that was about to be deleted")
-
     async def test_a_cleanup_retry_cannot_close_a_thread_reopened_but_not_yet_bound(self) -> None:
         bridge = make_bridge()
         thread = FakeThread(501, archived=True, members=[111])
@@ -218,14 +191,17 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(AgentSession(hello=hello, websocket=cast(web.WebSocketResponse, FakeWebSocket())))
         posting, release = asyncio.Event(), asyncio.Event()
 
-        async def slow_notification(_hello: object, _thread: object) -> int:
+        original_open = bridge.threads.open
+
+        async def slow_open(_workers: ThreadWorkers, target: discord.Thread) -> discord.Thread:
+            result = await original_open(target)
             posting.set()
             await release.wait()
-            return 7
+            return result
 
         with (
             patch.object(bridge.session_threads, "find_existing_session_thread", new=AsyncMock(return_value=thread)),
-            patch.object(bridge.session_threads, "ensure_session_notification", new=slow_notification),
+            patch.object(ThreadWorkers, "open", new=slow_open),
         ):
             attaching = asyncio.create_task(bridge.session_threads.find_or_create_session_thread(hello))
             await asyncio.wait_for(posting.wait(), timeout=1)
@@ -242,57 +218,6 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(thread.left)
         self.assertEqual(thread.removed_user_ids, [])
 
-    async def test_a_failed_overlapping_delete_does_not_expose_a_notification_still_being_deleted(self) -> None:
-        bridge = make_bridge()
-        channel = FakeTextChannel(321, [])
-        notice = add_bot_message(channel, 101, "Agent session connected for `repo`: <#501>")
-        first_sent, release = asyncio.Event(), asyncio.Event()
-        original_delete = notice.delete
-        calls = 0
-
-        async def delete() -> None:
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                first_sent.set()
-                await release.wait()
-                await original_delete()
-            else:
-                raise discord.RateLimited(60.0)
-
-        with (
-            patch.object(threads_module, "get_agent_session_channel", return_value=channel),
-            patch.object(notice, "delete", new=delete),
-        ):
-            first = asyncio.create_task(bridge.cleanups.delete_notification_message(cast(discord.Message, notice)))
-            await asyncio.wait_for(first_sent.wait(), timeout=1)
-            with self.assertRaises(discord.RateLimited):
-                await bridge.cleanups.delete_notification_message(cast(discord.Message, notice))
-            adopted = await bridge.session_threads.find_session_notification_for_thread(501)
-            release.set()
-            await first
-
-        self.assertIsNone(adopted)
-
-    async def test_a_history_page_read_before_a_delete_landed_does_not_bring_the_notification_back(self) -> None:
-        bridge = make_bridge()
-        channel = FakeTextChannel(321, [])
-        notice = add_bot_message(channel, 101, "Agent session connected for `repo`: <#501>")
-        stale_page = [notice]  # What Discord answered before the delete landed.
-
-        async def history(**_kwargs: object) -> AsyncIterator[FakeReplyMessage]:
-            for message in stale_page:
-                yield message
-
-        with (
-            patch.object(threads_module, "get_agent_session_channel", return_value=channel),
-            patch.object(channel, "history", history),
-        ):
-            await bridge.cleanups.delete_notification_message(cast(discord.Message, notice))
-            adopted = await bridge.session_threads.find_session_notification_for_thread(501)
-
-        self.assertIsNone(adopted)
-
     async def test_a_reloaded_bridge_adds_members_back_only_after_the_old_removal_lands(self) -> None:
         old_bridge = make_bridge()
         bot = old_bridge.bot
@@ -302,9 +227,12 @@ class ThreadWorkerTests(unittest.IsolatedAsyncioTestCase):
         removing, release = asyncio.Event(), asyncio.Event()
         membership: list[str] = []
 
+        original_remove = thread.remove_user
+
         async def slow_remove(user: object) -> None:
             removing.set()
             await release.wait()
+            await original_remove(cast(Any, user))
             membership.append("removed")
 
         async def add_user(user: object) -> None:

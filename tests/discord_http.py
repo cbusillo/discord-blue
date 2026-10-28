@@ -25,7 +25,7 @@ from discord.http import HTTPClient, Route, handle_message_parameters
 
 from discord_blue.plugs.discord_plug import MAX_RATELIMIT_SLEEP_SECONDS
 from tests.fake_discord import BOT_ID, GUILD_ID, PARENT_ID, FakeDiscord, FakeThreadState
-from tests.fakes_agent_session import FakeBot, FakeReplyMessage, FakeTextChannel, FakeThread, UserLike
+from tests.fakes_agent_session import FakeBot, FakeReplyMessage, FakeTextChannel, FakeThread, UserLike, message_components
 
 Json = dict[str, Any]
 PAGE = 100
@@ -39,7 +39,7 @@ class HttpMessage(FakeReplyMessage):
     def __init__(self, channel: HttpThread | HttpChannel, data: Json) -> None:
         super().__init__(int(data["id"]), channel, str(data.get("content") or ""), author_id=int(data["author"]["id"]))
         self.http = channel.http
-        self.components = [discord.Container(data=component, state=None) for component in data.get("components", [])]
+        self.components = message_components(data.get("components", []))
 
     async def edit(self, content: str | None = None, **kwargs: object) -> None:
         with handle_message_parameters(content=content, **cast(Any, kwargs)) as params:

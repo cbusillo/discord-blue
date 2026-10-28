@@ -20,7 +20,7 @@ from discord_blue.doodads.agent_session.cards import ANSWER_CARD_COMPONENT_ID, A
 from discord_blue.doodads.agent_session.cleanup import PENDING_CLEANUP_MAX_ATTEMPTS, THREAD_CLOSE_WAIT_SECONDS, SessionCleanups
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
-from discord_blue.doodads.agent_session.messages import send_agent_session_message, send_assistant_message
+from discord_blue.doodads.agent_session.messages import send_assistant_message
 from discord_blue.doodads.agent_session.protocol import SessionHello
 from discord_blue.doodads.agent_session.sessions import AgentSessionRegistry
 from discord_blue.doodads.agent_session.store import SessionStore, StoredSession
@@ -119,9 +119,10 @@ class SessionThreads:
             self.forget_stored_hint(session_id, record)
             return None
         opening = [
-            message.content
+            marker
             async for message in thread.history(limit=10, oldest_first=True)
             if message.author.id == self.bridge.bot_user_id()
+            for marker in threads_module.session_message_markers(message)
         ]
         expected = threads_module.session_start_without_pid(record.marker)
         if expected is None or not any(threads_module.session_start_without_pid(message) == expected for message in opening):
@@ -147,26 +148,19 @@ class SessionThreads:
             if thread.archived or thread.locked or self.bridge.threads.closing(thread.id) or record.status in {"closing", "closed"}:
                 thread = await self.bridge.threads.open(thread)
             notification_id = record.notification_id
-            try:
-                channel = await threads_module.get_agent_session_channel(self.bridge.bot, thread.parent_id)
-                if notification_id is not None:
-                    try:
-                        notification = await channel.fetch_message(notification_id)
-                        if (
-                            notification.author.id != self.bridge.bot_user_id()
-                            or threads_module.notification_thread_id(notification.content) != thread.id
-                            or self.bridge.cleanups.notification_going(notification_id)
-                        ):
-                            notification_id = None
-                    except discord.NotFound:
+            if notification_id is not None:
+                try:
+                    channel = await threads_module.get_agent_session_channel(self.bridge.bot, thread.parent_id)
+                    notification = await channel.fetch_message(notification_id)
+                    if (
+                        notification.author.id != self.bridge.bot_user_id()
+                        or not notification.content.startswith(SESSION_NOTIFICATION_PREFIXES)
+                        or threads_module.notification_thread_id(notification.content) != thread.id
+                        or self.bridge.cleanups.notification_going(notification_id)
+                    ):
                         notification_id = None
-                if notification_id is None:
-                    notification = await send_agent_session_message(
-                        channel, threads_module.session_notification_message(hello, thread)
-                    )
-                    notification_id = notification.id
-            except (discord.DiscordException, ValueError):
-                logger.warning("Unable to refresh Agent session notification for thread %s; attaching anyway", thread.id)
+                except (discord.DiscordException, ValueError):
+                    notification_id = None
             self.bridge.sessions.bind_thread(hello.session_id, thread.id, notification_id)
             logger.info("Recovered Agent session %s from store in thread %s", hello.session_id, thread.id)
             return SessionThread(thread=thread, notification_message_id=notification_id)
@@ -209,7 +203,7 @@ class SessionThreads:
                 if exc.code == DISCORD_UNKNOWN_CHANNEL:
                     raise CandidateGone(thread.id) from exc
                 raise
-            notification_message_id = await self.ensure_session_notification(hello, thread)
+            notification_message_id = None
             self.bridge.sessions.bind_thread(hello.session_id, thread.id, notification_message_id)
         finally:
             self._attaching_threads[thread.id] -= 1
@@ -277,40 +271,6 @@ class SessionThreads:
             elif check.attempts >= PENDING_CLEANUP_MAX_ATTEMPTS:
                 self._creation_checks.pop(token, None)
                 logger.warning("Giving up on duplicate Agent session threads of %s", check.created_id)
-
-    async def ensure_session_notification(self, hello: SessionHello, thread: discord.Thread) -> int | None:
-        existing_message_id = await self.find_session_notification_for_thread(thread.id, thread.parent_id)
-        if existing_message_id is not None:
-            return existing_message_id
-        try:
-            channel = await threads_module.get_agent_session_channel(self.bridge.bot, thread.parent_id)
-            message = await send_agent_session_message(channel, threads_module.session_notification_message(hello, thread))
-        except (discord.DiscordException, ValueError):
-            logger.warning("Unable to create Agent session notification for thread %s", thread.id)
-            return None
-        return message.id
-
-    async def find_session_notification_for_thread(self, thread_id: int, parent_id: int | None = None) -> int | None:
-        try:
-            channel = await threads_module.get_agent_session_channel(self.bridge.bot, parent_id)
-        except ValueError:
-            return None
-        bot_user = self.bridge.bot.user
-        if bot_user is None:
-            return None
-        try:
-            async for message in channel.history(limit=None):
-                if message.author.id != bot_user.id:
-                    continue
-                if not message.content.startswith(SESSION_NOTIFICATION_PREFIXES):
-                    continue
-                if self.bridge.cleanups.notification_going(message.id):
-                    continue  # Going away: the attach posts a new one instead.
-                if threads_module.notification_thread_id(message.content) == thread_id:
-                    return message.id
-        except discord.DiscordException:
-            logger.warning("Unable to scan Agent session notifications for thread %s", thread_id)
-        return None
 
     async def find_existing_session_thread(self, hello: SessionHello) -> discord.Thread | None:
         """The session's thread from the shared discovery index; None only when a complete index has no match.

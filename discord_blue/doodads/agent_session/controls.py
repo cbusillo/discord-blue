@@ -24,6 +24,7 @@ from discord_blue.doodads.agent_session.sessions import (
     RejectedCommandMessage,
 )
 from discord_blue.doodads.agent_session.threads import session_thread_name
+from discord_blue.doodads.agent_session.store import SessionStore
 from discord_blue.doodads.agent_session.thread_worker import ThreadWorkers
 from discord_blue.plugs.discord_plug import BlueBot
 
@@ -125,6 +126,7 @@ class ControlHooks(Protocol):
 
     bot: BlueBot
     sessions: AgentSessionRegistry
+    store: SessionStore
     threads: ThreadWorkers
 
     def is_operator(self, user: discord.User | discord.Member) -> bool: ...
@@ -329,6 +331,9 @@ class SessionControls:
 
         session = self.bridge.sessions.get_by_thread(channel.id)
         if session is None:
+            for record in self.bridge.store.records.values():
+                if record.thread_id == channel.id:
+                    return f"Session disconnected\n{record.marker.removeprefix('Agent session connected').lstrip()}"
             return "This thread is not attached to a live agent session."
 
         title = session_thread_name(session.hello)
@@ -339,6 +344,10 @@ class SessionControls:
                 f"Agent session `{title}`",
                 f"state: {state}",
                 f"host: {session.hello.host_label}",
+                f"cwd: `{session.hello.cwd}`",
+                f"branch: `{session.hello.branch or 'unknown'}`",
+                f"session: `{session.session_id}`",
+                f"pid: `{session.hello.pid}`",
                 f"status: {status}",
             ]
         )
@@ -454,11 +463,12 @@ class SessionControls:
                 await self.bridge.post_thread_notice(thread.id, response)
             return True
         if emoji == REACTION_CONTROL_STATUS:
-            await self.remove_message_reaction(thread, message_id, emoji, user)
-            await self.bridge.post_thread_notice(
-                thread.id,
-                self.session_status_summary(thread, user),
+            refreshed = await self.refresh_control_card(
+                session, thread, message_id, self.session_control_reactions(session), refresh_reactions=False
             )
+            if not refreshed:
+                await self.refresh_session_controls(session, thread)
+            await self.remove_message_reaction(thread, message_id, emoji, user)
             return True
         if emoji == REACTION_CONTROL_PAUSE:
             response = await self.send_pause_current_turn(thread, user)
@@ -765,6 +775,7 @@ class SessionControls:
         reactions: list[str],
         *,
         remove_user_reaction: tuple[str, discord.User | discord.Member] | None = None,
+        refresh_reactions: bool = True,
     ) -> bool:
         async with session.control_card_lock:
             if self.bridge.sessions.get(session.session_id) is not session:
@@ -794,7 +805,8 @@ class SessionControls:
             except discord.DiscordException:
                 # Retain a reachable anchor on an edit failure; don't duplicate it.
                 logger.warning("Unable to update Agent session status card %s", message_id)
-            await self.write_message_reactions(message, reactions, clear=True, remove_user_reaction=remove_user_reaction)
+            if refresh_reactions:
+                await self.write_message_reactions(message, reactions, clear=True, remove_user_reaction=remove_user_reaction)
             return True
 
     async def refresh_session_controls(
