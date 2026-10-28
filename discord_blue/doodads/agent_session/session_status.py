@@ -144,11 +144,11 @@ class SessionStatusUpdates:
         channel = self.bridge.thread_channel(thread_id)
         if not isinstance(channel, discord.Thread):
             return
-        sources: list[discord.Message] = []
-        source = await send_assistant_message(channel, text, sources=sources)
         session = self.bridge.sessions.get_by_thread(thread_id)
-        if source is not None and session is not None:
-            await self.bridge.questions.post(session, channel, text, sources)
+        if session is not None:
+            await self.bridge.questions.send_answer(session, channel, text)
+        else:
+            await send_assistant_message(channel, text)
 
     async def handle_title_changed(self, session: AgentSession, title: object) -> None:
         """Rename the session thread for a title the client learned after hello, such as its latest prompt."""

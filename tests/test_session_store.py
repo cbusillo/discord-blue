@@ -541,7 +541,7 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(notification_id)
                     self.assertEqual(fake.parent_messages, [])
                     record = second.bridge.store.records[hello["session_id"]]
-                    question = StoredQuestion("key", "epoch", thread.id, 1, "source", (("Q1", "Proceed?"),))
+                    question = StoredQuestion("key", "epoch", thread.id, "source", (("Q1", "Proceed?"),))
                     second.bridge.store.put(hello["session_id"], replace(record, grace_until=time.time() - 1, questions=(question,)))
                     await second.bridge.cleanups.recover_stored_cleanups()
                     self.assertTrue(await until(lambda: thread.archived and thread.locked, 5))

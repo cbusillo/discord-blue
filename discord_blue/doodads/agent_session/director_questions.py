@@ -5,15 +5,30 @@ import hashlib
 import logging
 import re
 from dataclasses import replace
+from collections.abc import Iterator
 from io import BytesIO
 from typing import TYPE_CHECKING
 
 import discord
 
-from discord_blue.doodads.agent_session.cards import notice_card
+from discord_blue.doodads.agent_session.cards import (
+    ANSWER_CARD_COMPONENT_ID,
+    ANSWER_CONTINUATION_COMPONENT_ID,
+    STATUS_LABELS,
+    notice_card,
+)
 from discord_blue.doodads.agent_session.controls import DELIVERY_UNCONFIRMED
-from discord_blue.doodads.agent_session.formatting import advance_code_fence, format_user_message, markdown_table_end
-from discord_blue.doodads.agent_session.messages import agent_session_allowed_mentions, send_agent_session_message
+from discord_blue.doodads.agent_session.formatting import (
+    advance_code_fence,
+    format_user_message,
+    mark_assistant_message,
+    markdown_table_end,
+)
+from discord_blue.doodads.agent_session.messages import (
+    agent_session_allowed_mentions,
+    send_agent_session_message,
+    send_assistant_message,
+)
 from discord_blue.doodads.agent_session.reply_modal import answer_text, reply_context_error
 from discord_blue.doodads.agent_session.store import SESSION_STORE_WAIT_TIMEOUT_SECONDS, QuestionState, StoredQuestion
 
@@ -25,27 +40,46 @@ logger = logging.getLogger(__name__)
 QUESTION_START = re.compile(r"^\*\*(Q\d+)(?:[.:](?:\*\*|\s)|\*\*[:.\s])")
 
 
-def detect_questions(text: str) -> tuple[tuple[str, str], ...]:
-    starts: list[tuple[int, str]] = []
-    lines = text.splitlines()
+def top_level_lines(lines: list[str]) -> Iterator[tuple[int, str]]:
     fence = None
     index = 0
     while index < len(lines):
         line = lines[index]
         if fence is None:
             if line.startswith(">>>"):
-                break
+                return
             if (end := markdown_table_end(lines, index)) is not None:
                 index = end
                 continue
-            if (match := QUESTION_START.match(line)) and line.rstrip("* ").endswith("?"):
-                starts.append((index, match[1]))
+            yield index, line
         fence = advance_code_fence(line, fence)
         index += 1
-    return tuple(
-        (number, "\n".join(lines[start : starts[index + 1][0] if index + 1 < len(starts) else len(lines)]).strip())
-        for index, (start, number) in enumerate(starts)
-    )
+
+
+def detect_questions(text: str) -> tuple[tuple[str, str], ...]:
+    lines = text.splitlines()
+    starts = []
+    for index, line in top_level_lines(lines):
+        match = QUESTION_START.match(line)
+        if match is not None and line.rstrip("* ").endswith("?"):
+            starts.append((index, match[1]))
+    questions = []
+    for index, (start, number) in enumerate(starts):
+        end = starts[index + 1][0] if index + 1 < len(starts) else len(lines)
+        fence = None
+        for position in range(start, end):
+            line = lines[position]
+            if fence is None and not line.strip() and position + 1 < end:
+                following = lines[position + 1]
+                if following.strip() and not re.match(
+                    r"(?i)^(?:\*\*)?(?:recommendation|cost|ongoing cost|alternatives?|options?|why|trade-offs?)\b|^[-*+0-9]",
+                    following,
+                ):
+                    end = position
+                    break
+            fence = advance_code_fence(line, fence)
+        questions.append((number, "\n".join(lines[start:end]).strip()))
+    return tuple(questions)
 
 
 def source_signature(message: discord.Message, bot_id: int) -> str:
@@ -88,20 +122,79 @@ class QuestionCards:
                     self.bridge.bot.add_view(self.view(session_id, question), message_id=question.message_id)
 
     def view(self, session_id: str, question: StoredQuestion) -> discord.ui.LayoutView:
+        if question.state == QuestionState.ANSWERED:
+            answer = discord.utils.escape_markdown(" ".join(question.answer.split())[:600])
+            numbers = ", ".join(number for number, _ in question.questions)
+            view = notice_card(f"**{numbers}** · {answer} · [Decision]({question.decision_url})")
+            container = view.children[0]
+            assert isinstance(container, discord.ui.Container)
+            container.accent_color = STATUS_LABELS["done"][1]
+            container.id = ANSWER_CARD_COMPONENT_ID if question.complete else ANSWER_CONTINUATION_COMPONENT_ID
+            return view
         text = "\n\n".join(body for _, body in question.questions)
         if len(text.encode("utf-16-le")) // 2 > 3000:
-            text = " · ".join(number for number, _ in question.questions)[:1000] + (
+            text = " · ".join(body.split("\n", 1)[0] for _, body in question.questions)[:1000] + (
                 "\nFull questions, recommendations, costs and alternatives are attached below."
                 if question.has_attachment
-                else "\nRead the full questions and context at Open session answer."
+                else "\nFull context remains in the native terminal."
             )
-        view = notice_card(f"### Question\n{text}\n\n[Open session answer]({question.source_url})\n**{question.state}**")
+        view = notice_card("")
         container = view.children[0]
         assert isinstance(container, discord.ui.Container)
+        container.clear_items()
+        container.accent_color = STATUS_LABELS["waiting"][1]
+        container.id = ANSWER_CARD_COMPONENT_ID if question.complete else ANSWER_CONTINUATION_COMPONENT_ID
+        container.add_item(discord.ui.TextDisplay(mark_assistant_message(f"### Question\n{text}")))
+        state = "Unanswered · Session ended" if question.state == QuestionState.CLOSED else question.state
+        container.add_item(discord.ui.TextDisplay(f"**{state}**"))
         if question.has_attachment:
             container.add_item(discord.ui.File("attachment://questions.md"))
-        container.add_item(discord.ui.ActionRow(QuestionAnswerButton(self, session_id, question)))
+        if question.state != QuestionState.CLOSED:
+            container.add_item(discord.ui.ActionRow(QuestionAnswerButton(self, session_id, question)))
         return view
+
+    async def send_answer(self, session: AgentSession, thread: discord.Thread, text: str) -> None:
+        await self.decisions(session.session_id, text, recorded=True)
+        questions = detect_questions(text)
+        remaining = text
+        for _number, body in questions:
+            before, _, remaining = remaining.partition(body)
+            if before.strip():
+                await send_assistant_message(thread, before, silent=True, complete=False, full_text=text)
+            await self.post(session, thread, body, complete=not remaining.strip())
+        if remaining.strip():
+            await send_assistant_message(thread, remaining, silent=bool(questions), full_text=text)
+
+    async def decisions(self, session_id: str, text: str, *, url: str = "", recorded: bool = False) -> None:
+        stored = self.bridge.store.records.get(session_id)
+        if stored is None:
+            return
+        pattern = r"(?m)^(?:Director decision:[ \t]*)?(Q\d+)[.: \t]+([^\n]+)"
+        if recorded:
+            pattern = r"(?m)^Director decision:[ \t]*(Q\d+)[.: \t]+([^\n]+)"
+        lines = text.splitlines()
+        matches = []
+        for index, line in top_level_lines(lines):
+            match = re.match(pattern, line)
+            if match is not None:
+                matches.append((index, match))
+        for index, (start, match) in enumerate(matches):
+            end = matches[index + 1][0] if index + 1 < len(matches) else len(lines)
+            context = "\n".join(lines[start:end])
+            link = re.search(r"https://github\.com/[^\s)]+#issuecomment-\d+", context) if recorded else None
+            decision_url = link[0] if link else url
+            if not decision_url:
+                continue
+            for question in tuple(self.bridge.store.records[session_id].questions):
+                if question.state == QuestionState.ANSWERED or match[1] not in {number for number, _ in question.questions}:
+                    continue
+                async with self.lock(question.key):
+                    current = self.record(session_id, question.key)
+                    if current is None or current.state == QuestionState.ANSWERED:
+                        continue
+                    answered = replace(current, state=QuestionState.ANSWERED, answer=match[2].strip(), decision_url=decision_url)
+                    self.save(session_id, answered)
+                    await self.refresh(session_id, [answered])
 
     def context_error(self, interaction: discord.Interaction, session_id: str, question: StoredQuestion | None) -> str | None:
         if question is None:
@@ -114,20 +207,19 @@ class QuestionCards:
         )
         if error:
             return error
-        if getattr(interaction.channel, "id", None) != question.parent_id:
-            return "Open the original Question card in its channel."
+        if getattr(interaction.channel, "id", None) != question.thread_id:
+            return "Open the original Question card in its session thread."
         if interaction.message is not None and interaction.message.id != question.message_id:
             return "Open the original Question card."
         if question.state != QuestionState.WAITING:
             return f"This answer was already submitted: {question.state}. Check the session before replying again."
         return None
 
-    async def post(self, session: AgentSession, thread: discord.Thread, text: str, sources: list[discord.Message]) -> None:
+    async def post(self, session: AgentSession, thread: discord.Thread, text: str, *, complete: bool = True) -> None:
         questions = detect_questions(text)
-        parent = getattr(thread, "parent", None)
-        if not questions or not isinstance(parent, discord.TextChannel):
+        if not questions:
             return
-        key = hashlib.sha256(f"{session.session_id}\0{sources[0].id}".encode()).hexdigest()[:32]
+        key = hashlib.sha256(f"{session.session_id}\0{session.session_epoch}\0{questions[0][0]}".encode()).hexdigest()[:32]
         if self.record(session.session_id, key) is not None:
             return
         if session.session_id not in self.bridge.store.records:
@@ -136,10 +228,9 @@ class QuestionCards:
             key,
             session.session_epoch,
             thread.id,
-            parent.id,
-            sources[0].jump_url,
+            "",
             questions,
-            tuple((source.id, source_signature(source, self.bridge.bot_user_id() or 0)) for source in sources),
+            complete=complete,
         )
         question = replace(
             question,
@@ -148,6 +239,7 @@ class QuestionCards:
         publication_started = False
         try:
             if not self.save(session.session_id, question) or not await self.persist():
+                await send_assistant_message(thread, text, silent=True, complete=complete)
                 await send_agent_session_message(
                     thread, "The Question card could not be saved. Reply in this session thread instead.", silent=True
                 )
@@ -161,19 +253,24 @@ class QuestionCards:
             if len(full.encode("utf-16-le")) // 2 > 3000:
                 attachment = discord.File(BytesIO(full.encode()), filename="questions.md")
                 try:
-                    message = await parent.send(
+                    message = await thread.send(
                         view=view, file=attachment, silent=True, allowed_mentions=agent_session_allowed_mentions()
                     )
                 except discord.Forbidden:
                     question = replace(self.record(session.session_id, key) or question, has_attachment=False)
                     self.save(session.session_id, question)
-                    message = await send_agent_session_message(parent, view=self.view(session.session_id, question), silent=True)
+                    message = await send_agent_session_message(thread, view=self.view(session.session_id, question), silent=True)
                 finally:
                     attachment.close()
             else:
-                message = await send_agent_session_message(parent, view=view, silent=True)
+                message = await send_agent_session_message(thread, view=view, silent=True)
             current = self.record(session.session_id, key) or question
-            current = replace(current, message_id=message.id)
+            current = replace(
+                current,
+                message_id=message.id,
+                source_url=message.jump_url,
+                sources=((message.id, source_signature(message, self.bridge.bot_user_id() or 0)),),
+            )
             self.save(session.session_id, current)
             if current.state != QuestionState.WAITING:
                 await self.refresh(session.session_id, [current])
@@ -187,7 +284,7 @@ class QuestionCards:
                 try:
                     await send_agent_session_message(
                         thread,
-                        "The Question card could not be posted in the channel. Reply in this session thread instead.",
+                        "The Question card could not be posted in the thread. Reply in this session thread instead.",
                         silent=True,
                     )
                 except (OSError, discord.DiscordException):
@@ -195,7 +292,7 @@ class QuestionCards:
             else:
                 try:
                     await send_agent_session_message(
-                        thread, "The Question card may not have posted. Check the channel or reply in this thread.", silent=True
+                        thread, "The Question card may not have posted. Check this thread before replying.", silent=True
                     )
                 except (OSError, discord.DiscordException):
                     logger.warning("Unable to report uncertain Question publication")
@@ -217,7 +314,7 @@ class QuestionCards:
 
     async def outcome(self, session_id: str, key: str, state: QuestionState) -> None:
         question = self.record(session_id, key)
-        if question is not None:
+        if question is not None and question.state != QuestionState.ANSWERED:
             question = replace(question, state=state)
             self.save(session_id, question)
             await self.refresh(session_id, [question])
@@ -225,10 +322,10 @@ class QuestionCards:
     async def refresh(self, session_id: str, questions: list[StoredQuestion]) -> None:
         async def edit_cards() -> None:
             for question in questions:
-                parent = self.bridge.bot.get_channel(question.parent_id)
-                if isinstance(parent, discord.TextChannel) and question.message_id is not None:
+                channel = self.bridge.thread_channel(question.thread_id)
+                if isinstance(channel, discord.Thread) and question.message_id is not None:
                     try:
-                        await parent.get_partial_message(question.message_id).edit(
+                        await channel.get_partial_message(question.message_id).edit(
                             view=self.view(session_id, question), allowed_mentions=agent_session_allowed_mentions()
                         )
                     except (OSError, discord.DiscordException):
@@ -333,6 +430,14 @@ class QuestionAnswerModal(discord.ui.Modal):
                     await interaction.followup.send("The answer could not be saved; it was not delivered.", ephemeral=True)
                     return
                 message = await send_agent_session_message(thread, format_user_message(text), silent=True)
+                answered = replace(
+                    question,
+                    state=QuestionState.ANSWERED,
+                    answer=self.fields[0].value.strip(),
+                    decision_url=message.jump_url,
+                )
+                self.cards.save(self.session_id, answered)
+                await self.cards.refresh(self.session_id, [answered])
                 error = reply_context_error(
                     self.cards.bridge,
                     interaction,

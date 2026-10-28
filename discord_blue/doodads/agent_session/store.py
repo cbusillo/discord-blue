@@ -31,6 +31,7 @@ class QuestionState(StrEnum):
     DELIVERED = "Delivered"
     NOT_DELIVERED = "Not delivered"
     CLOSED = "Closed"
+    ANSWERED = "Answered"
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,23 +39,28 @@ class StoredQuestion:
     key: str
     epoch: str
     thread_id: int
-    parent_id: int
     source_url: str
     questions: tuple[tuple[str, str], ...]
     sources: tuple[tuple[int, str], ...] = ()
     message_id: int | None = None
     state: QuestionState = QuestionState.WAITING
     has_attachment: bool = False
+    answer: str = ""
+    decision_url: str = ""
+    complete: bool = True
 
     @classmethod
     def parse(cls, value: object) -> StoredQuestion:
         if not isinstance(value, dict):
             raise ValueError("invalid question record")
-        question = cls(**value)
+        question = cls(**{key: field for key, field in value.items() if key != "parent_id"})
         if (
-            not all(isinstance(v, str) for v in (question.key, question.epoch, question.source_url, question.state))
+            not all(
+                isinstance(v, str)
+                for v in (question.key, question.epoch, question.source_url, question.state, question.answer, question.decision_url)
+            )
+            or type(question.complete) is not bool
             or type(question.thread_id) is not int
-            or type(question.parent_id) is not int
             or (question.message_id is not None and type(question.message_id) is not int)
             or not isinstance(question.questions, (list, tuple))
             or any(

@@ -624,27 +624,32 @@ Discord controls the final appearance on a phone.
 
 ## Numbered Question cards
 
-An answer containing a top-level bold numbered question ending in a question mark, such as `**Q123.** Ship it?`
-posts one silent **Question** card in that session's parent text channel. It keeps
-all questions from the answer together with their recommendation, cost and
-alternatives, and links to the session answer. No mentions or push notifications
-are sent. Discord controls unread indicators and phone rendering.
+An answer containing a top-level bold numbered question ending in a question mark,
+such as `**Q123.** Ship it?`, puts that question in a silent **Question** card
+inside the session thread. Its recommendation, cost and alternatives stay with
+it. Surrounding prose stays chat. Each Q number appears once per conversation,
+even on backfill; the parent channel gets no question posts. Quoted, tabled,
+indented and fenced examples do not create cards. Large context is attached as
+`questions.md`. No mentions or push notifications are sent. Discord controls
+unread indicators and phone rendering.
 
-Tap **Answer** to answer every question in one form. Submission sends one reply,
-with the Q numbers, through the session's normal reply controls. More than four
-questions use one field; keep every Q number with its answer. Large question
-context is attached as `questions.md` rather than shortened. Quoted, tabled,
-indented and fenced examples do not create cards. One-tap options and an open
-questions dashboard are not included in this first version.
+Tap **Answer** to use the existing answer form, or reply in the thread with the
+Q number, such as `Q123 yes, ship it`. The answer form sends that Q-prefixed
+reply through normal session controls. Only session operators can submit;
+changed cards, reconnected sessions and repeat submissions refuse stale forms.
+Closing the form leaves the question waiting.
 
-Only session operators can submit. Changed source answers or sessions refuse
-stale forms. Closing a form leaves the card waiting. Each card allows one
-submission across operators and restarts. **Delivered** means the native session
-acknowledged the reply; **Not delivered** means it was refused or never sent.
-**Uncertain** means check the native session before replying again. Claude may
-hold a busy reply until idle. Completed sessions close their waiting cards.
-A publication failure gets a silent notice in the session thread. Uncertain
-publication and delivery never retry automatically.
+When an operator answers, the original card loses its buttons and changes to
+green, showing one compact line with the Q number, answer excerpt and a link to
+the full decision. A session answer containing an explicit `Director decision:
+Q123. ...` record with a GitHub comment link also marks that question answered.
+This reads records delivered through the session, rather than polling GitHub.
+Recording an answer does not prove delivery to the native session; normal reply
+reactions and failure notices still report that separately. Claude may hold a
+busy reply until idle. An unanswered question stays visible when the session
+ends, with its full context and an **Unanswered · Session ended** label.
+Publication failures get a silent notice in the thread. Uncertain publication
+and delivery never retry automatically.
 
 ## Routine bridge delivery
 

@@ -119,7 +119,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(fixture.thread.sent_files)
             self.assertIsNotNone(fixture.session.control_message_id)
             self.assertEqual(fixture.session.display_state, "done")
-            self.assertFalse(fixture.thread.sent_kwargs[0].get("silent", False))
+            self.assertTrue(fixture.thread.sent_kwargs[0].get("silent", False))
             fixture.session.hello.assistant_message = answer
             count = len(fixture.thread.sent_messages)
             await fixture.bridge.session_threads.backfill_latest_assistant_message(
@@ -152,7 +152,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertGreater(" ".join(bodies.split()).count("A long question detail."), 0)
             self.assertLess(len(bodies), ANSWER_CHUNK_LIMIT * len(questions) * 2)
-            self.assertNotIn("Background detail.", displayed)
+            self.assertIn("Background detail.", displayed)
             for view in views:
                 self.assertLessEqual(len(text_in(view)), 4000)
                 self.assertFalse(any(isinstance(item, discord.ui.Button) for item in view.walk_children()))
@@ -205,7 +205,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                 cast(discord.Thread, fixture.thread), fixture.session.hello
             )
             self.assertIn("**Q999:** Is the recovered tail readable?", "\n".join(fixture.thread.sent_messages[start:]))
-            self.assertEqual(sum(not kwargs["silent"] for kwargs in fixture.thread.sent_kwargs[start:]), 1)
+            self.assertEqual(sum(not kwargs["silent"] for kwargs in fixture.thread.sent_kwargs[start:]), 0)
             self.assertTrue(await fixture.bridge.session_threads.thread_has_assistant_message(cast(discord.Thread, fixture.thread)))
 
     def test_huge_output_keeps_questions_without_unrelated_report_or_inline_references(self) -> None:

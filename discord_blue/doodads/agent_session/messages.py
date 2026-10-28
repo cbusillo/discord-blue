@@ -6,7 +6,12 @@ from io import BytesIO
 
 import discord
 
-from discord_blue.doodads.agent_session.cards import ANSWER_FILENAME, assistant_answer_cards, notice_card
+from discord_blue.doodads.agent_session.cards import (
+    ANSWER_FILENAME,
+    ANSWER_CONTINUATION_COMPONENT_ID,
+    assistant_answer_cards,
+    notice_card,
+)
 from discord_blue.doodads.agent_session.formatting import ASSISTANT_MESSAGE_MARKER, strip_assistant_markers
 
 logger = logging.getLogger(__name__)
@@ -40,18 +45,28 @@ async def send_agent_session_message(
 
 
 async def send_assistant_message(
-    destination: discord.abc.Messageable, message: str, *, sources: list[discord.Message] | None = None
+    destination: discord.abc.Messageable,
+    message: str,
+    *,
+    sources: list[discord.Message] | None = None,
+    silent: bool = False,
+    complete: bool = True,
+    full_text: str | None = None,
 ) -> discord.Message | None:
     if not strip_assistant_markers(message.replace(ASSISTANT_MESSAGE_MARKER, "")).strip():
         return None
     views, attached = assistant_answer_cards(message)
+    if not complete:
+        container = views[-1].children[0]
+        assert isinstance(container, discord.ui.Container)
+        container.id = ANSWER_CONTINUATION_COMPONENT_ID
     last_message = None
     for index, view in enumerate(views):
         if attached and index == len(views) - 1:
-            file = discord.File(BytesIO(strip_assistant_markers(message).encode()), filename=ANSWER_FILENAME)
+            file = discord.File(BytesIO(strip_assistant_markers(full_text or message).encode()), filename=ANSWER_FILENAME)
             try:
                 last_message = await destination.send(
-                    file=file, view=view, allowed_mentions=agent_session_allowed_mentions(), silent=index > 0
+                    file=file, view=view, allowed_mentions=agent_session_allowed_mentions(), silent=silent or index > 0
                 )
                 if sources is not None:
                     sources.append(last_message)
@@ -66,7 +81,9 @@ async def send_assistant_message(
                 note.content = "-# Attachment unavailable · Full answer remains in the terminal"
             finally:
                 file.close()
-        last_message = await destination.send(view=view, allowed_mentions=agent_session_allowed_mentions(), silent=index > 0)
+        last_message = await destination.send(
+            view=view, allowed_mentions=agent_session_allowed_mentions(), silent=silent or index > 0
+        )
         if sources is not None:
             sources.append(last_message)
     return last_message

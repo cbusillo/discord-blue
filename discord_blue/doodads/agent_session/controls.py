@@ -209,6 +209,9 @@ class SessionControls:
     async def send_thread_reply(self, message: discord.Message) -> bool:
         session = self.bridge.sessions.get_by_thread(message.channel.id)
         if session is None:
+            for session_id, stored in tuple(self.bridge.store.records.items()):
+                if stored.thread_id == message.channel.id:
+                    await self.bridge.questions.decisions(session_id, message.content, url=message.jump_url)
             return False
         # MESSAGE_CREATE can arrive before the reopened thread returns to discord.py's cache.
         # Its PartialMessageable still identifies the thread already bound by our acknowledged hello.
@@ -216,15 +219,16 @@ class SessionControls:
         if not isinstance(channel, discord.Thread):
             return False
         thread: discord.Thread = channel
-        if session.websocket.closed:
-            await message.reply("Agent session is offline; reply was not delivered.", mention_author=False)
-            return True
         text = message.content.strip()
         if not text or text.startswith("!"):
             return False
         if message.created_at < session.attached_at:
             # The client reconnected since (for Claude Code, after /clear or /resume); never deliver it to the new epoch.
             await message.reply(REPLY_BEFORE_RECONNECT, mention_author=False)
+            return True
+        await self.bridge.questions.decisions(session.session_id, text, url=message.jump_url)
+        if session.websocket.closed:
+            await message.reply("Agent session is offline; reply was not delivered.", mention_author=False)
             return True
         if not session.acknowledged:
             await message.reply("Agent session is reconnecting; send the reply again in a moment.", mention_author=False)
