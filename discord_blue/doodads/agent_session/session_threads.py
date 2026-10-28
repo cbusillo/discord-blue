@@ -389,7 +389,7 @@ class SessionThreads:
             return
         session = self.bridge.sessions.get(hello.session_id)
         if session is not None:
-            await self.bridge.questions.send_answer(session, thread, assistant_message)
+            await self.bridge.questions.send_answer(session, thread, assistant_message, replay=True)
         else:
             await send_assistant_message(thread, assistant_message)
 

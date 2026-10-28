@@ -211,7 +211,10 @@ class SessionControls:
         if session is None:
             for session_id, stored in tuple(self.bridge.store.records.items()):
                 if stored.thread_id == message.channel.id:
-                    await self.bridge.questions.decisions(session_id, message.content, url=message.jump_url)
+                    if await self.bridge.questions.decisions(session_id, message.content, url=message.jump_url):
+                        await message.reply(
+                            "Decision recorded. This session is not connected, so the reply was not delivered.", mention_author=False
+                        )
             return False
         # MESSAGE_CREATE can arrive before the reopened thread returns to discord.py's cache.
         # Its PartialMessageable still identifies the thread already bound by our acknowledged hello.

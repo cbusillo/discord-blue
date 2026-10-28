@@ -49,6 +49,7 @@ class StoredQuestion:
     decision_url: str = ""
     complete: bool = True
     legacy_parent_id: int | None = None
+    revision: int = 0
 
     @classmethod
     def parse(cls, value: object) -> StoredQuestion:
@@ -63,6 +64,8 @@ class StoredQuestion:
                 isinstance(v, str)
                 for v in (question.key, question.epoch, question.source_url, question.state, question.answer, question.decision_url)
             )
+            or type(question.revision) is not int
+            or question.revision < 0
             or type(question.complete) is not bool
             or (question.legacy_parent_id is not None and type(question.legacy_parent_id) is not int)
             or type(question.thread_id) is not int
@@ -122,6 +125,9 @@ class StoredSession:
             raise ValueError("invalid recovery attempts")
         if steps is not None and (not isinstance(steps, list) or any(step not in get_args(CleanupStep) for step in steps)):
             raise ValueError("invalid cleanup steps")
+        questions = value.get("question_cards", value.get("questions", []))
+        if not isinstance(questions, (list, tuple)):
+            raise ValueError("invalid questions")
         return cls(
             thread,
             notification,
@@ -132,8 +138,13 @@ class StoredSession:
             cast(tuple[CleanupStep, ...], tuple(steps)) if steps is not None else None,
             attempts,
             control,
-            tuple(StoredQuestion.parse(q) for q in value.get("questions", [])),
+            tuple(StoredQuestion.parse(q) for q in questions),
         )
+
+    def serialize(self) -> dict[str, object]:
+        value = asdict(self)
+        value["question_cards"] = value.pop("questions")
+        return value
 
 
 class SessionStore:
@@ -280,7 +291,7 @@ class SessionStore:
         descriptor, temporary = tempfile.mkstemp(prefix=f".{self.path.name}-", dir=self.path.parent)
         try:
             with os.fdopen(descriptor, "w") as output:
-                json.dump({key: asdict(record) for key, record in records.items()}, output)
+                json.dump({key: record.serialize() for key, record in records.items()}, output)
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(temporary, self.path)

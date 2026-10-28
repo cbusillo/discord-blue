@@ -208,7 +208,7 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         updated = await self.card(
             "Context update.\n\n**Q12.** Ship the revision?\n\nI recommend waiting.\nAn experienced developer would test first."
         )
-        self.assertEqual(len(self.fixture.thread.sent_views), count + 1)
+        self.assertEqual(len(self.fixture.thread.sent_views), count + 2)
         message = self.fixture.thread._messages[cast(int, original.question.message_id)]
         self.assertIn("I recommend waiting.", visible_view_text(message.view))
         self.assertIn("An experienced developer would test first.", visible_view_text(message.view))
@@ -228,7 +228,7 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.fixture.session.hello = replace(self.fixture.session.hello, session_epoch="next-conversation")
         count = len(self.fixture.thread.sent_views)
         reopened = await self.card()
-        self.assertEqual(len(self.fixture.thread.sent_views), count)
+        self.assertEqual(len(self.fixture.thread.sent_views), count + 1)
         self.assertEqual(reopened.question.key, original.question.key)
         await original.on_submit(cast(Any, FakeInteraction(self.fixture.thread)))
         self.assertEqual(self.fixture.socket.sent_json, [])
@@ -328,6 +328,93 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("yes", visible_view_text(message.view))
         self.assertNotIn("Ship it?", visible_view_text(message.view))
 
+    async def test_reask_serializes_a_concurrent_decision_and_reopens_an_answered_revision(self) -> None:
+        original = await self.card()
+        fetch = self.fixture.thread.fetch_message
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def held_fetch(message_id: int) -> FakeReplyMessage:
+            entered.set()
+            await release.wait()
+            return await fetch(message_id)
+
+        with patch.object(FakeThread, "fetch_message", side_effect=held_fetch):
+            reask = asyncio.create_task(
+                self.fixture.bridge.status.post_assistant_message(self.fixture.thread.id, "**Q12.** Ship the revision?")
+            )
+            await asyncio.wait_for(entered.wait(), 1)
+            answer = asyncio.create_task(
+                original.cards.decisions(original.session_id, "Q12 yes", url="https://discord.com/channels/1/2/3")
+            )
+            release.set()
+            await asyncio.gather(reask, answer)
+        self.assertEqual(
+            cast(StoredQuestion, original.cards.record(original.session_id, original.question.key)).state, QuestionState.ANSWERED
+        )
+        fresh = await self.card()
+        self.assertEqual(fresh.question.state, QuestionState.WAITING)
+        self.assertGreater(fresh.question.revision, original.question.revision)
+        original.fields[0]._value = "Yes"
+        await original.on_submit(cast(Any, FakeInteraction(self.fixture.thread)))
+        self.assertEqual(self.fixture.socket.sent_json, [])
+        self.assertIn(fresh.question.source_url, visible_view_text(self.fixture.thread.sent_views[-1]))
+
+    async def test_deleted_cards_recreate_and_transient_reads_do_not_drop_later_prose(self) -> None:
+        modal = await self.card()
+        self.fixture.thread._messages.pop(cast(int, modal.question.message_id))
+        recreated = await self.card("**Q12.** Ship the revision?")
+        self.assertNotEqual(recreated.question.message_id, modal.question.message_id)
+        with patch.object(FakeThread, "fetch_message", new=AsyncMock(side_effect=TimeoutError)):
+            await self.fixture.bridge.status.post_assistant_message(
+                self.fixture.thread.id, "**Q12.** Ship again?\n\n## Later\nTail survives."
+            )
+        self.assertIn("Tail survives.", "\n".join(self.fixture.thread.sent_messages))
+
+    async def test_reask_growing_past_attachment_limit_keeps_all_updated_context(self) -> None:
+        modal = await self.card()
+        original_edit = self.fixture.thread._messages[cast(int, modal.question.message_id)].edit
+
+        async def denied_file(content: str | None = None, **kwargs: object) -> None:
+            if any(isinstance(item, discord.File) for item in cast(list[object], kwargs.get("attachments", []))):
+                raise discord.Forbidden(
+                    response=type("Response", (), {"status": 403, "reason": "Forbidden"})(), message="No attachments"
+                )
+            await original_edit(content, **kwargs)
+
+        with patch.object(FakeReplyMessage, "edit", side_effect=denied_file):
+            grown = await self.card(
+                "**Q12.** Ship it?\n\nI recommend testing.\n" + "New cost detail. " * 400 + "\nAlternative: keep waiting."
+            )
+        stored = cast(StoredQuestion, grown.cards.record(grown.session_id, grown.question.key))
+        self.assertFalse(stored.has_attachment)
+        self.assertGreater(len(stored.sources), 1)
+        self.assertIn("Alternative: keep waiting.", "\n".join(self.fixture.thread.sent_messages))
+        self.assertTrue(
+            await self.fixture.bridge.session_threads.thread_has_assistant_message(cast(discord.Thread, self.fixture.thread))
+        )
+
+    async def test_repeated_question_within_one_answer_has_one_body_and_a_complete_reference(self) -> None:
+        await self.fixture.bridge.status.post_assistant_message(
+            self.fixture.thread.id, "**Q42.** Ship it?\n\n## More\nContext.\n\n**Q42.** Ship it?"
+        )
+        questions = self.fixture.bridge.store.records[self.fixture.session.session_id].questions
+        self.assertEqual(len(questions), 1)
+        self.assertIn(questions[0].source_url, visible_view_text(self.fixture.thread.sent_views[-1]))
+        self.assertTrue(
+            await self.fixture.bridge.session_threads.thread_has_assistant_message(cast(discord.Thread, self.fixture.thread))
+        )
+
+    async def test_late_native_ack_cannot_change_a_reasked_card(self) -> None:
+        modal = await self.card()
+        modal.fields[0]._value = "Yes"
+        await modal.on_submit(cast(Any, FakeInteraction(self.fixture.thread)))
+        command = self.fixture.socket.sent_json[-1]
+        reasked = await self.card()
+        await self.fixture.bridge.controls.handle_command_ack(command)
+        self.assertEqual(
+            cast(StoredQuestion, reasked.cards.record(reasked.session_id, reasked.question.key)).state, QuestionState.WAITING
+        )
+
     async def test_stale_or_changed_forms_never_deliver(self) -> None:
         for index, invalid in enumerate(("epoch", "source", "operator", "disabled", "replaced", "offline", "wrong-channel")):
             with self.subTest(invalid=invalid):
@@ -367,9 +454,10 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.fixture.bridge.store = loaded
         recovered = QuestionCards(self.fixture.bridge)
         recovered.restore()
+        original_body = modal.question.questions[0][1]
         count = len(self.fixture.thread.sent_messages)
-        await recovered.send_answer(self.fixture.session, cast(discord.Thread, self.fixture.thread), "**Q12.** Ship it?")
-        self.assertEqual(len(self.fixture.thread.sent_messages), count)
+        await recovered.send_answer(self.fixture.session, cast(discord.Thread, self.fixture.thread), original_body, replay=True)
+        self.assertEqual(len(self.fixture.thread.sent_messages), count + 1)
         stored = cast(StoredQuestion, recovered.record(modal.session_id, modal.question.key))
         self.assertEqual(stored.state, QuestionState.ANSWERED)
         self.assertEqual(stored.answer, "Yes")

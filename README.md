@@ -636,8 +636,10 @@ unread indicators and phone rendering.
 Tap **Answer** to use the existing answer form, or reply in the thread with the
 Q number, such as `Q123 yes, ship it`. The answer form sends that Q-prefixed
 reply through normal session controls. Only session operators can submit;
-changed cards, reconnected sessions and repeat submissions refuse stale forms.
-Closing the form leaves the question waiting.
+changed cards, re-asked questions, reconnected sessions and repeat submissions refuse stale forms.
+Closing the form leaves the question waiting. Re-asking a question updates its
+card, reopens it if answered, and puts a short silent jump link at the current
+place in the conversation.
 
 When an operator answers, the original card loses its buttons and changes to
 green, showing one compact line with the Q number, answer excerpt and a link to
@@ -647,7 +649,7 @@ This reads records delivered through the session, rather than polling GitHub.
 Recording an answer does not prove delivery to the native session; normal reply
 reactions and failure notices still report that separately. Claude may hold a
 busy reply until idle. An unanswered question stays visible when the session
-ends, with its full context and an **Unanswered · Session ended** label.
+ends, with its full context and an **Unanswered** label.
 Publication failures get a silent notice in the thread. Uncertain publication
 and delivery never retry automatically.
 
