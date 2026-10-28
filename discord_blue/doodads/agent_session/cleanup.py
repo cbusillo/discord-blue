@@ -14,6 +14,9 @@ from typing import TYPE_CHECKING, Protocol
 
 import discord
 
+if TYPE_CHECKING:
+    from discord_blue.doodads.agent_session.director_questions import QuestionCards
+
 from discord_blue.doodads.agent_session import threads as threads_module
 from discord_blue.doodads.agent_session.sessions import AgentSession, AgentSessionRegistry, CleanupStep, PendingSessionCleanup
 from discord_blue.doodads.agent_session.store import SessionState, SessionStore, StoredSession
@@ -46,6 +49,7 @@ class CleanupHooks(Protocol):
     session_threads: SessionThreads
     sessions: AgentSessionRegistry
     store: SessionStore
+    questions: QuestionCards
     threads: ThreadWorkers
 
     def attaching(self) -> bool: ...
@@ -285,6 +289,10 @@ class SessionCleanups:
                             updated_at=time.time(),
                         ),
                     )
+            finally:
+                current = self.bridge.store.records.get(session_id)
+                if current is not None and current.status in {"closing", "closed"} and self.bridge.sessions.get(session_id) is None:
+                    await self.bridge.questions.close(session_id)
 
     async def recover_stored_cleanup(self, session_id: str, record: StoredSession) -> None:
         lock = self.bridge.session_lifecycle_lock(session_id)

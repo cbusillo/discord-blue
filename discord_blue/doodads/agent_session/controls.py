@@ -26,7 +26,7 @@ from discord_blue.doodads.agent_session.sessions import (
     PendingRemoteUserInput,
     RejectedCommandMessage,
 )
-from discord_blue.doodads.agent_session.store import SessionStore
+from discord_blue.doodads.agent_session.store import QuestionState, SessionStore
 from discord_blue.doodads.agent_session.thread_worker import ThreadWorkers
 from discord_blue.doodads.agent_session.threads import session_thread_name
 from discord_blue.plugs.discord_plug import BlueBot
@@ -369,7 +369,7 @@ class SessionControls:
         if command is not None:
             session.active_command_id = command_id
             if command.question_key is not None:
-                await self.bridge.questions.outcome(session.session_id, command.question_key, "Delivered")
+                await self.bridge.questions.outcome(session.session_id, command.question_key, QuestionState.DELIVERED)
             await self.update_command_message_reaction(session, command, REACTION_DELIVERED)
             if command.kind == "reply" and command.status_revision == session.status_revision:
                 session.last_status_message = "Request delivered to the native session."
@@ -385,7 +385,7 @@ class SessionControls:
             session.active_command_id = None
         if command is not None:
             if command.question_key is not None:
-                await self.bridge.questions.outcome(session.session_id, command.question_key, "Not delivered")
+                await self.bridge.questions.outcome(session.session_id, command.question_key, QuestionState.NOT_DELIVERED)
             self.restore_command_status(session, command)
             await self.update_command_message_reaction(session, command, REACTION_REJECTED)
             if command.message_id is not None:

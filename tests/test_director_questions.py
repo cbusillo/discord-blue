@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import discord
 
@@ -16,8 +16,10 @@ from discord_blue.doodads.agent_session.director_questions import (
     QuestionAnswerModal,
     QuestionCards,
     detect_questions,
+    source_signature,
 )
-from discord_blue.doodads.agent_session.store import SessionStore, StoredQuestion
+from discord_blue.doodads.agent_session.store import QuestionState, SessionStore, StoredQuestion
+from discord_blue.doodads.agent_session.threads import SessionThread
 from tests.fakes_agent_prompts import PromptFixture, prompt_fixture
 from tests.fakes_agent_session import FakeInteraction, FakeReplyMessage, FakeThread, FakeWebSocket, visible_view_text
 
@@ -100,10 +102,14 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         command = self.fixture.socket.sent_json[0]
         self.assertIn("Q12: Ship it", str(command["text"]))
         self.assertIn("Q13: Keep both", str(command["text"]))
-        self.assertEqual(cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key)).state, "Uncertain")
+        self.assertEqual(
+            cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key)).state, QuestionState.UNCERTAIN
+        )
         await self.fixture.bridge.controls.handle_command_ack(command)
-        self.assertEqual(cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key)).state, "Delivered")
-        self.assertIn("Delivered", visible_view_text(self.parent._history[-1].view))
+        self.assertEqual(
+            cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key)).state, QuestionState.DELIVERED
+        )
+        self.assertIn(QuestionState.DELIVERED, visible_view_text(self.parent._history[-1].view))
 
     async def test_changed_session_source_and_operator_cannot_receive_a_form_answer(self) -> None:
         for invalid in ("epoch", "source", "operator", "disabled", "replaced", "offline", "wrong-channel"):
@@ -156,7 +162,7 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
             [cast(discord.Message, self.fixture.thread._history[0])],
         )
         self.assertEqual(len(self.parent.sent_messages), 1)
-        self.assertEqual(cast(StoredQuestion, recovered.record(modal.session_id, modal.question.key)).state, "Uncertain")
+        self.assertEqual(cast(StoredQuestion, recovered.record(modal.session_id, modal.question.key)).state, QuestionState.UNCERTAIN)
         await modal.on_submit(cast(Any, FakeInteraction(self.parent)))
         self.assertEqual(len(self.fixture.socket.sent_json), 1)
 
@@ -167,13 +173,22 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
             await modal.on_submit(cast(Any, FakeInteraction(self.parent)))
         await modal.on_submit(cast(Any, FakeInteraction(self.parent)))
         self.assertEqual(self.fixture.socket.sent_json, [])
-        self.assertEqual(cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key)).state, "Uncertain")
+        self.assertEqual(
+            cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key)).state, QuestionState.UNCERTAIN
+        )
 
     async def test_large_question_context_is_attached_without_losing_alternatives(self) -> None:
         body = "**Q14.** Proceed?\nRecommendation: yes.\nCost: " + "large " * 1000 + "\nAlternative: wait."
         modal = await self.card(body)
         self.assertEqual(self.parent.sent_files[-1].decode(), body)
-        self.assertIn(self.parent.sent_filenames[-1], visible_view_text(self.parent.sent_views[-1]))
+        self.assertEqual(
+            next(
+                item
+                for item in cast(discord.ui.LayoutView, self.parent.sent_views[-1]).walk_children()
+                if isinstance(item, discord.ui.File)
+            ).media.url,
+            f"attachment://{self.parent.sent_filenames[-1]}",
+        )
         self.assertEqual(len(modal.fields), 1)
 
     async def test_many_questions_require_every_number_and_submit_together(self) -> None:
@@ -201,7 +216,9 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(FakeThread, "send", side_effect=reconnect):
             await modal.on_submit(cast(Any, FakeInteraction(self.parent)))
         self.assertEqual(self.fixture.socket.sent_json, [])
-        self.assertEqual(cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key)).state, "Not delivered")
+        self.assertEqual(
+            cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key)).state, QuestionState.NOT_DELIVERED
+        )
         self.assertTrue(self.fixture.thread.sent_messages[-1])
         self.fixture.bridge.sessions.register(self.fixture.session)
         rejected = await self.card("**Q15.** Proceed?")
@@ -209,7 +226,8 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         await rejected.on_submit(cast(Any, FakeInteraction(self.parent)))
         await self.fixture.bridge.controls.handle_command_reject({**self.fixture.socket.sent_json[-1], "reason": "session busy"})
         self.assertEqual(
-            cast(StoredQuestion, rejected.cards.record(rejected.session_id, rejected.question.key)).state, "Not delivered"
+            cast(StoredQuestion, rejected.cards.record(rejected.session_id, rejected.question.key)).state,
+            QuestionState.NOT_DELIVERED,
         )
 
     async def test_identical_new_answer_gets_a_new_card_and_long_answer_checks_first_chunk(self) -> None:
@@ -231,7 +249,7 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.parent.send_raises = False
         modal = await self.card("**Q15.** Proceed?")
         await self.fixture.bridge.questions.close(self.fixture.session.session_id)
-        self.assertEqual(cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key)).state, "Closed")
+        self.assertEqual(cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key)).state, QuestionState.CLOSED)
         self.assertTrue(
             next(
                 item
@@ -239,3 +257,52 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
                 if isinstance(item, QuestionAnswerButton)
             ).disabled
         )
+
+    async def test_attachment_fallback_survives_state_edits_and_media_urls_do_not_change_source_binding(self) -> None:
+        self.parent.deny_attachments = True
+        modal = await self.card("**Q16.** Proceed?\n" + "Context " * 800)
+        await modal.cards.outcome(modal.session_id, modal.question.key, QuestionState.UNCERTAIN)
+        view = cast(discord.ui.LayoutView, self.parent._history[-1].view)
+        self.assertFalse(any(isinstance(item, discord.ui.File) for item in view.walk_children()))
+        self.assertIn(modal.question.source_url, visible_view_text(view))
+        source = self.fixture.thread._history[0]
+        container = source.components[0]
+        assert isinstance(container, discord.Container)
+        file = discord.components._component_factory(
+            cast(Any, {"type": 13, "file": {"url": "attachment://source.md"}, "spoiler": False})
+        )
+        assert isinstance(file, discord.FileComponent)
+        container.children.append(file)
+        original = source_signature(cast(discord.Message, source), 999)
+        file.media.url = "https://example.invalid/refreshed-url"
+        self.assertEqual(source_signature(cast(discord.Message, source), 999), original)
+
+    async def test_failed_durable_reservation_refuses_delivery_but_native_ack_does_not_need_a_flush(self) -> None:
+        modal = await self.card("**Q16.** Proceed?")
+        modal.fields[0]._value = "Yes"
+        with patch.object(SessionStore, "flush", new=AsyncMock(side_effect=OSError("disk unavailable"))):
+            await modal.on_submit(cast(Any, FakeInteraction(self.parent)))
+        self.assertEqual(self.fixture.socket.sent_json, [])
+        fresh = await self.card("**Q17.** Proceed?")
+        fresh.fields[0]._value = "Yes"
+        await fresh.on_submit(cast(Any, FakeInteraction(self.parent)))
+        with patch.object(SessionStore, "flush", new=AsyncMock(side_effect=OSError("disk unavailable"))):
+            await self.fixture.bridge.controls.handle_command_ack(self.fixture.socket.sent_json[-1])
+        self.assertFalse(self.fixture.socket.closed)
+        self.assertEqual(
+            cast(StoredQuestion, fresh.cards.record(fresh.session_id, fresh.question.key)).state, QuestionState.DELIVERED
+        )
+
+    async def test_new_epoch_acknowledgement_closes_earlier_questions(self) -> None:
+        modal = await self.card("**Q16.** Proceed?")
+        previous = self.fixture.session
+        current = replace(previous, hello=replace(previous.hello, session_epoch="new-epoch"), acknowledged=False)
+        self.fixture.bridge.sessions.register(current)
+        attached = asyncio.get_running_loop().create_future()
+        attached.set_result(SessionThread(cast(discord.Thread, self.fixture.thread), None))
+        with (
+            patch.object(AgentSessionBridge, "attach_task", return_value=attached),
+            patch.object(AgentSessionBridge, "request_thread_name"),
+        ):
+            self.assertTrue(await self.fixture.bridge.accept_hello(current, previous))
+        self.assertEqual(cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key)).state, QuestionState.CLOSED)

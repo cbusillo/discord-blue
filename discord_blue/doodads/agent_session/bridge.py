@@ -43,7 +43,7 @@ from discord_blue.doodads.agent_session.interactions import SessionInteractions
 from discord_blue.doodads.agent_session.session_status import SessionStatusUpdates
 
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
-from discord_blue.doodads.agent_session.store import SessionState, SessionStore, StoredSession
+from discord_blue.doodads.agent_session.store import SESSION_STORE_WAIT_TIMEOUT_SECONDS, SessionState, SessionStore, StoredSession
 from discord_blue.doodads.agent_session.thread_worker import RenameTarget, ThreadWorkers
 from discord_blue.doodads.agent_session.threads import SessionThread
 from discord_blue.doodads.agent_session.threads import auto_join_configured_users
@@ -57,7 +57,6 @@ logger = logging.getLogger(__name__)
 # A connection that drops without a clean session_end (including a failed hello_ack) keeps its thread untouched
 # this long, so a reconnect resumes it without an archive, member changes or notices.
 SESSION_DISCONNECT_GRACE_SECONDS = 300
-SESSION_STORE_WAIT_TIMEOUT_SECONDS = 1
 
 STARTUP_RECONNECT_GRACE_SECONDS = 20
 # After a start, sessions from before it reconnect over this long, and until they do nothing marks their threads as
@@ -700,6 +699,7 @@ class AgentSessionBridge:
             return False
         # Heartbeats start after the ack, so the watchdog's clock starts here too.
         session.acknowledged = True
+        await self.questions.close(session.session_id, current_epoch=session.session_epoch)
         session.touch()
         if self.sessions.get(session.session_id) is session and not self._stopping:
             self.save_session(session, "live")

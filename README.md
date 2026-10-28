@@ -637,15 +637,14 @@ context is attached as `questions.md` rather than shortened. Quoted, tabled,
 indented and fenced examples do not create cards. One-tap options and an open
 questions dashboard are not included in this first version.
 
-Only session operators can submit. The form checks the source answer and the
-session binding again before sending. Changed or disconnected sessions refuse
+Only session operators can submit. Changed source answers or sessions refuse
 stale forms. Closing a form leaves the card waiting. Each card allows one
-submission across operators and restarts. **Uncertain** means check the native
-session before replying again; it never retries automatically. **Delivered**
-requires the native session's acknowledgement; **Not delivered** means the client
-rejected it. Claude may hold a busy reply until idle. Delivery is not a decision
-being acted on. Recovery records bind each card to its source messages and prevent reposting the same source;
-an ambiguous card-publication failure is not automatically retried. Definite failures show a silent notice in the session thread. Completed sessions close their waiting cards.
+submission across operators and restarts. **Delivered** means the native session
+acknowledged the reply; **Not delivered** means it was refused or never sent.
+**Uncertain** means check the native session before replying again. Claude may
+hold a busy reply until idle. Completed sessions close their waiting cards.
+A publication failure gets a silent notice in the session thread. Uncertain
+publication and delivery never retry automatically.
 
 ## Routine bridge delivery
 
