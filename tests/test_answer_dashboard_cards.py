@@ -34,7 +34,12 @@ def text_in(view: discord.ui.LayoutView) -> str:
 class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
     async def test_complete_and_recovered_answers_share_inline_cards_for_both_harnesses(self) -> None:
         for harness in ("codex", "claude"):
-            for answer in ("Fixed the phone layout.", "```python\n" + 'print("hello")\n' * 600 + "```"):
+            for answer in (
+                "Fixed the phone layout.",
+                "Open [Testing → Managed secrets](https://example.com/testing/managed-secrets).\n\n"
+                "1. Enter the key privately.\n2. Reply entered.\n\nBare URL: https://example.com/testing/managed-secrets",
+                "```python\n" + 'print("hello")\n' * 600 + "```",
+            ):
                 with self.subTest(harness=harness, long=len(answer) > ANSWER_CHUNK_LIMIT), prompt_fixture() as fixture:
                     bridge, session, thread = fixture.bridge, fixture.session, fixture.thread
                     session.hello.harness = harness

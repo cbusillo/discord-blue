@@ -201,6 +201,10 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(terminal_send_started.is_set())
 
     async def test_hooks_mirror_typed_prompts_and_answers_but_not_injected_replies(self) -> None:
+        answer = (
+            "Open [Testing → Managed secrets](https://example.com/testing/managed-secrets).\n\n"
+            "1. Enter the key privately.\n2. Reply entered.\n\nBare URL: https://example.com/testing/managed-secrets"
+        )
         async with running_channel() as (claude, discord):
             await claude.initialize()
             hello = await discord.next("hello")
@@ -210,7 +214,7 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
                 await hook(claude, "UserPromptSubmit", session_title="dui-live-test", prompt=echo),
                 await hook(claude, "Stop", last_assistant_message="PINEAPPLE"),
                 await hook(claude, "UserPromptSubmit", session_title="dui-live-test", prompt="Now touch a file."),
-                await hook(claude, "Stop", last_assistant_message="Done."),
+                await hook(claude, "Stop", last_assistant_message=answer),
             ]
             events = await mirrored(claude, discord)
 
@@ -222,7 +226,7 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
                 ("title_changed", "dui-live-test"),
                 ("turn_complete", "PINEAPPLE"),
                 ("user_message", "Now touch a file."),
-                ("turn_complete", "Done."),
+                ("turn_complete", answer),
             ],
         )
 
