@@ -26,7 +26,7 @@ from discord_blue.doodads.agent_session.sessions import (
     PendingRemoteUserInput,
     RejectedCommandMessage,
 )
-from discord_blue.doodads.agent_session.store import QuestionState, SessionStore
+from discord_blue.doodads.agent_session.store import SessionStore
 from discord_blue.doodads.agent_session.thread_worker import ThreadWorkers
 from discord_blue.doodads.agent_session.threads import session_thread_name
 from discord_blue.plugs.discord_plug import BlueBot
@@ -209,6 +209,12 @@ class SessionControls:
     async def send_thread_reply(self, message: discord.Message) -> bool:
         session = self.bridge.sessions.get_by_thread(message.channel.id)
         if session is None:
+            for session_id, stored in tuple(self.bridge.store.records.items()):
+                if stored.thread_id == message.channel.id:
+                    if await self.bridge.questions.decisions(session_id, message.content, url=message.jump_url):
+                        await message.reply(
+                            "Decision recorded. This session is not connected, so the reply was not delivered.", mention_author=False
+                        )
             return False
         # MESSAGE_CREATE can arrive before the reopened thread returns to discord.py's cache.
         # Its PartialMessageable still identifies the thread already bound by our acknowledged hello.
@@ -216,15 +222,16 @@ class SessionControls:
         if not isinstance(channel, discord.Thread):
             return False
         thread: discord.Thread = channel
-        if session.websocket.closed:
-            await message.reply("Agent session is offline; reply was not delivered.", mention_author=False)
-            return True
         text = message.content.strip()
         if not text or text.startswith("!"):
             return False
         if message.created_at < session.attached_at:
             # The client reconnected since (for Claude Code, after /clear or /resume); never deliver it to the new epoch.
             await message.reply(REPLY_BEFORE_RECONNECT, mention_author=False)
+            return True
+        await self.bridge.questions.decisions(session.session_id, text, url=message.jump_url)
+        if session.websocket.closed:
+            await message.reply("Agent session is offline; reply was not delivered.", mention_author=False)
             return True
         if not session.acknowledged:
             await message.reply("Agent session is reconnecting; send the reply again in a moment.", mention_author=False)
@@ -242,8 +249,6 @@ class SessionControls:
         user: discord.User | discord.Member,
         text: str,
         message_id: int,
-        *,
-        question_key: str | None = None,
     ) -> str | None:
         command = RemoteCommand(
             command_id=str(uuid.uuid4()),
@@ -257,7 +262,6 @@ class SessionControls:
             thread_id=thread.id,
             message_id=message_id,
             kind="reply",
-            question_key=question_key,
         )
         queued = False
 
@@ -368,8 +372,6 @@ class SessionControls:
         command = session.pending_commands.get(command_id)
         if command is not None:
             session.active_command_id = command_id
-            if command.question_key is not None:
-                await self.bridge.questions.outcome(session.session_id, command.question_key, QuestionState.DELIVERED)
             await self.update_command_message_reaction(session, command, REACTION_DELIVERED)
             if command.kind == "reply" and command.status_revision == session.status_revision:
                 session.last_status_message = "Request delivered to the native session."
@@ -384,8 +386,6 @@ class SessionControls:
         if session.active_command_id == command_id:
             session.active_command_id = None
         if command is not None:
-            if command.question_key is not None:
-                await self.bridge.questions.outcome(session.session_id, command.question_key, QuestionState.NOT_DELIVERED)
             self.restore_command_status(session, command)
             await self.update_command_message_reaction(session, command, REACTION_REJECTED)
             if command.message_id is not None:

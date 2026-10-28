@@ -62,7 +62,7 @@ def _answer_questions(source: str) -> str:
                 sections.append(f"{current}\n\n*Question context continues in the full answer.*")
                 current = ""
         elif current:
-            if _question_boundary(block.split("\n", 1)[0]) or len(current) + len(block) + 2 > ANSWER_CHUNK_LIMIT:
+            if question_boundary(block.split("\n", 1)[0]) or len(current) + len(block) + 2 > ANSWER_CHUNK_LIMIT:
                 sections.append(current)
                 current = ""
             else:
@@ -72,7 +72,7 @@ def _answer_questions(source: str) -> str:
     return "\n\n".join(sections)
 
 
-def _question_boundary(line: str) -> bool:
+def question_boundary(line: str) -> bool:
     plain = line.lstrip(" \t>")
     return plain.startswith("#") or re.fullmatch(r"(?:[-*_][ \t]*){3,}", plain) is not None
 
@@ -82,7 +82,7 @@ def _question_blocks(source: str) -> Iterator[str]:
     fence = None
     for line in source.split("\n"):
         plain = line.lstrip(" \t>")
-        if fence is None and (not plain.strip() or QUESTION_NUMBER.match(plain) or _question_boundary(plain)):
+        if fence is None and (not plain.strip() or QUESTION_NUMBER.match(plain) or question_boundary(plain)):
             if lines:
                 yield "\n".join(lines)
                 lines = []
