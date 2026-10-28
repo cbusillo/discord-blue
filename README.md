@@ -650,6 +650,11 @@ Recording an answer does not prove delivery to the native session; normal reply
 reactions and failure notices still report that separately. Claude may hold a
 busy reply until idle. An unanswered question stays visible when the session
 ends, with its full context and an **Unanswered** label.
+Older releases cannot restore these new cards' answer forms after a rollback;
+ordinary thread replies still work. Existing parent cards are retired lazily
+when their session reconnects or ends, or an operator uses an enabled button.
+Historical cards are not rewritten in bulk. A heading or rule ends question
+context; the surrounding sections remain chat.
 Publication failures get a silent notice in the thread. Uncertain publication
 and delivery never retry automatically.
 

@@ -144,7 +144,7 @@ class QuestionCards:
             numbers = ", ".join(number for number, _ in question.questions)
             return notice_card(f"**{numbers}** · Continue in the [session thread]({question.source_url}).")
         if question.state == QuestionState.ANSWERED:
-            answer = discord.utils.escape_markdown(" ".join(question.answer.split())[:600])
+            answer = discord.utils.escape_markdown(" ".join(question.answer.split())[:120])
             numbers = ", ".join(number for number, _ in question.questions)
             view = notice_card(f"**{numbers}** · {answer} · [Decision]({question.decision_url})")
             container = view.children[0]
@@ -187,9 +187,15 @@ class QuestionCards:
         if (remaining := text[position:]).strip():
             parts.append((remaining, None))
         full_text = text
+        shown: set[str] = set()
         for index, (body, number) in enumerate(parts):
             if number is not None:
-                await self.post(session, thread, body, complete=index == len(parts) - 1, replay=replay)
+                current = self.record(session.session_id, self.key(session, number))
+                if number in shown and current is not None:
+                    await self.reference(thread, current, complete=index == len(parts) - 1)
+                else:
+                    await self.post(session, thread, body, complete=index == len(parts) - 1, replay=replay)
+                shown.add(number)
             else:
                 await send_assistant_message(
                     thread, body, silent=bool(sections), complete=index == len(parts) - 1, full_text=full_text
@@ -278,7 +284,14 @@ class QuestionCards:
         replay: bool,
     ) -> None:
         current = self.record(session.session_id, key)
+        previous = current
+        if current is not None and len(questions) == 1 and questions[0][1] in current.questions[0][1]:
+            questions = current.questions
         source = None
+        published = False
+        if current is not None and current.message_id is None:
+            await self.fallback(thread, text, "Earlier Question publication is unconfirmed; reply here instead.", complete)
+            return
         restored = current is not None and replay and current.questions == questions
         if current is not None and not restored:
             current = replace(
@@ -292,9 +305,6 @@ class QuestionCards:
             )
             self.save(session.session_id, current)
         try:
-            if current is not None and current.message_id is None:
-                await self.fallback(thread, text, "Earlier Question publication is unconfirmed; reply here instead.", complete)
-                return
             if current is not None and current.message_id is not None:
                 try:
                     source = await thread.fetch_message(current.message_id)
@@ -329,9 +339,19 @@ class QuestionCards:
                 sources=tuple((message.id, source_signature(message, self.bridge.bot_user_id() or 0)) for message in sources),
             )
             self.save(session.session_id, question)
+            published = True
             if source is not None:
                 await self.reference(thread, question, complete=complete)
-        except (OSError, discord.DiscordException):
+        except (OSError, discord.DiscordException) as exc:
+            if previous is not None and not published:
+                self.save(
+                    session.session_id, replace(previous, revision=current.revision if current is not None else previous.revision)
+                )
+            elif not published and isinstance(exc, discord.HTTPException) and 400 <= exc.status < 500:
+                stored = self.bridge.store.records[session.session_id]
+                self.bridge.store.put(
+                    session.session_id, replace(stored, questions=tuple(q for q in stored.questions if q.key != key))
+                )
             logger.exception("Unable to confirm Question publication for session %s", session.session_id)
             await self.fallback(thread, text, "The Question card could not be updated. Check this thread before replying.", complete)
 
@@ -410,10 +430,10 @@ class QuestionCards:
         for previous in stored.questions if stored is not None else ():
             async with self.lock(previous.key):
                 question = self.record(session_id, previous.key)
-                if (
-                    question is None
-                    or question.epoch == current_epoch
-                    or question.state not in {QuestionState.WAITING, QuestionState.CLOSED}
+                if question is None:
+                    continue
+                if question.legacy_parent_id is None and (
+                    question.epoch == current_epoch or question.state not in {QuestionState.WAITING, QuestionState.CLOSED}
                 ):
                     continue
                 question = replace(question, state=QuestionState.CLOSED)
@@ -594,5 +614,5 @@ class QuestionAnswerModal(discord.ui.Modal):
                     except discord.DiscordException:
                         logger.warning("Unable to post Question answer failure in thread %s", thread.id)
             await interaction.followup.send(
-                error or "Answer sent; waiting for native confirmation. The card shows its status.", ephemeral=True
+                error or "Decision recorded. Watch your thread reply for native delivery confirmation.", ephemeral=True
             )

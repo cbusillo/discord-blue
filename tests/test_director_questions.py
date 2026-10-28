@@ -395,10 +395,14 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_repeated_question_within_one_answer_has_one_body_and_a_complete_reference(self) -> None:
         await self.fixture.bridge.status.post_assistant_message(
-            self.fixture.thread.id, "**Q42.** Ship it?\n\n## More\nContext.\n\n**Q42.** Ship it?"
+            self.fixture.thread.id,
+            "**Q42.** Ship it?\nRecommendation: test first.\nCost: upkeep.\nAlternative: wait."
+            "\n\n## More\nContext.\n\n**Q42.** Ship it?",
         )
         questions = self.fixture.bridge.store.records[self.fixture.session.session_id].questions
         self.assertEqual(len(questions), 1)
+        for context in ("Recommendation: test first.", "Cost: upkeep.", "Alternative: wait."):
+            self.assertIn(context, questions[0].questions[0][1])
         self.assertIn(questions[0].source_url, visible_view_text(self.fixture.thread.sent_views[-1]))
         self.assertTrue(
             await self.fixture.bridge.session_threads.thread_has_assistant_message(cast(discord.Thread, self.fixture.thread))
@@ -414,6 +418,25 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             cast(StoredQuestion, reasked.cards.record(reasked.session_id, reasked.question.key)).state, QuestionState.WAITING
         )
+
+    async def test_failed_reask_preserves_the_prior_card_state_and_invalidates_older_forms(self) -> None:
+        modal = await self.card()
+        old = modal.question
+        with patch.object(FakeThread, "fetch_message", new=AsyncMock(side_effect=TimeoutError)):
+            await self.fixture.bridge.status.post_assistant_message(self.fixture.thread.id, "**Q12.** Ship the revision?")
+        current = cast(StoredQuestion, modal.cards.record(modal.session_id, old.key))
+        self.assertEqual(current.state, old.state)
+        self.assertEqual(current.questions, old.questions)
+        self.assertGreater(current.revision, old.revision)
+        final_question = "**Q12.** Ship the final revision?"
+        with patch.object(QuestionCards, "reference", new=AsyncMock(side_effect=OSError("link send failed"))):
+            await self.fixture.bridge.status.post_assistant_message(self.fixture.thread.id, final_question)
+        published = cast(StoredQuestion, modal.cards.record(modal.session_id, old.key))
+        self.assertEqual(published.state, QuestionState.WAITING)
+        self.assertEqual(published.questions[0][1], final_question)
+        modal.fields[0]._value = "Yes"
+        await modal.on_submit(cast(Any, FakeInteraction(self.fixture.thread)))
+        self.assertEqual(self.fixture.socket.sent_json, [])
 
     async def test_stale_or_changed_forms_never_deliver(self) -> None:
         for index, invalid in enumerate(("epoch", "source", "operator", "disabled", "replaced", "offline", "wrong-channel")):
