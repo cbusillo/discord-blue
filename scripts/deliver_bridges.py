@@ -5,21 +5,32 @@ import fcntl
 import json
 import os
 import plistlib
+import re
 import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
 
-LABEL = "com.shinycomputers.discord-blue-codex-bridge"
-BRIDGES = ("discord-blue-codex-bridge", "discord-blue-claude-channel")
+from discord_blue.release_delivery import BRIDGES
+from discord_blue.release_delivery import BRIDGE_LABEL as LABEL
 
 
-def source_revision(checkout: Path) -> str:
+def source_revision(checkout: Path, requested_revision: str | None = None) -> str:
     dirty = subprocess.check_output(["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"], text=True)
     if dirty:
         raise ValueError("Bridge delivery requires a clean committed checkout")
     subprocess.run(["git", "-C", str(checkout), "fetch", "origin", "main"], check=True, capture_output=True)
-    revision = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
+    if requested_revision is not None:
+        if re.fullmatch(r"[0-9a-f]{40}", requested_revision) is None:
+            raise ValueError("Bridge delivery revision must be an exact full commit ID")
+        revision = requested_revision
+        subprocess.run(
+            ["git", "-C", str(checkout), "rev-parse", "--verify", f"{revision}^{{commit}}"],
+            check=True,
+            capture_output=True,
+        )
+    else:
+        revision = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
     subprocess.run(["git", "-C", str(checkout), "merge-base", "--is-ancestor", revision, "origin/main"], check=True)
     return revision
 
@@ -31,8 +42,8 @@ def verify_release(binaries: Path, revision: str) -> None:
             raise ValueError(f"{name} does not report the selected source revision")
 
 
-def prepare_release(checkout: Path, home: Path, build_dir: Path) -> tuple[Path, str]:
-    revision = source_revision(checkout)
+def prepare_release(checkout: Path, home: Path, build_dir: Path, requested_revision: str | None = None) -> tuple[Path, str]:
+    revision = source_revision(checkout, requested_revision)
     release = home / ".local/share/discord-blue-bridges" / revision
     if (release / "complete").is_file():
         verify_release(release / "venv/bin", revision)
@@ -76,7 +87,7 @@ def replace_link(path: Path, target: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def deliver(checkout: Path, home: Path, build_dir: Path) -> str:
+def deliver(checkout: Path, home: Path, build_dir: Path, requested_revision: str | None = None) -> str:
     plist = home / "Library/LaunchAgents" / f"{LABEL}.plist"
     job = plistlib.loads(plist.read_bytes())
     args = job.get("ProgramArguments", [])
@@ -87,7 +98,7 @@ def deliver(checkout: Path, home: Path, build_dir: Path) -> str:
     loaded = subprocess.run(["launchctl", "print", service], capture_output=True, text=True, timeout=30)
     if loaded.returncode not in (0, 113):
         loaded.check_returncode()
-    release, revision = prepare_release(checkout, home, build_dir)
+    release, revision = prepare_release(checkout, home, build_dir, requested_revision)
     binaries = home / ".local/bin"
     binaries.mkdir(parents=True, exist_ok=True)
     for name in BRIDGES:
@@ -108,13 +119,14 @@ def main() -> None:
     parser.add_argument("--checkout", type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument("--home", type=Path, default=Path.home())
     parser.add_argument("--build-dir", type=Path, required=True, help="Disposable build directory on the host's artifact volume")
+    parser.add_argument("--revision", help="Exact full commit ID to deliver from origin/main")
     args = parser.parse_args()
     state = args.home / ".local/share/discord-blue-bridges"
     state.mkdir(parents=True, exist_ok=True)
     try:
         with (state / "delivery.lock").open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            revision = deliver(args.checkout.resolve(), args.home.resolve(), args.build_dir.resolve())
+            revision = deliver(args.checkout.resolve(), args.home.resolve(), args.build_dir.resolve(), args.revision)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         parser.exit(
             1,

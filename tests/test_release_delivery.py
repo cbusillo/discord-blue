@@ -1,0 +1,223 @@
+from __future__ import annotations
+
+import json
+import hashlib
+import plistlib
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import patch
+
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
+
+from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
+from discord_blue.health import RUNTIME_IDENTITY_ENV
+from discord_blue.plugs.discord_plug import BlueBot
+from discord_blue.release_delivery import BRIDGES, BRIDGE_LABEL, HOOK_PATH, DeliveryReceipts, production_delivery
+from scripts import reconcile_bridge_delivery as consumer
+from tests.fakes_agent_session import FakeBot
+
+
+class ReleaseDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name)
+        self.target = {"revision": "a" * 40, "hooks_sha256": "b" * 64}
+        self.receipt = {"status": "delivered", **self.target, "codex_revision": self.target["revision"], "codex_pid": 123}
+        config = SimpleNamespace(agent_session=SimpleNamespace(enabled=True, token="fixture-token"))
+        self.bridge = AgentSessionBridge(
+            cast(BlueBot, cast(object, FakeBot(cast(Any, config)))), store_path=self.base / "sessions.json"
+        )
+        app = web.Application()
+        self.bridge.register_routes(app)
+        self.server = TestServer(app)
+        self.client = TestClient(self.server)
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+        self.token = self.bridge.bot.config.agent_session.token
+        self.headers = {"Authorization": f"Bearer {self.token}"}
+        self.target_patch = patch("discord_blue.doodads.agent_session.bridge.production_delivery", side_effect=lambda: self.target)
+        self.target_patch.start()
+        self.addCleanup(self.target_patch.stop)
+
+    async def test_registered_mac_stays_pending_across_releases_failures_and_server_restarts(self) -> None:
+        host = "12345678-1234-1234-1234-123456789abc"
+        response = await self.client.get("/agent-session/delivery")
+        self.assertEqual(response.status, 401)
+        async with self.client.get("/agent-session/delivery", headers=self.headers) as response:
+            self.assertEqual((await response.json())["status"], "pending")
+        for receipt, status in ((self.receipt, "delivered"), ({"status": "pending", **self.target}, "pending")):
+            async with self.client.post(
+                "/agent-session/delivery", headers=self.headers, json={"host_id": host, "receipt": receipt}
+            ) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual((await response.json())["clients"][host]["status"], status)
+        self.bridge.deliveries.save(host, self.receipt)
+        self.target = {**self.target, "revision": "c" * 40}
+        recovered = DeliveryReceipts(self.bridge.deliveries.path)
+        self.assertEqual(recovered.status(self.target)["clients"][host]["status"], "pending")
+        stale = {**self.receipt, "revision": self.target["revision"]}
+        recovered.save(host, stale)
+        self.assertEqual(recovered.status(self.target)["status"], "pending")
+        current = {**stale, "codex_revision": self.target["revision"]}
+        recovered.save(host, current)
+        self.assertEqual(recovered.status(self.target)["status"], "delivered")
+        recovered.path.write_text("{")
+        async with self.client.get("/agent-session/delivery", headers=self.headers) as response:
+            self.assertEqual(response.status, 503)
+            self.assertEqual((await response.json())["status"], "pending")
+
+    async def test_consumer_reconciles_an_offline_mac_and_reposts_a_lost_ack_without_reloading(self) -> None:
+        registration = {
+            "host_id": "12345678-1234-1234-1234-123456789abc",
+            "bridge_config": str(self.base / "config.toml"),
+            "checkout": str(self.base / "checkout"),
+            "home": str(self.base / "home"),
+        }
+        config = SimpleNamespace(
+            server_url=str(self.server.make_url("/agent-session/connect")).replace("http:", "ws:"), token=self.token
+        )
+        receipt_path = self.base / "receipt.json"
+        with (
+            patch.object(consumer.bridge_config, "load_config", return_value=config),
+            patch.object(consumer, "deliver_target", return_value=self.receipt) as deliver,
+            patch.object(consumer, "verify_installed"),
+        ):
+            receipt = await consumer.reconcile(registration, receipt_path)
+            self.assertEqual(receipt, self.receipt)
+            await consumer.reconcile(registration, receipt_path)
+            deliver.assert_called_once()
+            self.target = {"revision": "c" * 40, "hooks_sha256": "d" * 64}
+            deliver.side_effect = OSError("Mac delivery unavailable")
+            with self.assertRaisesRegex(ValueError, "pending"):
+                await consumer.reconcile(registration, receipt_path)
+            self.assertEqual(json.loads(receipt_path.read_text())["status"], "pending")
+            self.assertEqual(self.bridge.deliveries.status(self.target)["status"], "pending")
+            deliver.side_effect = None
+            deliver.return_value = {**self.receipt, **self.target, "codex_revision": self.target["revision"]}
+            await consumer.reconcile(registration, receipt_path)
+            self.assertEqual(self.bridge.deliveries.status(self.target)["status"], "delivered")
+
+    async def test_unavailable_production_never_requests_installation(self) -> None:
+        with patch("discord_blue.doodads.agent_session.bridge.production_delivery", side_effect=ValueError):
+            async with self.client.get("/agent-session/delivery", headers=self.headers) as response:
+                self.assertEqual(response.status, 503)
+        malformed = {**self.receipt, "error": "private local path"}
+        async with self.client.post(
+            "/agent-session/delivery",
+            headers=self.headers,
+            json={
+                "host_id": "12345678-1234-1234-1234-123456789abc",
+                "receipt": malformed,
+            },
+        ) as response:
+            self.assertEqual(response.status, 400)
+
+
+class ProductionSourceTests(unittest.TestCase):
+    def test_only_exact_gated_production_identity_selects_source(self) -> None:
+        revision = "a" * 40
+        identity: dict[str, Any] = {
+            "product": "discord-blue",
+            "instance": "prod",
+            "source_git_ref": revision,
+            "deployment_record_id": "deployment",
+            "artifact_id": "artifact",
+        }
+        with patch.dict(
+            "os.environ", {RUNTIME_IDENTITY_ENV: json.dumps(identity), "LAUNCHPLANE_SOURCE_GIT_REF": revision}, clear=True
+        ):
+            self.assertEqual(production_delivery()["revision"], revision)
+        for change in ({"instance": "testing"}, {"product": "other"}, {"source_git_ref": "short"}, {"artifact_id": ""}):
+            with patch.dict(
+                "os.environ",
+                {
+                    RUNTIME_IDENTITY_ENV: json.dumps({**identity, **change}),
+                    "LAUNCHPLANE_SOURCE_GIT_REF": revision,
+                },
+                clear=True,
+            ):
+                with self.assertRaises(ValueError):
+                    production_delivery()
+
+
+class LocalDeliveryTests(unittest.TestCase):
+    def test_exact_hook_refresh_existing_command_and_fresh_startup_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source, home = base / "source", base / "home"
+            source.mkdir()
+            real_output = subprocess.check_output
+            real_run = subprocess.run
+
+            def git(*args: str) -> str:
+                return real_output(["git", "-C", str(source), *args], text=True, stderr=subprocess.DEVNULL).strip()
+
+            git("init", "-q", "-b", "main")
+            git("config", "user.name", "Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            git("remote", "add", "origin", str(source))
+            hooks = source / HOOK_PATH
+            hooks.parent.mkdir(parents=True)
+            hooks.write_text('{"hooks":{}}')
+            git("add", ".")
+            git("commit", "-qm", "old")
+            previous = git("rev-parse", "HEAD")
+            hooks.write_text('{"hooks":{"Stop":[]}}')
+            git("commit", "-qam", "released")
+            target = {"revision": git("rev-parse", "HEAD"), "hooks_sha256": hashlib.sha256(hooks.read_bytes()).hexdigest()}
+            remote = base / "remote"
+            subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+            git("remote", "set-url", "origin", str(remote))
+            git("push", "-q", "origin", "main")
+            git("checkout", "--detach", previous)
+            git("branch", "local-main", previous)
+            git("checkout", "local-main")
+            git("branch", "-D", "main")
+            git("branch", "-m", "main")
+            log = base / "bridge.log"
+            log.write_text("old startup\n")
+            plist = home / "Library/LaunchAgents" / f"{BRIDGE_LABEL}.plist"
+            plist.parent.mkdir(parents=True)
+            plist.write_bytes(plistlib.dumps({"StandardErrorPath": str(log)}))
+            registration = {"checkout": str(source), "home": str(home), "build_dir": str(base / "build")}
+
+            def output(args: list[str], **kwargs: object) -> str | bytes:
+                if args[0] == "launchctl":
+                    return "state = running\n pid = 123\n"
+                if args[0] == "ps":
+                    return str(home / ".local/share/discord-blue-bridges" / target["revision"] / "venv/bin/python")
+                return real_output(args, **cast(Any, kwargs))
+
+            def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                if args[0] != "uv":
+                    return real_run(args, **cast(Any, kwargs))
+                revision = args[args.index("--revision") + 1]
+                for name in BRIDGES:
+                    launcher = home / ".local/bin" / name
+                    launcher.parent.mkdir(parents=True, exist_ok=True)
+                    launcher.write_text(f"#!{sys.executable}\nprint({revision!r})\n")
+                    launcher.chmod(0o700)
+                with log.open("a") as stream:
+                    stream.write(f"Bridge source fixture {revision}\n")
+                return subprocess.CompletedProcess(args, 0)
+
+            with (
+                patch.object(consumer.subprocess, "check_output", side_effect=output),
+                patch.object(consumer.subprocess, "run", side_effect=run),
+            ):
+                receipt = consumer.deliver_target(registration, target)
+            self.assertEqual(receipt["revision"], git("rev-parse", "HEAD"))
+            self.assertEqual(receipt["hooks_sha256"], hashlib.sha256(hooks.read_bytes()).hexdigest())
+            self.assertEqual(receipt["status"], "delivered")
+            hooks.write_text("local work")
+            with self.assertRaises(ValueError), patch.object(consumer.subprocess, "run", side_effect=run) as install:
+                consumer.deliver_target(registration, target)
+            self.assertFalse(any(call.args[0][0] == "uv" for call in install.call_args_list))
+            self.assertEqual(hooks.read_text(), "local work")

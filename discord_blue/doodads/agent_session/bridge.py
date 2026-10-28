@@ -51,6 +51,7 @@ from discord_blue.doodads.agent_session.threads import ThreadCreationStopped
 from discord_blue.doodads.agent_session.threads import distinct_thread_name
 from discord_blue.doodads.agent_session.threads import session_start_message
 from discord_blue.health import health_payload
+from discord_blue.release_delivery import DeliveryReceipts, production_delivery
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,7 @@ class AgentSessionBridge:
         self.conversations = ConversationRouter(bot)
         # The container sets HOME to its existing durable /var/lib/discord-blue mount.
         self.store = SessionStore.for_path(store_path if store_path is not None else Path.home() / "agent-sessions.json")
+        self.deliveries = DeliveryReceipts(self.store.path.with_name("bridge-deliveries.json"))
         self.sessions = AgentSessionRegistry()
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -189,6 +191,32 @@ class AgentSessionBridge:
         app.router.add_get("/health", self.handle_health)
         app.router.add_get(AGENT_SESSION_CONNECT_PATH, self.handle_connect)
         app.router.add_get("/agent-session/conversation", self.handle_conversation_connect)
+        app.router.add_get("/agent-session/delivery", self.handle_delivery)
+        app.router.add_post("/agent-session/delivery", self.handle_delivery)
+
+    async def handle_delivery(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized()
+        try:
+            target = production_delivery()
+            if request.method == "POST":
+                body = await request.json()
+                if not isinstance(body, dict) or not isinstance(body.get("receipt"), dict):
+                    raise web.HTTPBadRequest()
+                receipt = body["receipt"]
+                if set(receipt) - {"status", "revision", "hooks_sha256", "codex_revision", "codex_pid", "error"}:
+                    raise web.HTTPBadRequest()
+                if receipt.get("status") not in {"pending", "delivered"} or receipt.get("error") not in {
+                    None,
+                    "delivery_failed",
+                    "startup_unverified",
+                    "source_unavailable",
+                }:
+                    raise web.HTTPBadRequest()
+                self.deliveries.save(str(body.get("host_id", "")), receipt)
+            return web.json_response(self.deliveries.status(target))
+        except (OSError, ValueError, TypeError):
+            return web.json_response({"status": "pending", "error": "production_delivery_unavailable"}, status=503)
 
     async def handle_conversation_connect(self, request: web.Request) -> web.WebSocketResponse:
         if not self._authorized(request):
@@ -213,16 +241,26 @@ class AgentSessionBridge:
         discord_healthy = gateway["status"] == "ok"
         monitor = self.agent_session_monitor_health()
         monitor_healthy = not self.bot.config.agent_session.enabled or monitor["status"] not in {"dead", "stalled"}
+        payload = health_payload(
+            discord_status="ok" if discord_healthy else "unhealthy",
+            discord_gateway=gateway,
+            agent_session_enabled=self.bot.config.agent_session.enabled,
+            active_agent_sessions=len(self.sessions.live_sessions()),
+            disconnected_agent_sessions=len(self.sessions.disconnected_sessions()),
+            pending_agent_session_cleanups=len(self.cleanups.pending),
+            agent_session_monitor=monitor,
+        )
+        try:
+            delivery = self.deliveries.status(production_delivery())
+            payload["components"]["local_delivery"] = {
+                "status": delivery["status"],
+                "registered": len(delivery["clients"]),
+                "pending": sum(client["status"] == "pending" for client in delivery["clients"].values()),
+            }
+        except (OSError, ValueError, TypeError):
+            payload["components"]["local_delivery"] = {"status": "pending", "reason": "delivery_unverified"}
         return web.json_response(
-            health_payload(
-                discord_status="ok" if discord_healthy else "unhealthy",
-                discord_gateway=gateway,
-                agent_session_enabled=self.bot.config.agent_session.enabled,
-                active_agent_sessions=len(self.sessions.live_sessions()),
-                disconnected_agent_sessions=len(self.sessions.disconnected_sessions()),
-                pending_agent_session_cleanups=len(self.cleanups.pending),
-                agent_session_monitor=monitor,
-            ),
+            payload,
             status=200 if discord_healthy and monitor_healthy else 503,
         )
 
