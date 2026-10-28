@@ -34,7 +34,12 @@ def text_in(view: discord.ui.LayoutView) -> str:
 class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
     async def test_complete_and_recovered_answers_share_inline_cards_for_both_harnesses(self) -> None:
         for harness in ("codex", "claude"):
-            for answer in ("Fixed the phone layout.", "```python\n" + 'print("hello")\n' * 600 + "```"):
+            for answer in (
+                "Fixed the phone layout.",
+                "Open [Testing → Managed secrets](https://example.com/testing/managed-secrets).\n\n"
+                "1. Enter the key privately.\n2. Reply entered.\n\nBare URL: https://example.com/testing/managed-secrets",
+                "```python\n" + 'print("hello")\n' * 600 + "```",
+            ):
                 with self.subTest(harness=harness, long=len(answer) > ANSWER_CHUNK_LIMIT), prompt_fixture() as fixture:
                     bridge, session, thread = fixture.bridge, fixture.session, fixture.thread
                     session.hello.harness = harness
@@ -64,6 +69,15 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(payload.get("content"))
                         self.assertTrue(discord.MessageFlags._from_value(payload["flags"]).components_v2)
                         self.assertFalse(payload["allowed_mentions"]["parse"])
+                        if len(answer) <= ANSWER_CHUNK_LIMIT:
+                            serialized_text = "\n".join(
+                                item["content"]
+                                for container in payload["components"]
+                                for item in container["components"]
+                                if item["type"] == discord.ComponentType.text_display.value
+                            )
+                            self.assertIn(answer, serialized_text)
+                            self.assertFalse(discord.MessageFlags._from_value(payload["flags"]).suppress_embeds)
                     answer_index = thread.sent_views.index(view)
                     self.assertFalse(thread.sent_kwargs[answer_index].get("silent", False))
                     self.assertFalse(thread.sent_files)

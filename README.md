@@ -910,7 +910,10 @@ This display choice
 does not change input delivery to either agent.
 
 Assistant answers remain separate so thread-history recovery can
-recognize them after a restart. Long answers have one Answer heading and continue inline across ordered
+recognize them after a restart. Masked Markdown links (`[label](https://example.com)`)
+and bare URLs stay in the answer's text display. A link read from a tool result
+must be included in the assistant's answer to appear in Discord; tool results
+are not mirrored. Long answers have one Answer heading and continue inline across ordered
 cards, with code fences reopened on each card. Ordinary long answers
 stay inline. Huge output uses an `answer.md` attachment and shows all
 bold Q-number question sections inline, with nearby recommendation and option blocks within a bounded excerpt per question.
