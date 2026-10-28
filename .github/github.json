@@ -13,6 +13,7 @@
     "runtimeCompose": "compose.runtime.yml",
     "systemdService": "discord-blue.service",
     "bridgeDelivery": "scripts/deliver_bridges.py",
+    "bridgeReleaseReconciliation": "scripts/reconcile_bridge_delivery.py",
     "agentSessionProtocol": "docs/agent-session-protocol.md",
     "cmConversation": "docs/cm-conversation.md"
   },

@@ -652,9 +652,11 @@ The registered Mac reconciles with the source identity served by the gated
 production release every minute and at login. Testing and preview identities
 cannot request delivery. It invokes the supported delivery command below with
 the exact production revision, rather than delivering whichever commit is newest.
-It first fast-forwards the registered in-place Claude hook source to that same
-revision. A dirty, divergent, or newer checkout stays pending for reconciliation;
-it is never reset or overwritten. Untracked files are preserved.
+It selects that same committed revision in the registered in-place Claude hook
+source, including on rollback. When the revision changes, the clean source
+checkout becomes detached at the release; named branches keep their existing
+tips. Dirty files, unmerged commits, other task branches and untracked-file
+collisions are preserved and leave delivery pending. Nothing is reset or forced.
 
 After this change lands, the release agent registers the Mac once from its clean
 `main` checkout (use the checkout already registered as the local Claude marketplace):
@@ -666,10 +668,19 @@ uv run python scripts/reconcile_bridge_delivery.py --register \
   --build-dir /Volumes/Developer-Artifacts/task-evidence/discord-blue/bridge-delivery/build
 ```
 
-Registration installs the `com.shinycomputers.discord-blue-delivery` login item.
+Registration prepares an immutable runtime through the existing updater without
+changing either bridge launcher, then installs the
+`com.shinycomputers.discord-blue-delivery` login item from that prepared source.
+The scheduled reconciler and updater therefore survive source rollback.
+After an acknowledged delivery, its stable automation link selects the new
+prepared source on the next scheduled run. A rollback to an older release
+without reconciliation code retains the existing automation runtime.
 It reads the existing bridge config and token in place; it creates no credential
 or inbound Mac listener. Repeating the same registration recovers an interrupted
-login-item installation. Existing sessions keep running throughout registration.
+login-item installation, preserving the existing job environment. If the hook
+checkout has rolled back before this command existed, repeat registration using
+the prepared `source` path recorded in the registration JSON. Existing sessions
+keep running throughout registration.
 The login item follows the accepted release's production identity using the
 existing authenticated server connection origin. It does not call Launchplane,
 promote a release, or change server settings.
@@ -684,6 +695,17 @@ are beside the registration; `reconciliation.log` holds the login item's output.
 An acknowledged delivery records the exact launcher revision, the hook artifact's
 SHA-256, and the running Codex bridge's PID and source revision. A lost receipt
 acknowledgement is reposted after verification without another bridge reload.
+An ordinary bridge restart refreshes the observed PID without a reload. Missing
+startup evidence for an already installed/running revision never triggers a
+reload loop. Failed installer attempts for the same revision wait at least
+15 minutes before another install. Receipts distinguish `source_unavailable`,
+`startup_unverified` and `delivery_failed`.
+
+To retire a Mac's receipt, unload only its delivery login item with
+`launchctl bootout gui/$(id -u)/com.shinycomputers.discord-blue-delivery`, then
+send an authenticated `DELETE /agent-session/delivery` with its `host_id`.
+This forgets delivery tracking and leaves all bridge credentials and sessions
+alone. A still-running reconciler registers itself again on its next pass.
 
 For a supported manual reconciliation, the release agent may still run this
 command from a clean, committed checkout after verifying the selected revision:

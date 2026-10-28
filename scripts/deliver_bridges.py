@@ -6,6 +6,7 @@ import json
 import os
 import plistlib
 import re
+import shutil
 import subprocess
 import tempfile
 import zipfile
@@ -13,13 +14,16 @@ from pathlib import Path
 
 from discord_blue.release_delivery import BRIDGES
 from discord_blue.release_delivery import BRIDGE_LABEL as LABEL
+from discord_blue.release_delivery import replace_link
 
 
 def source_revision(checkout: Path, requested_revision: str | None = None) -> str:
-    dirty = subprocess.check_output(["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"], text=True)
+    dirty = subprocess.check_output(
+        ["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"], text=True, timeout=30
+    )
     if dirty:
         raise ValueError("Bridge delivery requires a clean committed checkout")
-    subprocess.run(["git", "-C", str(checkout), "fetch", "origin", "main"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(checkout), "fetch", "origin", "main"], check=True, capture_output=True, timeout=60)
     if requested_revision is not None:
         if re.fullmatch(r"[0-9a-f]{40}", requested_revision) is None:
             raise ValueError("Bridge delivery revision must be an exact full commit ID")
@@ -28,16 +32,17 @@ def source_revision(checkout: Path, requested_revision: str | None = None) -> st
             ["git", "-C", str(checkout), "rev-parse", "--verify", f"{revision}^{{commit}}"],
             check=True,
             capture_output=True,
+            timeout=30,
         )
     else:
-        revision = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
-    subprocess.run(["git", "-C", str(checkout), "merge-base", "--is-ancestor", revision, "origin/main"], check=True)
+        revision = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True, timeout=30).strip()
+    subprocess.run(["git", "-C", str(checkout), "merge-base", "--is-ancestor", revision, "origin/main"], check=True, timeout=30)
     return revision
 
 
 def verify_release(binaries: Path, revision: str) -> None:
     for name in BRIDGES:
-        output = subprocess.check_output([str(binaries / name), "--version"], text=True).strip()
+        output = subprocess.check_output([str(binaries / name), "--version"], text=True, timeout=30).strip()
         if output.split()[-1] != revision:
             raise ValueError(f"{name} does not report the selected source revision")
 
@@ -52,7 +57,9 @@ def prepare_release(checkout: Path, home: Path, build_dir: Path, requested_revis
     with tempfile.TemporaryDirectory(prefix="bridge-", dir=build_dir) as directory:
         build = Path(directory)
         archive = build / "source.zip"
-        subprocess.run(["git", "-C", str(checkout), "archive", "--format=zip", f"--output={archive}", revision], check=True)
+        subprocess.run(
+            ["git", "-C", str(checkout), "archive", "--format=zip", f"--output={archive}", revision], check=True, timeout=60
+        )
         snapshot = build / "source"
         with zipfile.ZipFile(archive) as source:
             source.extractall(snapshot)
@@ -61,7 +68,9 @@ def prepare_release(checkout: Path, home: Path, build_dir: Path, requested_revis
             ["uv", "sync", "--frozen", "--no-dev", "--no-editable", "--project", str(snapshot)],
             env={**os.environ, "UV_PROJECT_ENVIRONMENT": str(release / "venv")},
             check=True,
+            timeout=600,
         )
+        shutil.copytree(snapshot, release / "source", dirs_exist_ok=True)
     verify_release(release / "venv/bin", revision)
     (release / "complete").touch()
     return release / "venv", revision
@@ -76,15 +85,6 @@ def replace_bytes(path: Path, content: bytes) -> None:
             temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
-
-
-def replace_link(path: Path, target: Path) -> None:
-    temporary = path.with_name(f".{path.name}.{os.getpid()}")
-    try:
-        temporary.symlink_to(target)
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def deliver(checkout: Path, home: Path, build_dir: Path, requested_revision: str | None = None) -> str:
@@ -120,12 +120,21 @@ def main() -> None:
     parser.add_argument("--home", type=Path, default=Path.home())
     parser.add_argument("--build-dir", type=Path, required=True, help="Disposable build directory on the host's artifact volume")
     parser.add_argument("--revision", help="Exact full commit ID to deliver from origin/main")
+    parser.add_argument(
+        "--prepare-only", action="store_true", help="Prepare the immutable runtime without changing launchers or jobs"
+    )
     args = parser.parse_args()
     state = args.home / ".local/share/discord-blue-bridges"
     state.mkdir(parents=True, exist_ok=True)
     try:
         with (state / "delivery.lock").open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if args.prepare_only:
+                runtime, revision = prepare_release(
+                    args.checkout.resolve(), args.home.resolve(), args.build_dir.resolve(), args.revision
+                )
+                print(json.dumps({"revision": revision, "runtime": str(runtime), "source": str(runtime.parent / "source")}))
+                return
             revision = deliver(args.checkout.resolve(), args.home.resolve(), args.build_dir.resolve(), args.revision)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         parser.exit(

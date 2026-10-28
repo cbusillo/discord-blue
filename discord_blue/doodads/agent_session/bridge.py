@@ -193,27 +193,29 @@ class AgentSessionBridge:
         app.router.add_get("/agent-session/conversation", self.handle_conversation_connect)
         app.router.add_get("/agent-session/delivery", self.handle_delivery)
         app.router.add_post("/agent-session/delivery", self.handle_delivery)
+        app.router.add_delete("/agent-session/delivery", self.handle_delivery)
 
     async def handle_delivery(self, request: web.Request) -> web.Response:
         if not self._authorized(request):
             raise web.HTTPUnauthorized()
+        if request.method in {"POST", "DELETE"}:
+            try:
+                body = await request.json()
+                if not isinstance(body, dict) or not isinstance(body.get("host_id"), str):
+                    raise ValueError("Invalid registered host")
+                if request.method == "DELETE":
+                    self.deliveries.forget(body["host_id"])
+                    return web.json_response({"status": "forgotten"})
+                if not isinstance(body.get("receipt"), dict):
+                    raise ValueError("Invalid receipt")
+                self.deliveries.validate(body["receipt"])
+                self.deliveries.save(body["host_id"], body["receipt"])
+            except (ValueError, TypeError) as error:
+                raise web.HTTPBadRequest() from error
+            except OSError:
+                return web.json_response({"status": "pending", "error": "receipt_store_unavailable"}, status=503)
         try:
             target = production_delivery()
-            if request.method == "POST":
-                body = await request.json()
-                if not isinstance(body, dict) or not isinstance(body.get("receipt"), dict):
-                    raise web.HTTPBadRequest()
-                receipt = body["receipt"]
-                if set(receipt) - {"status", "revision", "hooks_sha256", "codex_revision", "codex_pid", "error"}:
-                    raise web.HTTPBadRequest()
-                if receipt.get("status") not in {"pending", "delivered"} or receipt.get("error") not in {
-                    None,
-                    "delivery_failed",
-                    "startup_unverified",
-                    "source_unavailable",
-                }:
-                    raise web.HTTPBadRequest()
-                self.deliveries.save(str(body.get("host_id", "")), receipt)
             return web.json_response(self.deliveries.status(target))
         except (OSError, ValueError, TypeError):
             return web.json_response({"status": "pending", "error": "production_delivery_unavailable"}, status=503)

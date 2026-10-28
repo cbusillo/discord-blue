@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import uuid
+import os
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,15 @@ from discord_blue.health import runtime_identity, source_git_ref
 HOOK_PATH = Path("claude-plugin/dui/hooks/hooks.json")
 BRIDGE_LABEL = "com.shinycomputers.discord-blue-codex-bridge"
 BRIDGES = ("discord-blue-codex-bridge", "discord-blue-claude-channel")
+
+
+def replace_link(path: Path, target: Path) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}")
+    try:
+        temporary.symlink_to(target)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def production_delivery() -> dict[str, str]:
@@ -40,12 +51,14 @@ class DeliveryReceipts:
             records = json.loads(self.path.read_text())
         except FileNotFoundError:
             return {}
+        except json.JSONDecodeError as error:
+            raise OSError("Invalid delivery receipt store") from error
         if not isinstance(records, dict) or any(not isinstance(record, dict) for record in records.values()):
-            raise ValueError("Invalid delivery receipt store")
+            raise OSError("Invalid delivery receipt store")
         return records
 
     def save(self, host: str, receipt: dict[str, Any]) -> None:
-        if re.fullmatch(r"[0-9a-f-]{36}", host) is None:
+        if str(uuid.UUID(host)) != host:
             raise ValueError("Invalid registered host")
         records = self.read()
         records[host] = receipt
@@ -53,6 +66,40 @@ class DeliveryReceipts:
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(json.dumps(records))
         temporary.replace(self.path)
+
+    def forget(self, host: str) -> None:
+        if str(uuid.UUID(host)) != host:
+            raise ValueError("Invalid registered host")
+        records = self.read()
+        records.pop(host, None)
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(records))
+        temporary.replace(self.path)
+
+    @staticmethod
+    def validate(receipt: dict[str, Any]) -> None:
+        if set(receipt) - {"status", "revision", "hooks_sha256", "codex_revision", "codex_pid", "error"}:
+            raise ValueError("Unknown receipt fields")
+        if receipt.get("status") not in {"pending", "delivered"} or receipt.get("error") not in {
+            None,
+            "delivery_failed",
+            "startup_unverified",
+            "source_unavailable",
+        }:
+            raise ValueError("Invalid receipt state")
+        for field, length in (("revision", 40), ("hooks_sha256", 64)):
+            if not isinstance(receipt.get(field), str) or re.fullmatch(f"[0-9a-f]{{{length}}}", receipt[field]) is None:
+                raise ValueError("Invalid receipt source")
+        if "codex_revision" in receipt and (
+            not isinstance(receipt["codex_revision"], str) or re.fullmatch(r"[0-9a-f]{40}", receipt["codex_revision"]) is None
+        ):
+            raise ValueError("Invalid startup revision")
+        if "codex_pid" in receipt and (type(receipt["codex_pid"]) is not int or receipt["codex_pid"] <= 0):
+            raise ValueError("Invalid startup process")
+        if receipt["status"] == "delivered" and (
+            not {"codex_revision", "codex_pid"} <= receipt.keys() or receipt.get("error") is not None
+        ):
+            raise ValueError("Invalid startup receipt")
 
     def status(self, target: dict[str, str]) -> dict[str, Any]:
         records = self.read()

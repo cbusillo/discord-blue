@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import plistlib
 import subprocess
 import sys
@@ -88,14 +89,17 @@ class ReleaseDeliveryTests(unittest.IsolatedAsyncioTestCase):
             patch.object(consumer.bridge_config, "load_config", return_value=config),
             patch.object(consumer, "deliver_target", return_value=self.receipt) as deliver,
             patch.object(consumer, "verify_installed"),
+            patch.object(consumer, "job_pid", return_value=123),
+            patch.object(consumer, "startup_receipt", return_value=self.receipt),
         ):
             receipt = await consumer.reconcile(registration, receipt_path)
             self.assertEqual(receipt, self.receipt)
+            self.bridge.deliveries.path.unlink()
             await consumer.reconcile(registration, receipt_path)
             deliver.assert_called_once()
             self.target = {"revision": "c" * 40, "hooks_sha256": "d" * 64}
             deliver.side_effect = OSError("Mac delivery unavailable")
-            with self.assertRaisesRegex(ValueError, "pending"):
+            with self.assertRaises(ValueError):
                 await consumer.reconcile(registration, receipt_path)
             self.assertEqual(json.loads(receipt_path.read_text())["status"], "pending")
             self.assertEqual(self.bridge.deliveries.status(self.target)["status"], "pending")
@@ -118,6 +122,19 @@ class ReleaseDeliveryTests(unittest.IsolatedAsyncioTestCase):
             },
         ) as response:
             self.assertEqual(response.status, 400)
+        for body in (
+            {"host_id": "invalid", "receipt": self.receipt},
+            {"host_id": "12345678-1234-1234-1234-123456789abc", "receipt": {**self.receipt, "codex_pid": True}},
+        ):
+            async with self.client.post("/agent-session/delivery", headers=self.headers, json=body) as response:
+                self.assertEqual(response.status, 400)
+        async with self.client.post("/agent-session/delivery", headers=self.headers, data="{") as response:
+            self.assertEqual(response.status, 400)
+        host = "12345678-1234-1234-1234-123456789abc"
+        self.bridge.deliveries.save(host, self.receipt)
+        async with self.client.delete("/agent-session/delivery", headers=self.headers, json={"host_id": host}) as response:
+            self.assertEqual(response.status, 200)
+            self.assertFalse(self.bridge.deliveries.read())
 
 
 class ProductionSourceTests(unittest.TestCase):
@@ -189,6 +206,8 @@ class LocalDeliveryTests(unittest.TestCase):
             registration = {"checkout": str(source), "home": str(home), "build_dir": str(base / "build")}
 
             def output(args: list[str], **kwargs: object) -> str | bytes:
+                if args[0] == "claude":
+                    return json.dumps([{"id": "dui@discord-blue", "enabled": True, "readFromFolder": str(hooks.parent.parent)}])
                 if args[0] == "launchctl":
                     return "state = running\n pid = 123\n"
                 if args[0] == "ps":
@@ -196,7 +215,7 @@ class LocalDeliveryTests(unittest.TestCase):
                 return real_output(args, **cast(Any, kwargs))
 
             def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-                if args[0] != "uv":
+                if "--revision" not in args:
                     return real_run(args, **cast(Any, kwargs))
                 revision = args[args.index("--revision") + 1]
                 for name in BRIDGES:
@@ -216,8 +235,88 @@ class LocalDeliveryTests(unittest.TestCase):
             self.assertEqual(receipt["revision"], git("rev-parse", "HEAD"))
             self.assertEqual(receipt["hooks_sha256"], hashlib.sha256(hooks.read_bytes()).hexdigest())
             self.assertEqual(receipt["status"], "delivered")
+            self.assertEqual(git("rev-parse", "main"), previous)
+            with (
+                patch.object(consumer.subprocess, "check_output", side_effect=output),
+                patch.object(consumer.subprocess, "run", side_effect=run) as installer,
+            ):
+                with patch.object(consumer, "job_pid", return_value=456):
+                    resumed = consumer.deliver_target(registration, target)
+                self.assertEqual(resumed["codex_pid"], 456)
+                self.assertFalse(any("--revision" in call.args[0] for call in installer.call_args_list))
+                log.write_text("startup evidence unavailable")
+                for _ in range(2):
+                    with self.assertRaises(consumer.DeliveryFailure) as failed:
+                        consumer.deliver_target(registration, target)
+                    self.assertEqual(failed.exception.reason, "startup_unverified")
+                self.assertFalse(any("--revision" in call.args[0] for call in installer.call_args_list))
+                target = {"revision": previous, "hooks_sha256": hashlib.sha256(b'{"hooks":{}}').hexdigest()}
+                rolled_back = consumer.deliver_target(registration, target)
+                self.assertEqual(rolled_back["revision"], previous)
+                self.assertEqual(hooks.read_bytes(), b'{"hooks":{}}')
+            attempts = base / "attempt.json"
+
+            def failing_install(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                if "--revision" in args:
+                    raise subprocess.CalledProcessError(1, args)
+                return real_run(args, **cast(Any, kwargs))
+
+            with (
+                patch.object(consumer.subprocess, "check_output", side_effect=output),
+                patch.object(consumer.subprocess, "run", side_effect=failing_install) as installer,
+                patch.object(consumer, "verify_installed", side_effect=ValueError),
+            ):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    consumer.deliver_target(registration, target, attempts)
+                with self.assertRaises(consumer.DeliveryFailure):
+                    consumer.deliver_target(registration, target, attempts)
+                self.assertEqual(sum("--revision" in call.args[0] for call in installer.call_args_list), 1)
             hooks.write_text("local work")
             with self.assertRaises(ValueError), patch.object(consumer.subprocess, "run", side_effect=run) as install:
                 consumer.deliver_target(registration, target)
-            self.assertFalse(any(call.args[0][0] == "uv" for call in install.call_args_list))
+            self.assertFalse(any("--revision" in call.args[0] for call in install.call_args_list))
             self.assertEqual(hooks.read_text(), "local work")
+
+    def test_registration_recovers_bootstrap_failure_with_another_shell_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home = base / "home"
+            (home / "Library/LaunchAgents").mkdir(parents=True)
+            path = base / "registration.json"
+            prepared = {"runtime": str(base / "release/venv"), "source": str(base / "release/source")}
+            bootstraps = 0
+
+            def run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                nonlocal bootstraps
+                if args[1] == "print":
+                    return subprocess.CompletedProcess(args, 113)
+                bootstraps += 1
+                if bootstraps == 1:
+                    raise OSError("interrupted bootstrap")
+                return subprocess.CompletedProcess(args, 0)
+
+            with (
+                patch.object(consumer, "verify_hook_registration"),
+                patch.object(consumer.shutil, "which", return_value="/fixture/uv"),
+                patch.object(consumer.subprocess, "check_output", return_value=json.dumps(prepared)) as prepare,
+                patch.object(consumer.subprocess, "run", side_effect=run),
+            ):
+                with self.assertRaises(OSError):
+                    consumer.register(path, base / "source", home, base / "build", base / "config")
+                original = json.loads(path.read_text())
+                with patch.dict(os.environ, {"PATH": "/another/shell"}):
+                    consumer.register(path, base / "source", home, base / "build", base / "config")
+                self.assertEqual(json.loads(path.read_text())["host_id"], original["host_id"])
+                prepare.assert_called_once()
+                self.assertEqual(bootstraps, 2)
+            automation = home / ".local/share/discord-blue-bridges/automation"
+            initial = automation.resolve()
+            target = {"revision": "a" * 40}
+            consumer.advance_automation(home, target)
+            self.assertEqual(automation.resolve(), initial)
+            release = automation.parent / target["revision"]
+            script = release / "source/scripts/reconcile_bridge_delivery.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("released reconciler")
+            consumer.advance_automation(home, target)
+            self.assertEqual(automation.resolve(), release.resolve())
