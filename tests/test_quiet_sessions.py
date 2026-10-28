@@ -12,7 +12,6 @@ from discord_blue.doodads.agent_session import threads
 from discord_blue.doodads.agent_session.cards import assistant_answer_cards
 from discord_blue.doodads.agent_session.controls import REACTION_CONTROL_STATUS
 from discord_blue.plugs.discord_plug import BlueBot
-from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 from discord_blue.doodads.agent_session.protocol import SessionHello
 from discord_blue.doodads.agent_session.store import StoredSession
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
@@ -21,15 +20,12 @@ from tests.test_attach_scenarios import hello_for, scenario
 from tests import test_thread_titles as title_tests
 from discord_blue.doodads.agent_session.thread_worker import ThreadWorkers, ThreadHooks, INITIAL_TITLE_SETTLE_SECONDS
 from tests.fakes_agent_prompts import prompt_fixture
-from tests.fakes_agent_session import FakeThread, make_hello
+from tests.fakes_agent_session import FakeThread, FakeReplyMessage, make_hello
 
 
 class QuietSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_details_are_private_and_operator_gated_after_reconnect(self) -> None:
         with prompt_fixture() as fixture:
-            fixture.bridge.bot.config.agent_session.enabled = True
-            doodad = AgentSessionDoodad(fixture.bridge.bot)
-            doodad.bridge = fixture.bridge
             for online in (True, False):
                 if not online:
                     fixture.bridge.sessions.remove_if_current(fixture.session)
@@ -37,19 +33,12 @@ class QuietSessionTests(unittest.IsolatedAsyncioTestCase):
                         fixture.thread.id, None, threads.session_start_message(fixture.session.hello), "closed", 0, 0
                     )
                 for permitted in (False, True):
-                    interaction = SimpleNamespace(
-                        type=discord.InteractionType.component,
-                        data={"custom_id": threads.session_identity(fixture.session.hello)},
-                        channel=fixture.thread,
-                        user=SimpleNamespace(id=123),
-                        response=SimpleNamespace(send_message=AsyncMock()),
-                    )
                     with patch.object(AgentSessionBridge, "is_operator", return_value=permitted):
-                        await doodad.session_details(cast(discord.Interaction[BlueBot], cast(object, interaction)))
-                    call = interaction.response.send_message.call_args
-                    self.assertTrue(call.kwargs["ephemeral"])
-                    self.assertEqual(fixture.session.hello.cwd in call.args[0], permitted)
-                    self.assertEqual(fixture.session.session_id in call.args[0], permitted)
+                        summary = fixture.bridge.controls.session_status_summary(
+                            fixture.thread, cast(discord.User, cast(object, SimpleNamespace(id=123)))
+                        )
+                    self.assertEqual(fixture.session.hello.cwd in summary, permitted)
+                    self.assertEqual(fixture.session.session_id in summary, permitted)
 
     async def test_cold_discovery_recovers_component_marker_without_parent_announcement(self) -> None:
         fake = FakeDiscord()
@@ -82,13 +71,19 @@ class QuietSessionTests(unittest.IsolatedAsyncioTestCase):
             message = await fixture.thread.fetch_message(anchor)
             message.reactions.append(REACTION_CONTROL_STATUS)
             fixture.session.last_status_message = "New status from agent"
-            await fixture.bridge.controls.handle_session_control_reaction(
-                fixture.session,
-                cast(discord.Thread, fixture.thread),
-                anchor,
-                REACTION_CONTROL_STATUS,
-                cast(discord.User, cast(object, SimpleNamespace(id=123))),
-            )
+            with (
+                patch.object(FakeReplyMessage, "clear_reactions", wraps=message.clear_reactions) as clear,
+                patch.object(FakeReplyMessage, "add_reaction", wraps=message.add_reaction) as add,
+            ):
+                await fixture.bridge.controls.handle_session_control_reaction(
+                    fixture.session,
+                    cast(discord.Thread, fixture.thread),
+                    anchor,
+                    REACTION_CONTROL_STATUS,
+                    cast(discord.User, cast(object, SimpleNamespace(id=123))),
+                )
+            clear.assert_not_awaited()
+            add.assert_not_awaited()
             self.assertEqual(len(fixture.thread.sent_messages), 1)
             self.assertEqual(fixture.session.control_message_id, anchor)
             self.assertTrue(message.edit_kwargs)
@@ -117,11 +112,14 @@ class QuietSessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(result.notification_message_id)
             self.assertFalse(any(make_hello().cwd in text for text in thread.sent_messages))
             self.assertEqual(len(thread.sent_views), 1)
-            view = cast(discord.ui.View, thread.sent_views[0])
-            button = next(item for item in view.children if isinstance(item, discord.ui.Button))
-            self.assertTrue(button.label)
-            self.assertLessEqual(len(button.custom_id or ""), 100)
-            self.assertIn(button.custom_id, threads.expected_session_start_messages(make_hello()))
+            view = cast(discord.ui.LayoutView, thread.sent_views[0])
+            details = next(item for item in view.children if isinstance(item, discord.ui.Container))
+            self.assertTrue(details.spoiler)
+            marker = next(item.content for item in details.children if isinstance(item, discord.ui.TextDisplay))
+            self.assertIn(marker, threads.expected_session_start_messages(make_hello()))
+            self.assertEqual(
+                threads.session_message_markers(cast(discord.Message, cast(object, await thread.fetch_message(901)))), ["", marker]
+            )
 
     async def test_multicard_answer_has_one_heading_and_preserves_body(self) -> None:
         source = "First passage.\n\n" + "Later passage.\n" * 300
@@ -129,7 +127,10 @@ class QuietSessionTests(unittest.IsolatedAsyncioTestCase):
         texts = [item.content for view in views for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)]
         self.assertGreater(len(views), 1)
         self.assertFalse(attached)
-        self.assertEqual(sum(text.startswith("### ") for text in texts), 1)
+        self.assertEqual(
+            [sum(isinstance(item, discord.ui.TextDisplay) for item in view.walk_children()) for view in views],
+            [2, *[1 for _ in views[1:]]],
+        )
         self.assertIn("First passage.", "\n".join(texts))
         self.assertEqual("\n".join(texts).count("Later passage."), 300)
 

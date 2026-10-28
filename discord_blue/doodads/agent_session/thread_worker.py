@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 import weakref
 from collections import deque
@@ -27,6 +26,7 @@ from typing import Any, Literal, Protocol, TypeVar, cast
 import discord
 
 from discord_blue.doodads.agent_session.sessions import CleanupStep
+from discord_blue.doodads.agent_session.threads import has_creation_token
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -139,12 +139,7 @@ class ThreadWorker:
 
     def rename(self, name: str, epoch: str) -> None:
         target = self.pool.hooks.rename_target(self.thread_id, epoch)
-        if (
-            self.applied_name is None
-            and not self.rename_not_before
-            and target is not None
-            and re.search(r" \[[a-z2-7]{6}]$", target.name or "")
-        ):
+        if self.applied_name is None and not self.rename_not_before and target is not None and has_creation_token(target.name or ""):
             self.rename_not_before = self.pool.clock() + INITIAL_TITLE_SETTLE_SECONDS
         self.name = (name, epoch)
         self.start()

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import hashlib
 import re
 import secrets
 from collections.abc import Awaitable, Callable
@@ -20,8 +19,7 @@ DISCORD_THREAD_NAME_LIMIT = 100
 # The thread-name icon for each agent a client reports in hello's `harness`; others get none.
 HARNESS_ICONS = {"claude": "\u2734\ufe0f", "codex": "\U0001f537"}
 DEFAULT_BRANCH_NAMES = {"main", "master", "develop", "development", "dev", "trunk"}
-SESSION_IDENTITY_PREFIX = "dui-session:"
-SESSION_IDENTITY_RE = re.compile(rf"{re.escape(SESSION_IDENTITY_PREFIX)}[0-9a-f]{{64}}:[0-9a-f]{{16}}\Z")
+SESSION_DETAILS_COMPONENT_ID = 216
 SESSION_START_PREFIX = "Agent session connected"
 SESSION_NOTIFICATION_PREFIX = "Agent session connected for "
 SESSION_NOTIFICATION_PREFIXES = (
@@ -129,7 +127,7 @@ def session_start_message(hello: SessionHello) -> str:
 
 
 def expected_session_start_messages(hello: SessionHello) -> set[str]:
-    return {session_start_message(hello), session_identity(hello)}
+    return {session_start_message(hello)}
 
 
 def session_start_messages_without_pid(starts: set[str]) -> set[str]:
@@ -137,8 +135,6 @@ def session_start_messages_without_pid(starts: set[str]) -> set[str]:
 
 
 def session_start_without_pid(content: str) -> str | None:
-    if SESSION_IDENTITY_RE.fullmatch(content):
-        return content.split(":")[1]
     lines = content.splitlines()
     if not lines or lines[0] != SESSION_START_PREFIX:
         return None
@@ -146,30 +142,23 @@ def session_start_without_pid(content: str) -> str | None:
         return None
     if not lines[-1].startswith("pid: `"):
         return None
-    return hashlib.sha256("\n".join(lines[:-1]).encode()).hexdigest()
+    return "\n".join(lines[:-1])
 
 
-def session_identity(hello: SessionHello) -> str:
-    marker = session_start_message(hello)
-    identity = session_start_without_pid(marker)
-    process = hashlib.sha256(marker.encode()).hexdigest()[:16]
-    return f"{SESSION_IDENTITY_PREFIX}{identity}:{process}"
-
-
-def session_identity_view(hello: SessionHello) -> discord.ui.View:
-    view = discord.ui.View(timeout=None)
-    view.add_item(discord.ui.Button(label="Session details", custom_id=session_identity(hello)))
+def session_identity_view(hello: SessionHello) -> discord.ui.LayoutView:
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.TextDisplay("-# Session details · Tap to reveal"))
+    view.add_item(
+        discord.ui.Container(discord.ui.TextDisplay(session_start_message(hello)), spoiler=True, id=SESSION_DETAILS_COMPONENT_ID)
+    )
     return view
 
 
 def session_message_markers(message: discord.Message) -> list[str]:
     markers = [message.content]
     for component in message.components:
-        if not isinstance(component, discord.ActionRow):
-            continue
-        for child in component.children:
-            if isinstance(child, discord.Button) and child.custom_id and SESSION_IDENTITY_RE.fullmatch(child.custom_id):
-                markers.append(child.custom_id)
+        if isinstance(component, discord.Container) and component.id == SESSION_DETAILS_COMPONENT_ID:
+            markers.extend(child.content for child in component.children if isinstance(child, discord.TextDisplay))
     return markers
 
 
@@ -197,10 +186,16 @@ async def get_agent_session_channel(bot: BlueBot, channel_id: int | None = None)
 
 
 CREATION_TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
+CREATION_TOKEN_LENGTH = 6
+CREATION_TOKEN_RE = re.compile(rf" \[[{CREATION_TOKEN_ALPHABET}]{{{CREATION_TOKEN_LENGTH}}}]$")
+
+
+def has_creation_token(name: str) -> bool:
+    return CREATION_TOKEN_RE.search(name) is not None
 
 
 def new_creation_token() -> str:
-    return "".join(secrets.choice(CREATION_TOKEN_ALPHABET) for _ in range(6))
+    return "".join(secrets.choice(CREATION_TOKEN_ALPHABET) for _ in range(CREATION_TOKEN_LENGTH))
 
 
 def creation_token_suffix(token: str) -> str:
@@ -225,11 +220,6 @@ async def create_session_thread(
     settle: Callable[[discord.Thread], Awaitable[None]] | None = None,
     stopping: asyncio.Event | None = None,
 ) -> SessionThread:
-    """Create the session's thread, let `settle` see it before anything is posted, then announce it.
-
-    With a token, the thread's name carries it: the only field Discord sets atomically with a private thread, so a
-    duplicate made by discord.py retrying the create can be told apart from other sessions' threads.
-    """
     channel_id = bot.config.agent_session.spawned_channel_id if hello.spawned else agent_session_channel_ids(bot)[0]
     if hello.spawned and (not channel_id or channel_id == agent_session_channel_ids(bot)[0]):
         raise ValueError("Spawned sessions need a separate agent_session.spawned_channel_id")

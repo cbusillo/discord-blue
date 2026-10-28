@@ -229,12 +229,12 @@ reconnect metadata-matching rules or delete conversation history. Background
 progress and pending cleanup state are visible in `/health`, with warnings for
 failed operations. A dead or stalled monitor is reported as unhealthy.
 
-Reconnect with the same session identity and metadata. New threads persist a
-`Session details` button whose custom ID carries the SHA-256 fingerprint of the
-legacy marker without PID, plus a bounded fingerprint of the complete marker.
-This keeps machine identity out of the reading path and preserves exact and
-PID-relaxed matching. The button opens the operator-only private status response,
-with stored details available after disconnect. Discovery and orphan cleanup
+Reconnect with the same session identity and metadata. New threads persist the
+complete legacy marker inside a native spoiler container identified as session
+details. The default reading path hides host, folder, branch, session and PID;
+tap to reveal them. The marker remains recoverable without the local store.
+Spoilers preserve the thread's existing audience and are not an access boundary.
+`/code status` remains operator-only and private. Discovery and orphan cleanup
 recognize both this component representation and old text markers. An unread
 candidate still blocks duplicate creation. Parent announcements are not required.
 Thread recovery matches persisted session markers; a changed PID can be tolerated only for one matching

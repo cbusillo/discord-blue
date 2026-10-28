@@ -19,6 +19,21 @@ if TYPE_CHECKING:
     from discord_blue.config import Config
 
 
+def message_components(payload: list[dict[str, Any]]) -> list[discord.Component]:
+    components: list[discord.Component] = []
+    for item in payload:
+        match item["type"]:
+            case discord.ComponentType.action_row.value:
+                components.append(discord.ActionRow(cast(Any, item)))
+            case discord.ComponentType.text_display.value:
+                components.append(discord.TextDisplay(cast(Any, item)))
+            case discord.ComponentType.container.value:
+                components.append(discord.Container(data=cast(Any, item), state=None))
+            case _:
+                raise ValueError(f"Unsupported test component {item['type']}")
+    return components
+
+
 @contextmanager
 def every_user_is_operator() -> Iterator[None]:
     """Admit every fake user through the operator gate, for tests of what an operator's action does.
@@ -75,7 +90,7 @@ class FakeReplyMessage:
         self.channel = channel
         self.content = content
         self.view: object = None
-        self.components: list[discord.Container | discord.ActionRow] = []
+        self.components: list[discord.Component] = []
         self.author = SimpleNamespace(id=author_id)
         self.reactions: list[str] = []
         self.replies: list[str] = []
@@ -103,12 +118,7 @@ class FakeReplyMessage:
         self.content = content or ""
         self.view = kwargs.get("view")
         if isinstance(self.view, (discord.ui.View, discord.ui.LayoutView)):
-            self.components = [
-                discord.ActionRow(cast(Any, component))
-                if component["type"] == 1
-                else discord.Container(data=cast(Any, component), state=None)
-                for component in self.view.to_components()
-            ]
+            self.components = message_components(self.view.to_components())
         self.edits.append((self.content, self.view is None))
         self.edit_kwargs.append(kwargs)
 
@@ -238,12 +248,7 @@ class FakeThread:
         self.add_message(message)
         message.view = kwargs.get("view")
         if isinstance(message.view, (discord.ui.View, discord.ui.LayoutView)):
-            message.components = [
-                discord.ActionRow(cast(Any, component))
-                if component["type"] == 1
-                else discord.Container(data=cast(Any, component), state=None)
-                for component in message.view.to_components()
-            ]
+            message.components = message_components(message.view.to_components())
         return message
 
     async def edit(self, **kwargs: object) -> None:

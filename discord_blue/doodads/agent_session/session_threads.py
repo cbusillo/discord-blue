@@ -203,7 +203,7 @@ class SessionThreads:
                 if exc.code == DISCORD_UNKNOWN_CHANNEL:
                     raise CandidateGone(thread.id) from exc
                 raise
-            notification_message_id = await self.find_session_notification_for_thread(thread.id, thread.parent_id)
+            notification_message_id = None
             self.bridge.sessions.bind_thread(hello.session_id, thread.id, notification_message_id)
         finally:
             self._attaching_threads[thread.id] -= 1
@@ -271,28 +271,6 @@ class SessionThreads:
             elif check.attempts >= PENDING_CLEANUP_MAX_ATTEMPTS:
                 self._creation_checks.pop(token, None)
                 logger.warning("Giving up on duplicate Agent session threads of %s", check.created_id)
-
-    async def find_session_notification_for_thread(self, thread_id: int, parent_id: int | None = None) -> int | None:
-        try:
-            channel = await threads_module.get_agent_session_channel(self.bridge.bot, parent_id)
-        except ValueError:
-            return None
-        bot_user = self.bridge.bot.user
-        if bot_user is None:
-            return None
-        try:
-            async for message in channel.history(limit=None):
-                if message.author.id != bot_user.id:
-                    continue
-                if not message.content.startswith(SESSION_NOTIFICATION_PREFIXES):
-                    continue
-                if self.bridge.cleanups.notification_going(message.id):
-                    continue  # Going away: the attach posts a new one instead.
-                if threads_module.notification_thread_id(message.content) == thread_id:
-                    return message.id
-        except discord.DiscordException:
-            logger.warning("Unable to scan Agent session notifications for thread %s", thread_id)
-        return None
 
     async def find_existing_session_thread(self, hello: SessionHello) -> discord.Thread | None:
         """The session's thread from the shared discovery index; None only when a complete index has no match.

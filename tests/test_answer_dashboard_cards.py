@@ -276,6 +276,8 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(fixture.bridge.session_threads.is_bot_assistant_message(cast(discord.Message, message)))
             # A Discord readback that normalizes invisible text still retains the card ID.
             for container in message.components:
+                if not isinstance(container, discord.Container):
+                    continue
                 for child in container.children:
                     if isinstance(child, discord.TextDisplay):
                         child.content = child.content.replace(mark_assistant_message(""), "")

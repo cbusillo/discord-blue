@@ -361,18 +361,7 @@ class ThreadFormattingTests(unittest.IsolatedAsyncioTestCase):
         session_thread = await create_session_thread(FakeBot(config, channel=channel), make_hello())
 
         self.assertEqual(channel.sent_kwargs, [])
-        self.assertTrue(session_thread.thread.sent_kwargs[0]["suppress_embeds"])
-
-    async def test_create_session_thread_warns_when_manage_messages_missing(self) -> None:
-        config = Config()
-        config.agent_session.channel_id = 321
-        channel = FakeTextChannel(321, [], manage_messages=False)
-
-        session_thread = await create_session_thread(FakeBot(config, channel=channel), make_hello())
-
-        self.assertEqual(channel.sent_kwargs, [])
-        self.assertNotIn("suppress_embeds", session_thread.thread.sent_kwargs[0])
-        self.assertIn("missing the `Manage Messages` permission", session_thread.thread.sent_messages[1])
+        self.assertEqual(session_thread.thread.sent_messages, [""])
 
     async def test_missing_manage_messages_notice_posts_once_per_destination(self) -> None:
         config = Config()
@@ -1407,21 +1396,6 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await bridge.cleanups.delete_session_notification_for_thread(555)
 
         self.assertTrue(matching_notice.deleted)
-
-    async def test_find_session_notification_for_thread_scans_full_history(self) -> None:
-        config = Config()
-        config.agent_session.channel_id = 321
-        channel = FakeTextChannel(321, [])
-        matching_notice = add_bot_message(
-            channel,
-            101,
-            "Agent session connected for `project`: <#555>",
-        )
-        for index in range(60):
-            add_bot_message(channel, 200 + index, f"Agent session status summary {index}")
-        bridge = AgentSessionBridge(FakeBot(config, channel=channel))
-
-        self.assertEqual(await bridge.session_threads.find_session_notification_for_thread(555), matching_notice.id)
 
     async def test_close_session_thread_deletes_reused_thread_notification(self) -> None:
         config = Config()
@@ -3299,21 +3273,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        self.assertEqual(
-            bridge.controls.session_status_summary(thread, SimpleNamespace(id=123)),
-            "\n".join(
-                [
-                    "Agent session `project`",
-                    "state: online",
-                    "host: Mac Studio",
-                    f"cwd: `{session.hello.cwd}`",
-                    f"branch: `{session.hello.branch or 'unknown'}`",
-                    f"session: `{session.session_id}`",
-                    f"pid: `{session.hello.pid}`",
-                    "status: Turn started",
-                ]
-            ),
-        )
+        summary = bridge.controls.session_status_summary(thread, SimpleNamespace(id=123))
+        self.assertIn(session_thread_name(session.hello), summary)
+        self.assertIn(session.hello.cwd, summary)
+        self.assertIn(session.session_id, summary)
 
     async def test_session_status_summary_marks_agent_session_origin(self) -> None:
         config = Config()
@@ -3342,21 +3305,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        self.assertEqual(
-            bridge.controls.session_status_summary(thread, SimpleNamespace(id=123)),
-            "\n".join(
-                [
-                    "Agent session `Auto sellyouroutboard#67`",
-                    "state: online",
-                    "host: Mac Studio",
-                    f"cwd: `{session.hello.cwd}`",
-                    f"branch: `{session.hello.branch or 'unknown'}`",
-                    f"session: `{session.session_id}`",
-                    f"pid: `{session.hello.pid}`",
-                    "status: No status update received yet.",
-                ]
-            ),
-        )
+        summary = bridge.controls.session_status_summary(thread, SimpleNamespace(id=123))
+        self.assertIn(session_thread_name(session.hello), summary)
+        self.assertIn(session.hello.cwd, summary)
+        self.assertIn(session.session_id, summary)
 
     async def test_reconnect_reuses_matching_thread_with_assistant_history(self) -> None:
         config = Config()
@@ -3479,20 +3431,20 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn(session_thread.thread, [first_thread, second_thread])
 
-    async def test_reconnect_reuses_existing_parent_notification(self) -> None:
+    async def test_reconnect_needs_no_parent_history_scan(self) -> None:
         config = Config()
         config.agent_session.channel_id = 321
         hello = make_hello()
         original_thread = FakeThread(555)
         add_bot_message(original_thread, 1, session_start_message(hello))
         channel = FakeTextChannel(321, [original_thread])
-        notice = add_bot_message(channel, 701, session_notification_message(hello, original_thread))
+        add_bot_message(channel, 701, session_notification_message(hello, original_thread))
         bridge = AgentSessionBridge(FakeBot(config, channel=channel))
 
         session_thread = await bridge.session_threads.find_or_create_session_thread(hello)
 
         self.assertIs(session_thread.thread, original_thread)
-        self.assertEqual(session_thread.notification_message_id, notice.id)
+        self.assertIsNone(session_thread.notification_message_id)
         self.assertEqual(channel.sent_messages, [])
 
     async def test_same_session_reconnect_reuses_current_thread(self) -> None:

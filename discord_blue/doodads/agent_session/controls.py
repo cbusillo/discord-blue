@@ -333,7 +333,7 @@ class SessionControls:
         if session is None:
             for record in self.bridge.store.records.values():
                 if record.thread_id == channel.id:
-                    return f"Session disconnected\n{record.marker}"
+                    return f"Session disconnected\n{record.marker.removeprefix('Agent session connected').lstrip()}"
             return "This thread is not attached to a live agent session."
 
         title = session_thread_name(session.hello)
@@ -463,7 +463,12 @@ class SessionControls:
                 await self.bridge.post_thread_notice(thread.id, response)
             return True
         if emoji == REACTION_CONTROL_STATUS:
-            await self.refresh_session_controls(session, thread, remove_user_reaction=(emoji, user))
+            refreshed = await self.refresh_control_card(
+                session, thread, message_id, self.session_control_reactions(session), refresh_reactions=False
+            )
+            if not refreshed:
+                await self.refresh_session_controls(session, thread)
+            await self.remove_message_reaction(thread, message_id, emoji, user)
             return True
         if emoji == REACTION_CONTROL_PAUSE:
             response = await self.send_pause_current_turn(thread, user)
@@ -770,6 +775,7 @@ class SessionControls:
         reactions: list[str],
         *,
         remove_user_reaction: tuple[str, discord.User | discord.Member] | None = None,
+        refresh_reactions: bool = True,
     ) -> bool:
         async with session.control_card_lock:
             if self.bridge.sessions.get(session.session_id) is not session:
@@ -799,7 +805,8 @@ class SessionControls:
             except discord.DiscordException:
                 # Retain a reachable anchor on an edit failure; don't duplicate it.
                 logger.warning("Unable to update Agent session status card %s", message_id)
-            await self.write_message_reactions(message, reactions, clear=True, remove_user_reaction=remove_user_reaction)
+            if refresh_reactions:
+                await self.write_message_reactions(message, reactions, clear=True, remove_user_reaction=remove_user_reaction)
             return True
 
     async def refresh_session_controls(

@@ -28,24 +28,6 @@ class AgentSessionDoodad(commands.Cog):
 
         await open_reply_modal(self.bridge, interaction, message)
 
-    @commands.Cog.listener("on_interaction")
-    async def session_details(self, interaction: discord.Interaction[BlueBot]) -> None:
-        from discord_blue.doodads.agent_session.threads import SESSION_IDENTITY_RE
-
-        if interaction.type != discord.InteractionType.component or not interaction.data:
-            return
-        custom_id = interaction.data.get("custom_id")
-        if not isinstance(custom_id, str) or not SESSION_IDENTITY_RE.fullmatch(custom_id):
-            return
-        if not self.bot.config.agent_session.enabled:
-            await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
-            return
-        await interaction.response.send_message(
-            self.bridge.controls.session_status_summary(interaction.channel, interaction.user),
-            ephemeral=True,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-
     @commands.Cog.listener("on_ready")
     async def start_bridge(self) -> None:
         if not self.bot.config.agent_session.enabled:

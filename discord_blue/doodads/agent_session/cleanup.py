@@ -257,10 +257,7 @@ class SessionCleanups:
             async for message in thread.history(limit=10, oldest_first=True):
                 if message.author.id != bot_user.id:
                     continue
-                if any(
-                    marker.startswith(SESSION_START_PREFIX) or threads_module.SESSION_IDENTITY_RE.fullmatch(marker)
-                    for marker in threads_module.session_message_markers(message)
-                ):
+                if any(marker.startswith(SESSION_START_PREFIX) for marker in threads_module.session_message_markers(message)):
                     return True
         except discord.DiscordException:
             logger.warning("Unable to inspect Agent session thread %s", thread.id)

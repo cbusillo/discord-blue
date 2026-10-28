@@ -76,7 +76,7 @@ class Scenario:
             for t in self.fake.threads.values()
             if any(
                 m.content in expected
-                or any(child.get("custom_id") in expected for component in m.components for child in component.get("components", []))
+                or any(child.get("content") in expected for component in m.components for child in component.get("components", []))
                 for m in t.messages
             )
         ]
