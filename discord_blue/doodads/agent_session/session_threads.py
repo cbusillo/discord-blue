@@ -387,11 +387,11 @@ class SessionThreads:
         assistant_message = hello.assistant_message
         if assistant_message is None:
             return
-        sources: list[discord.Message] = []
-        source = await send_assistant_message(thread, assistant_message, sources=sources)
         session = self.bridge.sessions.get(hello.session_id)
-        if source is not None and session is not None:
-            await self.bridge.questions.post(session, thread, assistant_message, sources)
+        if session is not None:
+            await self.bridge.questions.send_answer(session, thread, assistant_message, replay=True)
+        else:
+            await send_assistant_message(thread, assistant_message)
 
     def is_bot_assistant_message(self, message: discord.Message) -> bool:
         bot_user = self.bridge.bot.user

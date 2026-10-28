@@ -24,7 +24,6 @@ class PendingRemoteCommand:
     reject_notice: str | None = None
     input_prompt: PendingRemoteUserInput | None = None
     status_revision: int | None = None
-    question_key: str | None = None
     previous_display_state: DisplayState = "waiting"
     previous_status_message: str | None = None
     previous_status_reaction: str | None = None
