@@ -5,6 +5,7 @@ import json
 import re
 import uuid
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,23 @@ from discord_blue.health import runtime_identity, source_git_ref
 HOOK_PATH = Path("claude-plugin/dui/hooks/hooks.json")
 BRIDGE_LABEL = "com.shinycomputers.discord-blue-codex-bridge"
 BRIDGES = ("discord-blue-codex-bridge", "discord-blue-claude-channel")
+STARTUP_RECEIPT = Path(".local/share/discord-blue-bridges/codex-startup.json")
+
+
+def replace_bytes(path: Path, content: bytes) -> None:
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as target:
+        temporary = Path(target.name)
+        try:
+            target.write(content)
+            target.close()
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def save_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    replace_bytes(path, json.dumps(value).encode())
 
 
 def replace_link(path: Path, target: Path) -> None:
@@ -24,13 +42,17 @@ def replace_link(path: Path, target: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def production_delivery() -> dict[str, str]:
+def delivery_identity() -> dict[str, Any]:
     identity = runtime_identity() or {}
     revision = identity.get("source_git_ref", "")
+    instance = identity.get("instance")
+    kind = identity.get("environment_kind", "stable")
     if (
         identity.get("product") != "discord-blue"
-        or identity.get("instance") != "prod"
-        or identity.get("environment_kind", "stable") != "stable"
+        or not isinstance(instance, str)
+        or not instance.strip()
+        or (kind == "stable" and instance not in {"prod", "testing"})
+        or kind not in {"stable", "preview"}
         or not identity.get("deployment_record_id")
         or not identity.get("artifact_id")
         or not isinstance(revision, str)
@@ -38,8 +60,15 @@ def production_delivery() -> dict[str, str]:
         or revision != source_git_ref()
     ):
         raise ValueError("Verified production source is unavailable")
+    return identity
+
+
+def production_delivery() -> dict[str, str]:
+    identity = delivery_identity()
+    if identity["instance"] != "prod" or identity.get("environment_kind", "stable") != "stable":
+        raise ValueError("Only production requests local delivery")
     hooks = Path(__file__).resolve().parent.parent / HOOK_PATH
-    return {"revision": revision, "hooks_sha256": hashlib.sha256(hooks.read_bytes()).hexdigest()}
+    return {"revision": identity["source_git_ref"], "hooks_sha256": hashlib.sha256(hooks.read_bytes()).hexdigest()}
 
 
 class DeliveryReceipts:
@@ -62,19 +91,28 @@ class DeliveryReceipts:
             raise ValueError("Invalid registered host")
         records = self.read()
         records[host] = receipt
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(records))
-        temporary.replace(self.path)
+        save_json(self.path, records)
 
     def forget(self, host: str) -> None:
         if str(uuid.UUID(host)) != host:
             raise ValueError("Invalid registered host")
         records = self.read()
         records.pop(host, None)
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(records))
-        temporary.replace(self.path)
+        save_json(self.path, records)
+
+    def health(self) -> dict[str, Any]:
+        try:
+            identity = delivery_identity()
+            if identity["instance"] != "prod" or identity.get("environment_kind", "stable") == "preview":
+                return {"status": "not_applicable"}
+            delivery = self.status(production_delivery())
+            return {
+                "status": delivery["status"],
+                "registered": len(delivery["clients"]),
+                "pending": sum(client["status"] == "pending" for client in delivery["clients"].values()),
+            }
+        except (OSError, ValueError, TypeError):
+            return {"status": "pending", "reason": "delivery_unverified"}
 
     @staticmethod
     def validate(receipt: dict[str, Any]) -> None:

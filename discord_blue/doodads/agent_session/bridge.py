@@ -252,15 +252,7 @@ class AgentSessionBridge:
             pending_agent_session_cleanups=len(self.cleanups.pending),
             agent_session_monitor=monitor,
         )
-        try:
-            delivery = self.deliveries.status(production_delivery())
-            payload["components"]["local_delivery"] = {
-                "status": delivery["status"],
-                "registered": len(delivery["clients"]),
-                "pending": sum(client["status"] == "pending" for client in delivery["clients"].values()),
-            }
-        except (OSError, ValueError, TypeError):
-            payload["components"]["local_delivery"] = {"status": "pending", "reason": "delivery_unverified"}
+        payload["components"]["local_delivery"] = self.deliveries.health()
         return web.json_response(
             payload,
             status=200 if discord_healthy and monitor_healthy else 503,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 import traceback
 from asyncio import sleep
@@ -16,6 +17,7 @@ from discord_blue.codex_bridge.accounts import supervisor_homes
 from discord_blue.bridge_version import bridge_version
 from discord_blue.codex_bridge.config import DEFAULT_CONFIG_PATH, BridgeConfig, load_config, socket_for_home
 from discord_blue.codex_bridge.daemon import start_daemon
+from discord_blue.release_delivery import STARTUP_RECEIPT, save_json
 
 logger = logging.getLogger(__name__)
 FAILURE_RESET_SECONDS = 60
@@ -94,6 +96,10 @@ def main() -> None:
     except (OSError, ValueError) as exc:
         print(f"codex bridge config error: {exc}", file=sys.stderr)
         sys.exit(2)
+    try:
+        save_json(Path.home() / STARTUP_RECEIPT, {"pid": os.getpid(), "revision": bridge_version().split()[-1]})
+    except OSError as exc:
+        logger.warning("Bridge startup receipt unavailable (%s)", type(exc).__name__)
     with suppress(KeyboardInterrupt):
         asyncio.run(run_bridges(config, homes, args.codex_bin, include_configured_socket=args.supervisor_config is not None))
 

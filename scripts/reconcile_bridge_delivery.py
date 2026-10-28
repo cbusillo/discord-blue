@@ -20,7 +20,7 @@ from urllib.parse import urlsplit, urlunsplit
 import aiohttp
 
 from discord_blue.codex_bridge import config as bridge_config
-from discord_blue.release_delivery import BRIDGE_LABEL, BRIDGES, HOOK_PATH, replace_link
+from discord_blue.release_delivery import BRIDGE_LABEL, BRIDGES, HOOK_PATH, STARTUP_RECEIPT, replace_link, save_json
 
 LABEL = "com.shinycomputers.discord-blue-delivery"
 
@@ -58,6 +58,12 @@ def verify_installed(checkout: Path, home: Path, target: dict[str, str], pid: in
         raise ValueError("Running bridge source is unverified")
     if pid != job_pid():
         raise ValueError("Bridge process changed during verification")
+    try:
+        startup = read_json(home / STARTUP_RECEIPT)
+    except (OSError, ValueError) as error:
+        raise DeliveryFailure("startup_unverified") from error
+    if startup.get("pid") != pid or startup.get("revision") != target["revision"]:
+        raise DeliveryFailure("startup_unverified")
 
 
 def verify_hook_registration(checkout: Path) -> None:
@@ -81,13 +87,6 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def save_json(path: Path, value: dict[str, Any]) -> None:
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value))
-    temporary.chmod(0o600)
-    temporary.replace(path)
-
-
 def advance_automation(home: Path, target: dict[str, str]) -> None:
     release = home / ".local/share/discord-blue-bridges" / target["revision"]
     automation = release.parent / "automation"
@@ -95,16 +94,9 @@ def advance_automation(home: Path, target: dict[str, str]) -> None:
         replace_link(automation, release)
 
 
-def startup_receipt(home: Path, target: dict[str, str], pid: int, offset: int | None = None) -> dict[str, Any]:
-    try:
-        plist = plistlib.loads((home / "Library/LaunchAgents" / f"{BRIDGE_LABEL}.plist").read_bytes())
-        with Path(plist["StandardErrorPath"]).open("rb") as stream:
-            stream.seek(offset if offset is not None else max(0, stream.seek(0, 2) - 65536))
-            lines = stream.read(65536).decode(errors="replace").splitlines()
-    except (OSError, KeyError) as error:
-        raise DeliveryFailure("startup_unverified") from error
-    if not any("Bridge source " in line and line.endswith(f" {target['revision']}") for line in lines):
-        raise DeliveryFailure("startup_unverified")
+def observed_receipt(checkout: Path, home: Path, target: dict[str, str]) -> dict[str, Any]:
+    pid = job_pid()
+    verify_installed(checkout, home, target, pid)
     return {"status": "delivered", **target, "codex_revision": target["revision"], "codex_pid": pid}
 
 
@@ -124,7 +116,9 @@ def select_hook_source(checkout: Path, target: dict[str, str]) -> None:
         git(checkout, "switch", "--detach", target["revision"])
 
 
-def deliver_target(registration: dict[str, Any], target: dict[str, str], attempt_path: Path | None = None) -> dict[str, Any]:
+def deliver_target(
+    registration: dict[str, Any], target: dict[str, str], attempt_path: Path | None = None
+) -> tuple[dict[str, Any], bool]:
     checkout, home = Path(registration["checkout"]), Path(registration["home"])
     if re.fullmatch(r"[0-9a-f]{40}", target["revision"]) is None or re.fullmatch(r"[0-9a-f]{64}", target["hooks_sha256"]) is None:
         raise ValueError("Invalid release target")
@@ -134,43 +128,43 @@ def deliver_target(registration: dict[str, Any], target: dict[str, str], attempt
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         raise DeliveryFailure("source_unavailable") from error
     try:
-        pid = job_pid()
-        verify_installed(checkout, home, target, pid)
+        return observed_receipt(checkout, home, target), False
+    except DeliveryFailure:
+        raise
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
-    else:
-        return startup_receipt(home, target, pid)
     if attempt_path is not None:
         attempt = read_json(attempt_path) if attempt_path.exists() else {}
-        if attempt.get("revision") == target["revision"] and time.time() - attempt.get("started_at", 0) < 900:
-            raise DeliveryFailure("delivery_failed")
-        save_json(attempt_path, {"revision": target["revision"], "started_at": time.time()})
-    plist = plistlib.loads((home / "Library/LaunchAgents" / f"{BRIDGE_LABEL}.plist").read_bytes())
-    log = Path(plist["StandardErrorPath"])
-    offset = log.stat().st_size if log.exists() else 0
-    subprocess.run(
-        [
-            sys.executable,
-            str(Path(__file__).with_name("deliver_bridges.py")),
-            "--checkout",
-            str(checkout),
-            "--home",
-            str(home),
-            "--build-dir",
-            registration["build_dir"],
-            "--revision",
-            target["revision"],
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+        if attempt.get("revision") == target["revision"]:
+            if attempt.get("outcome") != "failed":
+                raise DeliveryFailure("startup_unverified")
+            if time.time() - attempt.get("started_at", 0) < 900:
+                raise DeliveryFailure("delivery_failed")
+        save_json(attempt_path, {"revision": target["revision"], "started_at": time.time(), "outcome": "started"})
+    command = [
+        sys.executable,
+        str(Path(__file__).with_name("deliver_bridges.py")),
+        "--checkout",
+        str(checkout),
+        "--home",
+        str(home),
+        "--build-dir",
+        registration["build_dir"],
+        "--revision",
+        target["revision"],
+    ]
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        if attempt_path is not None:
+            save_json(attempt_path, {"revision": target["revision"], "started_at": time.time(), "outcome": "failed"})
+        raise
+    if attempt_path is not None:
+        save_json(attempt_path, {"revision": target["revision"], "started_at": time.time(), "outcome": "succeeded"})
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         try:
-            pid = job_pid()
-            verify_installed(checkout, home, target, pid)
-            return startup_receipt(home, target, pid, offset)
+            return observed_receipt(checkout, home, target), True
         except (OSError, ValueError, subprocess.SubprocessError):
             pass
         time.sleep(1)
@@ -182,6 +176,7 @@ async def reconcile(registration: dict[str, Any], receipt_path: Path) -> dict[st
     parsed = urlsplit(config.server_url)
     url = urlunsplit(("https" if parsed.scheme == "wss" else "http", parsed.netloc, "/agent-session/delivery", "", ""))
     timeout = aiohttp.ClientTimeout(total=30)
+    installed = False
     async with aiohttp.ClientSession(headers={"Authorization": f"Bearer {config.token}"}, timeout=timeout) as client:
         async with client.get(url, allow_redirects=False) as response:
             response.raise_for_status()
@@ -192,9 +187,7 @@ async def reconcile(registration: dict[str, Any], receipt_path: Path) -> dict[st
             receipt = read_json(receipt_path)
             if receipt.get("status") != "delivered" or any(receipt.get(key) != value for key, value in target.items()):
                 raise ValueError("Delivery is pending")
-            pid = await asyncio.to_thread(job_pid)
-            await asyncio.to_thread(verify_installed, Path(registration["checkout"]), Path(registration["home"]), target, pid)
-            receipt = await asyncio.to_thread(startup_receipt, Path(registration["home"]), target, pid)
+            receipt = await asyncio.to_thread(observed_receipt, Path(registration["checkout"]), Path(registration["home"]), target)
             save_json(receipt_path, receipt)
         except (OSError, ValueError, KeyError, subprocess.SubprocessError):
             receipt = {"status": "pending", **target}
@@ -206,7 +199,9 @@ async def reconcile(registration: dict[str, Any], receipt_path: Path) -> dict[st
                 if response.status != 200:
                     raise ValueError("Delivery registration is unavailable") from None
             try:
-                receipt = await asyncio.to_thread(deliver_target, registration, target, receipt_path.with_suffix(".attempt.json"))
+                receipt, installed = await asyncio.to_thread(
+                    deliver_target, registration, target, receipt_path.with_suffix(".attempt.json")
+                )
             except DeliveryFailure as error:
                 receipt["error"] = error.reason
             except (OSError, ValueError, KeyError, subprocess.SubprocessError):
@@ -220,14 +215,12 @@ async def reconcile(registration: dict[str, Any], receipt_path: Path) -> dict[st
             registered = result["clients"][registration["host_id"]]
             if registered["status"] != "delivered":
                 raise ValueError("Mac delivery remains pending")
-        advance_automation(Path(registration["home"]), target)
+        if installed:
+            advance_automation(Path(registration["home"]), target)
         return receipt
 
 
 def register(path: Path, checkout: Path, home: Path, build_dir: Path, bridge_config_path: Path) -> None:
-    uv = shutil.which("uv")
-    if uv is None:
-        raise ValueError("uv is unavailable")
     destination = {
         "checkout": str(checkout),
         "home": str(home),
@@ -239,6 +232,9 @@ def register(path: Path, checkout: Path, home: Path, build_dir: Path, bridge_con
         raise ValueError("Preserve the existing Mac registration")
     verify_hook_registration(checkout)
     if "runtime" not in registration:
+        uv = shutil.which("uv")
+        if uv is None:
+            raise ValueError("uv is unavailable")
         prepared = json.loads(
             subprocess.check_output(
                 [
@@ -285,10 +281,9 @@ def register(path: Path, checkout: Path, home: Path, build_dir: Path, bridge_con
     if not path.exists():
         save_json(path, registration)
     automation.parent.mkdir(parents=True, exist_ok=True)
-    if not automation.is_symlink():
-        if automation.exists():
-            raise ValueError("Preserve the existing automation path")
-        replace_link(automation, Path(registration["runtime"]).parent)
+    if automation.exists() and not automation.is_symlink():
+        raise ValueError("Preserve the existing automation path")
+    replace_link(automation, Path(registration["runtime"]).parent)
     if not plist.exists():
         plist.write_bytes(plistlib.dumps(job))
     loaded = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"], capture_output=True, timeout=30)

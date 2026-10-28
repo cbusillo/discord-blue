@@ -672,14 +672,18 @@ Registration prepares an immutable runtime through the existing updater without
 changing either bridge launcher, then installs the
 `com.shinycomputers.discord-blue-delivery` login item from that prepared source.
 The scheduled reconciler and updater therefore survive source rollback.
-After an acknowledged delivery, its stable automation link selects the new
+After an acknowledged new installation, its stable automation link selects the new
 prepared source on the next scheduled run. A rollback to an older release
 without reconciliation code retains the existing automation runtime.
 It reads the existing bridge config and token in place; it creates no credential
 or inbound Mac listener. Repeating the same registration recovers an interrupted
 login-item installation, preserving the existing job environment. If the hook
-checkout has rolled back before this command existed, repeat registration using
-the prepared `source` path recorded in the registration JSON. Existing sessions
+checkout has rolled back before this command existed, execute the script from
+the prepared `source` path recorded in the registration JSON, with the original
+`--checkout` and other destination arguments. Explicit re-registration restores
+that prepared automation runtime, even when a newer reconciler is broken.
+Observation of the same installed release leaves this recovery choice in place;
+the next newly installed release advances automation normally. Existing sessions
 keep running throughout registration.
 The login item follows the accepted release's production identity using the
 existing authenticated server connection origin. It does not call Launchplane,
@@ -695,11 +699,19 @@ are beside the registration; `reconciliation.log` holds the login item's output.
 An acknowledged delivery records the exact launcher revision, the hook artifact's
 SHA-256, and the running Codex bridge's PID and source revision. A lost receipt
 acknowledgement is reposted after verification without another bridge reload.
+The bridge writes its PID/source startup receipt atomically after configuration
+validation. Delivery verifies this file against the current job and installed
+runtime; growing, rotating or deleting the log cannot erase this proof. A failed
+receipt write leaves delivery pending and lets the bridge continue running.
 An ordinary bridge restart refreshes the observed PID without a reload. Missing
 startup evidence for an already installed/running revision never triggers a
 reload loop. Failed installer attempts for the same revision wait at least
-15 minutes before another install. Receipts distinguish `source_unavailable`,
+15 minutes before another install. A successful installer with unverified startup
+is observed again without another install, regardless of elapsed time; use the
+documented manual delivery command to reconcile an interrupted or uncertain
+attempt if observation cannot settle it. Receipts distinguish `source_unavailable`,
 `startup_unverified` and `delivery_failed`.
+Testing and preview identities report `local_delivery: not_applicable`.
 
 To retire a Mac's receipt, unload only its delivery login item with
 `launchctl bootout gui/$(id -u)/com.shinycomputers.discord-blue-delivery`, then

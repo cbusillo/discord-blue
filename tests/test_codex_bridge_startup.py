@@ -13,6 +13,7 @@ from discord_blue.codex_bridge.__main__ import main, run_bridges
 from discord_blue.codex_bridge.accounts import supervisor_homes
 from discord_blue.codex_bridge.config import BridgeConfig, socket_for_home
 from discord_blue.codex_bridge.daemon import start_daemon
+from discord_blue.release_delivery import STARTUP_RECEIPT
 
 
 class SupervisorAccountTests(unittest.TestCase):
@@ -30,8 +31,14 @@ class SupervisorAccountTests(unittest.TestCase):
                 patch.object(sys, "argv", ["bridge", "--config", str(bridge_config), "--supervisor-config", str(source)]),
                 patch("discord_blue.codex_bridge.__main__.run_bridges", mirror),
                 patch("discord_blue.codex_bridge.__main__.logging.basicConfig"),
+                patch("discord_blue.codex_bridge.__main__.Path.home", return_value=base),
+                patch("discord_blue.codex_bridge.__main__.bridge_version", return_value=f"fixture {'a' * 40}"),
             ):
                 main()
+                self.assertEqual(json.loads((base / STARTUP_RECEIPT).read_text()), {"pid": os.getpid(), "revision": "a" * 40})
+                with patch("discord_blue.codex_bridge.__main__.save_json", side_effect=OSError), self.assertLogs(level="WARNING"):
+                    main()
+                self.assertEqual(mirror.await_count, 2)
             assert mirror.await_args is not None
             self.assertEqual(mirror.await_args.args[1], [base / "account"])
             self.assertTrue(mirror.await_args.kwargs["include_configured_socket"])

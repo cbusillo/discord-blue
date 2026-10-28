@@ -14,7 +14,7 @@ from pathlib import Path
 
 from discord_blue.release_delivery import BRIDGES
 from discord_blue.release_delivery import BRIDGE_LABEL as LABEL
-from discord_blue.release_delivery import replace_link
+from discord_blue.release_delivery import replace_bytes, replace_link
 
 
 def source_revision(checkout: Path, requested_revision: str | None = None) -> str:
@@ -74,17 +74,6 @@ def prepare_release(checkout: Path, home: Path, build_dir: Path, requested_revis
     verify_release(release / "venv/bin", revision)
     (release / "complete").touch()
     return release / "venv", revision
-
-
-def replace_bytes(path: Path, content: bytes) -> None:
-    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as target:
-        temporary = Path(target.name)
-        try:
-            target.write(content)
-            target.close()
-            temporary.replace(path)
-        finally:
-            temporary.unlink(missing_ok=True)
 
 
 def deliver(checkout: Path, home: Path, build_dir: Path, requested_revision: str | None = None) -> str:
