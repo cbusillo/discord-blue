@@ -45,12 +45,16 @@ def job_pid() -> int:
     return int(match[1])
 
 
-def verify_installed(checkout: Path, home: Path, target: dict[str, str], pid: int) -> None:
-    verify_hook_registration(checkout)
+def verify_launchers(home: Path, target: dict[str, str]) -> None:
     for bridge in BRIDGES:
         output = subprocess.check_output([str(home / ".local/bin" / bridge), "--version"], text=True, timeout=30).split()
         if not output or output[-1] != target["revision"]:
             raise ValueError("Launcher source is unverified")
+
+
+def verify_installed(checkout: Path, home: Path, target: dict[str, str], pid: int) -> None:
+    verify_hook_registration(checkout)
+    verify_launchers(home, target)
     if hashlib.sha256((checkout / HOOK_PATH).read_bytes()).hexdigest() != target["hooks_sha256"]:
         raise ValueError("In-place hook source is unverified")
     command = subprocess.check_output(["ps", "-ww", "-p", str(pid), "-o", "command="], text=True, timeout=30)
@@ -100,7 +104,7 @@ def observed_receipt(checkout: Path, home: Path, target: dict[str, str]) -> dict
     return {"status": "delivered", **target, "codex_revision": target["revision"], "codex_pid": pid}
 
 
-def select_hook_source(checkout: Path, target: dict[str, str]) -> None:
+def validate_hook_source(checkout: Path, target: dict[str, str]) -> None:
     if git(checkout, "status", "--porcelain", "--untracked-files=no") or git(checkout, "branch", "--show-current") not in {
         "main",
         "",
@@ -112,8 +116,23 @@ def select_hook_source(checkout: Path, target: dict[str, str]) -> None:
     hooks = subprocess.check_output(["git", "-C", str(checkout), "show", f"{target['revision']}:{HOOK_PATH}"], timeout=30)
     if hashlib.sha256(hooks).hexdigest() != target["hooks_sha256"]:
         raise ValueError("Released hook source disagrees with production")
-    if git(checkout, "rev-parse", "HEAD") != target["revision"]:
-        git(checkout, "switch", "--detach", target["revision"])
+
+
+def select_hook_source(checkout: Path, target: dict[str, str]) -> None:
+    try:
+        validate_hook_source(checkout, target)
+        if git(checkout, "rev-parse", "HEAD") != target["revision"]:
+            git(checkout, "switch", "--detach", target["revision"])
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise DeliveryFailure("source_unavailable") from error
+
+
+def verify_installer_idle(home: Path) -> None:
+    try:
+        with (home / ".local/share/discord-blue-bridges/delivery.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        raise DeliveryFailure("startup_unverified") from error
 
 
 def deliver_target(
@@ -124,10 +143,12 @@ def deliver_target(
         raise ValueError("Invalid release target")
     try:
         verify_hook_registration(checkout)
-        select_hook_source(checkout, target)
+        validate_hook_source(checkout, target)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         raise DeliveryFailure("source_unavailable") from error
     try:
+        verify_launchers(home, target)
+        select_hook_source(checkout, target)
         return observed_receipt(checkout, home, target), False
     except DeliveryFailure:
         raise
@@ -136,10 +157,12 @@ def deliver_target(
     if attempt_path is not None:
         attempt = read_json(attempt_path) if attempt_path.exists() else {}
         if attempt.get("revision") == target["revision"]:
-            if attempt.get("outcome") != "failed":
+            if attempt.get("outcome") not in {"failed", "started"}:
                 raise DeliveryFailure("startup_unverified")
             if time.time() - attempt.get("started_at", 0) < 900:
                 raise DeliveryFailure("delivery_failed")
+            if attempt["outcome"] == "started":
+                verify_installer_idle(home)
         save_json(attempt_path, {"revision": target["revision"], "started_at": time.time(), "outcome": "started"})
     command = [
         sys.executable,
@@ -161,6 +184,7 @@ def deliver_target(
         raise
     if attempt_path is not None:
         save_json(attempt_path, {"revision": target["revision"], "started_at": time.time(), "outcome": "succeeded"})
+    select_hook_source(checkout, target)
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         try:

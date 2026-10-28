@@ -5,6 +5,7 @@ import copy
 import io
 import json
 import plistlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -149,6 +150,21 @@ class BridgeDeliveryTests(unittest.TestCase):
             prepare.assert_not_called()
             run.assert_not_called()
         self.assertFalse((self.home / ".local/bin").exists())
+
+    def test_cached_runtime_gains_its_source_snapshot_without_reinstalling_existing_files(self) -> None:
+        with patch.object(deliver_bridges.subprocess, "run", side_effect=self.run_command):
+            runtime, revision = deliver_bridges.prepare_release(self.source, self.home, self.base / "builds")
+            before = {
+                name: ((runtime / "bin" / name).read_bytes(), (runtime / "bin" / name).stat().st_mtime_ns)
+                for name in deliver_bridges.BRIDGES
+            }
+            shutil.rmtree(runtime.parent / "source")
+            recovered, selected = deliver_bridges.prepare_release(self.source, self.home, self.base / "builds")
+        self.assertEqual((recovered, selected), (runtime, revision))
+        for name, evidence in before.items():
+            command = runtime / "bin" / name
+            self.assertEqual((command.read_bytes(), command.stat().st_mtime_ns), evidence)
+        self.assertEqual((runtime.parent / "source/discord_blue/bridge.py").read_bytes(), self.tracked.read_bytes())
 
     def test_dirty_and_unmerged_source_refuse(self) -> None:
         self.tracked.write_text("uncommitted")

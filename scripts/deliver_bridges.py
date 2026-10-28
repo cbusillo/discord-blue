@@ -50,9 +50,11 @@ def verify_release(binaries: Path, revision: str) -> None:
 def prepare_release(checkout: Path, home: Path, build_dir: Path, requested_revision: str | None = None) -> tuple[Path, str]:
     revision = source_revision(checkout, requested_revision)
     release = home / ".local/share/discord-blue-bridges" / revision
-    if (release / "complete").is_file():
+    cached = (release / "complete").is_file()
+    if cached:
         verify_release(release / "venv/bin", revision)
-        return release / "venv", revision
+        if (release / "source").is_dir():
+            return release / "venv", revision
     build_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="bridge-", dir=build_dir) as directory:
         build = Path(directory)
@@ -64,13 +66,18 @@ def prepare_release(checkout: Path, home: Path, build_dir: Path, requested_revis
         with zipfile.ZipFile(archive) as source:
             source.extractall(snapshot)
         (snapshot / "discord_blue/bridge_release.json").write_text(json.dumps({"revision": revision}))
-        subprocess.run(
-            ["uv", "sync", "--frozen", "--no-dev", "--no-editable", "--project", str(snapshot)],
-            env={**os.environ, "UV_PROJECT_ENVIRONMENT": str(release / "venv")},
-            check=True,
-            timeout=600,
-        )
-        shutil.copytree(snapshot, release / "source", dirs_exist_ok=True)
+        if not cached:
+            subprocess.run(
+                ["uv", "sync", "--frozen", "--no-dev", "--no-editable", "--project", str(snapshot)],
+                env={**os.environ, "UV_PROJECT_ENVIRONMENT": str(release / "venv")},
+                check=True,
+                timeout=600,
+            )
+        if not (release / "source").is_dir():
+            with tempfile.TemporaryDirectory(prefix=".source-", dir=release) as publishing:
+                prepared = Path(publishing) / "source"
+                shutil.copytree(snapshot, prepared)
+                prepared.rename(release / "source")
     verify_release(release / "venv/bin", revision)
     (release / "complete").touch()
     return release / "venv", revision

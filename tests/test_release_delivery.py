@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
-import plistlib
+import fcntl
 import subprocess
 import sys
 import tempfile
@@ -21,7 +21,6 @@ from discord_blue.health import RUNTIME_IDENTITY_ENV
 from discord_blue.plugs.discord_plug import BlueBot
 from discord_blue.release_delivery import (
     BRIDGES,
-    BRIDGE_LABEL,
     HOOK_PATH,
     STARTUP_RECEIPT,
     DeliveryReceipts,
@@ -222,12 +221,8 @@ class LocalDeliveryTests(unittest.TestCase):
             git("checkout", "local-main")
             git("branch", "-D", "main")
             git("branch", "-m", "main")
-            log = base / "bridge.log"
-            log.write_text("old startup\n")
-            plist = home / "Library/LaunchAgents" / f"{BRIDGE_LABEL}.plist"
-            plist.parent.mkdir(parents=True)
-            plist.write_bytes(plistlib.dumps({"StandardErrorPath": str(log)}))
             registration = {"checkout": str(source), "home": str(home), "build_dir": str(base / "build")}
+            installed_sources: list[str] = []
 
             def output(args: list[str], **kwargs: object) -> str | bytes:
                 if args[0] == "claude":
@@ -241,14 +236,13 @@ class LocalDeliveryTests(unittest.TestCase):
             def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
                 if "--revision" not in args:
                     return real_run(args, **cast(Any, kwargs))
+                installed_sources.append(git("rev-parse", "HEAD"))
                 revision = args[args.index("--revision") + 1]
                 for name in BRIDGES:
                     launcher = home / ".local/bin" / name
                     launcher.parent.mkdir(parents=True, exist_ok=True)
                     launcher.write_text(f"#!{sys.executable}\nprint({revision!r})\n")
                     launcher.chmod(0o700)
-                with log.open("a") as stream:
-                    stream.write(f"Bridge source fixture {revision}\n")
                 save_json(home / STARTUP_RECEIPT, {"pid": 123, "revision": revision})
                 return subprocess.CompletedProcess(args, 0)
 
@@ -258,6 +252,7 @@ class LocalDeliveryTests(unittest.TestCase):
             ):
                 receipt, installed = consumer.deliver_target(registration, target)
             self.assertTrue(installed)
+            self.assertEqual(installed_sources, [previous])
             self.assertEqual(receipt["revision"], git("rev-parse", "HEAD"))
             self.assertEqual(receipt["hooks_sha256"], hashlib.sha256(hooks.read_bytes()).hexdigest())
             self.assertEqual(receipt["status"], "delivered")
@@ -266,11 +261,6 @@ class LocalDeliveryTests(unittest.TestCase):
                 patch.object(consumer.subprocess, "check_output", side_effect=output),
                 patch.object(consumer.subprocess, "run", side_effect=run) as installer,
             ):
-                log.write_text("unrelated log traffic" * 10000)
-                aged, installed = consumer.deliver_target(registration, target)
-                self.assertEqual(aged["status"], "delivered")
-                self.assertFalse(installed)
-                log.unlink()
                 save_json(home / STARTUP_RECEIPT, {"pid": 456, "revision": target["revision"]})
                 with patch.object(consumer, "job_pid", return_value=456):
                     resumed, installed = consumer.deliver_target(registration, target)
@@ -304,6 +294,27 @@ class LocalDeliveryTests(unittest.TestCase):
                     consumer.deliver_target(registration, target, attempts)
                 with self.assertRaises(consumer.DeliveryFailure):
                     consumer.deliver_target(registration, target, attempts)
+                self.assertEqual(sum("--revision" in call.args[0] for call in installer.call_args_list), 1)
+            target = {
+                "revision": git("rev-parse", "origin/main"),
+                "hooks_sha256": hashlib.sha256(b'{"hooks":{"Stop":[]}}').hexdigest(),
+            }
+            interrupted = base / "interrupted-attempt.json"
+            save_json(interrupted, {"revision": target["revision"], "started_at": 0, "outcome": "started"})
+            lock_path = home / ".local/share/discord-blue-bridges/delivery.lock"
+            with (
+                patch.object(consumer.subprocess, "check_output", side_effect=output),
+                patch.object(consumer.subprocess, "run", side_effect=run) as installer,
+            ):
+                with lock_path.open("a") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    with self.assertRaises(consumer.DeliveryFailure):
+                        consumer.deliver_target(registration, target, interrupted)
+                    self.assertEqual(git("rev-parse", "HEAD"), previous)
+                    self.assertFalse(any("--revision" in call.args[0] for call in installer.call_args_list))
+                recovered, installed = consumer.deliver_target(registration, target, interrupted)
+                self.assertTrue(installed)
+                self.assertEqual(recovered["revision"], target["revision"])
                 self.assertEqual(sum("--revision" in call.args[0] for call in installer.call_args_list), 1)
             succeeded = base / "successful-attempt.json"
             with (

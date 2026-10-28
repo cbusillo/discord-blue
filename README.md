@@ -685,6 +685,10 @@ that prepared automation runtime, even when a newer reconciler is broken.
 Observation of the same installed release leaves this recovery choice in place;
 the next newly installed release advances automation normally. Existing sessions
 keep running throughout registration.
+For this recovery, use the recorded interpreter as well as the recorded source:
+`RECORDED_RUNTIME/bin/python RECORDED_SOURCE/scripts/reconcile_bridge_delivery.py --register`
+with the original registration and destination arguments. Do not create a new
+virtual environment inside the prepared source.
 The login item follows the accepted release's production identity using the
 existing authenticated server connection origin. It does not call Launchplane,
 promote a release, or change server settings.
@@ -711,6 +715,11 @@ is observed again without another install, regardless of elapsed time; use the
 documented manual delivery command to reconcile an interrupted or uncertain
 attempt if observation cannot settle it. Receipts distinguish `source_unavailable`,
 `startup_unverified` and `delivery_failed`.
+An interrupted attempt can resume after the same 15-minute delay only when the
+existing installer's lock is free. New hooks are selected after the target
+launchers are installed or already verified, so a failed build leaves the old
+hook/channel pair together. A manual delivery or lost acknowledgement may leave
+automation on its older working source until the next actual installation.
 Testing and preview identities report `local_delivery: not_applicable`.
 
 To retire a Mac's receipt, unload only its delivery login item with
