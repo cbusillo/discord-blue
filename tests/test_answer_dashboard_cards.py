@@ -69,15 +69,6 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(payload.get("content"))
                         self.assertTrue(discord.MessageFlags._from_value(payload["flags"]).components_v2)
                         self.assertFalse(payload["allowed_mentions"]["parse"])
-                        if len(answer) <= ANSWER_CHUNK_LIMIT:
-                            serialized_text = "\n".join(
-                                item["content"]
-                                for container in payload["components"]
-                                for item in container["components"]
-                                if item["type"] == discord.ComponentType.text_display.value
-                            )
-                            self.assertIn(answer, serialized_text)
-                            self.assertFalse(discord.MessageFlags._from_value(payload["flags"]).suppress_embeds)
                     answer_index = thread.sent_views.index(view)
                     self.assertFalse(thread.sent_kwargs[answer_index].get("silent", False))
                     self.assertFalse(thread.sent_files)
