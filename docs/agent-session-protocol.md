@@ -133,7 +133,10 @@ Older store records remain readable and use bot-authored card discovery from
 thread history. A failed history read does not authorize creating another card.
 A reused thread with uncertain input provenance keeps its input visible.
 
-A dropped connection marks the card Disconnected during its reconnect grace.
+A native client drop marks the card Disconnected during its reconnect grace.
+Bridge shutdown saves grace first, then makes a bounded non-canceling attempt to
+update the card outside lifecycle locks; that remote edit is best-effort if
+Discord is slow or unavailable.
 Reattachment shows unconfirmed state until a native event arrives. Routine
 closure edits the card instead of sending a session-ended notice; answers and
 failure events remain in the transcript. The stored legacy `disconnect_notice`
@@ -292,7 +295,7 @@ an ID or epoch that differs from the connection's current session.
 that exact input mirror only for an explicitly spawned session. Older clients
 and unmarked inputs remain visible. Codex marks the initial native user item
 only when its complete first-turn page proves launch provenance. Claude marks
-the first hook input only for an explicitly new native launch, with a fully read
+the first hook input only when it matches the explicit CLI launch brief, with a fully read
 transcript containing no prior user or assistant record. Neither the thread's
 age nor the session's background label alone hides an input. Full input remains
 in the native terminal. The marker affects display only, never agent delivery.

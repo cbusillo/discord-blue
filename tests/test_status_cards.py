@@ -11,6 +11,7 @@ import discord
 from discord.http import handle_message_parameters
 
 from discord_blue.doodads.agent_session import controls as controls_module
+from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.cards import session_status_card, STATUS_LABELS
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
 from discord_blue.agent_client import AgentSessionClient
@@ -136,12 +137,12 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.control_message_id, anchor)
         self.assertEqual(len(self.thread.sent_messages), 2)
         await self.status("error", "Try the terminal")
-        self.assertIn("Failed", visible_text(await self.current_card()))
+        self.assertIn(STATUS_LABELS["failed"][0], visible_text(await self.current_card()))
 
     async def test_pause_is_waiting_and_continue_refreshes_card(self) -> None:
         await self.status("status_changed", "Turn aborted")
         card = visible_text(await self.current_card())
-        self.assertIn("Waiting on you", card)
+        self.assertIn(STATUS_LABELS["waiting"][0], card)
         self.assertNotIn("Failed", card)
         await self.bridge.controls.send_continue_autonomously(self.thread, cast(discord.User, SimpleNamespace(id=123)))
         self.assertIn("queued", visible_text(await self.current_card()))
@@ -163,7 +164,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         await self.status("status_changed", "Waiting on a decision in the Codex TUI")
         self.assertFalse(old.deleted)
         self.assertEqual(self.session.control_message_id, old.id)
-        self.assertIn("Waiting on you", visible_text(await self.current_card()))
+        self.assertIn(STATUS_LABELS["waiting"][0], visible_text(await self.current_card()))
 
     async def test_spawned_launch_brief_is_hidden_but_later_terminal_input_is_shown(self) -> None:
         for harness in ("codex", "claude"):
@@ -287,6 +288,52 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("Useful answer" in message for message in self.thread.sent_messages))
         self.assertIn(STATUS_LABELS["done"][0], visible_text(await self.current_card()))
 
+    async def test_long_and_rejected_error_notices_keep_the_failed_card(self) -> None:
+        from unittest.mock import AsyncMock
+        from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
+
+        detail = "provider error " * DISCORD_MESSAGE_LIMIT
+        await self.status("error", detail)
+        self.assertEqual(len(self.thread.sent_messages[-1]), DISCORD_MESSAGE_LIMIT)
+        error = discord.HTTPException(
+            cast(ClientResponse, cast(object, SimpleNamespace(status=503, reason="Unavailable"))), "failed"
+        )
+        with patch.object(AgentSessionBridge, "post_thread_notice", new=AsyncMock(side_effect=error)):
+            await self.status("error", "Another provider failure")
+        self.assertEqual(self.session.display_state, "failed")
+        self.assertIn(STATUS_LABELS["failed"][0], visible_text(await self.current_card()))
+        self.assertFalse(self.fixture.socket.closed)
+        self.assertIs(self.bridge.sessions.get(self.session.session_id), self.session)
+
+    async def test_shutdown_updates_the_saved_card_outside_the_lifecycle_lock(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from discord_blue.doodads.agent_session.store import SessionStore
+
+        with TemporaryDirectory() as directory:
+            store = self.bridge.store = SessionStore(Path(directory) / "sessions.json")
+            await store.start()
+            try:
+                self.bridge.save_session(self.session, "live")
+                await self.status("status_changed", "Turn started")
+                anchor = cast(int, self.session.control_message_id)
+                self.fixture.socket.closed = True
+                anchor_message: FakeReplyMessage = await self.thread.fetch_message(anchor)
+                original = anchor_message.edit
+
+                async def observe_edit(content: str | None = None, **kwargs: object) -> None:
+                    self.assertFalse(self.bridge.session_lifecycle_lock(self.session.session_id).locked())
+                    self.assertEqual(store.records[self.session.session_id].status, "grace")
+                    await original(content, **kwargs)
+
+                with patch.object(anchor_message, "edit", new=observe_edit):
+                    await self.bridge.disconnect_active_session(self.session.session_id, self.session)
+                message = await self.thread.fetch_message(anchor)
+                self.assertIn(STATUS_LABELS["disconnected"][0], visible_text(cast(discord.ui.LayoutView, message.view)))
+                self.assertIsNone(self.bridge.sessions.get(self.session.session_id))
+            finally:
+                await store.close()
+
     async def test_failure_is_new_and_routine_unknown_status_is_quiet(self) -> None:
         await self.status("status_changed", "Turn started")
         await self.status("status_changed", "Approval status unconfirmed; tools are active")
@@ -328,7 +375,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         await self.status("status_changed", "Turn started")
         await self.fixture.prompt()
         text = visible_text(await self.current_card())
-        self.assertIn("Waiting on you", text)
+        self.assertIn(STATUS_LABELS["waiting"][0], text)
         self.assertIn("question controls", text)
 
     async def test_failed_fetch_keeps_connection_and_anchor(self) -> None:
@@ -401,7 +448,7 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("queued", visible_text(await self.current_card()))
         await self.status("status_changed", "Waiting on a decision in the Codex TUI")
         await self.bridge.controls.handle_command_ack(command)
-        self.assertIn("Waiting on you", visible_text(await self.current_card()))
+        self.assertIn(STATUS_LABELS["waiting"][0], visible_text(await self.current_card()))
 
     async def test_refresh_cannot_forget_a_new_anchor_published_during_fetch(self) -> None:
         await self.status("status_changed", "Turn started")
@@ -425,4 +472,4 @@ class StatusCardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_replayed_question_creates_current_waiting_card_without_turn_start(self) -> None:
         await self.fixture.prompt()
-        self.assertIn("Waiting on you", visible_text(await self.current_card()))
+        self.assertIn(STATUS_LABELS["waiting"][0], visible_text(await self.current_card()))

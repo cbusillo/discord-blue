@@ -179,8 +179,7 @@ class ThreadSession(AgentSessionClient):
                 if prompt.get("approval_kind") == "file_change" and (prompt["turn_id"], prompt["call_id"]) == key:
                     self.on_resolved(request_id)
                     if changed and not completed:
-                        self.wait_locally(request_id)
-                        self.publish("notice", message="The patch changed; review this request in the Codex TUI.")
+                        self.wait_locally(request_id, notice="The patch changed; review this request in the Codex TUI.")
         if completed:
             self.file_items.pop(key, None)
             return
@@ -357,9 +356,9 @@ class ThreadSession(AgentSessionClient):
                 self.approvals.pop(str(prompt["approval_id"]), None)
                 self.wait_locally(request_id)
 
-    def wait_locally(self, request_id: RequestId) -> None:
+    def wait_locally(self, request_id: RequestId, *, notice: str = WAITING_LOCALLY) -> None:
         if request_id not in self.local_decisions:
-            self.publish("notice", message=WAITING_LOCALLY)
+            self.publish("notice", message=notice)
         self.local_decisions.add(request_id)
         self.publish("status_changed", message=WAITING_LOCALLY)
 

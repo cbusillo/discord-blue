@@ -754,8 +754,8 @@ lifecycle, without another session-ended post.
 A spawned session omits an automated launch brief only when its client marks
 that exact input with native launch provenance. The card says where to read the full input in the native
 terminal. Later human terminal input remains visible. Existing, resumed or uncertain inputs keep their mirrors. Codex proves the
-first turn from native pagination. Claude requires a new native session ID and a
-fully read transcript with no prior prompt; a missing or long transcript keeps
+first turn from native pagination. Claude matches the explicit CLI launch brief against the first hook input, with a
+fully read transcript containing no prior prompt; a missing or long transcript keeps
 the input visible. This display choice
 does not change input delivery to either agent.
 

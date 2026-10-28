@@ -66,6 +66,7 @@ STARTUP_RECONNECT_GRACE_SECONDS = 20
 STARTUP_SWEEP_HOLD_SECONDS = 600
 SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 1
 MAINTENANCE_INTERVAL_SECONDS = 300
+SHUTDOWN_CARD_WAIT_TIMEOUT_SECONDS = 1
 SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
 SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = 5
 SHUTDOWN_ATTACH_SETTLE_SECONDS = 10
@@ -349,16 +350,20 @@ class AgentSessionBridge:
         async with self.session_lifecycle_lock(session.session_id):
             if self.sessions.get(session.session_id) is not session:
                 return
-            session.display_state = "disconnected"
+            self.set_disconnected_status(session)
             self.save_session(session, "grace", grace_until=time.time() + SESSION_DISCONNECT_GRACE_SECONDS)
-            self.schedule_card_refresh(session)
             # Retain ownership until the socket closes: its handler's finally must not finalize this thread.
             if not session.websocket.closed:
                 await self.close_session_websocket(
                     session.session_id, session, message=b"bridge shutdown", timeout=SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
                 )
+        try:
+            await self.threads.bounded(self.refresh_lifecycle_card(session), SHUTDOWN_CARD_WAIT_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.info("Agent session %s disconnected card is still updating during shutdown", session.session_id)
+        finally:
             self.sessions.remove_if_current(session)
-            logger.info("Kept Agent session %s thread %s open for restart", session.session_id, session.thread_id)
+        logger.info("Kept Agent session %s thread %s open for restart", session.session_id, session.thread_id)
 
     def save_session(self, session: AgentSession, status: SessionState, *, grace_until: float = 0) -> None:
         if session.thread_id is not None:
@@ -845,13 +850,17 @@ class AgentSessionBridge:
             except discord.DiscordException:
                 logger.warning("Unable to update Agent session lifecycle card %s", session.session_id)
 
+    @staticmethod
+    def set_disconnected_status(session: AgentSession) -> None:
+        session.display_state = "disconnected"
+        session.last_status_message = "The session is disconnected. Waiting for it to reconnect."
+        session.control_status_reaction = None
+        session.control_interruptions_enabled = False
+        session.pending_control_confirmation = None
+
     def start_grace(self, session: AgentSession) -> None:
         if session.grace_task is None:
-            session.display_state = "disconnected"
-            session.last_status_message = "The session is disconnected. Waiting for it to reconnect."
-            session.control_status_reaction = None
-            session.control_interruptions_enabled = False
-            session.pending_control_confirmation = None
+            self.set_disconnected_status(session)
             self.save_session(session, "grace", grace_until=time.time() + SESSION_DISCONNECT_GRACE_SECONDS)
             self.schedule_card_refresh(session)
             session.grace_task = asyncio.create_task(self.expire_grace(session), name=f"agent-session-grace-{session.session_id}")

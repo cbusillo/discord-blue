@@ -35,6 +35,8 @@ class StatusHooks(Protocol):
 
     def request_thread_name(self, session: AgentSession) -> None: ...
 
+    async def post_thread_notice(self, thread_id: int, text: str) -> None: ...
+
 
 class SessionStatusUpdates:
     def __init__(self, bridge: StatusHooks) -> None:
@@ -61,11 +63,6 @@ class SessionStatusUpdates:
         else:
             session.display_state = "working"
 
-        if message_type == "error":
-            channel = self.bridge.thread_channel(session.thread_id)
-            if isinstance(channel, discord.Thread):
-                await send_agent_session_message(channel, status.message or "The agent reported an error. Check the terminal.")
-
         if message_type == "status_changed":
             status_message = (status.message or "").lower()
             if status_message == "turn aborted":
@@ -88,6 +85,12 @@ class SessionStatusUpdates:
                 "Agent session stopped waiting on this prompt.",
             )
             await self.bridge.controls.update_session_status_reaction(session, REACTION_REJECTED)
+            try:
+                await self.bridge.post_thread_notice(
+                    session.thread_id, status.message or "The agent reported an error. Check the terminal."
+                )
+            except discord.DiscordException:
+                logger.warning("Unable to post Agent session error in thread %s; failure remains on its card", session.thread_id)
             return
 
         if message_type == "turn_complete" and status.assistant_message:

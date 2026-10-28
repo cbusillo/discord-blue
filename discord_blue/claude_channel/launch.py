@@ -49,15 +49,15 @@ def loaded_as_channel(command_lines: list[str]) -> bool | None:
     return None
 
 
-def is_new_session(command_lines: list[str], session_id: str) -> bool:
+def launch_prompt(command_lines: list[str]) -> str | None:
     for line in command_lines:
-        words = line.split()
+        options, separator, prompt = line.partition(" -- ")
+        words = options.split()
         if not words or not os.path.basename(words[0]).startswith("claude"):
             continue
+        if len(words) > 1 and words[1].startswith("bg-"):
+            return None
         if any(word.split("=", 1)[0] in {"--resume", "--continue", "--fork-session", "--from-pr", "-r", "-c"} for word in words):
-            return False
-        return any(
-            word == f"--session-id={session_id}" or (word == "--session-id" and words[index + 1 : index + 2] == [session_id])
-            for index, word in enumerate(words)
-        )
-    return False
+            return None
+        return prompt if separator and prompt.strip() else None
+    return None

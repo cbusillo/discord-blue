@@ -229,6 +229,20 @@ class SliceTwoTests(unittest.IsolatedAsyncioTestCase):
             await bridge.dispatch({"method": "thread/closed", "params": {"threadId": "new-thread"}})
             self.assertNotIn("new-thread", bridge.owned_threads)
 
+    async def test_changed_pending_patch_posts_one_terminal_request_notice(self) -> None:
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            self.assertTrue(await until(lambda: bridge.sessions["root"].server_features is not None, 2))
+            session = bridge.sessions["root"]
+            session.on_file_item("t", file_item())
+            session.on_request(1, "item/fileChange/requestApproval", {"threadId": "root", "turnId": "t", "itemId": "item"})
+            await discord.next("approval_request")
+            session.on_file_item("t", file_item("+changed patch\n"))
+            self.assertEqual(sum(event["type"] == "notice" for event in session.outbox), 1)
+            self.assertIn(1, session.local_decisions)
+            self.assertFalse(session.prompts)
+
     async def test_completed_patch_is_removed_without_a_false_change_notice(self) -> None:
         rpc = FakeRpc(thread("root"))
         async with running_bridge(rpc) as (bridge, discord):

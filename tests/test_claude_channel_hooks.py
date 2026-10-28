@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from discord_blue.claude_channel.launch import loaded_as_channel, is_new_session
+from discord_blue.claude_channel.launch import loaded_as_channel, launch_prompt
 from discord_blue.claude_channel.session import CHANNEL, HOOK_TOOL, MODEL_CALL, PERMISSION_REQUEST, waiting_message
 from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN, SessionHello
 from tests.fakes_discord_blue import FakeDiscordBlue
@@ -43,28 +43,29 @@ async def mirrored(
 
 
 class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
-    def test_launch_identity_requires_the_new_native_session_id(self) -> None:
-        session_id = IDENTITY.session_id
-        self.assertTrue(is_new_session([f"/bin/claude --session-id {session_id}"], session_id))
+    def test_launch_identity_uses_the_explicit_supervisor_payload(self) -> None:
+        brief = "Brief from the Supervisor.\nDo the work."
+        self.assertEqual(launch_prompt([f"/bin/claude --disallowedTools AskUserQuestion -- {brief}"]), brief)
         for command_line in (
-            f"/bin/claude --resume {session_id}",
-            f"/bin/claude --session-id {session_id} --continue",
+            f"/bin/claude --resume {IDENTITY.session_id} -- {brief}",
+            f"/bin/claude --continue -- {brief}",
             "/bin/claude bg-session",
-            "/bin/claude --session-id another-session",
             "/bin/claude",
+            "/bin/claude -- ",
         ):
-            self.assertFalse(is_new_session([command_line], session_id))
+            self.assertIsNone(launch_prompt([command_line]))
 
-    async def test_launch_origin_requires_new_process_and_an_unused_transcript(self) -> None:
-        for new_session, transcript_record, expected in (
-            (True, {"type": "system"}, LAUNCH_BRIEF_ORIGIN),
-            (False, {"type": "system"}, None),
-            (True, {"type": "user", "message": "Earlier brief"}, None),
+    async def test_launch_origin_requires_a_matching_brief_and_unused_transcript(self) -> None:
+        for launch_text, transcript_record, expected in (
+            ("Initial input", {"type": "system"}, LAUNCH_BRIEF_ORIGIN),
+            (None, {"type": "system"}, None),
+            ("Different brief", {"type": "system"}, None),
+            ("Initial input", {"type": "user", "message": "Earlier brief"}, None),
         ):
             with tempfile.TemporaryDirectory() as directory:
                 transcript = Path(directory) / "session.jsonl"
                 transcript.write_text(json.dumps(transcript_record) + "\n")
-                identity = dataclasses.replace(IDENTITY, spawned=True, new_session=new_session)
+                identity = dataclasses.replace(IDENTITY, spawned=True, launch_prompt=launch_text)
                 async with running_channel(identity=identity) as (claude, discord):
                     await claude.initialize()
                     await discord.next("hello")
