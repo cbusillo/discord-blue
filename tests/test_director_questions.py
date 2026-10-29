@@ -743,6 +743,16 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
             cast(StoredQuestion, second.cards.record(second.session_id, second.question.key)).state, QuestionState.ANSWERED
         )
 
+    async def test_closing_again_leaves_closed_cards_alone(self) -> None:
+        modal = await self.card()
+        await modal.cards.close(modal.session_id)
+        stored = cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key))
+        message = self.fixture.thread._messages[cast(int, stored.message_id)]
+        edits = len(message.edits)
+        for _ in range(3):  # Reconnects and session end each close the session again.
+            await modal.cards.close(modal.session_id)
+        self.assertEqual(len(message.edits), edits)
+
     async def test_large_context_attachment_and_forbidden_fallback_stay_in_thread(self) -> None:
         body = "**Q14.** Proceed?\nRecommendation: yes.\nCost: " + "large " * 1000 + "\nAlternative: wait."
         modal = await self.card(body)

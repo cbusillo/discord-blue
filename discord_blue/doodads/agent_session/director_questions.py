@@ -168,6 +168,8 @@ class QuestionCards:
         self.bridge = bridge
         self.locks: dict[str, asyncio.Lock] = {}
         self.edit_locks: dict[str, asyncio.Lock] = {}
+        # One card edit at a time per channel, so a session with many cards cannot starve other threads.
+        self.channel_edit_locks: dict[int, asyncio.Lock] = {}
         # Cards marked unconfirmed at startup, redrawn once their session attaches or ends and Discord is reachable.
         self.unconfirmed_at_start: dict[str, list[str]] = {}
 
@@ -584,6 +586,8 @@ class QuestionCards:
                     QuestionState.HELD: QuestionState.NOT_DELIVERED,
                     QuestionState.UNCERTAIN: QuestionState.UNCONFIRMED,
                 }.get(question.state, QuestionState.CLOSED)
+                if closed == question.state and question.legacy_parent_id is None:
+                    continue  # Already shown closed; editing it again on every reconnect floods Discord's rate limits.
                 question = replace(question, state=closed)
                 self.save(session_id, question)
                 await self.refresh(session_id, [question], thread=thread)
@@ -599,18 +603,25 @@ class QuestionCards:
 
     async def acknowledge(
         self, interaction: discord.Interaction, session_id: str, expected: StoredQuestion, answers: list[str], user_id: int
-    ) -> None:
-        """Show the answer on its own card as the interaction response, before any delivery work."""
+    ) -> frozenset[int]:
+        """Show the answer on its own card as the interaction response, before any delivery work.
+
+        Returns the source messages verified before the edit; the edit changes the card's own text, so submit must not
+        compare that message again.
+        """
         current = self.record(session_id, expected.key)
+        message = interaction.message
         if (
-            interaction.message is None
+            message is None
             or current is None
             or (current.revision, current.questions, current.epoch) != (expected.revision, expected.questions, expected.epoch)
             or interaction.user.id != user_id
             or self.context_error(interaction, session_id, current) is not None
+            or dict(current.sources).get(message.id, source_signature(message, self.bridge.bot_user_id() or 0))
+            != source_signature(message, self.bridge.bot_user_id() or 0)
         ):
             await interaction.response.defer()
-            return
+            return frozenset()
         own = {number for number, _ in current.questions}
         waiting = any(number not in own for number in self.open_numbers(session_id, current))
         shown = replace(
@@ -620,6 +631,7 @@ class QuestionCards:
             state=QuestionState.HELD if waiting else QuestionState.UNCERTAIN,
         )
         await interaction.response.edit_message(view=self.view(session_id, shown))
+        return frozenset({message.id})
 
     async def submit(
         self,
@@ -629,6 +641,7 @@ class QuestionCards:
         expected: StoredQuestion,
         answers: list[str],
         user_id: int,
+        verified: frozenset[int] = frozenset(),
     ) -> bool:
         """Record answers for an answered interaction; the group's answers go to the agent once none of its cards waits.
 
@@ -660,6 +673,8 @@ class QuestionCards:
             sending: list[StoredQuestion] = []
             try:
                 for message_id, signature in question.sources:
+                    if message_id in verified:
+                        continue  # Checked before the early edit rewrote this card's own text.
                     source = await thread.fetch_message(message_id)
                     if source_signature(source, self.bridge.bot_user_id() or 0) != signature:
                         await interaction.followup.send("The source answer changed; answer was not sent.", ephemeral=True)
@@ -746,8 +761,8 @@ class QuestionCards:
         """Change the card at once, then record and deliver; a refused answer redraws the card as it really is."""
         recorded = False
         try:
-            await self.acknowledge(interaction, session_id, expected, answers, user_id)
-            recorded = await self.submit(interaction, session_id, session, expected, answers, user_id)
+            verified = await self.acknowledge(interaction, session_id, expected, answers, user_id)
+            recorded = await self.submit(interaction, session_id, session, expected, answers, user_id, verified)
         finally:
             # Redraw even when a refusal notice or the early edit itself failed, so no card keeps an unrecorded answer.
             if not recorded and (current := self.record(session_id, expected.key)) is not None:
@@ -810,11 +825,12 @@ class QuestionCards:
                             else None
                         )
                         try:
-                            await channel.get_partial_message(question.message_id).edit(
-                                view=self.view(session_id, question),
-                                allowed_mentions=agent_session_allowed_mentions(),
-                                attachments=[attachment] if attachment is not None else [],
-                            )
+                            async with self.channel_edit_locks.setdefault(channel.id, asyncio.Lock()):
+                                await channel.get_partial_message(question.message_id).edit(
+                                    view=self.view(session_id, question),
+                                    allowed_mentions=agent_session_allowed_mentions(),
+                                    attachments=[attachment] if attachment is not None else [],
+                                )
                         finally:
                             if attachment is not None:
                                 attachment.close()

@@ -41,11 +41,16 @@ class TerminalPromptTests(unittest.IsolatedAsyncioTestCase):
             send=AsyncMock(),
         )
         self.parent.webhooks = AsyncMock(return_value=[])
-        self.parent.create_webhook = AsyncMock(return_value=self.hook)
+        self.parent.create_webhook = AsyncMock(side_effect=self.create_webhook)
         self.thread.parent_id = self.parent.id
         self.thread.parent = self.parent
         self.thread.guild = self.guild
         self.bridge.bot.config.agent_session.auto_join_user_ids = [123]
+
+    async def create_webhook(self, *, name: str, **_options: object) -> object:
+        if any(word in name.casefold() for word in ("discord", "clyde")):  # Discord refuses these names with HTTP 400.
+            raise discord.HTTPException(cast(Any, SimpleNamespace(status=400, reason="Bad Request")), "Invalid Form Body")
+        return self.hook
 
     async def prompt(self, text: str = "Please fix this", origin: str | None = None) -> None:
         await self.bridge.status.handle_user_message(UserMessage(self.session.session_id, self.session.session_epoch, text, origin))
@@ -114,6 +119,12 @@ class TerminalPromptTests(unittest.IsolatedAsyncioTestCase):
         await self.prompt()
         self.hook.send.assert_not_awaited()
         self.assertEqual(len(self.thread.sent_messages), 2)
+
+    async def test_a_reserved_display_name_keeps_the_bot_mirror(self) -> None:
+        self.member.display_name = "Chris on Discord"
+        await self.prompt()
+        self.hook.send.assert_not_awaited()
+        self.assertEqual(len(self.thread.sent_messages), 1)
 
     async def test_uncached_member_is_fetched_and_profile_changes_are_used(self) -> None:
         self.guild.get_member = lambda _: None

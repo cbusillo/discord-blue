@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -15,7 +16,9 @@ if TYPE_CHECKING:
     from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
-WEBHOOK_NAME = "Discord Blue terminal prompts"
+# Discord refuses webhook names and usernames containing "discord" or "clyde".
+WEBHOOK_NAME = "Blue terminal prompts"
+RESERVED_NAME = re.compile(r"discord|clyde", re.IGNORECASE)
 TERMINAL_SUBTEXT = "\n-# from terminal"
 CLIPPED_TERMINAL_SUBTEXT = f"{TERMINAL_SUBTEXT} · Full prompt remains in the terminal"
 
@@ -87,7 +90,10 @@ class TerminalPrompts:
                 return False
             hook = await self.webhook(parent, thread)
         except discord.HTTPException as error:
-            self.warn_once(thread, f"webhook/member lookup failed (HTTP {error.status})")
+            self.warn_once(thread, f"webhook/member lookup failed (HTTP {error.status}: {error.text})")
+            return False
+        if RESERVED_NAME.search(member.display_name):
+            self.warn_once(thread, "operator display name contains a name Discord reserves")
             return False
         content = strip_assistant_markers(text)
         subtext = TERMINAL_SUBTEXT
@@ -106,6 +112,6 @@ class TerminalPrompts:
             )
         except discord.HTTPException as error:
             self.webhooks.pop(parent.id, None)
-            self.warn_once(thread, f"webhook send failed (HTTP {error.status})")
+            self.warn_once(thread, f"webhook send failed (HTTP {error.status}: {error.text})")
             return False
         return True
