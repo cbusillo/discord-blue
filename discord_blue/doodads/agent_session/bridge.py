@@ -751,6 +751,14 @@ class AgentSessionBridge:
 
     async def handle_event(self, session: AgentSession, message_type: object, payload: dict[str, object]) -> None:
         """Route one event from the session's current connection; unknown types are ignored."""
+        try:
+            if await self.handover.restore_prompt(session, message_type, payload):
+                return
+            await self.handle_current_event(session, message_type, payload)
+        finally:
+            await self.handover.notify()
+
+    async def handle_current_event(self, session: AgentSession, message_type: object, payload: dict[str, object]) -> None:
         match message_type:
             case "heartbeat":
                 session.touch()
@@ -969,6 +977,9 @@ class AgentSessionBridge:
         session = await self.handover.wait_for_thread(thread.id)
         if session is None:
             return False
+
+        if asyncio.current_task() in getattr(getattr(self.bot, "handover", None), "replay", ()):
+            await self.handover.wait_for_prompt(thread.id, message_id)
 
         for approval_id, pending in session.pending_approvals.items():
             if pending.message_id == message_id:

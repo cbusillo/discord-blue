@@ -282,8 +282,13 @@ class GatewayHandover:
             cog.bridge.handover.load(self.agents)
             await cog.start_bridge()
             for record in cog.bridge.store.records.values():
+                if record.status == "closed":
+                    continue
                 if self.bot.get_channel(record.thread_id) is None:
-                    restored = await self.bot.fetch_channel(record.thread_id)
+                    try:
+                        restored = await self.bot.fetch_channel(record.thread_id)
+                    except discord.NotFound:
+                        continue
                     if isinstance(restored, discord.Thread):
                         restored.guild._add_thread(restored)
 
@@ -323,5 +328,9 @@ class GatewayHandover:
                 await socket.close(code=4000)
         self.restore_parsers()
         await self.close_client()
-        if complete and continuation is not None:
+        if isinstance(cog, AgentSessionDoodad):
+            await cog.bridge.store.close()
+            if cog.bridge.store.error is not None:
+                raise cog.bridge.store.error
+        if complete and continuation is not None and self.status != "failed":
             continuation.save(self.path)

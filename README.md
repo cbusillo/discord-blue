@@ -856,6 +856,40 @@ and image build; it does not prove a production release.
 Consult the [overall direction](https://github.com/cbusillo/direction/blob/HEAD/DIRECTION.md)
 for release authority before production work.
 
+Process replacement uses the existing shared HOME volume. A kernel file lock
+is held from before configuration loads until process exit. A successor waits
+before it can connect to Discord, write state, or bind the bridge. This requires
+every replacement to use the same volume on the same host; it is not a
+cross-host leader election mechanism. The lock file must not be removed while
+either process is running.
+
+On graceful shutdown, the gateway reader stops and received callbacks drain
+before a private, atomically written continuation is saved. The socket closes
+without invalidating its Discord session. A successor rebuilds the SDK cache,
+starts the existing bridge, and resumes that session through discord.py's
+reconnect loop. The continuation is consumed once. Replayed replies and approval
+reactions wait for the matching native session and request; changed epochs
+cannot inherit old replies or approval authority. Pending prompt controls keep
+their original message and control IDs. No per-start Connected message is sent.
+
+`components.discord_handover` reports the resume stage and outstanding replay
+counts. A resumed deployment is healthy only after RESUMED, startup and replay
+completion, alongside the existing heartbeat and store checks. Rejected resume,
+invalid continuation, a failed replay handler, or a native reconnect timeout
+cannot become successful catch-up proof through a fresh IDENTIFY. Complete
+pending prompts before a release that changes their request or control shape;
+incompatible continuation must fail closed.
+
+The first installation over an older image cannot resume a session that image
+did not save. Neither can a rollback to an image without this feature. An
+unclean kill, missing shared state, session expiry or provider stop timeout can
+also prevent catch-up. These transitions cannot qualify as a successful
+handover; use the existing gated release and rollback paths and retain their
+exact runtime identity and health evidence. The next normal release between
+compatible images supplies the handover proof. Interaction expiry during the
+gap remains a release hold in
+[launchplane#5352](https://github.com/cbusillo/launchplane/issues/5352).
+
 - CI proves the Docker image builds for every PR and push with read-only permissions.
 - A separate publishing job runs only on `main` pushes and manual `main` runs;
   it alone has GHCR package-write permission. Pull-request jobs are read-only.

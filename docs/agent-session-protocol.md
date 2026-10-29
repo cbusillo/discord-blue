@@ -156,6 +156,15 @@ Pending snapshots coalesce in memory, including while the volume is stalled.
 Maintenance retries a failed snapshot. Attach and shutdown bound their wait for
 the writer; a write already running finishes without cancellation.
 
+The separate private gateway continuation preserves the owning Discord session
+and sequence, same-epoch attachment time, pending prompt IDs and control IDs,
+and acknowledgment context for already-sent commands. It contains no bot token
+or replayable command payload. Its saved requests never authorize an action:
+the native client must reattach with the same epoch and replay the exact pending
+request before an old prompt reaction can run. The continuation can contain
+private request text and selected answers; keep it on the existing private HOME
+volume and out of logs and exported health evidence.
+
 Server shutdown keeps live threads, members and notifications intact and closes
 only their WebSockets. On startup, live, attaching and grace records receive
 at least a fresh disconnect-grace window (five minutes), preserving a longer
