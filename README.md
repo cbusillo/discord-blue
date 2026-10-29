@@ -231,8 +231,9 @@ The bot needs Manage Webhooks in each session parent channel for this display.
 It creates one webhook per parent and reuses it across threads and restarts.
 Without that permission, or if Discord refuses the webhook, it keeps the
 quoted bot mirror and logs the reason once per parent per bot run. Webhook
-messages never enter the session as replies. Long prompts are split across
-messages; mentions and link previews stay suppressed.
+messages never enter the session as replies. Long prompts stay in one message
+with a note that the full prompt remains in the terminal. Mentions and link
+previews stay suppressed.
 
 ### Managed runtime Compose
 

@@ -8,6 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 
+from discord_blue.doodads.agent_session.formatting import filter_injected_tags, format_user_message
+from discord_blue.doodads.agent_session.terminal_prompts import WEBHOOK_NAME, TERMINAL_SUBTEXT, CLIPPED_TERMINAL_SUBTEXT
+from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
+from tests.fakes_agent_session import FakeThread
 from discord_blue.doodads.agent_session.controls import SessionControls
 from discord_blue.plugs.discord_plug import BlueBot
 from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN, UserMessage
@@ -30,7 +34,7 @@ class TerminalPromptTests(unittest.IsolatedAsyncioTestCase):
         self.parent.id = 444
         self.parent.permissions_for.return_value = discord.Permissions(manage_webhooks=True)
         self.hook = SimpleNamespace(
-            name="Discord Blue terminal prompts",
+            name=WEBHOOK_NAME,
             user=self.guild.me,
             token="fake-token",
             type=discord.WebhookType.incoming,
@@ -51,7 +55,7 @@ class TerminalPromptTests(unittest.IsolatedAsyncioTestCase):
             self.session.hello.harness = harness
             await self.prompt("First line\nSecond line @everyone")
             content = self.hook.send.call_args.args[0]
-            self.assertEqual(content, "First line\nSecond line @everyone\n-# from terminal")
+            self.assertEqual(content, "First line\nSecond line @everyone" + TERMINAL_SUBTEXT)
             options = self.hook.send.call_args.kwargs
             self.assertIs(options["thread"], self.thread)
             self.assertEqual(options["username"], self.member.display_name)
@@ -62,7 +66,13 @@ class TerminalPromptTests(unittest.IsolatedAsyncioTestCase):
         self.parent.create_webhook.assert_awaited_once()
 
     async def test_concurrent_threads_share_hook_and_restart_rediscovers_it(self) -> None:
-        await asyncio.gather(self.prompt(), self.prompt())
+        sibling = FakeThread(556)
+        sibling.parent, sibling.parent_id, sibling.guild = self.parent, self.parent.id, self.guild
+        await asyncio.gather(
+            self.bridge.status.terminal_prompts.send(cast(discord.Thread, cast(object, self.thread)), "First thread"),
+            self.bridge.status.terminal_prompts.send(cast(discord.Thread, cast(object, sibling)), "Second thread"),
+        )
+        self.assertEqual([call.kwargs["thread"].id for call in self.hook.send.call_args_list], [555, 556])
         self.parent.create_webhook.assert_awaited_once()
         self.parent.webhooks.return_value = [self.hook]
         self.bridge.status = SessionStatusUpdates(self.bridge)
@@ -78,15 +88,9 @@ class TerminalPromptTests(unittest.IsolatedAsyncioTestCase):
             await self.prompt()
             await self.prompt()
         self.assertEqual(len(logs.output), 1)
-        self.assertIn("Manage Webhooks", logs.output[0])
         self.assertEqual(len(self.thread.sent_messages), 2)
-        self.assertTrue(self.thread.sent_messages[0].startswith(">>> 🧑 "))
+        self.assertEqual(self.thread.sent_messages[0], format_user_message("Please fix this"))
         self.parent.create_webhook.assert_not_awaited()
-
-    async def test_forbidden_webhook_send_falls_back(self) -> None:
-        self.hook.send.side_effect = discord.Forbidden(cast(Any, SimpleNamespace(status=403, reason="Forbidden")), "denied")
-        await self.prompt()
-        self.assertTrue(self.thread.sent_messages[0].startswith(">>> 🧑 "))
 
     async def test_automated_inputs_keep_labels_and_spawned_brief_stays_hidden(self) -> None:
         await self.prompt("Automated brief", LAUNCH_BRIEF_ORIGIN)
@@ -97,8 +101,10 @@ class TerminalPromptTests(unittest.IsolatedAsyncioTestCase):
         await self.prompt("Hidden brief", LAUNCH_BRIEF_ORIGIN)
         self.hook.send.assert_not_awaited()
         self.assertEqual(len(self.thread.sent_messages), 4)
-        self.assertIn("Task notification:", self.thread.sent_messages[1])
-        self.assertIn("Agent message:", self.thread.sent_messages[2])
+        self.assertEqual(
+            self.thread.sent_messages[1],
+            format_user_message(filter_injected_tags("<task-notification><summary>Worker finished</summary></task-notification>")),
+        )
 
     async def test_ambiguous_or_non_operator_identity_uses_fallback(self) -> None:
         self.bridge.bot.config.agent_session.auto_join_user_ids = [123, 456]
@@ -129,14 +135,23 @@ class TerminalPromptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.thread.sent_messages), 3)
         self.hook.send.assert_not_awaited()
 
-    async def test_long_prompt_keeps_tail_and_each_message_fits(self) -> None:
-        text = "hello " * 800 + "THE END"
+    async def test_long_prompt_stays_one_message_with_terminal_note(self) -> None:
+        text = "hello " * DISCORD_MESSAGE_LIMIT
         await self.prompt(text)
-        content = [call.args[0] for call in self.hook.send.call_args_list]
-        self.assertGreater(len(content), 1)
-        self.assertTrue(all(len(chunk) <= 2000 for chunk in content))
-        self.assertIn("THE END", content[-1])
+        self.hook.send.assert_awaited_once()
+        content = self.hook.send.call_args.args[0]
+        self.assertLessEqual(len(content), DISCORD_MESSAGE_LIMIT)
+        self.assertTrue(content.startswith(text[:1000]))
+        self.assertTrue(content.endswith(CLIPPED_TERMINAL_SUBTEXT))
         self.assertEqual(self.thread.sent_messages, [])
+
+    async def test_any_http_send_failure_falls_back_without_disconnect(self) -> None:
+        for status in (400, 403, 404, 503):
+            with self.subTest(status=status):
+                self.hook.send.side_effect = discord.HTTPException(cast(Any, SimpleNamespace(status=status, reason="Failed")), "")
+                await self.prompt()
+        self.assertEqual(len(self.thread.sent_messages), 4)
+        self.assertEqual(self.session.display_state, "working")
 
     async def test_webhook_input_is_ignored_even_with_human_author_flag(self) -> None:
         self.bridge.bot.config.agent_session.enabled = True

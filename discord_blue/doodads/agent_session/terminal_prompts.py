@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT, split_discord_message
+from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
 from discord_blue.doodads.agent_session.formatting import INJECTED_BLOCK, strip_assistant_markers
 from discord_blue.doodads.agent_session.messages import agent_session_allowed_mentions
 
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 WEBHOOK_NAME = "Discord Blue terminal prompts"
 TERMINAL_SUBTEXT = "\n-# from terminal"
+CLIPPED_TERMINAL_SUBTEXT = f"{TERMINAL_SUBTEXT} · Full prompt remains in the terminal"
 
 
 def is_operator_prompt(text: str) -> bool:
@@ -88,22 +89,23 @@ class TerminalPrompts:
         except discord.HTTPException as error:
             self.warn_once(thread, f"webhook/member lookup failed (HTTP {error.status})")
             return False
-        chunks = split_discord_message(strip_assistant_markers(text), DISCORD_MESSAGE_LIMIT - len(TERMINAL_SUBTEXT))
-        for index, chunk in enumerate(chunks):
-            try:
-                await hook.send(
-                    chunk + TERMINAL_SUBTEXT,
-                    thread=thread,
-                    username=member.display_name,
-                    avatar_url=str(member.display_avatar),
-                    wait=True,
-                    allowed_mentions=agent_session_allowed_mentions(),
-                    suppress_embeds=True,
-                )
-            except (discord.Forbidden, discord.NotFound) as error:
-                self.webhooks.pop(parent.id, None)
-                self.warn_once(thread, f"webhook send refused (HTTP {error.status})")
-                if index == 0:
-                    return False
-                raise
+        content = strip_assistant_markers(text)
+        subtext = TERMINAL_SUBTEXT
+        if len(content) + len(subtext) > DISCORD_MESSAGE_LIMIT:
+            subtext = CLIPPED_TERMINAL_SUBTEXT
+            content = content[: DISCORD_MESSAGE_LIMIT - len(subtext) - 1] + "…"
+        try:
+            await hook.send(
+                content + subtext,
+                thread=thread,
+                username=member.display_name,
+                avatar_url=str(member.display_avatar),
+                wait=True,
+                allowed_mentions=agent_session_allowed_mentions(),
+                suppress_embeds=True,
+            )
+        except discord.HTTPException as error:
+            self.webhooks.pop(parent.id, None)
+            self.warn_once(thread, f"webhook send failed (HTTP {error.status})")
+            return False
         return True
