@@ -636,7 +636,7 @@ When the question offers short answers, they become buttons on its card and one
 tap answers it. Write them as `- **On yes:** ...` bullets, or as a
 `Recommendation:` line plus `Alternatives:` separated by semicolons, with the
 short answer first and ended by a period. The recommended answer is marked and
-green. **Other…** (or **Answer**, when there are no short answers) opens a form
+blurple, so green only ever means sent. **Other…** (or **Answer**, when there are no short answers) opens a form
 that shows the whole question above a large answer box. You can also reply in
 the thread with the Q number, such as `Q123 yes, ship it`. Every route sends
 that Q-prefixed reply through normal session controls. Only session operators
@@ -648,11 +648,12 @@ conversation.
 
 Cards from one agent reply form a group, and their answers reach the agent
 together in one message once every card in the group is answered. A
-single-question reply sends at once. When an operator answers, the card loses
-its buttons and shows one compact line with the Q number, the question and the
-answer. Its color shows where the answer is: yellow cards still need an answer,
+single-question reply sends at once. When an operator answers, the card changes as the tap or form submit itself is
+acknowledged, before delivery, losing its buttons and showing one compact line
+with the Q number, the question and the answer. A refused answer redraws the
+card as it really is. The cards of a group change together. Its color shows where the answer is: yellow cards still need an answer,
 blue cards are answered and on their way (the line names the questions still
-open, such as "sends when Q2 is answered"), green cards reached the agent, red
+open, such as "sends when Q2 is answered"), green cards reached the agent and say "✓ sent", red
 cards were not sent, and gray cards were sent but the agent's acknowledgment can
 no longer arrive because the bot restarted or the conversation ended. No copy of
 the answer is posted, and cards carry no delivery reactions. A typed thread

@@ -388,7 +388,7 @@ class FakeInteractionResponse:
     async def send_message(self, content: str, *, ephemeral: bool) -> None:
         self.messages.append((content, ephemeral))
 
-    async def edit_message(self, content: str | None, **kwargs: object) -> None:
+    async def edit_message(self, content: str | None = None, **kwargs: object) -> None:
         self.edits.append((content or "", kwargs.get("view") is None))
         self.edit_kwargs.append(kwargs)
 

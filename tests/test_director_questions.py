@@ -5,6 +5,7 @@ import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -497,7 +498,7 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.card("**Q12.** Ship it now?\nRecommendation: yes.\nAlternative: no")  # Re-asked: the old buttons are stale.
         refused = FakeInteraction(self.fixture.thread, message=self.fixture.thread._history[0])
         await stale.callback(cast(Any, refused))
-        self.assertEqual(self.fixture.socket.sent_json, [])
+        self.assertEqual((self.fixture.socket.sent_json, refused.response.edits), ([], []))
         self.assertTrue(refused.response.messages)
         current = cast(discord.ui.LayoutView, self.fixture.thread._history[0].view)
         tap = next(item for item in current.walk_children() if isinstance(item, QuestionChoiceButton))
@@ -558,6 +559,37 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         modal.fields[0]._value = text
         await modal.on_submit(cast(Any, FakeInteraction(self.fixture.thread)))
 
+    async def test_a_tap_changes_its_card_as_the_interaction_response(self) -> None:
+        await self.fixture.bridge.status.post_assistant_message(self.fixture.thread.id, self.GROUP)
+        _, message = self.grouped("Q1")
+        view = cast(discord.ui.LayoutView, message.view)
+        tap = next(item for item in view.walk_children() if isinstance(item, QuestionChoiceButton))
+        self.assertNotEqual(tap.style, discord.ButtonStyle.success)  # Green means only "sent".
+        interaction = FakeInteraction(self.fixture.thread, message=message)
+        await tap.callback(cast(Any, interaction))
+        self.assertFalse(interaction.response.deferred)
+        self.assertIn("sends when Q2 is answered", visible_view_text(interaction.response.edit_kwargs[0]["view"]))
+
+    async def test_a_card_shown_early_is_redrawn_when_its_refusal_notice_fails(self) -> None:
+        await self.fixture.bridge.status.post_assistant_message(self.fixture.thread.id, self.GROUP)
+        _, message = self.grouped("Q1")
+        tap = next(
+            item for item in cast(discord.ui.LayoutView, message.view).walk_children() if isinstance(item, QuestionChoiceButton)
+        )
+        interaction = FakeInteraction(self.fixture.thread, message=message)
+
+        async def lost(*_args: object, **_kwargs: object) -> None:
+            raise OSError("notice lost")
+
+        interaction.followup = SimpleNamespace(send=lost)
+        edits = len(message.edits)
+        cards: QuestionCards = self.fixture.bridge.questions
+        with patch.object(cards, "persist", AsyncMock(return_value=False)), self.assertRaises(OSError):
+            await tap.callback(cast(Any, interaction))
+        question, _ = self.grouped("Q1")
+        self.assertEqual((question.state, interaction.response.deferred), (QuestionState.WAITING, False))
+        self.assertGreater(len(message.edits), edits)  # The early answer view was replaced by the real card.
+
     async def test_answers_from_one_reply_go_to_the_agent_together(self) -> None:
         await self.hold_first_answer()
         held, message = self.grouped("Q1")
@@ -570,6 +602,7 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         for number in ("Q1", "Q2"):
             question, message = self.grouped(number)
             self.assertEqual((question.state, self.accent(message)), (QuestionState.ANSWERED, STATUS_LABELS["done"][1]))
+            self.assertIn("✓ sent", visible_view_text(message.view))
             self.assertEqual(message.reactions, [])
 
     async def test_a_rejected_answer_turns_its_card_red_without_reactions(self) -> None:
