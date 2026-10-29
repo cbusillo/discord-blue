@@ -32,6 +32,8 @@ class QuestionState(StrEnum):
     NOT_DELIVERED = "Not delivered"
     CLOSED = "Closed"
     ANSWERED = "Answered"
+    # Answered, but sent with the rest of its group once every card from the same agent reply is answered.
+    HELD = "Waiting to send"
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +52,8 @@ class StoredQuestion:
     complete: bool = True
     legacy_parent_id: int | None = None
     revision: int = 0
+    # Cards from one agent reply share a group; their answers go to the agent together.
+    group: str = ""
 
     @classmethod
     def parse(cls, value: object) -> StoredQuestion:
@@ -62,7 +66,15 @@ class StoredQuestion:
         if (
             not all(
                 isinstance(v, str)
-                for v in (question.key, question.epoch, question.source_url, question.state, question.answer, question.decision_url)
+                for v in (
+                    question.key,
+                    question.epoch,
+                    question.source_url,
+                    question.state,
+                    question.answer,
+                    question.decision_url,
+                    question.group,
+                )
             )
             or type(question.revision) is not int
             or question.revision < 0

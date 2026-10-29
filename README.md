@@ -646,10 +646,17 @@ question waiting. Re-asking a question updates its card, reopens it if
 answered, and puts a short silent jump link at the current place in the
 conversation.
 
-When an operator answers, the card loses its buttons and turns green, showing
-one compact line with the Q number, the question and the answer. No copy of the
-answer is posted; the card carries the delivery reactions instead. A thread
-reply or recorded decision adds a link to it.
+Cards from one agent reply form a group, and their answers reach the agent
+together in one message once every card in the group is answered. A
+single-question reply sends at once. When an operator answers, the card loses
+its buttons and shows one compact line with the Q number, the question and the
+answer. Its color shows where the answer is: yellow cards still need an answer,
+blue cards are answered and on their way (the line names the questions still
+open, such as "sends when Q2 is answered"), green cards reached the agent, and
+red cards were not sent. No copy of the answer is posted, and cards carry no
+delivery reactions. A typed thread reply, such as `Q2 round`, sends at once and
+takes any answers already held for finished groups with it, ahead of its own
+text. A thread reply or recorded decision adds a link to the card.
 A session answer containing an explicit `Director decision:
 Q123. ...` record with a GitHub comment link also marks that question answered.
 This reads records delivered through the session, rather than polling GitHub.
@@ -657,8 +664,10 @@ Recording an answer does not prove delivery to the native session; normal reply
 reactions and failure notices still report that separately. A delivered answer
 shows no private confirmation; only a refusal or failure does. An unanswered question stays visible when the session
 ends, with its full context and an **Unanswered** label.
-Older releases cannot restore these new cards' answer forms after a rollback;
-ordinary thread replies still work. Existing parent cards are retired lazily
+A held answer survives a bot restart. If the conversation ends or is replaced
+first, its card turns red and says it was not sent. Older releases cannot read
+the saved card records after a rollback and rebuild from Discord instead; held
+answers are then lost, and ordinary thread replies still work. Existing parent cards are retired lazily
 when their session reconnects or ends, or an operator uses an enabled button.
 Historical cards are not rewritten in bulk. A heading or rule ends question
 context; the surrounding sections remain chat.

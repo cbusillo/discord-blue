@@ -24,7 +24,7 @@ from discord_blue.doodads.agent_session.sessions import (
     PendingRemoteUserInput,
     RejectedCommandMessage,
 )
-from discord_blue.doodads.agent_session.store import SessionStore
+from discord_blue.doodads.agent_session.store import QuestionState, SessionStore
 from discord_blue.doodads.agent_session.thread_worker import ThreadWorkers
 from discord_blue.doodads.agent_session.threads import session_thread_name
 from discord_blue.plugs.discord_plug import BlueBot
@@ -224,8 +224,14 @@ class SessionControls:
             await message.reply("Agent session is reconnecting; send the reply again in a moment.", mention_author=False)
             return True
 
-        error = await self.send_reply(session, thread, message.author, text, message.id)
+        # Answers held for finished Question card groups travel with this reply.
+        held, keys = await self.bridge.questions.release_ready(session)
+        error = await self.send_reply(
+            session, thread, message.author, f"{held}\n\n{text}" if held else text, message.id, question_keys=keys
+        )
         if error is not None:
+            if error != DELIVERY_UNCONFIRMED:
+                await self.bridge.questions.settle(session.session_id, keys, QuestionState.HELD)
             await message.reply(error, mention_author=False)
         return True
 
@@ -236,6 +242,9 @@ class SessionControls:
         user: discord.User | discord.Member,
         text: str,
         message_id: int,
+        *,
+        question_keys: tuple[str, ...] = (),
+        react: bool = True,
     ) -> str | None:
         command = RemoteCommand(
             command_id=str(uuid.uuid4()),
@@ -249,13 +258,16 @@ class SessionControls:
             thread_id=thread.id,
             message_id=message_id,
             kind="reply",
+            question_keys=question_keys,
+            react=react,
         )
         queued = False
 
         async def show_queued() -> None:
             nonlocal queued
             queued = True
-            await self.set_message_reaction(thread.id, message_id, REACTION_QUEUED)
+            if react:
+                await self.set_message_reaction(thread.id, message_id, REACTION_QUEUED)
             self.show_working(session, "Your request is queued.")
 
         delivered = False
@@ -263,7 +275,7 @@ class SessionControls:
             error = await self.dispatch_command(session, command, pending, before_send=show_queued)
             delivered = error is None
         finally:
-            if queued and not delivered:
+            if queued and not delivered and react:
                 await self.clear_message_transient_reactions(thread.id, message_id)
                 self.restore_command_status(session, pending)
                 self.show_activity(session)
@@ -358,6 +370,7 @@ class SessionControls:
         command = session.pending_commands.get(command_id)
         if command is not None:
             session.active_command_id = command_id
+            await self.bridge.questions.settle(session.session_id, command.question_keys, QuestionState.ANSWERED)
             await self.update_command_message_reaction(session, command, REACTION_DELIVERED)
             if command.kind == "reply" and command.status_revision == session.status_revision:
                 session.last_status_message = "Request delivered to the native session."
@@ -372,8 +385,9 @@ class SessionControls:
             session.active_command_id = None
         if command is not None:
             self.restore_command_status(session, command)
+            await self.bridge.questions.settle(session.session_id, command.question_keys, QuestionState.NOT_DELIVERED)
             await self.update_command_message_reaction(session, command, REACTION_REJECTED)
-            if command.message_id is not None:
+            if command.message_id is not None and command.react:
                 session.rejected_command_messages.append(
                     RejectedCommandMessage(
                         thread_id=command.thread_id,
@@ -418,7 +432,7 @@ class SessionControls:
                     return
                 await self.set_message_reaction(command.thread_id, command.input_prompt.message_id, reaction)
             return
-        if command.message_id is None:
+        if command.message_id is None or not command.react:
             return
         if command.kind == "reply" and reaction != REACTION_REJECTED:
             await self.clear_message_transient_reactions(command.thread_id, command.message_id)
