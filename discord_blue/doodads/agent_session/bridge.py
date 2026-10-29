@@ -338,17 +338,22 @@ class AgentSessionBridge:
         self.handover.snapshot = None
         self._stopping = True
         self.session_threads.creation_stopping.set()
-        complete = False
+        complete = True
         snapshot = None
+        try:
+            complete = await self.threads.bounded(self.close_native_connections(), max(0, deadline - loop.time()))
+        except TimeoutError:
+            complete = False
         try:
             async with self.handover.changed:
                 while self.handover.incoming or self._attach_tasks:
                     await asyncio.wait_for(self.handover.changed.wait(), max(0, deadline - loop.time()))
                 if loop.time() >= deadline:
                     raise TimeoutError
-                snapshot = {"agents": self.handover.export(), "conversation": self.conversations.export()}
-                complete = True
+                if complete:
+                    snapshot = {"agents": self.handover.export(), "conversation": self.conversations.export()}
         except TimeoutError:
+            complete = False
             logger.warning("Agent session shutdown did not settle native work before its deadline")
         try:
             await self.threads.bounded(self.conversations.stop(), max(0, deadline - loop.time()))
@@ -379,6 +384,18 @@ class AgentSessionBridge:
             self._site = None
         if complete:
             self.handover.snapshot = snapshot
+
+    async def close_native_connections(self) -> bool:
+        sessions = tuple(session for session in self.sessions.by_session.values() if not session.websocket.closed)
+        await asyncio.gather(
+            *(
+                self.close_session_websocket(
+                    session.session_id, session, message=b"bridge shutdown", timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
+                )
+                for session in sessions
+            )
+        )
+        return all(session.websocket.closed for session in sessions)
 
     @staticmethod
     async def stop_background_task(name: str, task: asyncio.Task[None] | None) -> None:
@@ -644,8 +661,6 @@ class AgentSessionBridge:
                     continue
 
                 message_type = payload.get("type")
-                if self._stopping:
-                    break
                 if message_type == "hello":
                     if "conversation" in payload:
                         await websocket.close(message=b"use conversation endpoint", drain=False)
@@ -800,8 +815,6 @@ class AgentSessionBridge:
             return True
 
     async def handle_event(self, session: AgentSession, message_type: object, payload: dict[str, object]) -> None:
-        if self._stopping:
-            return
         with self.handover.section():
             restored = False
             try:

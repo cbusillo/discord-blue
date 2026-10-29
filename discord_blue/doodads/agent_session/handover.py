@@ -43,7 +43,8 @@ class SessionContinuation:
                 self.notify_soon()
 
     def fallback(self) -> None:
-        self.fallbacks += 1
+        if asyncio.current_task() in self.bridge.bot.handover.replay:
+            self.fallbacks += 1
 
     def retire(self, session_id: str, kind: str | None = None, request_id: str | None = None) -> None:
         record = self.saved.get(session_id)
@@ -126,17 +127,21 @@ class SessionContinuation:
             approval = RemoteApprovalRequest.from_payload(payload)
             current = session.pending_approvals.get(approval.approval_id)
             if current is not None and not current.retired:
+                self.retire(session.session_id, "approvals", approval.approval_id)
                 return True
-            if record is not None and (message_id := record["approvals"].pop(approval.approval_id, None)) is not None:
+            if record is not None and (message_id := record["approvals"].get(approval.approval_id)) is not None:
                 await self.bridge.interactions.handle_approval_request(approval, message_id=message_id)
+                self.retire(session.session_id, "approvals", approval.approval_id)
                 return True
         elif message_type == "request_user_input":
             request = RemoteRequestUserInput.from_payload(payload)
             current_input = session.pending_user_inputs.get(request.call_id)
             if current_input is not None and not current_input.retired and current_input.turn_id == request.turn_id:
+                self.retire(session.session_id, "inputs", request.call_id)
                 return True
-            if record is not None and (message_id := record["inputs"].pop(request.call_id, None)) is not None:
+            if record is not None and (message_id := record["inputs"].get(request.call_id)) is not None:
                 await self.bridge.interactions.handle_request_user_input(request, message_id=message_id)
+                self.retire(session.session_id, "inputs", request.call_id)
                 return True
         return False
 
@@ -188,12 +193,17 @@ class SessionContinuation:
                 self.fallback()
         return self.bridge.sessions.get_by_thread(thread_id)
 
-    def has_prompt(self, thread_id: int, message_id: int) -> bool:
-        return any(message_id in record["approvals"].values() for record in self.saved.values() if record["thread_id"] == thread_id)
+    def has_prompt(self, thread_id: int, message_id: int, *, kind: str = "approvals") -> bool:
+        return any(message_id in record[kind].values() for record in self.saved.values() if record["thread_id"] == thread_id)
 
     async def wait_for_prompt(self, thread_id: int, message_id: int) -> None:
         async with self.changed:
             try:
-                await asyncio.wait_for(self.changed.wait_for(lambda: not self.has_prompt(thread_id, message_id)), self.grace_seconds)
+                await asyncio.wait_for(
+                    self.changed.wait_for(
+                        lambda: not any(self.has_prompt(thread_id, message_id, kind=kind) for kind in ("approvals", "inputs"))
+                    ),
+                    self.grace_seconds,
+                )
             except TimeoutError:
                 self.fallback()

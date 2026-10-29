@@ -15,7 +15,7 @@ from aiohttp.test_utils import TestServer
 import discord
 from discord.gateway import DiscordWebSocket
 
-from discord_blue.gateway_handover import GatewayContinuation
+from discord_blue.gateway_handover import CHECKPOINT_MAX_AGE_SECONDS, GatewayContinuation
 from discord_blue.plugs.discord_plug import BlueBot
 from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 from discord_blue.doodads.agent_session.sessions import AgentSession
@@ -392,7 +392,7 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stale_checkpoint_is_consumed_without_replay(self) -> None:
         value = json.loads(self.bot.handover.path.read_text())
-        value["saved_at"] = time.time() - 120
+        value["saved_at"] = time.time() - CHECKPOINT_MAX_AGE_SECONDS * 2
         self.bot.handover.path.write_text(json.dumps(value))
         await self.identify_without_replay()
 
@@ -429,7 +429,7 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(self.identified_event.wait(), 1)
             self.assertIsNotNone(self.resume_payload)
             self.assertFalse(self.bot.handover.path.exists())
-            self.assertTrue(self.bot.handover.healthy())
+            self.assertFalse(self.bot.handover.healthy())
             await self.finish(task)
 
     async def test_unplanned_restart_without_checkpoint_recovers_health(self) -> None:
@@ -440,6 +440,35 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.bot.handover.healthy())
         self.assertNotEqual(self.bot.handover.evidence()["status"], "caught_up")
         await self.finish(task)
+
+    async def test_identified_runtime_can_reidentify_after_a_later_invalid_session(self) -> None:
+        with patch("discord_blue.gateway_handover.REPLAY_ENABLED", False):
+            task = self.begin()
+            await asyncio.wait_for(self.identified_event.wait(), 1)
+            self.bot.handover.observe({"op": DiscordWebSocket.INVALIDATE_SESSION, "d": False})
+            self.bot.handover.observe({"op": DiscordWebSocket.DISPATCH, "t": "READY"})
+            self.assertTrue(self.bot.handover.healthy())
+            await self.finish(task)
+
+    async def test_resume_timeout_stops_at_resumed_before_slow_startup(self) -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def on_ready() -> None:
+            entered.set()
+            await release.wait()
+
+        self.bot.add_listener(on_ready)
+        with patch("discord_blue.gateway_handover.RESUME_TIMEOUT_SECONDS", 0.02):
+            task = await self.start_bot()
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+                with self.assertRaises(TimeoutError):
+                    await asyncio.wait_for(self.identified_event.wait(), 0.05)
+                release.set()
+                self.assertTrue(await wait_until(lambda: self.bot.handover.healthy()))
+            finally:
+                release.set()
+                await self.finish(task)
 
     async def test_replay_rejects_expired_slash_component_and_modal_before_dispatch(self) -> None:
         await self.bot.login("inert-token")

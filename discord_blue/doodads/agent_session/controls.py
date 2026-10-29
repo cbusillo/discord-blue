@@ -109,9 +109,9 @@ REACTION_APPROVAL_DENY = "✖️"
 TRANSIENT_REACTIONS = STATUS_REACTIONS
 
 
-async def defer_control(interaction: discord.Interaction, *, ephemeral: bool = False) -> bool:
+async def defer_control(interaction: discord.Interaction, **kwargs: bool) -> bool:
     try:
-        await interaction.response.defer(ephemeral=ephemeral)
+        await interaction.response.defer(**kwargs)
     except discord.NotFound as exc:
         if exc.code != 10062:
             raise

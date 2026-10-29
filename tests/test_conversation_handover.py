@@ -174,7 +174,10 @@ class ConversationHandoverTests(unittest.IsolatedAsyncioTestCase):
         bridge = AgentSessionBridge(cast(Any, self.bot))
         client = await self.endpoint(bridge)
         old = await self.connect(client)
-        await bridge.conversations.receive_message(message())
+        old_message = message()
+        live_message = message(message_id=old_message.id + 1)
+        replay_message = message(message_id=old_message.id + 2)
+        await bridge.conversations.receive_message(old_message)
         command = await old.receive_json(timeout=2)
         await old.close()
         entered, release = asyncio.Event(), asyncio.Event()
@@ -193,8 +196,8 @@ class ConversationHandoverTests(unittest.IsolatedAsyncioTestCase):
             await replacement.send_json(hello())
             self.assertEqual((await replacement.receive_json(timeout=2))["type"], "hello_ack")
             await asyncio.wait_for(entered.wait(), 2)
-            live = asyncio.create_task(bridge.conversations.receive_message(message(message_id=201)))
-            replayed = asyncio.create_task(bridge.conversations.receive_message(message(message_id=202)))
+            live = asyncio.create_task(bridge.conversations.receive_message(live_message))
+            replayed = asyncio.create_task(bridge.conversations.receive_message(replay_message))
             self.bot.handover.replay = {replayed}
             try:
                 await asyncio.sleep(0)
@@ -205,7 +208,10 @@ class ConversationHandoverTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(asyncio.gather(live, replayed), 2)
                 delivered = [await replacement.receive_json(timeout=2) for _ in range(3)]
                 self.assertEqual(delivered[0], command)
-                self.assertEqual([payload["envelope"]["message_id"] for payload in delivered], [200, 201, 202])
+                self.assertEqual(
+                    [payload["envelope"]["message_id"] for payload in delivered],
+                    [old_message.id, live_message.id, replay_message.id],
+                )
             finally:
                 release.set()
                 await asyncio.gather(live, replayed, return_exceptions=True)

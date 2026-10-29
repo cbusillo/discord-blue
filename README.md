@@ -889,14 +889,15 @@ counts. Catch-up requires RESUMED, startup and replay completion, alongside
 heartbeat and store health. Missing, expired or unusable checkpoints and failed
 initial resume connections fall back to IDENTIFY, recording that earlier work
 could not be replayed. An unplanned restart can become healthy once Discord and
-the bridge recover. A failed replay handler still reports failed catch-up.
+the bridge recover. A failed planned resume or replay remains failed catch-up;
+a fresh IDENTIFY does not qualify that planned handover.
 
-The CM conversation transport retains unacknowledged input, reply deduplication
+With replay enabled, the CM conversation retains unacknowledged input, reply deduplication
 and observed-message context, bound to its configured destination and native
 epoch. Reconnection flushes older pending input before new sends. Native waits
 are bounded; an offline action counts as handled after the person receives a
-notice that it was not delivered and should be retried. Expired slash commands,
-components and modals receive a retry notice before any native side effect.
+notice that it was not delivered and should be retried. During replay, expired slash commands, components and modals receive
+a retry notice before any native side effect.
 
 Container startup executes Python directly after dropping privileges, so the
 stop signal reaches the bot. The repository's Compose and systemd definitions

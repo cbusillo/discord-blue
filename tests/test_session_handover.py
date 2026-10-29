@@ -196,6 +196,46 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.fixture.socket.sent_json), 1)
         self.assertEqual(pending.decision, "approved")
 
+    async def test_live_reaction_waits_through_native_prompt_message_restoration(self) -> None:
+        request = await self.pending_approval()
+        message_id = self.fixture.session.pending_approvals[request.approval_id].message_id
+        self.bridge.handover.load(self.bridge.handover.export())
+        self.bridge.sessions.remove(request.session_id)
+        session, socket = await self.reattach(epoch=request.session_epoch)
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = self.bridge.interactions.prompt_message
+
+        async def restore(*args: object, **kwargs: object) -> discord.Message:
+            entered.set()
+            await release.wait()
+            return await cast(Any, original)(*args, **kwargs)
+
+        with patch.object(self.bridge.interactions, "prompt_message", restore):
+            restoring = asyncio.create_task(self.bridge.handle_event(session, "approval_request", asdict(request)))
+            await asyncio.wait_for(entered.wait(), 1)
+            reaction = asyncio.create_task(
+                self.bridge.handle_thread_reaction(
+                    cast(Any, self.fixture.thread),
+                    message_id,
+                    REACTION_APPROVAL_APPROVE,
+                    cast(Any, FakeInteraction(self.fixture.thread).user),
+                )
+            )
+            try:
+                await self.bridge.handover.notify()
+                await asyncio.sleep(0)
+                self.assertFalse(reaction.done())
+                release.set()
+                await restoring
+                self.assertTrue(await asyncio.wait_for(reaction, 1))
+                self.assertEqual(
+                    [payload["approval_id"] for payload in socket.sent_json if payload.get("type") == "approval_decision"],
+                    [request.approval_id],
+                )
+            finally:
+                release.set()
+                await asyncio.gather(restoring, reaction, return_exceptions=True)
+
     async def test_offline_thread_ignores_empty_input_and_reports_undelivered_replies(self) -> None:
         self.bridge.handover.grace_seconds = 0.01
         for text in ("", " !code"):

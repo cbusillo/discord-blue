@@ -214,7 +214,7 @@ class GatewayHandover:
                 except (discord.DiscordException, OSError, aiohttp.ClientError, TimeoutError):
                     logger.warning("Gateway cache unavailable; earlier work cannot be replayed", exc_info=True)
                     continuation = None
-                    self.status = "unreplayed"
+                    self.status = "failed"
             if continuation is not None:
                 connection = self.connect_resumed(continuation, reconnect=reconnect)
             else:
@@ -261,7 +261,7 @@ class GatewayHandover:
                 await self.bot.ws.close()
             self.restore_parsers()
             self.buffer.clear()
-            self.status = "unreplayed"
+            self.status = "failed"
             await self.bot.connect(reconnect=reconnect)
         finally:
             if resumed is not None:
@@ -288,7 +288,7 @@ class GatewayHandover:
                 return task
             self.events.add(task)
             task.add_done_callback(self.events.discard)
-            if self.parsing_replay or (self.buffering and parent is self.connect_task):
+            if self.parsing_replay:
                 self.replay.add(task)
                 task.add_done_callback(self.replay.discard)
             elif parent is self.startup_caller:
@@ -321,16 +321,18 @@ class GatewayHandover:
     def observe(self, event: dict[str, Any]) -> None:
         if not self.started:
             return
-        if not self.runtime_started and event.get("op") == DiscordWebSocket.INVALIDATE_SESSION and event.get("d") is False:
+        if self.status == "resuming" and event.get("op") == DiscordWebSocket.INVALIDATE_SESSION and event.get("d") is False:
             self.status = "failed"
             self.restore_parsers()
             self.buffer.clear()
             self.resumed_event.set()
         if event.get("op") == 0 and event.get("t") == "READY":
-            if not self.runtime_started and self.status not in {"initial", "unreplayed"}:
+            if self.status == "resuming":
                 self.status = "failed"
                 self.restore_parsers()
                 self.buffer.clear()
+            self.resumed_event.set()
+        if event.get("op") == 0 and event.get("t") == "RESUMED":
             self.resumed_event.set()
 
     async def resumed(self) -> None:
@@ -364,10 +366,21 @@ class GatewayHandover:
         self.bot.dispatch("handover_replayed")
 
     async def reject_expired_interaction(self, payload: dict[str, Any]) -> bool:
-        if time.time() - discord.utils.snowflake_time(int(payload["id"])).timestamp() < 3:
+        created_at = discord.utils.snowflake_time(int(payload["id"])).timestamp()
+        guild_id = int(payload.get("guild_id", 0))
+        channel_id = int(payload.get("channel_id", 0))
+        from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
+
+        cog = self.bot.get_cog("AgentSessionDoodad")
+        if time.time() - created_at < 3 and guild_id == self.bot.config.discord.guild_id and isinstance(cog, AgentSessionDoodad):
+            message_id = int(payload.get("message", {}).get("id", 0))
+            if any(cog.bridge.handover.has_prompt(channel_id, message_id, kind=kind) for kind in ("approvals", "inputs")):
+                await cog.bridge.handover.wait_for_thread(channel_id)
+                await cog.bridge.handover.wait_for_prompt(channel_id, message_id)
+        if time.time() - created_at < 3:
             return False
-        if int(payload.get("guild_id", 0)) == self.bot.config.discord.guild_id:
-            channel = self.bot.get_channel(int(payload.get("channel_id", 0)))
+        if guild_id == self.bot.config.discord.guild_id:
+            channel = self.bot.get_channel(channel_id)
             if isinstance(channel, (discord.TextChannel, discord.Thread)):
                 try:
                     await channel.send(

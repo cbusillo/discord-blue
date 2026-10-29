@@ -131,8 +131,8 @@ class NativeShutdownTests(unittest.IsolatedAsyncioTestCase):
                 stopping = asyncio.create_task(bridge.stop(deadline=asyncio.get_running_loop().time() + 0.02))
                 try:
                     await asyncio.sleep(0)
-                    extra = asyncio.create_task(bridge.handle_event(fixture.session, "command_ack", {}))
-                    await asyncio.wait_for(extra, 0.1)
+                    extra = AgentSession(fixture.session.hello, cast(web.WebSocketResponse, FakeWebSocket()))
+                    self.assertFalse(await bridge.accept_hello(extra, None))
                     await asyncio.wait_for(stopping, 1)
                     self.assertIsNone(bridge.handover.snapshot)
                     self.assertTrue(fixture.socket.closed)
@@ -140,5 +140,37 @@ class NativeShutdownTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     release.set()
                     await incoming
+                    await stopping
+                    bridge.threads.stop()
+
+    async def test_native_frame_already_read_is_handled_before_shutdown_snapshot(self) -> None:
+        with (
+            TemporaryDirectory() as folder,
+            patch("pathlib.Path.home", return_value=Path(folder)),
+            prompt_fixture() as fixture,
+        ):
+            bridge = fixture.bridge
+            closing, release = asyncio.Event(), asyncio.Event()
+            original = fixture.socket.close
+
+            async def close(*, message: bytes = b"", drain: bool = True) -> None:
+                closing.set()
+                await release.wait()
+                await original(message=message, drain=drain)
+
+            async def acknowledge(_payload: dict[str, object]) -> None:
+                fixture.session.active_command_id = "late-native-ack"
+
+            with (
+                patch.object(fixture.socket, "close", close),
+                patch.object(bridge.controls, "handle_command_ack", acknowledge),
+            ):
+                stopping = asyncio.create_task(bridge.stop())
+                try:
+                    await asyncio.wait_for(closing.wait(), 1)
+                    await bridge.handle_event(fixture.session, "command_ack", {})
+                    self.assertEqual(fixture.session.active_command_id, "late-native-ack")
+                finally:
+                    release.set()
                     await stopping
                     bridge.threads.stop()
