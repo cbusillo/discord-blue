@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 
 _STATE_LOCKS: dict[Path, int] = {}
+SHUTDOWN_TIMEOUT_SECONDS = 90.0
 
 
 def hold_state_lock() -> None:
@@ -125,6 +126,7 @@ class GatewayHandover:
         self.status = "initial"
         self.connect_task: asyncio.Task[None] | None = None
         self.shutdown: asyncio.Task[None] | None = None
+        self.shutdown_deadline: float | None = None
         self.events: set[asyncio.Task[Any]] = set()
         self.replay: set[asyncio.Task[Any]] = set()
         self.startup: set[asyncio.Task[Any]] = set()
@@ -142,10 +144,14 @@ class GatewayHandover:
 
     def evidence(self) -> dict[str, object]:
         caught_up = self.status == "replayed" and self.runtime_started and not self.replay
+        from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
+
+        cog = self.bot.get_cog("AgentSessionDoodad")
         return {
             "status": "caught_up" if caught_up else self.status,
             "pending_events": len(self.replay),
             "buffered_events": len(self.buffer),
+            "native_fallbacks": cog.bridge.handover.fallbacks if isinstance(cog, AgentSessionDoodad) else 0,
         }
 
     def healthy(self) -> bool:
@@ -259,10 +265,12 @@ class GatewayHandover:
         if not self.started:
             return
         if not self.runtime_started and event.get("op") == DiscordWebSocket.INVALIDATE_SESSION and event.get("d") is False:
+            self.path.unlink(missing_ok=True)
             self.status = "failed"
             self.restore_parsers()
             self.buffer.clear()
         if event.get("op") == 0 and event.get("t") == "READY":
+            self.path.unlink(missing_ok=True)
             if not self.runtime_started and self.status != "initial":
                 self.status = "failed"
                 self.restore_parsers()
@@ -294,6 +302,7 @@ class GatewayHandover:
             self.startup_caller = None
         self.runtime_started = True
         self.status = "replayed" if self.status != "failed" else "failed"
+        self.bot.dispatch("handover_replayed")
 
     async def warm_cache(self) -> None:
         user = self.bot.user
@@ -314,10 +323,12 @@ class GatewayHandover:
         if isinstance(cog, AgentSessionDoodad):
             try:
                 cog.bridge.handover.load(self.agents)
+            except (ValueError, KeyError, TypeError, OverflowError, OSError):
+                self.status = "failed"
+            try:
                 cog.bridge.conversations.restore(self.conversation)
             except (ValueError, KeyError, TypeError, OverflowError, OSError):
                 self.status = "failed"
-                cog.bridge.handover.saved.clear()
             await cog.start_bridge()
             for record in cog.bridge.store.records.values():
                 if record.status == "closed":
@@ -339,11 +350,18 @@ class GatewayHandover:
                 self._close_callers.add(self.startup_caller)
         shutdown = self.shutdown
         if shutdown is None:
+            if self.shutdown_deadline is None:
+                self.shutdown_deadline = asyncio.get_running_loop().time() + SHUTDOWN_TIMEOUT_SECONDS
             shutdown = asyncio.create_task(self.finish())
             self.shutdown = shutdown
         await asyncio.shield(shutdown)
 
     async def finish(self) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = self.shutdown_deadline
+        if deadline is None:
+            deadline = loop.time() + SHUTDOWN_TIMEOUT_SECONDS
+            self.shutdown_deadline = deadline
         connect_task = self.connect_task
         if connect_task is not None and not connect_task.done():
             connect_task.cancel()
@@ -352,29 +370,28 @@ class GatewayHandover:
         pending = {task for task in self.events if not task.done() and task not in self._close_callers}
         complete = not self.buffer
         if pending:
-            _done, remaining = await asyncio.wait(pending, timeout=10)
+            _done, remaining = await asyncio.wait(pending, timeout=max(0, deadline - loop.time()))
             complete = complete and not remaining
         socket = self.bot.ws
         from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 
         cog = self.bot.get_cog("AgentSessionDoodad")
         if isinstance(cog, AgentSessionDoodad):
-            complete = await cog.bridge.prepare_handover() and complete
+            cog.bridge.handover.snapshot = None
         continuation = None
         user = self.bot.user
         if socket is not None and user is not None and socket.session_id and socket.sequence is not None:
-            continuation = GatewayContinuation(user.id, socket.session_id, socket.sequence, str(socket.gateway), self.agents)
+            continuation = GatewayContinuation(user.id, socket.session_id, socket.sequence, str(socket.gateway), {})
             if socket.open:
-                await socket.close()
+                closing = asyncio.create_task(socket.close())
+                _done, remaining = await asyncio.wait({closing}, timeout=max(0, deadline - loop.time()))
+                complete = complete and not remaining
         self.restore_parsers()
         await self.close_client()
         if isinstance(cog, AgentSessionDoodad):
-            await cog.bridge.store.close()
-            if cog.bridge.store.error is not None:
-                raise cog.bridge.store.error
             snapshot = cog.bridge.handover.snapshot
-            complete = complete and snapshot is not None
+            complete = complete and snapshot is not None and cog.bridge.store.error is None
             if continuation is not None and snapshot is not None:
-                continuation = replace(continuation, agents=snapshot, conversation=cog.bridge.conversations.export())
-        if complete and continuation is not None:
+                continuation = replace(continuation, agents=snapshot["agents"], conversation=snapshot["conversation"])
+        if complete and continuation is not None and loop.time() < deadline:
             continuation.save(self.path)

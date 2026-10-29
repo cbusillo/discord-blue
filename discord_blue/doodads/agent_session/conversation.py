@@ -13,7 +13,7 @@ import discord
 from aiohttp import ClientError, WSMsgType, web
 
 from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT, split_discord_message
-from discord_blue.doodads.agent_session.handover import REPLAY_RECONNECT_WAIT_SECONDS
+from discord_blue.doodads.agent_session.handover import REPLAY_RECONNECT_WAIT_SECONDS, SessionContinuation
 
 if TYPE_CHECKING:
     from discord_blue.plugs.discord_plug import BlueBot
@@ -36,18 +36,20 @@ class ConversationConnection:
 
 
 class ConversationRouter:
-    def __init__(self, bot: BlueBot) -> None:
+    def __init__(self, bot: BlueBot, handover: SessionContinuation) -> None:
         self.bot = bot
+        self.handover = handover
         self.connection: ConversationConnection | None = None
         self.seen: OrderedDict[str, None] = OrderedDict()
         self.observed: OrderedDict[int, dict[str, Any]] = OrderedDict()
         self.connection_lock = asyncio.Lock()
         self.changed = asyncio.Condition()
         self.continuation: dict[str, Any] | None = None
-        self.stopping = False
 
     def export(self) -> dict[str, Any]:
         connection = self.connection
+        if connection is None and self.continuation is not None:
+            return {**self.continuation, "seen": list(self.seen), "observed": list(self.observed.items())}
         return {
             "binding": self.binding(),
             "session_id": self.bot.config.conversation.session_id,
@@ -156,10 +158,13 @@ class ConversationRouter:
     async def queue_envelope(self, command_id: str, envelope: dict[str, Any]) -> bool:
         if getattr(getattr(self.bot, "handover", None), "replay", None):
             async with self.changed:
-                await asyncio.wait_for(
-                    self.changed.wait_for(lambda: self.connection is not None and not self.connection.websocket.closed),
-                    REPLAY_RECONNECT_WAIT_SECONDS,
-                )
+                try:
+                    await asyncio.wait_for(
+                        self.changed.wait_for(lambda: self.connection is not None and not self.connection.websocket.closed),
+                        REPLAY_RECONNECT_WAIT_SECONDS,
+                    )
+                except TimeoutError:
+                    self.handover.fallback()
         channel, binding, connection = self.channel(), self.binding(), self.connection
         if channel is None:
             return False
@@ -217,31 +222,32 @@ class ConversationRouter:
         ):
             await websocket.close(message=b"invalid conversation binding", drain=False)
             return
-        async with self.connection_lock:
-            previous = self.connection
-            # No input may precede the new socket's hello_ack, including during an awaited old-socket close.
-            self.connection = None
-            if previous and previous.session_id == config.session_id and previous.epoch == epoch and previous.binding == binding:
-                connection = previous
-                old_socket = previous.websocket
+        with self.handover.section():
+            async with self.connection_lock:
+                if self.handover.bridge._stopping:
+                    return
+                previous = self.connection
+                old_socket = previous.websocket if previous is not None else None
+                if previous and previous.session_id == config.session_id and previous.epoch == epoch and previous.binding == binding:
+                    connection = previous
+                else:
+                    connection = ConversationConnection(config.session_id, epoch, binding, websocket)
+                    if self.continuation is not None and self.continuation["epoch"] == epoch:
+                        connection.pending = OrderedDict(self.continuation["pending"])
+                        connection.replies = OrderedDict(self.continuation["replies"])
+                await websocket.send_json(
+                    {"type": "hello_ack", "features": [FEATURE], "guild_id": binding[0], "channel_id": binding[1]}
+                )
                 connection.websocket = websocket
-                if not old_socket.closed:
-                    await old_socket.close(message=b"replaced connection", drain=False)
-            else:
-                if previous and not previous.websocket.closed:
-                    await previous.websocket.close(message=b"conversation changed", drain=False)
-                connection = ConversationConnection(config.session_id, epoch, binding, websocket)
-                if self.continuation is not None and self.continuation["epoch"] == epoch:
-                    connection.pending = OrderedDict(self.continuation["pending"])
-                    connection.replies = OrderedDict(self.continuation["replies"])
+                self.connection = connection
                 self.continuation = None
-            await websocket.send_json({"type": "hello_ack", "features": [FEATURE], "guild_id": binding[0], "channel_id": binding[1]})
-            self.connection = connection
-            async with self.changed:
-                self.changed.notify_all()
-            for payload in list(connection.pending.values()):
-                await websocket.send_json(payload)
-        while not self.stopping and not websocket.closed:
+                async with self.changed:
+                    self.changed.notify_all()
+                for payload in list(connection.pending.values()):
+                    await websocket.send_json(payload)
+            if old_socket is not None and not old_socket.closed:
+                await old_socket.close(message=b"replaced connection", drain=False)
+        while not self.handover.bridge._stopping and not websocket.closed:
             try:
                 async with asyncio.timeout(self.bot.config.agent_session.heartbeat_timeout_seconds):
                     frame = await websocket.receive()
@@ -265,30 +271,31 @@ class ConversationRouter:
             ):
                 continue
             kind = payload.get("type")
-            if self.stopping:
+            if self.handover.bridge._stopping:
                 break
-            command_id = payload.get("command_id")
-            if kind == "command_ack":
-                if isinstance(command_id, str):
-                    connection.pending.pop(command_id, None)
-            elif kind == "command_reject":
-                if (
-                    isinstance(command_id, str)
-                    and connection.pending.pop(command_id, None) is not None
-                    and (channel := self.channel())
-                ):
-                    await channel.send(
-                        "The CM conversation could not take that message. Please resend when it is idle.",
-                        allowed_mentions=discord.AllowedMentions.none(),
-                    )
-            elif kind == "conversation_reply":
-                await self.reply(connection, payload)
-            elif kind == "session_end":
-                connection.pending.clear()
-                await websocket.close(drain=False)
-            # Hooks, status, final answers, title, controls and approval events are never mirrored.
+            with self.handover.section():
+                command_id = payload.get("command_id")
+                if kind == "command_ack":
+                    if isinstance(command_id, str):
+                        connection.pending.pop(command_id, None)
+                elif kind == "command_reject":
+                    if (
+                        isinstance(command_id, str)
+                        and connection.pending.pop(command_id, None) is not None
+                        and (channel := self.channel())
+                    ):
+                        await channel.send(
+                            "The CM conversation could not take that message. Please resend when it is idle.",
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
+                elif kind == "conversation_reply":
+                    await self.reply(connection, websocket, payload)
+                elif kind == "session_end":
+                    connection.pending.clear()
+                    await websocket.close(drain=False)
+                # Hooks, status, final answers, title, controls and approval events are never mirrored.
 
-    async def reply(self, connection: ConversationConnection, payload: dict[str, Any]) -> None:
+    async def reply(self, connection: ConversationConnection, websocket: web.WebSocketResponse, payload: dict[str, Any]) -> None:
         reply_id, text = payload.get("reply_id"), payload.get("text")
         channel = self.channel()
         if not isinstance(reply_id, str) or not reply_id or len(reply_id) > 128:
@@ -329,10 +336,9 @@ class ConversationRouter:
                             connection.replies.popitem(last=False)
                     except (discord.DiscordException, ClientError, OSError):
                         response["error"] = "Discord could not confirm the complete reply. Retry the same reply ID."
-        await connection.websocket.send_json(response)
+        if connection.websocket is websocket and not websocket.closed:
+            await websocket.send_json(response)
 
     async def stop(self) -> None:
-        self.stopping = True
         if self.connection and not self.connection.websocket.closed:
-            async with self.connection.reply_lock:
-                await self.connection.websocket.close(message=b"bridge shutdown", drain=False)
+            await self.connection.websocket.close(message=b"bridge shutdown", drain=False)

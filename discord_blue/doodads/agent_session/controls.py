@@ -196,6 +196,7 @@ class SessionControls:
                     input_pending.submitted = False
 
     async def send_thread_reply(self, message: discord.Message) -> bool:
+        saved_thread = any(record["thread_id"] == message.channel.id for record in self.bridge.handover.saved.values())
         session = await self.bridge.handover.wait_for_thread(message.channel.id)
         if session is None:
             for session_id, stored in tuple(self.bridge.store.records.items()):
@@ -204,6 +205,9 @@ class SessionControls:
                         await message.reply(
                             "Decision recorded. This session is not connected, so the reply was not delivered.", mention_author=False
                         )
+            if saved_thread:
+                await message.reply("Agent session is offline; reply was not delivered.", mention_author=False)
+                return True
             return False
         # MESSAGE_CREATE can arrive before the reopened thread returns to discord.py's cache.
         # Its PartialMessageable still identifies the thread already bound by our acknowledged hello.

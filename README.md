@@ -863,18 +863,25 @@ every replacement to use the same volume on the same host; it is not a
 cross-host leader election mechanism. The lock file must not be removed while
 either process is running.
 
-On graceful shutdown, the gateway reader stops and received callbacks drain
-before a private, atomically written continuation is saved. The socket closes
+On graceful shutdown, the gateway reader stops and received callbacks drain.
+The bridge then finishes admitted native attachments, payloads and conversation
+replies before freezing their continuation. One shutdown deadline covers these
+drains and the final state flush; an unfinished operation prevents a checkpoint
+and is not cancelled to make the handover look complete. A private, atomically
+written continuation is saved only after that shutdown succeeds. The socket closes
 without invalidating its Discord session. A successor rebuilds the SDK cache,
 starts the existing bridge, and resumes that session through discord.py's
 reconnect loop. The continuation is consumed once. Replayed replies and approval
 reactions wait for the matching native session and request; changed epochs
 cannot inherit old replies or approval authority. Pending prompt controls keep
 their original message and control IDs. No per-start Connected message is sent.
+Unconsumed native and conversation state survives another handover; a closed
+session, replaced epoch or explicitly resolved request retires its old state.
 
 `components.discord.handover` reports the resume stage and outstanding replay
 counts. A resumed deployment is healthy only after RESUMED, startup and replay
-completion, alongside the existing heartbeat and store checks. Rejected resume,
+completion, alongside the existing heartbeat and store checks. Evidence also
+counts native fallbacks. Rejected resume,
 invalid continuation, a failed replay handler, or a native reconnect timeout
 cannot become successful catch-up proof through a fresh IDENTIFY. This failure
 belongs to the attempted handover. A subsequent clean stop can save the current
@@ -887,7 +894,9 @@ The existing CM conversation transport preserves unacknowledged input, explicit
 reply deduplication and observed-message context. Its replay waits for the same
 configured conversation to reconnect, and pending input is never transferred
 to a changed epoch or binding. Native reconnect waits are bounded; a timeout
-fails this handover rather than claiming that its work caught up.
+uses the existing offline or stale-session response instead of silently losing
+the event. Whether that response qualifies as successful catch-up remains held
+on the Director's pending decision; the current draft records failed catch-up.
 
 Container startup executes Python directly after dropping privileges, so the
 stop signal reaches the bot. The repository's Compose and systemd definitions

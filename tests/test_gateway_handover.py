@@ -227,6 +227,7 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.resume_payload)
         self.assertFalse(self.bot.handover.healthy())
         self.assertEqual(self.bot.handover.evidence()["status"], "failed")
+        self.assertFalse(self.bot.handover.path.exists())
         await self.bot.close()
         await asyncio.wait_for(task, 5)
 
@@ -362,3 +363,18 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
             cog.start_bridge.assert_awaited_once()
             self.assertFalse(self.bot.handover.healthy())
             self.assertFalse(fixture.bridge.handover.saved)
+
+    async def test_changed_conversation_binding_does_not_discard_valid_agent_continuation(self) -> None:
+        with prompt_fixture() as fixture:
+            cog = Mock(spec=AgentSessionDoodad)
+            cog.bridge = fixture.bridge
+            cog.start_bridge = AsyncMock()
+            saved = fixture.bridge.handover.export()
+            self.bot.handover.agents = saved
+            self.bot.handover.conversation = {"binding": [20, 21, [100]]}
+            await self.bot.login("inert-token")
+            with patch.object(self.bot, "get_cog", return_value=cog):
+                await self.bot.handover.warm_cache()
+            self.assertEqual(fixture.bridge.handover.saved, saved)
+            cog.start_bridge.assert_awaited_once()
+            self.assertFalse(self.bot.handover.healthy())

@@ -9,7 +9,6 @@
     "lockfile": "uv.lock",
     "dockerfile": "Dockerfile",
     "containerEntrypoint": "docker/entrypoint.sh",
-    "gatewayHandover": "discord_blue/gateway_handover.py",
     "dockerignore": ".dockerignore",
     "compose": "docker-compose.yml",
     "runtimeCompose": "compose.runtime.yml",

@@ -192,7 +192,7 @@ class AgentSessionDoodad(commands.Cog):
 
     async def cog_unload(self) -> None:
         self.bot.tree.remove_command(self.reply_about_command.name, type=self.reply_about_command.type)
-        await self.bridge.stop()
+        await self.bridge.stop(deadline=self.bot.handover.shutdown_deadline)
 
 
 async def setup(bot: BlueBot) -> None:

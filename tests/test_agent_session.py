@@ -1597,6 +1597,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_stop_bounds_slow_runner_cleanup(self) -> None:
         config = Config()
         bridge = AgentSessionBridge(FakeBot(config))
+        release, finished = asyncio.Event(), asyncio.Event()
 
         class SlowRunner:
             def __init__(self) -> None:
@@ -1606,26 +1607,25 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             async def cleanup(self) -> None:
                 self.cleanup_started = True
                 try:
-                    await asyncio.sleep(60)
+                    await release.wait()
+                    finished.set()
                 except asyncio.CancelledError:
                     self.cleanup_cancelled = True
                     raise
 
         runner = SlowRunner()
-        bridge_module_any = cast(Any, bridge_module)
-        original_timeout = bridge_module_any.SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS
-        bridge_module_any.SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = 0.01
         bridge._runner = runner
         try:
             with self.assertLogs(bridge_module.logger, level="WARNING"):
                 async with asyncio.timeout(5):
-                    await bridge.stop()
+                    await bridge.stop(deadline=asyncio.get_running_loop().time() + 0.01)
+            self.assertTrue(runner.cleanup_started)
+            self.assertFalse(runner.cleanup_cancelled)
+            self.assertIsNone(bridge.handover.snapshot)
+            self.assertIsNone(bridge._runner)
         finally:
-            bridge_module_any.SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = original_timeout
-
-        self.assertTrue(runner.cleanup_started)
-        self.assertTrue(runner.cleanup_cancelled)
-        self.assertIsNone(bridge._runner)
+            release.set()
+            await asyncio.wait_for(finished.wait(), 1)
 
     async def test_thread_reply_reports_offline_session(self) -> None:
         config = Config()

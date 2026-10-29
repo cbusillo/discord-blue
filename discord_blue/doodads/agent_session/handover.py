@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import asdict, fields
 from datetime import UTC, datetime
 import math
@@ -30,9 +33,47 @@ class SessionContinuation:
         self.grace_seconds = min(grace_seconds, REPLAY_RECONNECT_WAIT_SECONDS)
         self.saved: dict[str, Any] = {}
         self.changed = asyncio.Condition()
-        self.restored_sessions: set[str] = set()
-        self.incoming: set[asyncio.Task[Any]] = set()
+        self.incoming: dict[asyncio.Task[Any], int] = {}
         self.snapshot: dict[str, Any] | None = None
+        self.fallbacks = 0
+
+    @contextmanager
+    def section(self) -> Iterator[None]:
+        task = asyncio.current_task()
+        assert task is not None
+        self.incoming[task] = self.incoming.get(task, 0) + 1
+        try:
+            yield
+        finally:
+            depth = self.incoming[task] - 1
+            if depth:
+                self.incoming[task] = depth
+            else:
+                del self.incoming[task]
+                self.notify_soon()
+
+    def fallback(self) -> None:
+        self.fallbacks += 1
+        handover = getattr(self.bridge.bot, "handover", None)
+        if handover is not None and (not getattr(handover, "runtime_started", True) or handover.replay):
+            handover.status = "failed"
+
+    def retire(self, session_id: str, kind: str | None = None, request_id: str | None = None) -> None:
+        record = self.saved.get(session_id)
+        if record is None:
+            return
+        kinds = (kind,) if kind is not None else ("approvals", "inputs")
+        for prompt_kind in kinds:
+            prompts = record.get(prompt_kind, {})
+            for key in list(prompts):
+                if request_id is not None and key != request_id:
+                    continue
+                message_id = prompts.pop(key)["message_id"]
+                view = self.bridge.bot._connection._view_store._synced_message_views.get(message_id)
+                if view is not None:
+                    view.stop()
+        if kind is None:
+            self.saved.pop(session_id, None)
 
     def load(self, saved: dict[str, Any]) -> None:
         views: list[tuple[discord.ui.LayoutView, int]] = []
@@ -75,22 +116,33 @@ class SessionContinuation:
             self.bridge.bot._connection.store_view(view, message_id)
 
     def export(self) -> dict[str, Any]:
-        saved: dict[str, dict[str, Any]] = {
-            session.session_id: {
+        saved = {
+            session_id: deepcopy(record)
+            for session_id, record in self.saved.items()
+            if (stored := self.bridge.store.records.get(session_id)) is not None
+            and stored.status not in {"closed", "closing"}
+            and stored.thread_id == record["thread_id"]
+        }
+        for session in self.bridge.sessions.by_session.values():
+            if session.ended:
+                saved.pop(session.session_id, None)
+                continue
+            if session.thread_id is None:
+                continue
+            previous = saved.get(session.session_id, {})
+            matching = (previous.get("epoch"), previous.get("thread_id")) == (session.session_epoch, session.thread_id)
+            saved[session.session_id] = {
                 "epoch": session.session_epoch,
                 "thread_id": session.thread_id,
                 "attached_at": session.attached_at.timestamp(),
-                "approvals": {},
-                "inputs": {},
+                "approvals": previous.get("approvals", {}) if matching else {},
+                "inputs": previous.get("inputs", {}) if matching else {},
                 "commands": {command_id: self.command_state(command) for command_id, command in session.pending_commands.items()},
                 "active_command_id": session.active_command_id,
                 "status_revision": session.status_revision,
                 "display_state": session.display_state,
                 "last_status_message": session.last_status_message,
             }
-            for session in self.bridge.sessions.by_session.values()
-            if session.thread_id is not None
-        }
         for session in self.bridge.sessions.by_session.values():
             if session.session_id not in saved:
                 continue
@@ -197,14 +249,22 @@ class SessionContinuation:
         if not saved["request"].keys() <= {field.name for field in fields(request_type)}:
             raise ValueError("Pending request schema cannot be restored")
         if request_type.from_payload(saved["request"]) != request:
-            record[kind].pop(request.approval_id if isinstance(request, RemoteApprovalRequest) else request.call_id)
+            self.retire(
+                session.session_id, kind, request.approval_id if isinstance(request, RemoteApprovalRequest) else request.call_id
+            )
             return False
         channel = self.bridge.thread_channel(record["thread_id"])
         if not isinstance(channel, discord.Thread):
+            self.retire(
+                session.session_id, kind, request.approval_id if isinstance(request, RemoteApprovalRequest) else request.call_id
+            )
             return False
         try:
             message = await channel.fetch_message(saved["message_id"])
         except discord.NotFound:
+            self.retire(
+                session.session_id, kind, request.approval_id if isinstance(request, RemoteApprovalRequest) else request.call_id
+            )
             return False
         if message.author.id != self.bridge.bot_user_id():
             raise ValueError("Pending prompt no longer belongs to the bot")
@@ -241,7 +301,7 @@ class SessionContinuation:
     def current_prompt_matches(self, session: AgentSession, request: RemoteApprovalRequest | RemoteRequestUserInput) -> bool:
         if isinstance(request, RemoteApprovalRequest):
             pending = session.pending_approvals.get(request.approval_id)
-            if pending is None or pending.retired or pending.view is None:
+            if pending is None or pending.retired or pending.view is None or pending.view.is_finished():
                 return False
             return any(isinstance(item, ApprovalButton) and item.approval == request for item in pending.view.walk_children())
         pending_input = session.pending_user_inputs.get(request.call_id)
@@ -251,6 +311,10 @@ class SessionContinuation:
         return isinstance(view, RequestUserInputView) and view.request == request
 
     def reconnected(self, session: AgentSession, previous: AgentSession | None) -> None:
+        record = self.saved.get(session.session_id)
+        if record is not None and (record["epoch"], record["thread_id"]) != (session.session_epoch, session.thread_id):
+            self.retire(session.session_id)
+            record = None
         if previous is not None and (previous.session_epoch, previous.thread_id) == (session.session_epoch, session.thread_id):
             session.attached_at = previous.attached_at
             session.pending_commands = previous.pending_commands
@@ -261,22 +325,25 @@ class SessionContinuation:
             session.display_state = previous.display_state
             session.last_status_message = previous.last_status_message
             return
-        record = self.saved.get(session.session_id)
         if record is not None and (record["epoch"], record["thread_id"]) == (session.session_epoch, session.thread_id):
             session.attached_at = datetime.fromtimestamp(record["attached_at"], UTC)
-            if session.session_id not in self.restored_sessions:
+            if "commands" in record:
                 session.pending_commands = {
-                    command_id: self.restore_command(command) for command_id, command in record.get("commands", {}).items()
+                    command_id: self.restore_command(command) for command_id, command in record.pop("commands").items()
                 }
-                session.active_command_id = record.get("active_command_id")
-                session.status_revision = record.get("status_revision", 0)
-                session.display_state = record.get("display_state", "unknown")
-                session.last_status_message = record.get("last_status_message")
-                self.restored_sessions.add(session.session_id)
+                session.active_command_id = record.pop("active_command_id", None)
+                session.status_revision = record.pop("status_revision", 0)
+                session.display_state = record.pop("display_state", "unknown")
+                session.last_status_message = record.pop("last_status_message", None)
 
     async def notify(self) -> None:
         async with self.changed:
             self.changed.notify_all()
+
+    def notify_soon(self) -> None:
+        task = asyncio.create_task(self.notify())
+        self.bridge.threads.background.add(task)
+        task.add_done_callback(self.bridge.threads.request_done)
 
     async def wait_for_thread(self, thread_id: int) -> AgentSession | None:
         session = self.bridge.sessions.get_by_thread(thread_id)
@@ -291,7 +358,10 @@ class SessionContinuation:
             return current is not None and current.acknowledged and not current.websocket.closed
 
         async with self.changed:
-            await asyncio.wait_for(self.changed.wait_for(ready), self.grace_seconds)
+            try:
+                await asyncio.wait_for(self.changed.wait_for(ready), self.grace_seconds)
+            except TimeoutError:
+                self.fallback()
         return self.bridge.sessions.get_by_thread(thread_id)
 
     def has_prompt(self, thread_id: int, message_id: int) -> bool:
@@ -301,15 +371,6 @@ class SessionContinuation:
             if record["thread_id"] == thread_id
             for saved in record.get("approvals", {}).values()
         )
-
-    async def settle(self) -> bool:
-        async with self.changed:
-            try:
-                await asyncio.wait_for(self.changed.wait_for(lambda: not self.incoming), self.grace_seconds)
-            except TimeoutError:
-                return False
-        self.snapshot = self.export()
-        return True
 
     async def wait_for_prompt(self, thread_id: int, message_id: int) -> None:
         target = next(
@@ -329,7 +390,10 @@ class SessionContinuation:
 
         def ready() -> bool:
             session = self.bridge.sessions.get(session_id)
-            return session is not None and (session.session_epoch != epoch or not self.has_prompt(thread_id, message_id))
+            return not self.has_prompt(thread_id, message_id) or (session is not None and session.session_epoch != epoch)
 
         async with self.changed:
-            await asyncio.wait_for(self.changed.wait_for(ready), self.grace_seconds)
+            try:
+                await asyncio.wait_for(self.changed.wait_for(ready), self.grace_seconds)
+            except TimeoutError:
+                self.fallback()

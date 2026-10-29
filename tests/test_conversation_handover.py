@@ -91,3 +91,81 @@ class ConversationHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.bot.config.conversation.allowed_user_ids = []
         with self.assertRaises(ValueError):
             bridge.conversations.restore(saved)
+
+    async def test_unadopted_conversation_survives_another_handover(self) -> None:
+        original = AgentSessionBridge(cast(Any, self.bot))
+        socket = await self.connect(await self.endpoint(original))
+        await original.conversations.receive_message(message())
+        command = await socket.receive_json(timeout=2)
+        saved = json.loads(json.dumps(original.conversations.export()))
+        successor = AgentSessionBridge(cast(Any, self.bot))
+        successor.conversations.restore(saved)
+        saved_again = json.loads(json.dumps(successor.conversations.export()))
+        third = AgentSessionBridge(cast(Any, self.bot))
+        third.conversations.restore(saved_again)
+        resumed = await self.connect(await self.endpoint(third))
+        self.assertEqual(await resumed.receive_json(timeout=2), command)
+
+    async def test_shutdown_waits_for_conversation_hello_and_keeps_pending_input(self) -> None:
+        bridge = AgentSessionBridge(cast(Any, self.bot))
+        client = await self.endpoint(bridge)
+        old = await self.connect(client)
+        await bridge.conversations.receive_message(message())
+        command = await old.receive_json(timeout=2)
+        entered, release = asyncio.Event(), asyncio.Event()
+        send_json = web.WebSocketResponse.send_json
+
+        async def gated_ack(socket: web.WebSocketResponse, payload: object) -> None:
+            if isinstance(payload, dict) and payload.get("type") == "hello_ack":
+                entered.set()
+                await release.wait()
+            await send_json(socket, payload)
+
+        with patch.object(web.WebSocketResponse, "send_json", gated_ack):
+            replacement = await client.ws_connect(
+                "/agent-session/conversation", headers={"Authorization": f"Bearer {self.bot.config.agent_session.token}"}
+            )
+            await replacement.send_json(hello())
+            stopping: asyncio.Task[None] | None = None
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                stopping = asyncio.create_task(bridge.stop())
+                await asyncio.sleep(0)
+                self.assertFalse(stopping.done())
+                release.set()
+                self.assertEqual((await replacement.receive_json(timeout=2))["type"], "hello_ack")
+                self.assertEqual(await replacement.receive_json(timeout=2), command)
+                await asyncio.wait_for(stopping, 2)
+                assert bridge.handover.snapshot is not None
+                saved = bridge.handover.snapshot["conversation"]
+                self.assertEqual(dict(saved["pending"])[command["command_id"]], command)
+                self.assertEqual(saved["epoch"], command["session_epoch"])
+            finally:
+                release.set()
+                if stopping is not None:
+                    await stopping
+
+    async def test_reply_in_flight_does_not_block_reconnect_or_duplicate_discord_output(self) -> None:
+        bridge = AgentSessionBridge(cast(Any, self.bot))
+        client = await self.endpoint(bridge)
+        old = await self.connect(client)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def send(_text: str, **_kwargs: object) -> None:
+            entered.set()
+            await release.wait()
+
+        self.destination.send.side_effect = send
+        reply = {**hello(), "type": "conversation_reply", "reply_id": "inert-retry", "text": "One answer"}
+        await old.send_json(reply)
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            replacement = await asyncio.wait_for(self.connect(client), 2)
+            await replacement.send_json(reply)
+            release.set()
+            ack = await replacement.receive_json(timeout=2)
+            self.assertEqual(ack["type"], "conversation_reply_ack")
+            self.assertEqual(ack["reply_id"], reply["reply_id"])
+            self.assertEqual(self.destination.send.await_count, 1)
+        finally:
+            release.set()

@@ -28,6 +28,8 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch("pathlib.Path.home", return_value=Path(folder)))
         self.fixture = self.enterContext(prompt_fixture())
         self.bridge = self.fixture.bridge
+        await self.bridge.store.start()
+        self.addAsyncCleanup(self.bridge.store.close)
         self.addCleanup(self.bridge.threads.stop)
         self.fixture.session.attached_at = datetime.now(UTC) - timedelta(seconds=30)
         self.bridge.handover.load(self.bridge.handover.export())
@@ -153,18 +155,45 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await asyncio.wait_for(task, 2))
         command = next(payload for payload in socket.sent_json if payload.get("kind") == "reply")
         self.bridge.handover.load(self.bridge.handover.export())
-        self.bridge.handover.restored_sessions.clear()
         self.bridge.sessions.remove(session.session_id)
         restored, _socket = await self.reattach(epoch=session.session_epoch)
         await self.bridge.handle_event(restored, "command_ack", command)
         self.assertEqual(restored.active_command_id, command["command_id"])
         self.assertEqual(message.reactions, [])
 
+    def test_unadopted_session_survives_another_handover(self) -> None:
+        self.bridge.save_session(self.fixture.session, "grace")
+        saved = self.bridge.handover.export()
+        self.assertIn(self.fixture.session.session_id, saved)
+        successor = SessionContinuation(self.bridge, 1)
+        successor.load(saved)
+        self.assertEqual(successor.export(), saved)
+
+    def test_closed_session_does_not_return_in_another_handover(self) -> None:
+        session = self.fixture.session
+        self.bridge.save_session(session, "closed")
+        self.assertNotIn(session.session_id, self.bridge.handover.export())
+
+    def test_ended_live_session_is_not_carried_to_successor(self) -> None:
+        session = self.fixture.session
+        self.bridge.sessions.register(session)
+        session.ended = True
+        self.assertNotIn(session.session_id, self.bridge.handover.export())
+
+    async def test_new_epoch_retires_previous_epoch_before_another_handover(self) -> None:
+        session = self.fixture.session
+        self.bridge.save_session(session, "grace")
+        replacement, _socket = await self.reattach(epoch="new-native-epoch")
+        self.bridge.sessions.remove(replacement.session_id)
+        self.assertNotIn(session.session_id, self.bridge.handover.export())
+
     async def test_unavailable_native_session_does_not_wait_for_full_disconnect_grace(self) -> None:
         self.bridge.handover.grace_seconds = 0.01
-        task, _message = await self.gap_reply()
-        with self.assertRaises(TimeoutError):
-            await asyncio.wait_for(task, 1)
+        task, message = await self.gap_reply()
+        self.assertTrue(await asyncio.wait_for(task, 1))
+        self.assertEqual(len(message.replies), 1)
+        self.assertFalse(self.fixture.socket.sent_json)
+        self.assertGreater(self.bridge.handover.fallbacks, 0)
 
     async def test_shutdown_snapshot_waits_for_incoming_ack_not_websocket_task_exit(self) -> None:
         session = self.fixture.session
@@ -185,14 +214,14 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
             incoming = asyncio.create_task(connection())
             self.addAsyncCleanup(self.cancel, incoming)
             await asyncio.wait_for(entered.wait(), 1)
-            stopping = asyncio.create_task(self.bridge.prepare_handover())
+            stopping = asyncio.create_task(self.bridge.stop())
             await asyncio.sleep(0)
             self.assertFalse(stopping.done())
             release.set()
-            self.assertTrue(await asyncio.wait_for(stopping, 1))
+            await asyncio.wait_for(stopping, 1)
             self.assertFalse(incoming.done())
             assert self.bridge.handover.snapshot is not None
-            self.assertEqual(self.bridge.handover.snapshot[session.session_id]["active_command_id"], command_id)
+            self.assertEqual(self.bridge.handover.snapshot["agents"][session.session_id]["active_command_id"], command_id)
             keep_alive.set()
             await incoming
 

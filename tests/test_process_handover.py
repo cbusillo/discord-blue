@@ -74,6 +74,33 @@ class ProcessHandoverTests(unittest.TestCase):
             self.assertEqual(new.wait(timeout=10), 0)
             self.assertTrue(json.loads((folder / "new-config").read_text())["predecessor_exited"])
 
+    def test_standby_terminates_without_waiting_for_predecessor_or_loading_config(self) -> None:
+        with TemporaryDirectory() as directory:
+            folder = Path(directory)
+            reader, writer = os.pipe()
+            self.addCleanup(os.close, reader)
+            old = subprocess.Popen(
+                [sys.executable, "-c", PROCESS, directory, "old", str(writer)],
+                pass_fds=(writer,),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            os.close(writer)
+            self.addCleanup(self.stop, old)
+            self.wait_for(folder / "old-config")
+            new = subprocess.Popen(
+                [sys.executable, "-c", PROCESS, directory, "new", str(reader)],
+                pass_fds=(reader,),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            self.addCleanup(self.stop, new)
+            self.wait_for(folder / "new-entered")
+            new.terminate()
+            new.communicate(timeout=2)
+            self.assertFalse((folder / "new-config").exists())
+            self.assertIsNone(old.poll())
+
     @staticmethod
     def stop(process: subprocess.Popen[bytes]) -> None:
         if process.poll() is None:

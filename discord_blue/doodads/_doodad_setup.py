@@ -22,6 +22,12 @@ class SetupDoodad(commands.Cog):
 
     @commands.Cog.listener("on_ready")
     async def my_on_ready(self) -> None:
+        if self.bot.handover.startup_caller is not None:
+            return
+        await self.sync_commands()
+
+    @commands.Cog.listener("on_handover_replayed")
+    async def sync_commands(self) -> None:
         tree_sync = await self.bot.sync_home_commands()
         logger.info(f"Loaded {len(tree_sync)} commands")
 
