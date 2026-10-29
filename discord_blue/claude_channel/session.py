@@ -11,9 +11,8 @@ declares the permission capability, which leaves the terminal dialog unchanged,
 so it can post Claude Code's own (credential-masked) preview as a notice.
 
 The plugin's hooks call ``dui_hook_event`` on this server to mirror typed
-prompts, final answers and titles. Claude Code queues channel messages while a
-turn runs and keeps them across ``/clear`` and ``/resume``, so Discord replies
-are held until Claude Code reports it is idle. When the conversation ends or changes, the session
+prompts, final answers and titles. A Discord reply goes to Claude Code at once,
+which queues it like a typed prompt while a turn runs. When the conversation ends or changes, the session
 takes a new epoch, so Discord controls meant for the old conversation are
 rejected.
 """
@@ -34,7 +33,7 @@ from dataclasses import dataclass
 import aiohttp
 
 from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN
-from discord_blue.agent_client import DEFERRED, PROMPT_EVENTS, SESSION_END_TIMEOUT_SECONDS, AgentSessionClient, Json, Rejected
+from discord_blue.agent_client import PROMPT_EVENTS, SESSION_END_TIMEOUT_SECONDS, AgentSessionClient, Json, Rejected
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.claude_channel.launch import launch_prompt, matches_launch_prompt, ancestry, loaded_as_channel
 from discord_blue.codex_bridge.session import REPLY_LIMIT, TEXT_LIMIT, TURN_DONE
@@ -144,11 +143,7 @@ class ClaudeSession(AgentSessionClient):
         self.ending: tuple[Json, asyncio.Event] | None = None
         self.conversation_id: str | None = identity.session_id
         self.controls = CAPABILITIES if identity.channel else ["status_request"]
-        # Discord replies held while a turn runs: Claude Code queues channel messages and would deliver
-        # them even after /clear or /resume switched conversations.
-        self.turn_running = False
         self.waiting_locally = False
-        self.held: list[tuple[str, str]] = []
         # Replies this server injected; their prompts are already in Discord.
         self.injected: deque[str] = deque(maxlen=64)
         if not identity.channel:
@@ -211,7 +206,6 @@ class ClaudeSession(AgentSessionClient):
             self.waiting_locally = False
             self.publish("status_changed", message="Turn started")
         if event in RUNNING_EVENTS:
-            self.turn_running = True
             if self.waiting_locally:
                 self.waiting_locally = False
                 self.publish(
@@ -238,13 +232,9 @@ class ClaudeSession(AgentSessionClient):
             )
             # Claude Code writes its own title for the session as it answers.
             await self.retitle(fields)
-            # Not idle yet: another plugin's Stop hook may still keep Claude working.
         elif event == "StopFailure":
             self.waiting_locally = False
             self.publish("error", message="Claude Code ended the turn with an error; check the terminal.")
-        elif event == "Notification":
-            # idle_prompt: Claude Code has been waiting for input for about a minute, the only confirmed idle signal.
-            await self.release_held()
         elif event == "SessionStart":
             await self.retitle(fields)
 
@@ -283,7 +273,6 @@ class ClaudeSession(AgentSessionClient):
         self.epoch = uuid.uuid4().hex
         self.commands.clear()
         self.prompts.clear()
-        dropped, self.held, self.turn_running = len(self.held), [], False
         self.conversation_id, self.label = conversation, SessionLabel()
         if self.websocket is not None:
             # Reconnect so Discord Blue binds the thread to the new epoch; nothing more goes out on this socket.
@@ -292,11 +281,6 @@ class ClaudeSession(AgentSessionClient):
         self.outbox = deque({**event, "session_epoch": self.epoch} for event in self.outbox if event["type"] not in PROMPT_EVENTS)
         ended = "The Claude Code conversation in this thread ended (/clear or /resume)"
         self.publish("notice", message=f"{ended}; earlier replies from Discord are no longer accepted.")
-        if dropped:
-            waiting = f"{dropped} Discord {'reply was' if dropped == 1 else 'replies were'} waiting for Claude Code to be idle"
-            self.publish(
-                "notice", message=f"{waiting} and {'was' if dropped == 1 else 'were'} not delivered. Send again if still needed."
-            )
 
     async def retitle(self, fields: dict[str, str], prompt: str | None = None) -> Titles:
         """Name first (hook session_title, else the transcript's custom title), then Claude's aiTitle, then the prompt."""
@@ -312,26 +296,7 @@ class ClaudeSession(AgentSessionClient):
 
     async def inject(self, command_id: str, text: str) -> None:
         self.injected.append(command_id)
-        # The injected message starts a turn; later replies wait for it to end.
-        self.turn_running = True
         await self.notify(CHANNEL, {"content": text, "meta": {"command_id": command_id}})
-
-    async def release_held(self) -> None:
-        """Claude Code is confirmed idle: deliver the oldest held reply, which starts a turn; the rest wait.
-
-        Delivering more at once would leave them in Claude Code's own queue, where /clear or /resume
-        could carry them into the next conversation.
-        """
-        self.turn_running = False
-        if not self.held:
-            return
-        command_id, text = self.held.pop(0)
-        try:
-            await self.inject(command_id, text)
-        except OSError:
-            self.finish_command(command_id, self.event("command_reject", command_id=command_id, reason=LOST_CLAUDE))
-        else:
-            self.finish_command(command_id, self.event("command_ack", command_id=command_id))
 
     async def run_command(self, message: Json) -> object:
         kind = message.get("kind")
@@ -339,11 +304,7 @@ class ClaudeSession(AgentSessionClient):
             text = message.get("text")
             if not isinstance(text, str) or not text.strip() or len(text) > REPLY_LIMIT:
                 raise Rejected(f"Replies must contain 1 to {REPLY_LIMIT} characters.")
-            command_id = str(message["command_id"])
-            if self.turn_running:
-                self.held.append((command_id, text))
-                return DEFERRED
-            await self.inject(command_id, text)
+            await self.inject(str(message["command_id"]), text)
         elif kind == "status_request":
             self.enqueue(self.status_snapshot())
         else:
