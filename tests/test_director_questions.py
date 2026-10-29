@@ -497,7 +497,7 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.card("**Q12.** Ship it now?\nRecommendation: yes.\nAlternative: no")  # Re-asked: the old buttons are stale.
         refused = FakeInteraction(self.fixture.thread, message=self.fixture.thread._history[0])
         await stale.callback(cast(Any, refused))
-        self.assertEqual(self.fixture.socket.sent_json, [])
+        self.assertEqual((self.fixture.socket.sent_json, refused.response.edits), ([], []))
         self.assertTrue(refused.response.messages)
         current = cast(discord.ui.LayoutView, self.fixture.thread._history[0].view)
         tap = next(item for item in current.walk_children() if isinstance(item, QuestionChoiceButton))
@@ -558,6 +558,17 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         modal.fields[0]._value = text
         await modal.on_submit(cast(Any, FakeInteraction(self.fixture.thread)))
 
+    async def test_a_tap_changes_its_card_as_the_interaction_response(self) -> None:
+        await self.fixture.bridge.status.post_assistant_message(self.fixture.thread.id, self.GROUP)
+        _, message = self.grouped("Q1")
+        view = cast(discord.ui.LayoutView, message.view)
+        tap = next(item for item in view.walk_children() if isinstance(item, QuestionChoiceButton))
+        self.assertNotEqual(tap.style, discord.ButtonStyle.success)  # Green means only "sent".
+        interaction = FakeInteraction(self.fixture.thread, message=message)
+        await tap.callback(cast(Any, interaction))
+        self.assertFalse(interaction.response.deferred)
+        self.assertIn("sends when Q2 is answered", visible_view_text(interaction.response.edit_kwargs[0]["view"]))
+
     async def test_answers_from_one_reply_go_to_the_agent_together(self) -> None:
         await self.hold_first_answer()
         held, message = self.grouped("Q1")
@@ -570,6 +581,7 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         for number in ("Q1", "Q2"):
             question, message = self.grouped(number)
             self.assertEqual((question.state, self.accent(message)), (QuestionState.ANSWERED, STATUS_LABELS["done"][1]))
+            self.assertIn("✓ sent", visible_view_text(message.view))
             self.assertEqual(message.reactions, [])
 
     async def test_a_rejected_answer_turns_its_card_red_without_reactions(self) -> None:
