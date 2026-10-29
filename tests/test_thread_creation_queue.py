@@ -85,7 +85,7 @@ class ThreadCreationQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(running.archived, [])
 
     async def test_a_burst_is_serialized_through_repeated_creation_limits(self) -> None:
-        fake = FakeDiscord(latency=0.002)
+        fake = FakeDiscord(latency=0.002, rate_limit_reset_after=0.01)
         hellos = [hello_for(f"burst-{n}", client_features=["hello_pending"]) for n in range(7)]
 
         # A two-creation window: sessions 2, 4, and 6 hit the next window's limit once each.

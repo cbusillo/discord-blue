@@ -136,8 +136,9 @@ def respond(payload: object, status: int) -> web.Response:
 
 
 class FakeDiscord:
-    def __init__(self, *, latency: float = 0.0, gateway_delay: float = 0.02) -> None:
+    def __init__(self, *, latency: float = 0.0, gateway_delay: float = 0.02, rate_limit_reset_after: float = 1.0) -> None:
         self.latency = latency
+        self.rate_limit_reset_after = rate_limit_reset_after
         self.route_latency: dict[tuple[str, str], float] = {}
         # Extra latency for requests whose JSON body matches, e.g. only archive edits: (method, route, match, seconds).
         self.body_latency: list[tuple[str, str, Callable[[Json], bool], float]] = []
@@ -265,7 +266,7 @@ class FakeDiscord:
             {
                 "X-RateLimit-Limit": "50",
                 "X-RateLimit-Remaining": "49",
-                "X-RateLimit-Reset-After": "1.0",
+                "X-RateLimit-Reset-After": str(self.rate_limit_reset_after),
                 "X-RateLimit-Bucket": f"{method}:{template}",
             }
         )
