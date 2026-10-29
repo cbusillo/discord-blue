@@ -10,6 +10,7 @@ from pathlib import Path
 
 import discord
 
+from discord_blue.doodads.agent_session.formatting import discord_text_length
 from discord_blue.doodads.agent_session.messages import send_agent_session_message
 from discord_blue.doodads.agent_session.protocol import SessionHello
 from discord_blue.plugs.discord_plug import BlueBot
@@ -61,7 +62,7 @@ def distinct_thread_name(hello: SessionHello, taken: set[str]) -> str:
             return with_branch
     # The end of the session ID: Codex IDs share a time-ordered start.
     suffix = f" #{hello.session_id[-4:]}"
-    return _truncate_thread_name(name, DISCORD_THREAD_NAME_LIMIT - _discord_length(suffix)) + suffix
+    return _truncate_thread_name(name, DISCORD_THREAD_NAME_LIMIT - discord_text_length(suffix)) + suffix
 
 
 def session_branch_is_title_worthy(branch: str | None) -> bool:
@@ -77,15 +78,10 @@ def session_display_name(hello: SessionHello) -> str:
     return repo
 
 
-def _discord_length(text: str) -> int:
-    # Count UTF-16 units, as a JavaScript client would, so an emoji icon never pushes a name over the limit.
-    return len(text.encode("utf-16-le")) // 2
-
-
 def _truncate_thread_name(name: str, limit: int = DISCORD_THREAD_NAME_LIMIT) -> str:
     # Every character is at least one UTF-16 unit, so nothing past this prefix can fit.
     name = name[: limit + 1]
-    if _discord_length(name) <= limit:
+    if discord_text_length(name) <= limit:
         return name
     kept, units = [], 0
     for char in name:
@@ -205,7 +201,7 @@ def creation_token_suffix(token: str) -> str:
 def tokened_thread_name(hello: SessionHello, token: str) -> str:
     """The session's thread name plus its creation token, which the first rename removes."""
     suffix = creation_token_suffix(token)
-    return _truncate_thread_name(session_thread_name(hello), DISCORD_THREAD_NAME_LIMIT - _discord_length(suffix)) + suffix
+    return _truncate_thread_name(session_thread_name(hello), DISCORD_THREAD_NAME_LIMIT - discord_text_length(suffix)) + suffix
 
 
 class ThreadCreationStopped(Exception):

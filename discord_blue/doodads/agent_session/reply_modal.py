@@ -11,6 +11,7 @@ from discord_blue.doodads.agent_session.cards import ANSWER_CARD_COMPONENT_ID, A
 from discord_blue.doodads.agent_session.formatting import (
     ASSISTANT_MESSAGE_MARKER,
     LEGACY_ASSISTANT_LABEL,
+    discord_text_length,
     format_user_message,
     is_assistant_message,
     strip_assistant_markers,
@@ -94,7 +95,7 @@ class ReplyAboutModal(discord.ui.Modal):
         identity = discord.utils.escape_markdown(session.thread_name or session.hello.title or session.session_id)[:100]
         age = " · Earlier context" if self.older else ""
         self.add_item(discord.ui.TextDisplay(f"**{identity}{age}**\n{self.quote()}\n[Open answer]({self.jump_url})"))
-        context_size = len(format_user_message(self.reply_text("x")).encode("utf-16-le")) // 2 - 1
+        context_size = discord_text_length(format_user_message(self.reply_text("x"))) - 1
         self.reply: discord.ui.TextInput[ReplyAboutModal] = discord.ui.TextInput[ReplyAboutModal](
             style=discord.TextStyle.paragraph, max_length=(DISCORD_MESSAGE_LIMIT - context_size) // 2
         )

@@ -4,15 +4,12 @@ from typing import TYPE_CHECKING, cast
 
 import discord
 
+from discord_blue.doodads.agent_session.formatting import discord_text_length
 from discord_blue.doodads.agent_session.protocol import RemoteRequestUserInput
 from discord_blue.plugs.discord_plug import BlueBot
 
 if TYPE_CHECKING:
     from discord_blue.doodads.agent_session.interactions import RequestUserInputView
-
-
-def _text_length(text: str) -> int:
-    return len(text.encode("utf-16-le")) // 2
 
 
 def questionnaire_fits_modal(request: RemoteRequestUserInput) -> bool:
@@ -21,10 +18,10 @@ def questionnaire_fits_modal(request: RemoteRequestUserInput) -> bool:
         and sum(1 + bool(q.options and q.is_other) for q in request.questions) <= 5
         and all(
             not q.is_secret
-            and _text_length(q.header or q.id) + (8 if q.options and q.is_other else 0) <= 45
-            and _text_length(q.question) <= 100
+            and discord_text_length(q.header or q.id) + (8 if q.options and q.is_other else 0) <= 45
+            and discord_text_length(q.question) <= 100
             and (not q.options or 2 <= len(q.options) + q.is_other <= 10)
-            and all(1 <= _text_length(o.label) <= 100 and _text_length(o.description) <= 100 for o in q.options)
+            and all(1 <= discord_text_length(o.label) <= 100 and discord_text_length(o.description) <= 100 for o in q.options)
             for q in request.questions
         )
     )

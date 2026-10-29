@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
+from discord_blue.doodads.agent_session.formatting import discord_text_length
 
 
 # Discord shows at most this many characters of an approval's shell-joined command.
@@ -31,7 +32,7 @@ def approval_content_displayable(kind: str, text: str) -> bool:
         kind in {"file_change", "permissions"}
         and bool(text)
         and "```" not in text
-        and len(format_content_approval(kind, text).encode("utf-16-le")) // 2 <= DISCORD_MESSAGE_LIMIT
+        and discord_text_length(format_content_approval(kind, text)) <= DISCORD_MESSAGE_LIMIT
     )
 
 
