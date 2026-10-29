@@ -55,8 +55,11 @@ Recommendation: keep both.
         self.assertEqual(question_choices(lines), (("ship it", True), ("wait a day", False), ("drop it", False)))
         prose = "**Q3.** Which?\nRecommendation: " + "a long explanation that is a paragraph, not a button " * 2
         self.assertEqual(question_choices(prose), ())
-        example = "**Q4.** Adopt this template?\n```\n- **On yes:** x\n```\n    - **On no:** y\nRecommendation: adopt it."
-        self.assertEqual(question_choices(example), (("adopt it", True),))
+        example = "**Q4.** Adopt this template?\n```\n- **On yes:** x\n```\n    - **On no:** y\n" + (
+            "Recommendation: adopt it.\nAlternative: keep it"
+        )
+        self.assertEqual(question_choices(example), (("adopt it", True), ("keep it", False)))
+        self.assertEqual(question_choices("**Q5.** Describe it?\nRecommendation: free text answer."), ())
 
     def test_references_and_historical_labels_are_not_questions(self) -> None:
         for source in ("**Q12** was answered yesterday.", "**Q12 status**\nDone.", "See **Q12.** Later?", "**Q12.** Resolved."):
@@ -489,7 +492,7 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([button.choice for button in choices], ["yes", "wait"])
         self.assertIn("recommended", str(choices[0].label))
         stale = choices[1]
-        await self.card("**Q12.** Ship it now?\nRecommendation: yes.")  # Re-asked: the old buttons are stale.
+        await self.card("**Q12.** Ship it now?\nRecommendation: yes.\nAlternative: no")  # Re-asked: the old buttons are stale.
         refused = FakeInteraction(self.fixture.thread, message=self.fixture.thread._history[0])
         await stale.callback(cast(Any, refused))
         self.assertEqual(self.fixture.socket.sent_json, [])
@@ -500,6 +503,17 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fixture.socket.sent_json[-1]["text"], "Q12: yes")
         stored = cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key))
         self.assertEqual((stored.state, stored.answer), (QuestionState.ANSWERED, "yes"))
+
+    async def test_a_new_cards_choice_answers_it(self) -> None:
+        modal = await self.card()
+        message = self.fixture.thread._history[-1]
+        view = cast(discord.ui.LayoutView, message.view)
+        tap = next(item for item in view.walk_children() if isinstance(item, QuestionChoiceButton))
+        interaction = FakeInteraction(self.fixture.thread, message=message)
+        await tap.callback(cast(Any, interaction))
+        self.assertEqual((self.fixture.socket.sent_json[-1]["text"], interaction.response.messages), ("Q12: yes", []))
+        stored = cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key))
+        self.assertEqual(stored.state, QuestionState.ANSWERED)
 
     async def test_the_answer_form_shows_the_whole_question(self) -> None:
         body = "**Q12.** Ship it?\n" + "Context that must stay readable. " * 20 + "\nRecommendation: yes."

@@ -123,7 +123,8 @@ def question_choices(body: str) -> tuple[tuple[str, bool], ...]:
             recommended = choice_text(recommendation[1])
         elif alternative := ALTERNATIVE.match(line):
             alternatives.extend(choice_text(part) for part in alternative[1].split(";"))
-    named = bullets or [recommended, *alternatives]
+    # A recommendation alone is advice, not a choice; a free-text question keeps only its form.
+    named = bullets or ([recommended, *alternatives] if alternatives else [])
     choices: dict[str, tuple[str, bool]] = {}
     for choice in named:
         if choice and len(choice) <= CHOICE_LIMIT and choice.casefold() not in choices:
@@ -671,8 +672,12 @@ class QuestionChoiceButton(discord.ui.Button[discord.ui.LayoutView]):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
+        # The card is drawn before its message is saved, so compare the tap with the saved record of the same revision.
+        current = self.cards.record(self.session_id, self.question.key)
+        same = current is not None and (current.revision, current.questions) == (self.question.revision, self.question.questions)
         session = self.cards.bridge.sessions.get(self.session_id)
-        await self.cards.submit(interaction, self.session_id, session, self.question, [self.choice], interaction.user.id)
+        expected = current if same and current is not None else self.question
+        await self.cards.submit(interaction, self.session_id, session, expected, [self.choice], interaction.user.id)
 
 
 class QuestionAnswerModal(discord.ui.Modal):
