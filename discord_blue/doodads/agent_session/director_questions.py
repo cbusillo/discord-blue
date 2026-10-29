@@ -170,6 +170,8 @@ class QuestionCards:
         self.edit_locks: dict[str, asyncio.Lock] = {}
         # One card edit at a time per channel, so a session with many cards cannot starve other threads.
         self.channel_edit_locks: dict[int, asyncio.Lock] = {}
+        # The state each card was last drawn in by this process; a failed edit or a restart draws it again.
+        self.drawn: dict[str, QuestionState] = {}
         # Cards marked unconfirmed at startup, redrawn once their session attaches or ends and Discord is reachable.
         self.unconfirmed_at_start: dict[str, list[str]] = {}
 
@@ -586,8 +588,8 @@ class QuestionCards:
                     QuestionState.HELD: QuestionState.NOT_DELIVERED,
                     QuestionState.UNCERTAIN: QuestionState.UNCONFIRMED,
                 }.get(question.state, QuestionState.CLOSED)
-                if closed == question.state and question.legacy_parent_id is None:
-                    continue  # Already shown closed; editing it again on every reconnect floods Discord's rate limits.
+                if closed == question.state and self.drawn.get(question.key) == closed and question.legacy_parent_id is None:
+                    continue  # Already drawn closed by this process; redrawing on every reconnect floods Discord's rate limits.
                 question = replace(question, state=closed)
                 self.save(session_id, question)
                 await self.refresh(session_id, [question], thread=thread)
@@ -831,6 +833,7 @@ class QuestionCards:
                                     allowed_mentions=agent_session_allowed_mentions(),
                                     attachments=[attachment] if attachment is not None else [],
                                 )
+                            self.drawn[question.key] = question.state
                         finally:
                             if attachment is not None:
                                 attachment.close()

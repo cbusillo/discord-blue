@@ -753,6 +753,17 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
             await modal.cards.close(modal.session_id)
         self.assertEqual(len(message.edits), edits)
 
+    async def test_a_failed_closing_edit_is_drawn_again_on_the_next_close(self) -> None:
+        modal = await self.card()
+        stored = cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key))
+        message = self.fixture.thread._messages[cast(int, stored.message_id)]
+        failure = discord.HTTPException(cast(Any, SimpleNamespace(status=500, reason="")), "")
+        with patch.object(message, "edit", AsyncMock(side_effect=failure)):
+            await modal.cards.close(modal.session_id)
+        edits = len(message.edits)
+        await modal.cards.close(modal.session_id)
+        self.assertEqual(len(message.edits), edits + 1)
+
     async def test_large_context_attachment_and_forbidden_fallback_stay_in_thread(self) -> None:
         body = "**Q14.** Proceed?\nRecommendation: yes.\nCost: " + "large " * 1000 + "\nAlternative: wait."
         modal = await self.card(body)
