@@ -26,6 +26,10 @@ class PendingRemoteCommand:
     status_revision: int | None = None
     previous_display_state: DisplayState = "waiting"
     previous_status_message: str | None = None
+    # Question cards this reply answers; its acknowledgment or rejection settles their color.
+    question_keys: tuple[str, ...] = ()
+    # Question cards show delivery by color, so their messages get no delivery reactions.
+    react: bool = True
 
 
 @dataclass(slots=True)

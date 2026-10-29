@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import uuid
 from dataclasses import dataclass, replace
 from collections.abc import Iterator
 from io import BytesIO
@@ -50,6 +51,14 @@ CHOICE_LIMIT = 60
 MAX_CHOICES = 4
 # Discord allows 4000 characters of text in a form; leave room for the cut notice and link.
 MODAL_TEXT_LIMIT = 3800
+# Yellow needs an answer, blue is answered and on its way, green reached the agent, red did not.
+ANSWERED_STATES = {
+    QuestionState.HELD: STATUS_LABELS["working"][1],
+    QuestionState.UNCERTAIN: STATUS_LABELS["working"][1],
+    QuestionState.ANSWERED: STATUS_LABELS["done"][1],
+    QuestionState.NOT_DELIVERED: STATUS_LABELS["failed"][1],
+    QuestionState.UNCONFIRMED: STATUS_LABELS["disconnected"][1],
+}
 
 
 def top_level_lines(lines: list[str]) -> Iterator[tuple[int, str]]:
@@ -147,6 +156,8 @@ class QuestionCards:
         self.bridge = bridge
         self.locks: dict[str, asyncio.Lock] = {}
         self.edit_locks: dict[str, asyncio.Lock] = {}
+        # Cards marked unconfirmed at startup, redrawn once their session attaches or ends and Discord is reachable.
+        self.unconfirmed_at_start: dict[str, list[str]] = {}
 
     def lock(self, key: str) -> asyncio.Lock:
         return self.locks.setdefault(key, asyncio.Lock())
@@ -172,23 +183,62 @@ class QuestionCards:
             return False
 
     def restore(self) -> None:
-        for session_id, stored in self.bridge.store.records.items():
+        for session_id, stored in tuple(self.bridge.store.records.items()):
             for question in stored.questions:
+                if question.state in {QuestionState.UNCERTAIN, QuestionState.UNCONFIRMED} and question.answer:
+                    # The acknowledgment that would settle it was lost with the previous process. An earlier
+                    # restart may have saved this state before its card was redrawn, so redraw it either way.
+                    question = replace(question, state=QuestionState.UNCONFIRMED)
+                    self.save(session_id, question)
+                    self.unconfirmed_at_start.setdefault(session_id, []).append(question.key)
                 if question.message_id is not None:
                     view = self.view(session_id, question)
                     if question.legacy_parent_id is not None:
                         view.add_item(discord.ui.ActionRow(QuestionAnswerButton(self, session_id, question)))
                     self.bridge.bot.add_view(view, message_id=question.message_id)
 
+    def members(self, session_id: str, question: StoredQuestion) -> list[StoredQuestion]:
+        """Cards from the same agent reply in the same conversation, including this one."""
+        stored = self.bridge.store.records.get(session_id)
+        if stored is None or not question.group:
+            return [question]
+        return [q for q in stored.questions if q.group == question.group and q.epoch == question.epoch]
+
+    def open_numbers(self, session_id: str, question: StoredQuestion) -> list[str]:
+        """Questions of the group still waiting, including any whose card is not posted yet."""
+        cards = {number: member for member in self.members(session_id, question) for number, _ in member.questions}
+        expected = question.group.partition(":")[2].split(",") if ":" in question.group else []
+        numbers = [*expected, *(number for number in cards if number not in expected)]
+        return [number for number in numbers if number not in cards or cards[number].state == QuestionState.WAITING]
+
+    @staticmethod
+    def answer_text(questions: list[StoredQuestion]) -> str:
+        ordered = sorted(questions, key=lambda q: int(q.questions[0][0][1:]))
+        return "\n\n".join(f"{q.questions[0][0]}: {q.answer}" if len(q.questions) == 1 else q.answer for q in ordered)
+
     def view(self, session_id: str, question: StoredQuestion) -> discord.ui.LayoutView:
         if question.legacy_parent_id is not None:
             numbers = ", ".join(number for number, _ in question.questions)
             return notice_card(f"**{numbers}** · Continue in the [session thread]({question.source_url}).")
-        if question.state == QuestionState.ANSWERED:
+        if question.state == QuestionState.ANSWERED or (question.answer and question.state in ANSWERED_STATES):
             answer = discord.utils.escape_markdown(" ".join(question.answer.split())[:120])
             numbers = ", ".join(number for number, _ in question.questions)
             asked = discord.utils.escape_markdown(question_excerpt(question.questions[0][1]))
             link = f" · [Decision]({question.decision_url})" if question.decision_url else ""
+            if question.state == QuestionState.HELD:
+                waiting = self.open_numbers(session_id, question)
+                names = " and ".join(waiting) if len(waiting) < 3 else f"{', '.join(waiting[:-1])} and {waiting[-1]}"
+                link = (
+                    f" · sends when {names} {'is' if len(waiting) == 1 else 'are'} answered"
+                    if waiting
+                    else " · sends with your next message"
+                )
+            elif question.state == QuestionState.UNCERTAIN:
+                link = " · sending"
+            elif question.state == QuestionState.NOT_DELIVERED:
+                link = " · not sent"
+            elif question.state == QuestionState.UNCONFIRMED:
+                link = " · delivery not confirmed; check the session"
             view = notice_card(f"**{numbers}** · {asked} → **{answer}**{link}")
             container = view.children[0]
             assert isinstance(container, discord.ui.Container)
@@ -196,7 +246,7 @@ class QuestionCards:
                 # The card is the only record of a form answer, so a long or grouped answer stays readable in full.
                 full = discord.utils.escape_markdown(question.answer.strip())[:ANSWER_CHUNK_LIMIT]
                 container.add_item(discord.ui.TextDisplay(f">>> {full}"))
-            container.accent_color = STATUS_LABELS["done"][1]
+            container.accent_color = ANSWERED_STATES[question.state]
             container.id = ANSWER_CARD_COMPONENT_ID if question.complete else ANSWER_CONTINUATION_COMPONENT_ID
             return view
         text = "\n\n".join(body for _, body in question.questions)
@@ -242,13 +292,15 @@ class QuestionCards:
             parts.append((remaining, None))
         full_text = text
         shown: set[str] = set()
+        # Every question in the reply belongs to the group before its card exists, so an early answer still waits.
+        group = f"{uuid.uuid4().hex}:{','.join(section.number for section in sections)}"
         for index, (body, number) in enumerate(parts):
             if number is not None:
                 current = self.record(session.session_id, self.key(session, number))
                 if number in shown and current is not None:
                     await self.reference(thread, current, complete=index == len(parts) - 1)
                 else:
-                    await self.post(session, thread, body, complete=index == len(parts) - 1, replay=replay)
+                    await self.post(session, thread, body, complete=index == len(parts) - 1, replay=replay, group=group)
                 shown.add(number)
             else:
                 await send_assistant_message(
@@ -294,7 +346,8 @@ class QuestionCards:
                     answered = replace(current, state=QuestionState.ANSWERED, answer=match[2].strip(), decision_url=decision_url)
                     self.save(session_id, answered)
                     changed = True
-                    await self.refresh(session_id, [answered])
+                    held = [q for q in self.members(session_id, answered) if q.state == QuestionState.HELD]
+                    await self.refresh(session_id, [answered, *held])
         return changed
 
     def context_error(self, interaction: discord.Interaction, session_id: str, question: StoredQuestion | None) -> str | None:
@@ -317,14 +370,21 @@ class QuestionCards:
         return None
 
     async def post(
-        self, session: AgentSession, thread: discord.Thread, text: str, *, complete: bool = True, replay: bool = False
+        self,
+        session: AgentSession,
+        thread: discord.Thread,
+        text: str,
+        *,
+        complete: bool = True,
+        replay: bool = False,
+        group: str = "",
     ) -> None:
         questions = detect_questions(text)
         if not questions:
             return
         key = self.key(session, questions[0][0])
         async with self.lock(key):
-            await self.publish(session, thread, text, questions, key, complete=complete, replay=replay)
+            await self.publish(session, thread, text, questions, key, complete=complete, replay=replay, group=group)
 
     async def publish(
         self,
@@ -336,6 +396,7 @@ class QuestionCards:
         *,
         complete: bool,
         replay: bool,
+        group: str = "",
     ) -> None:
         current = self.record(session.session_id, key)
         previous = current
@@ -378,6 +439,7 @@ class QuestionCards:
                 message_id=source.id if source is not None else None,
                 revision=current.revision if current is not None else 0,
                 complete=current.complete if source is not None and current is not None else complete,
+                group=group,
             )
             if restored and current is not None:
                 question = replace(question, state=current.state, answer=current.answer, decision_url=current.decision_url)
@@ -394,6 +456,14 @@ class QuestionCards:
             )
             self.save(session.session_id, question)
             published = True
+            if previous is not None and previous.group and previous.group != group:
+                # A re-asked question joins its new reply's group; answers held for it move along so they still send.
+                moved = [
+                    replace(q, group=group) for q in self.members(session.session_id, previous) if q.state == QuestionState.HELD
+                ]
+                for held in moved:
+                    self.save(session.session_id, held)
+                await self.refresh(session.session_id, moved, thread=thread)
             if source is not None:
                 await self.reference(thread, question, complete=complete)
         except (OSError, discord.DiscordException) as exc:
@@ -487,12 +557,23 @@ class QuestionCards:
                 if question is None:
                     continue
                 if question.legacy_parent_id is None and (
-                    question.epoch == current_epoch or question.state not in {QuestionState.WAITING, QuestionState.CLOSED}
+                    question.epoch == current_epoch
+                    or question.state
+                    not in {QuestionState.WAITING, QuestionState.CLOSED, QuestionState.HELD, QuestionState.UNCERTAIN}
+                    or (question.state == QuestionState.UNCERTAIN and not question.answer)
                 ):
                     continue
-                question = replace(question, state=QuestionState.CLOSED)
+                # A held answer never reached the agent; one still sending can no longer be acknowledged.
+                closed = {
+                    QuestionState.HELD: QuestionState.NOT_DELIVERED,
+                    QuestionState.UNCERTAIN: QuestionState.UNCONFIRMED,
+                }.get(question.state, QuestionState.CLOSED)
+                question = replace(question, state=closed)
                 self.save(session_id, question)
                 await self.refresh(session_id, [question], thread=thread)
+        records = (self.record(session_id, key) for key in self.unconfirmed_at_start.pop(session_id, []))
+        restored = [question for question in records if question is not None]
+        await self.refresh(session_id, restored, thread=thread)
 
     async def submit(
         self,
@@ -503,8 +584,8 @@ class QuestionCards:
         answers: list[str],
         user_id: int,
     ) -> None:
-        """Deliver answers for a deferred interaction; the card itself shows the answer and its delivery reactions."""
-        async with self.lock(expected.key):
+        """Record answers for a deferred interaction; the group's answers go to the agent once none of its cards waits."""
+        async with self.lock(expected.key), self.lock(f"group:{expected.group or expected.key}"):
             question = self.record(session_id, expected.key)
             error = self.context_error(interaction, session_id, question)
             if question is not None and (
@@ -518,7 +599,6 @@ class QuestionCards:
                 await interaction.followup.send(error or "This form belongs to another operator.", ephemeral=True)
                 return
             assert question is not None and question.message_id is not None
-            text = "\n\n".join(f"{number}: {answer}" for (number, _), answer in zip(question.questions, answers, strict=True))
             thread = self.bridge.thread_channel(question.thread_id)
             if session is None or self.bridge.sessions.get(session_id) is not session:
                 await interaction.followup.send("The session reconnected; open the Question card again.", ephemeral=True)
@@ -526,8 +606,10 @@ class QuestionCards:
             if not isinstance(thread, discord.Thread):
                 await interaction.followup.send("The session thread is unavailable; answer was not sent.", ephemeral=True)
                 return
+            text = "\n\n".join(f"{number}: {answer}" for (number, _), answer in zip(question.questions, answers, strict=True))
+            answered = replace(question, answer=answers[0] if len(answers) == 1 else text, decision_url="")
             dispatch_started = False
-            reserved = False
+            sending: list[StoredQuestion] = []
             try:
                 for message_id, signature in question.sources:
                     source = await thread.fetch_message(message_id)
@@ -544,16 +626,29 @@ class QuestionCards:
                 ):
                     await interaction.followup.send(error, ephemeral=True)
                     return
-                await self.outcome(session_id, question.key, QuestionState.UNCERTAIN)
-                reserved = True
+                # Read the group only now: a re-ask or typed answer may have changed it during the awaits above.
+                siblings = [q for q in self.members(session_id, question) if q.key != question.key]
+                own = {number for number, _ in question.questions}
+                if any(number not in own for number in self.open_numbers(session_id, question)):
+                    held = replace(answered, state=QuestionState.HELD)
+                    self.save(session_id, held)
+                    if not await self.persist():
+                        self.save(session_id, question)
+                        await interaction.followup.send("The answer could not be saved; answer again.", ephemeral=True)
+                        return
+                    await self.refresh(session_id, [held, *(q for q in siblings if q.state == QuestionState.HELD)])
+                    return
+                sending = [
+                    replace(q, state=QuestionState.UNCERTAIN)
+                    for q in [*(q for q in siblings if q.state == QuestionState.HELD), answered]
+                ]
+                for card in sending:
+                    self.save(session_id, card)
                 if not await self.persist():
-                    await self.outcome(session_id, question.key, QuestionState.NOT_DELIVERED)
+                    await self.settle(session_id, tuple(q.key for q in sending), QuestionState.NOT_DELIVERED)
                     await interaction.followup.send("The answer could not be saved; it was not delivered.", ephemeral=True)
                     return
-                answer = answers[0] if len(answers) == 1 else text
-                answered = replace(question, state=QuestionState.ANSWERED, answer=answer, decision_url="")
-                self.save(session_id, answered)
-                await self.refresh(session_id, [answered])
+                await self.refresh(session_id, sending)
                 error = reply_context_error(
                     self.bridge,
                     interaction,
@@ -564,30 +659,63 @@ class QuestionCards:
                 )
                 if error is None:
                     dispatch_started = True
-                    error = await self.bridge.controls.send_reply(session, thread, interaction.user, text, question.message_id)
+                    error = await self.bridge.controls.send_reply(
+                        session,
+                        thread,
+                        interaction.user,
+                        self.answer_text(sending),
+                        question.message_id,
+                        question_keys=tuple(q.key for q in sending),
+                        react=False,
+                    )
             except (OSError, discord.DiscordException):
                 logger.exception("Unable to confirm Question answer submission")
                 error = DELIVERY_UNCONFIRMED if dispatch_started else "Answer was not delivered."
             if error is None:
                 return
-            if reserved and error != DELIVERY_UNCONFIRMED:
+            if sending:
+                outcome = QuestionState.UNCONFIRMED if error == DELIVERY_UNCONFIRMED else QuestionState.NOT_DELIVERED
                 try:
-                    await self.outcome(session_id, question.key, QuestionState.NOT_DELIVERED)
+                    await self.settle(session_id, tuple(q.key for q in sending), outcome)
                 except OSError:
                     logger.exception("Unable to persist definite Question answer failure")
-            if reserved:
                 try:
                     await send_agent_session_message(thread, f"{question.questions[0][0]}: {error}", silent=True)
                 except discord.DiscordException:
                     logger.warning("Unable to post Question answer failure in thread %s", thread.id)
             await interaction.followup.send(error, ephemeral=True)
 
-    async def outcome(self, session_id: str, key: str, state: QuestionState) -> None:
-        question = self.record(session_id, key)
-        if question is not None and question.state != QuestionState.ANSWERED:
-            question = replace(question, state=state)
-            self.save(session_id, question)
-            await self.refresh(session_id, [question])
+    async def settle(self, session_id: str, keys: tuple[str, ...], state: QuestionState) -> None:
+        """Set the delivery outcome of answers on their way to the agent, or hold them again."""
+        # No card lock: submit settles while holding it, and only answers marked as sending change here.
+        settled = []
+        for key in keys:
+            question = self.record(session_id, key)
+            if question is not None and question.state == QuestionState.UNCERTAIN and question.answer:
+                question = replace(question, state=state)
+                self.save(session_id, question)
+                settled.append(question)
+        await self.refresh(session_id, settled)
+
+    async def release_held(self, session: AgentSession) -> tuple[str, tuple[str, ...]]:
+        """Every answer held in this conversation, now marked as sending with a typed reply.
+
+        Typing in the thread is an explicit message, so answers already given go with it rather than waiting
+        for cards that may never be answered or never posted.
+        """
+        stored = self.bridge.store.records.get(session.session_id)
+        ready = [
+            replace(q, state=QuestionState.UNCERTAIN)
+            for q in (stored.questions if stored is not None else ())
+            if q.state == QuestionState.HELD and q.epoch == session.session_epoch
+        ]
+        if not all(self.save(session.session_id, question) for question in ready) or not await self.persist():
+            # Without a durable sending mark, a restart could send these answers a second time.
+            for question in ready:
+                self.save(session.session_id, replace(question, state=QuestionState.HELD))
+            return "", ()
+        await self.refresh(session.session_id, ready)
+        return (self.answer_text(ready), tuple(q.key for q in ready)) if ready else ("", ())
 
     async def refresh(self, session_id: str, questions: list[StoredQuestion], *, thread: discord.Thread | None = None) -> None:
         async def edit_cards() -> None:
