@@ -14,7 +14,6 @@ from unittest.mock import patch
 import aiohttp
 
 from discord_blue.doodads.agent_session import bridge as bridge_module
-from discord_blue.doodads.agent_session.cards import STATUS_CARD_COMPONENT_ID, STATUS_LABELS
 from discord_blue.doodads.agent_session.cleanup import PENDING_CLEANUP_MAX_ATTEMPTS, THREAD_LOOKUP_TIMEOUT_SECONDS
 from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN
 from discord_blue.doodads.agent_session.store import QuestionState, SessionStore, StoredQuestion, StoredSession
@@ -134,7 +133,7 @@ class SessionStoreTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_restart_recovers_old_status_anchor_and_keeps_human_input(self) -> None:
+    async def test_restart_keeps_human_input_and_retires_an_old_status_card(self) -> None:
         fake = FakeDiscord(latency=0.002)
         hello = {**hello_for("quiet"), "session_kind": "spawned"}
         fake.add_thread("quiet", marker=marker(hello), members={BOT_ID})
@@ -154,24 +153,17 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 await socket.send_json(
                     {**hello, "type": "user_message", "message": "Automated launch brief", "input_origin": LAUNCH_BRIEF_ORIGIN}
                 )
-                self.assertTrue(await until(lambda: first.bridge.store.records["quiet"].control_message_id is not None, 5))
-                anchor = first.bridge.store.records["quiet"].control_message_id
+                self.assertTrue(await until(lambda: ("POST", "/channels/{channel}/typing") in fake.requests, 5))
                 self.assertFalse(any("Automated launch brief" in message.content for message in thread.messages))
-                for _ in range(60):
-                    thread.messages.append(FakeMessage(next(fake.ids), thread.id, "Older conversation"))
+                self.assertFalse(any(message.components for message in thread.messages))
                 await socket.close()
                 self.assertTrue(await until(lambda: first_session.grace_task is not None, 5))
-                self.assertTrue(
-                    await until(
-                        lambda: any(
-                            STATUS_LABELS["disconnected"][0] in json.dumps(message.components, ensure_ascii=False)
-                            for message in thread.messages
-                        ),
-                        5,
-                    )
-                )
-            record = json.loads(path.read_text())["quiet"]
-            self.assertEqual(record["control_message_id"], anchor)
+            # An older release left a status card in the thread and remembered it.
+            card = FakeMessage(next(fake.ids), thread.id, "", components=[{"type": 17, "id": 213, "components": []}])
+            thread.messages.append(card)
+            records = json.loads(path.read_text())
+            records["quiet"]["control_message_id"] = card.id
+            path.write_text(json.dumps(records))
             async with (
                 scenario(fake, store_path=path, listen_host="127.0.0.1", listen_port=0) as second,
                 aiohttp.ClientSession() as http,
@@ -183,20 +175,10 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await socket.receive_json(timeout=10))["thread_id"], thread.id)
                 await socket.send_json({**hello, "type": "user_message", "message": "Human correction"})
                 self.assertTrue(await until(lambda: any("Human correction" in message.content for message in thread.messages), 5))
-                session = second.bridge.sessions.get("quiet")
-                assert session is not None
-                self.assertEqual(session.control_message_id, anchor)
-                cards = [
-                    message
-                    for message in thread.messages
-                    if any(component.get("id") == STATUS_CARD_COMPONENT_ID for component in message.components)
-                ]
-                self.assertEqual([message.id for message in cards], [anchor])
+                self.assertTrue(await until(lambda: card not in thread.messages, 5))
+                self.assertTrue(await until(lambda: second.bridge.store.records["quiet"].control_message_id is None, 5))
                 await socket.send_json({**hello, "type": "session_end"})
                 self.assertTrue(await until(lambda: thread.archived and thread.locked, 5))
-                self.assertTrue(
-                    any(STATUS_LABELS["disconnected"][0] in json.dumps(message.components, ensure_ascii=False) for message in cards)
-                )
                 await socket.close()
 
     async def test_a_forbidden_stored_hint_falls_back_to_discovery(self) -> None:

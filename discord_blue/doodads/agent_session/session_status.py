@@ -66,11 +66,12 @@ class SessionStatusUpdates:
             session.display_state = "waiting"
         else:
             session.display_state = "working"
+        # Before anything is posted: a typing request landing after the answer would show typing again.
+        self.bridge.controls.show_activity(session)
 
         if message_type == "status_changed":
             status_message = (status.message or "").lower()
             if status_message == "turn aborted":
-                await self.bridge.controls.post_session_controls(session)
                 return
             elif "compact" in status_message:
                 reaction = REACTION_COMPACTING
@@ -94,7 +95,7 @@ class SessionStatusUpdates:
                     session.thread_id, status.message or "The agent reported an error. Check the terminal."
                 )
             except discord.DiscordException:
-                logger.warning("Unable to post Agent session error in thread %s; failure remains on its card", session.thread_id)
+                logger.warning("Unable to post Agent session error in thread %s", session.thread_id)
             return
 
         if message_type == "turn_complete" and status.assistant_message:
@@ -106,7 +107,6 @@ class SessionStatusUpdates:
                 session,
                 "Agent session is no longer waiting on this prompt.",
             )
-            await self.bridge.controls.post_session_controls(session)
 
     async def handle_user_message(self, user_message: UserMessage) -> None:
         session = self.bridge.sessions.get(user_message.session_id)
@@ -127,17 +127,11 @@ class SessionStatusUpdates:
         if not hide_brief:
             await send_agent_session_message(channel, format_user_message(message)[:DISCORD_MESSAGE_LIMIT])
         session.status_revision += 1
-        session.display_state = "working"
-        session.last_status_message = (
+        self.bridge.controls.show_working(
+            session,
             "Working on the automated launch brief. Full input remains in the native terminal."
             if hide_brief
-            else "Working on your request."
-        )
-        session.pending_control_confirmation = None
-        await self.bridge.controls.spawn_session_controls(
-            session,
-            reaction=REACTION_IN_PROGRESS,
-            interruptions_enabled=True,
+            else "Working on your request.",
         )
 
     async def post_assistant_message(self, thread_id: int, text: str) -> None:

@@ -413,7 +413,7 @@ class SessionInteractions:
         session.status_revision += 1
         session.display_state = "waiting"
         session.last_status_message = "Approval required. Review the request in this thread."
-        await self.bridge.controls.show_or_refresh_session_controls(session, channel)
+        self.bridge.controls.show_activity(session)
 
     async def handle_request_user_input(self, request: RemoteRequestUserInput) -> None:
         session = self.bridge.sessions.get(request.session_id)
@@ -468,17 +468,15 @@ class SessionInteractions:
         session.status_revision += 1
         session.display_state = "waiting"
         session.last_status_message = "Answer required. Use the question controls in this thread."
-        await self.bridge.controls.show_or_refresh_session_controls(session, channel)
+        self.bridge.controls.show_activity(session)
 
     async def user_input_stays_native(self, session: AgentSession) -> None:
         session.status_revision += 1
         session.display_state = "waiting"
         session.last_status_message = "Answer required in the native TUI; this prompt cannot use Discord controls."
+        self.bridge.controls.show_activity(session)
         if session.thread_id is not None:
             await self.bridge.post_thread_notice(session.thread_id, session.last_status_message)
-            channel = self.bridge.thread_channel(session.thread_id)
-            if isinstance(channel, discord.Thread):
-                await self.bridge.controls.show_or_refresh_session_controls(session, channel)
 
     async def user_input_context(
         self,

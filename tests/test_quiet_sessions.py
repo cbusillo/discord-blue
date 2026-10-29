@@ -10,7 +10,6 @@ import aiohttp
 
 from discord_blue.doodads.agent_session import threads
 from discord_blue.doodads.agent_session.cards import assistant_answer_cards
-from discord_blue.doodads.agent_session.controls import REACTION_CONTROL_STATUS
 from discord_blue.plugs.discord_plug import BlueBot
 from discord_blue.doodads.agent_session.protocol import SessionHello
 from discord_blue.doodads.agent_session.store import StoredSession
@@ -20,7 +19,7 @@ from tests.test_attach_scenarios import hello_for, scenario
 from tests import test_thread_titles as title_tests
 from discord_blue.doodads.agent_session.thread_worker import ThreadWorkers, ThreadHooks, INITIAL_TITLE_SETTLE_SECONDS
 from tests.fakes_agent_prompts import prompt_fixture
-from tests.fakes_agent_session import FakeThread, FakeReplyMessage, make_hello
+from tests.fakes_agent_session import FakeThread, make_hello
 
 
 class QuietSessionTests(unittest.IsolatedAsyncioTestCase):
@@ -63,31 +62,6 @@ class QuietSessionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(fake.threads), 1)
                 self.assertEqual(fake.parent_messages, [])
                 await socket.close()
-
-    async def test_status_tap_refreshes_anchor_without_posting_summary(self) -> None:
-        with prompt_fixture() as fixture:
-            await fixture.bridge.controls.post_session_controls(fixture.session)
-            anchor = cast(int, fixture.session.control_message_id)
-            message = await fixture.thread.fetch_message(anchor)
-            message.reactions.append(REACTION_CONTROL_STATUS)
-            fixture.session.last_status_message = "New status from agent"
-            with (
-                patch.object(FakeReplyMessage, "clear_reactions", wraps=message.clear_reactions) as clear,
-                patch.object(FakeReplyMessage, "add_reaction", wraps=message.add_reaction) as add,
-            ):
-                await fixture.bridge.controls.handle_session_control_reaction(
-                    fixture.session,
-                    cast(discord.Thread, fixture.thread),
-                    anchor,
-                    REACTION_CONTROL_STATUS,
-                    cast(discord.User, cast(object, SimpleNamespace(id=123))),
-                )
-            clear.assert_not_awaited()
-            add.assert_not_awaited()
-            self.assertEqual(len(fixture.thread.sent_messages), 1)
-            self.assertEqual(fixture.session.control_message_id, anchor)
-            self.assertTrue(message.edit_kwargs)
-            self.assertEqual(message.reactions.count(REACTION_CONTROL_STATUS), 1)
 
     async def test_reconnect_adds_only_missing_configured_members(self) -> None:
         with prompt_fixture() as fixture:

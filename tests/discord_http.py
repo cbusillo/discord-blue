@@ -79,6 +79,9 @@ class HttpThread(FakeThread):
         self.edits.append(kwargs)
         self.refresh(as_json(await self.http.edit_channel(self.id, reason=reason if isinstance(reason, str) else None, **options)))
 
+    async def typing(self) -> None:
+        await self.http.send_typing(self.id)
+
     async def join(self) -> None:
         await self.http.join_thread(self.id)
         self.joined, self.left = True, False

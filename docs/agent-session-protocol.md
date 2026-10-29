@@ -128,24 +128,19 @@ the next sweep, allowing other stale sessions to be cleaned up.
 
 ### Disconnect cleanup and recovery
 
-The session store also preserves the status-card message ID. Reconnect restores
-it only for the same validated thread. Ordinary inputs and completed
-turns edit that card; only a confirmed missing message permits replacement.
-Older store records remain readable and use bot-authored card discovery from
-thread history. A failed history read does not authorize creating another card. Complete legacy
-discovery and card writes run as one coalesced task per connection, with a
-bounded non-canceling caller wait; later updates share the task and refresh the
-latest state, so slow history does not hold native heartbeats.
+Sessions no longer post a status card; a working session shows Discord's typing
+indicator instead. The store keeps a status-card message ID that an older
+release saved, only for the same validated thread, until that bot-authored card
+is deleted on reconnect or closure. Typing and that deletion run in the
+background, so neither holds native heartbeats or a reconnect.
 A reused thread with uncertain input provenance keeps its input visible.
 
-A native client drop marks the card Disconnected during its reconnect grace.
-Bridge shutdown saves grace first, then makes a bounded non-canceling attempt to
-update the card outside lifecycle locks; that remote edit is best-effort if
-Discord is slow or unavailable.
-Reattachment shows unconfirmed state until a native event arrives. Routine
-closure edits the card instead of sending a session-ended notice; answers and
-failure events remain in the transcript. The stored legacy `disconnect_notice`
-cleanup step now updates the card, preserving restart and residual-step recovery.
+A native client drop stops typing during its reconnect grace, and bridge
+shutdown saves grace before disconnecting. Reattachment shows unconfirmed state
+in `/code status` until a native event arrives. Routine closure sends no
+session-ended notice; answers and failure events remain in the transcript. The
+stored legacy `disconnect_notice` cleanup step now deletes an older release's
+card, preserving restart and residual-step recovery.
 
 
 The bridge persists bound session IDs, thread and notification IDs, the session
@@ -338,7 +333,7 @@ answer** sends all answers together. **Cancel** returns an empty answer set.
 Option labels are returned in full even when Discord shortens their display.
 Full questions and shortened menu labels/descriptions stay visible on the card;
 prompts whose full text and selection feedback exceed Discord's message budget
-stay in the native TUI with a waiting status card.
+stay in the native TUI with a notice that says so.
 Other, when enabled, uses a separate form button and does not consume a picker
 option. Unsupported question counts, duplicate/empty IDs or more than 25 options
 stay in the native TUI rather than hiding controls. The renderer owns the question
