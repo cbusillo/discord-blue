@@ -20,6 +20,7 @@ rejected.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -59,6 +60,12 @@ HOOK_TOOL = {
 }
 # Hooks that only fire while Claude is working. Another plugin's Stop hook can keep a turn going after Stop.
 RUNNING_EVENTS = {"UserPromptSubmit", "PreToolUse", "PostToolUse"}
+# A final answer waits for the other Stop hooks' verdict. Claude going idle, a new prompt or the session ending
+# posts it at once; this bound only covers a verdict never recorded, past the hooks' 600-second default timeout.
+STOP_VERDICT_SECONDS = 660.0
+STOP_VERDICT_POLL_SECONDS = 0.1
+STOP_VERDICT_SLOW_POLL_SECONDS = 1.0
+STOP_VERDICT_FAST_SECONDS = 5.0
 # The `_meta` key Claude Code sets on a model's tool call; hook calls carry no tool use.
 MODEL_CALL = "claudecode/toolUseId"
 
@@ -144,6 +151,8 @@ class ClaudeSession(AgentSessionClient):
         self.conversation_id: str | None = identity.session_id
         self.controls = CAPABILITIES if identity.channel else ["status_request"]
         self.waiting_locally = False
+        self.pending_stop: asyncio.Task[None] | None = None
+        self.settle = asyncio.Event()
         # Replies this server injected; their prompts are already in Discord.
         self.injected: deque[str] = deque(maxlen=64)
         if not identity.channel:
@@ -192,6 +201,9 @@ class ClaudeSession(AgentSessionClient):
         )
         self.launch_brief_pending = False
         conversation = fields.get("session_id") or None
+        if event in {"SessionEnd", "UserPromptSubmit", "Notification"} or (conversation and conversation != self.conversation_id):
+            # Claude waiting at its prompt or taking a new one means the last answer stood; it posts before what follows.
+            await self.settle_turns()
         if event == "SessionEnd":
             # /clear or /resume ends this conversation; the next hook names the one that follows.
             await self.switch_conversation(None)
@@ -227,8 +239,11 @@ class ClaudeSession(AgentSessionClient):
                     self.publish("user_message", message=clip(typed))
         elif event == "Stop":
             self.waiting_locally = False
-            self.publish(
-                "turn_complete", message=TURN_DONE, assistant_message=clip(fields.get("last_assistant_message", "")) or None
+            # Another plugin's Stop hook can reject this answer and send Claude back to rewrite it. Its verdict is
+            # written only after every Stop hook returns, this one included, so it is read afterwards, in Stop order.
+            offset = await self.transcript.size(fields.get("transcript_path", ""))
+            self.pending_stop = asyncio.create_task(
+                self.finish_turn(fields, offset, self.pending_stop), name=f"claude-stop-{self.session_id}"
             )
             # Claude Code writes its own title for the session as it answers.
             await self.retitle(fields)
@@ -237,6 +252,37 @@ class ClaudeSession(AgentSessionClient):
             self.publish("error", message="Claude Code ended the turn with an error; check the terminal.")
         elif event == "SessionStart":
             await self.retitle(fields)
+
+    async def finish_turn(self, fields: dict[str, str], offset: int | None, previous: asyncio.Task[None] | None) -> None:
+        if previous is not None:
+            await asyncio.wait({previous})
+        path = fields.get("transcript_path", "")
+        blocked = None if offset is None else await self.transcript.stop_blocked(path, offset)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        while offset is not None and blocked is None and not self.settle.is_set():
+            waited = loop.time() - started
+            if waited >= STOP_VERDICT_SECONDS:
+                break  # Unknown: post it rather than lose a final answer.
+            # Most verdicts land within moments; a slow hook is then checked once a second.
+            poll = STOP_VERDICT_POLL_SECONDS if waited < STOP_VERDICT_FAST_SECONDS else STOP_VERDICT_SLOW_POLL_SECONDS
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.settle.wait(), poll)
+            blocked = await self.transcript.stop_blocked(path, offset)
+        if not blocked:
+            self.publish(
+                "turn_complete", message=TURN_DONE, assistant_message=clip(fields.get("last_assistant_message", "")) or None
+            )
+
+    async def settle_turns(self) -> None:
+        """Post any answer still awaiting its verdict now, before a new turn, conversation or session end follows it."""
+        if self.pending_stop is None or self.pending_stop.done():
+            return
+        self.settle.set()
+        try:
+            await asyncio.wait({self.pending_stop})
+        finally:
+            self.settle.clear()
 
     async def flush_pending_input(self) -> None:
         pending, self.pending_input = self.pending_input, None
@@ -256,6 +302,7 @@ class ClaudeSession(AgentSessionClient):
         try:
             async with asyncio.timeout(SESSION_END_TIMEOUT_SECONDS):
                 await self.flush_pending_input()
+                await self.settle_turns()
                 if self.websocket is not None and not self.websocket.closed and not self.stopped.is_set():
                     terminal = self.event("session_end")
                     sent = asyncio.Event()

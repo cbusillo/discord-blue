@@ -17,10 +17,13 @@ import asyncio
 import json
 import os
 import stat
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 TAIL_BYTES = 256 * 1024
+# Hook output, such as a failing test report, can be large; read whole records around a stop.
+STOP_READ_LIMIT = 16 * 1024 * 1024
 READ_TIMEOUT_SECONDS = 1.0
 
 
@@ -70,6 +73,24 @@ class TranscriptTitles:
         self.cached = (key, titles)
         return titles
 
+    async def size(self, path: str) -> int | None:
+        """Where the transcript ends now: records written later answer for what happened after this point."""
+        return await self.bounded(transcript_size, path)
+
+    async def stop_blocked(self, path: str, offset: int) -> bool | None:
+        """Whether another Stop hook rejected the answer that ends at offset, sending Claude back to rewrite it."""
+        return await self.bounded(stop_verdict, path, offset)
+
+    async def bounded[T](self, read: Callable[..., T | None], path: str, *args: object) -> T | None:
+        if not path.endswith(".jsonl"):
+            return None
+        try:
+            return await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(self.executor, read, path, *args), READ_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            return None
+
     @staticmethod
     def scan(path: str, size: int) -> Titles:
         start = max(0, size - TAIL_BYTES)
@@ -113,3 +134,58 @@ class TranscriptTitles:
         return Titles(
             custom=custom, ai=ai, before_first_prompt=before_first_prompt, scheduled_prompt_ids=frozenset(scheduled_prompt_ids)
         )
+
+
+def transcript_size(path: str) -> int | None:
+    try:
+        return os.stat(path).st_size
+    except OSError:
+        return None
+
+
+def stop_verdict(path: str, offset: int) -> bool | None:
+    """Whether the Stop hooks that ran at offset sent Claude back to work; None until their summary is written.
+
+    Claude Code writes each Stop invocation's summary only after every Stop hook returns, this session's own
+    included, so the first summary after offset (the transcript's end when this session's hook ran) is this
+    stop's. Its toolUseID ties it to the invocation's hook attachments, which may land on either side of
+    offset: a blocking error or added context means Claude continues and this answer was not final.
+    """
+    after = read_records(path, offset, STOP_READ_LIMIT)
+    summary = next((record for record in after if record.get("subtype") == "stop_hook_summary"), None)
+    if summary is None or not isinstance(stop := summary.get("toolUseID"), str):
+        return None
+    start = max(0, offset - STOP_READ_LIMIT)
+    # A hook that finished before this session's own may already be recorded before offset.
+    before = read_records(path, start, offset - start, partial_first=start > 0)
+    return any(continues(record, stop) for record in [*before, *after])
+
+
+def continues(record: dict[str, object], stop: str) -> bool:
+    attachment = record.get("attachment")
+    return (
+        isinstance(attachment, dict)
+        and attachment.get("toolUseID") == stop
+        and attachment.get("hookEvent") == "Stop"
+        and attachment.get("type") in {"hook_blocking_error", "hook_additional_context"}
+    )
+
+
+def read_records(path: str, start: int, length: int, *, partial_first: bool = False) -> list[dict[str, object]]:
+    try:
+        with open(path, "rb") as transcript:
+            transcript.seek(start)
+            lines = transcript.read(length).split(b"\n")
+    except OSError:
+        return []
+    if partial_first:
+        lines = lines[1:]  # The first line was cut by the seek.
+    records = []
+    for line in lines:
+        try:
+            record = json.loads(line) if line.strip() else None
+        except ValueError:
+            continue  # Includes a last line still being written.
+        if isinstance(record, dict):
+            records.append(record)
+    return records
