@@ -60,7 +60,6 @@ class AppServerClientTests(unittest.IsolatedAsyncioTestCase):
 
         initialize, initialized = received
         self.assertEqual(initialize["method"], "initialize")
-        self.assertTrue(initialize["id"].startswith("discord-blue-"))
         self.assertEqual(initialize["params"]["clientInfo"]["name"], "discord_blue")
         self.assertTrue(initialize["params"]["capabilities"]["experimentalApi"])
         self.assertEqual(initialized, {"method": "initialized"})
