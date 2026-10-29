@@ -27,4 +27,4 @@ fi
 install -d -m 700 -o "$runtime_user" -g "$runtime_user" \
   "$state_dir/.config/discord-blue"
 
-exec runuser --user "$runtime_user" -- "$@"
+exec setpriv --reuid "$runtime_user" --regid "$(id -g "$runtime_user")" --init-groups -- "$@"

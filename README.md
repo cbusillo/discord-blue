@@ -872,13 +872,30 @@ reactions wait for the matching native session and request; changed epochs
 cannot inherit old replies or approval authority. Pending prompt controls keep
 their original message and control IDs. No per-start Connected message is sent.
 
-`components.discord_handover` reports the resume stage and outstanding replay
+`components.discord.handover` reports the resume stage and outstanding replay
 counts. A resumed deployment is healthy only after RESUMED, startup and replay
 completion, alongside the existing heartbeat and store checks. Rejected resume,
 invalid continuation, a failed replay handler, or a native reconnect timeout
-cannot become successful catch-up proof through a fresh IDENTIFY. Complete
-pending prompts before a release that changes their request or control shape;
-incompatible continuation must fail closed.
+cannot become successful catch-up proof through a fresh IDENTIFY. This failure
+belongs to the attempted handover. A subsequent clean stop can save the current
+session for the existing gated rollback; no manual state-file deletion is needed.
+An incompatible agent continuation records failed handover evidence and falls
+back to native reattachment and new prompt cards, retaining the gateway resume.
+It does not reuse old approval authority or crash-loop on the old shape.
+
+The existing CM conversation transport preserves unacknowledged input, explicit
+reply deduplication and observed-message context. Its replay waits for the same
+configured conversation to reconnect, and pending input is never transferred
+to a changed epoch or binding. Native reconnect waits are bounded; a timeout
+fails this handover rather than claiming that its work caught up.
+
+Container startup executes Python directly after dropping privileges, so the
+stop signal reaches the bot. The repository's Compose and systemd definitions
+allow two minutes for shutdown. A Dokploy application target needs its effective
+stop grace qualified through its existing gated setup path as well; the product
+Compose setting does not configure that application target. Deployment and
+rollback qualification must prove that native work settles, state flushes and
+the continuation is saved before the provider ends the process.
 
 The first installation over an older image cannot resume a session that image
 did not save. Neither can a rollback to an image without this feature. An

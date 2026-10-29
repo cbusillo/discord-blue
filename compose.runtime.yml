@@ -12,6 +12,7 @@ services:
     volumes:
       - "discord-blue-state:/var/lib/discord-blue"
     restart: unless-stopped
+    stop_grace_period: 120s
 
 volumes:
   discord-blue-state:

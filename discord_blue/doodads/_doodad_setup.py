@@ -24,7 +24,6 @@ class SetupDoodad(commands.Cog):
     async def my_on_ready(self) -> None:
         tree_sync = await self.bot.sync_home_commands()
         logger.info(f"Loaded {len(tree_sync)} commands")
-        await self.bot.bot_channel.send(f"Loaded {len(tree_sync)} commands")
 
     @commands.hybrid_command(name="sync")
     @checks.has_employee_role()

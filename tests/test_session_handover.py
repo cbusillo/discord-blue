@@ -34,7 +34,7 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.replay: set[asyncio.Task[Any]] = set()
         self.enterContext(patch.object(self.bridge.bot, "handover", SimpleNamespace(replay=self.replay), create=True))
 
-    async def reattach(self, *, epoch: str) -> tuple[AgentSession, FakeWebSocket]:
+    async def reattach(self, *, epoch: str, previous: AgentSession | None = None) -> tuple[AgentSession, FakeWebSocket]:
         socket = FakeWebSocket()
         hello = replace(self.fixture.session.hello, session_epoch=epoch)
         session = AgentSession(hello, cast(web.WebSocketResponse, socket))
@@ -45,7 +45,7 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
 
         task = asyncio.create_task(attached())
         with patch.object(self.bridge, "attach_task", return_value=task):
-            self.assertTrue(await self.bridge.accept_hello(session, None))
+            self.assertTrue(await self.bridge.accept_hello(session, previous))
         return session, socket
 
     async def gap_reply(self) -> tuple[asyncio.Task[bool], FakeReplyMessage]:
@@ -138,6 +138,12 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.answers, view.answers)
         self.assertEqual(SessionContinuation.control_ids(restored), previous_ids)
         self.assertEqual(len(self.fixture.thread.sent_views), 1)
+        self.bridge.bot._connection.store_view(restored, view.message_id)
+        restored.set_answer("answer", "later answer")
+        successor, _socket = await self.reattach(epoch=session.session_epoch, previous=session)
+        await self.bridge.handle_event(successor, "request_user_input", asdict(view.request))
+        self.assertEqual(restored.answers["answer"], "later answer")
+        self.assertEqual(len(self.fixture.thread.sent_views), 1)
 
     async def test_native_command_ack_after_reconnect_settles_original_reply(self) -> None:
         task, message = await self.gap_reply()
@@ -151,3 +157,44 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.handle_event(restored, "command_ack", command)
         self.assertEqual(restored.active_command_id, command["command_id"])
         self.assertEqual(message.reactions, [])
+
+    async def test_unavailable_native_session_does_not_wait_for_full_disconnect_grace(self) -> None:
+        self.bridge.handover.grace_seconds = 0.01
+        task, _message = await self.gap_reply()
+        with self.assertRaises(TimeoutError):
+            await asyncio.wait_for(task, 1)
+
+    async def test_shutdown_snapshot_waits_for_incoming_ack_not_websocket_task_exit(self) -> None:
+        session = self.fixture.session
+        self.bridge.sessions.register(session)
+        entered, release, keep_alive = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        command_id = "inert-command"
+
+        async def acknowledge(_payload: dict[str, object]) -> None:
+            entered.set()
+            await release.wait()
+            session.active_command_id = command_id
+
+        async def connection() -> None:
+            await self.bridge.handle_event(session, "command_ack", {})
+            await keep_alive.wait()
+
+        with patch.object(self.bridge.controls, "handle_command_ack", side_effect=acknowledge):
+            incoming = asyncio.create_task(connection())
+            self.addAsyncCleanup(self.cancel, incoming)
+            await asyncio.wait_for(entered.wait(), 1)
+            stopping = asyncio.create_task(self.bridge.prepare_handover())
+            await asyncio.sleep(0)
+            self.assertFalse(stopping.done())
+            release.set()
+            self.assertTrue(await asyncio.wait_for(stopping, 1))
+            self.assertFalse(incoming.done())
+            assert self.bridge.handover.snapshot is not None
+            self.assertEqual(self.bridge.handover.snapshot[session.session_id]["active_command_id"], command_id)
+            keep_alive.set()
+            await incoming
+
+    @staticmethod
+    async def cancel(task: asyncio.Task[None]) -> None:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

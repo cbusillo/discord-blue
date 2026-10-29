@@ -135,6 +135,7 @@ class AgentSessionBridge:
         if self._runner is not None:
             return
         self._stopping = False
+        self.conversations.stopping = False
         self._monitor_started_at = time.monotonic()
         self._monitor_last_progress = self._monitor_started_at
         self._monitor_has_run = False
@@ -330,11 +331,16 @@ class AgentSessionBridge:
         is_ready = getattr(self.bot, "is_ready", None)
         return not callable(is_ready) or bool(is_ready())
 
+    async def prepare_handover(self) -> bool:
+        self._stopping = True
+        await self.conversations.stop()
+        return await self.handover.settle()
+
     async def stop(self) -> None:
+        self._stopping = True
         await self.conversations.stop()
         if self._runner is None:
             return
-        self._stopping = True
         self.session_threads.creation_stopping.set()
         for task in list(self._grace_tasks):
             task.cancel()
@@ -616,6 +622,8 @@ class AgentSessionBridge:
                     continue
 
                 message_type = payload.get("type")
+                if self._stopping:
+                    break
                 if message_type == "hello":
                     if "conversation" in payload:
                         await websocket.close(message=b"use conversation endpoint", drain=False)
@@ -750,12 +758,23 @@ class AgentSessionBridge:
         return True
 
     async def handle_event(self, session: AgentSession, message_type: object, payload: dict[str, object]) -> None:
-        """Route one event from the session's current connection; unknown types are ignored."""
+        current = asyncio.current_task()
+        if current is not None:
+            self.handover.incoming.add(current)
         try:
-            if await self.handover.restore_prompt(session, message_type, payload):
+            restored = False
+            try:
+                restored = await self.handover.restore_prompt(session, message_type, payload)
+            except (ValueError, KeyError, TypeError, discord.HTTPException, OSError):
+                handover = getattr(self.bot, "handover", None)
+                if handover is not None:
+                    handover.status = "failed"
+            if restored:
                 return
             await self.handle_current_event(session, message_type, payload)
         finally:
+            if current is not None:
+                self.handover.incoming.discard(current)
             await self.handover.notify()
 
     async def handle_current_event(self, session: AgentSession, message_type: object, payload: dict[str, object]) -> None:
@@ -974,12 +993,12 @@ class AgentSessionBridge:
         if not self.is_operator(user):
             return False
 
-        session = await self.handover.wait_for_thread(thread.id)
+        if getattr(getattr(self.bot, "handover", None), "replay", None) and self.handover.has_prompt(thread.id, message_id):
+            await self.handover.wait_for_thread(thread.id)
+            await self.handover.wait_for_prompt(thread.id, message_id)
+        session = self.sessions.get_by_thread(thread.id)
         if session is None:
             return False
-
-        if asyncio.current_task() in getattr(getattr(self.bot, "handover", None), "replay", ()):
-            await self.handover.wait_for_prompt(thread.id, message_id)
 
         for approval_id, pending in session.pending_approvals.items():
             if pending.message_id == message_id:

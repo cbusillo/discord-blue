@@ -6,15 +6,18 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, cast
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from aiohttp import ClientSession, ClientWebSocketResponse, web, WSMsgType, WSCloseCode
 from aiohttp.test_utils import TestServer
 import discord
 from discord.gateway import DiscordWebSocket
 
-from discord_blue.gateway_handover import GatewayContinuation
+from discord_blue.gateway_handover import GatewayContinuation, GatewayHandover
 from discord_blue.plugs.discord_plug import BlueBot
+from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
+from tests.fakes_agent_prompts import prompt_fixture
+from tests.test_session_cleanup_progress import wait_until
 
 
 class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
@@ -58,6 +61,19 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch.object(self.bot, "fetch_guild", return_value=self.guild))
         self.enterContext(patch.object(discord.Guild, "fetch_channels", return_value=[self.channel]))
         self.enterContext(patch.object(discord.Guild, "active_threads", return_value=[]))
+        member = discord.Member(
+            state=self.bot._connection,
+            guild=self.guild,
+            data=cast(
+                Any,
+                {
+                    "user": {"id": str(self.continuation.bot_id), "username": "inert", "discriminator": "0", "avatar": None},
+                    "roles": [],
+                    "flags": 0,
+                },
+            ),
+        )
+        self.enterContext(patch.object(discord.Guild, "fetch_member", return_value=member))
         self.received = asyncio.Event()
         self.resume_payload: dict[str, Any] | None = None
         self.identified = False
@@ -169,6 +185,7 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(messages), 1)
         self.assertIs(messages[0].guild, self.guild)
         self.assertTrue(self.bot.is_ready())
+        self.assertIsNotNone(self.guild.me)
         changed.clear()
         await self.message()
         await asyncio.wait_for(changed.wait(), 5)
@@ -188,6 +205,7 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.bot.add_listener(on_message)
         task = await self.start_bot()
         await asyncio.wait_for(started.wait(), 5)
+        self.assertFalse(self.bot.handover.healthy())
         shutdown = asyncio.create_task(self.bot.close())
         await asyncio.sleep(0)
         self.assertFalse(shutdown.done())
@@ -261,3 +279,86 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(edits), 1)
         self.assertEqual(edits[0].content, payload["content"])
         self.assertEqual(edits[0].guild, foreign)
+
+    async def test_first_connect_failure_retries_without_consuming_checkpoint(self) -> None:
+        attempts = 0
+
+        async def connect(_url: str, **_kwargs: object) -> ClientWebSocketResponse:
+            nonlocal attempts
+            attempts += 1
+            self.assertTrue(self.bot.handover.path.exists())
+            if attempts == 1:
+                raise OSError("inert transient network failure")
+            return await self.http.ws_connect(self.server.make_url("/gateway"))
+
+        with (
+            patch.object(self.bot.http, "ws_connect", side_effect=connect),
+            patch("discord_blue.gateway_handover.ExponentialBackoff.delay", return_value=0),
+        ):
+            task = await self.start_bot()
+            await wait_until(lambda: self.bot.handover.healthy())
+            self.assertEqual(attempts, 2)
+            self.assertFalse(self.bot.handover.path.exists())
+            await self.finish(task)
+
+    async def test_failed_attempt_does_not_poison_next_clean_process_handover(self) -> None:
+        task = await self.start_bot()
+        await wait_until(lambda: self.bot.handover.healthy())
+        self.bot.handover.status = "failed"
+        self.assertFalse(self.bot.handover.healthy())
+        await self.finish(task)
+        self.continuation = GatewayContinuation.read(self.bot.handover.path, self.continuation.bot_id)
+        self.bot.clear()
+        await self.bot._async_setup_hook()
+        self.bot.handover = GatewayHandover(self.bot, super(BlueBot, self.bot).close)
+        self.received.clear()
+        self.resume_payload = None
+        successor = await self.start_bot()
+        await wait_until(lambda: self.bot.handover.healthy())
+        self.assertNotIn(self.continuation.session_id, self.bot.handover.active.read_text())
+        await self.finish(successor)
+
+    async def test_repeated_resume_does_not_restart_startup_callbacks(self) -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = 0
+
+        async def on_ready() -> None:
+            nonlocal calls
+            calls += 1
+            entered.set()
+            await release.wait()
+
+        self.bot.add_listener(on_ready)
+        task = await self.start_bot()
+        await asyncio.wait_for(entered.wait(), 2)
+        assert self.peer is not None
+        self.last_sequence += 1
+        await self.peer.send_json({"op": DiscordWebSocket.DISPATCH, "s": self.last_sequence, "t": "RESUMED", "d": {}})
+        await asyncio.sleep(0.01)
+        self.assertEqual(calls, 1)
+        release.set()
+        await wait_until(lambda: self.bot.handover.healthy())
+        await self.finish(task)
+
+    async def test_failed_replay_callback_cannot_turn_green_when_its_task_finishes(self) -> None:
+        async def on_message(_message: discord.Message) -> None:
+            raise RuntimeError("inert replay failure")
+
+        self.bot.add_listener(on_message)
+        task = await self.start_bot()
+        await wait_until(lambda: self.bot.handover.status == "failed")
+        self.assertFalse(self.bot.handover.healthy())
+        await self.finish(task)
+
+    async def test_incompatible_native_continuation_does_not_prevent_gateway_startup(self) -> None:
+        with prompt_fixture() as fixture:
+            cog = Mock(spec=AgentSessionDoodad)
+            cog.bridge = fixture.bridge
+            cog.start_bridge = AsyncMock()
+            self.bot.handover.agents = {fixture.session.session_id: "inert invalid record"}
+            await self.bot.login("inert-token")
+            with patch.object(self.bot, "get_cog", return_value=cog):
+                await self.bot.handover.warm_cache()
+            cog.start_bridge.assert_awaited_once()
+            self.assertFalse(self.bot.handover.healthy())
+            self.assertFalse(fixture.bridge.handover.saved)

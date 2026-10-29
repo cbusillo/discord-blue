@@ -13,6 +13,7 @@ import discord
 from aiohttp import ClientError, WSMsgType, web
 
 from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT, split_discord_message
+from discord_blue.doodads.agent_session.handover import REPLAY_RECONNECT_WAIT_SECONDS
 
 if TYPE_CHECKING:
     from discord_blue.plugs.discord_plug import BlueBot
@@ -41,6 +42,40 @@ class ConversationRouter:
         self.seen: OrderedDict[str, None] = OrderedDict()
         self.observed: OrderedDict[int, dict[str, Any]] = OrderedDict()
         self.connection_lock = asyncio.Lock()
+        self.changed = asyncio.Condition()
+        self.continuation: dict[str, Any] | None = None
+        self.stopping = False
+
+    def export(self) -> dict[str, Any]:
+        connection = self.connection
+        return {
+            "binding": self.binding(),
+            "session_id": self.bot.config.conversation.session_id,
+            "epoch": connection.epoch if connection else None,
+            "pending": list(connection.pending.items()) if connection else [],
+            "replies": list(connection.replies.items()) if connection else [],
+            "seen": list(self.seen),
+            "observed": list(self.observed.items()),
+        }
+
+    def restore(self, saved: dict[str, Any] | None) -> None:
+        if saved is None:
+            return
+        binding = self.binding()
+        saved_binding = saved["binding"]
+        if ([binding[0], binding[1], list(binding[2])] if binding else None) != saved_binding:
+            raise ValueError("Conversation binding changed during handover")
+        if saved["session_id"] != self.bot.config.conversation.session_id:
+            raise ValueError("Conversation session changed during handover")
+        seen = OrderedDict.fromkeys(saved["seen"])
+        observed: OrderedDict[int, dict[str, Any]] = OrderedDict(saved["observed"])
+        pending = OrderedDict(saved["pending"])
+        replies = OrderedDict(saved["replies"])
+        if any(len(values) > MEMORY_LIMIT for values in (seen, observed, replies)) or len(pending) > INBOX_LIMIT:
+            raise ValueError("Conversation continuation exceeds its bounds")
+        self.continuation = saved
+        self.seen = seen
+        self.observed = observed
 
     def binding(self) -> tuple[int, int, tuple[int, ...]] | None:
         config = self.bot.config.conversation
@@ -119,6 +154,12 @@ class ConversationRouter:
         return await self.queue_envelope(f"delete-{payload.message_id}", {**envelope, "event": "deletion", "text": ""})
 
     async def queue_envelope(self, command_id: str, envelope: dict[str, Any]) -> bool:
+        if getattr(getattr(self.bot, "handover", None), "replay", None):
+            async with self.changed:
+                await asyncio.wait_for(
+                    self.changed.wait_for(lambda: self.connection is not None and not self.connection.websocket.closed),
+                    REPLAY_RECONNECT_WAIT_SECONDS,
+                )
         channel, binding, connection = self.channel(), self.binding(), self.connection
         if channel is None:
             return False
@@ -190,11 +231,17 @@ class ConversationRouter:
                 if previous and not previous.websocket.closed:
                     await previous.websocket.close(message=b"conversation changed", drain=False)
                 connection = ConversationConnection(config.session_id, epoch, binding, websocket)
+                if self.continuation is not None and self.continuation["epoch"] == epoch:
+                    connection.pending = OrderedDict(self.continuation["pending"])
+                    connection.replies = OrderedDict(self.continuation["replies"])
+                self.continuation = None
             await websocket.send_json({"type": "hello_ack", "features": [FEATURE], "guild_id": binding[0], "channel_id": binding[1]})
             self.connection = connection
+            async with self.changed:
+                self.changed.notify_all()
             for payload in list(connection.pending.values()):
                 await websocket.send_json(payload)
-        while not websocket.closed:
+        while not self.stopping and not websocket.closed:
             try:
                 async with asyncio.timeout(self.bot.config.agent_session.heartbeat_timeout_seconds):
                     frame = await websocket.receive()
@@ -218,6 +265,8 @@ class ConversationRouter:
             ):
                 continue
             kind = payload.get("type")
+            if self.stopping:
+                break
             command_id = payload.get("command_id")
             if kind == "command_ack":
                 if isinstance(command_id, str):
@@ -283,5 +332,7 @@ class ConversationRouter:
         await connection.websocket.send_json(response)
 
     async def stop(self) -> None:
+        self.stopping = True
         if self.connection and not self.connection.websocket.closed:
-            await self.connection.websocket.close(message=b"bridge shutdown", drain=False)
+            async with self.connection.reply_lock:
+                await self.connection.websocket.close(message=b"bridge shutdown", drain=False)

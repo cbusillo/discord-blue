@@ -164,6 +164,10 @@ the native client must reattach with the same epoch and replay the exact pending
 request before an old prompt reaction can run. The continuation can contain
 private request text and selected answers; keep it on the existing private HOME
 volume and out of logs and exported health evidence.
+The same continuation retains the external conversation's pending input,
+explicit-reply deduplication and observed-message context. These remain bound to
+its configured destination and native epoch. Neither recovery format gives an
+external conversation the mirrored session's controls or approval authority.
 
 Server shutdown keeps live threads, members and notifications intact and closes
 only their WebSockets. On startup, live, attaching and grace records receive

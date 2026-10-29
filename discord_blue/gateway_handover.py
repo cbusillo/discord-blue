@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import fcntl
 import json
 import os
@@ -13,8 +13,11 @@ import time
 from typing import Any, TYPE_CHECKING, cast
 from urllib.parse import urlsplit
 
+import aiohttp
 import discord
+from discord.backoff import ExponentialBackoff
 from discord.gateway import DiscordWebSocket
+from yarl import URL
 
 if TYPE_CHECKING:
     from discord_blue.plugs.discord_plug import BlueBot
@@ -43,6 +46,7 @@ class GatewayContinuation:
     sequence: int
     gateway: str
     agents: dict[str, Any]
+    conversation: dict[str, Any] | None = None
 
     @classmethod
     def read(cls, path: Path, bot_id: int) -> GatewayContinuation:
@@ -61,9 +65,12 @@ class GatewayContinuation:
             or gateway.password is not None
             or gateway.port not in (None, 443)
             or not isinstance(value.get("agents", {}), dict)
+            or not isinstance(value.get("conversation"), (dict, type(None)))
         ):
             raise ValueError("Invalid gateway continuation")
-        return cls(bot_id, value["session_id"], value["sequence"], value["gateway"], value.get("agents", {}))
+        return cls(
+            bot_id, value["session_id"], value["sequence"], value["gateway"], value.get("agents", {}), value.get("conversation")
+        )
 
     def save(self, path: Path) -> None:
         write_handover(path, self.__dict__)
@@ -88,24 +95,14 @@ def write_handover(path: Path, value: object) -> None:
 
 
 @contextmanager
-def resume_first_connection(bot: BlueBot, continuation: GatewayContinuation, claim: Callable[[], None]) -> Iterator[None]:
+def use_first_connection(bot: BlueBot, socket: DiscordWebSocket) -> Iterator[None]:
     descriptor = vars(DiscordWebSocket)["from_client"]
     original = DiscordWebSocket.from_client
 
     async def resume(_cls: type[DiscordWebSocket], client: discord.Client, **kwargs: object) -> DiscordWebSocket:
         if client is bot:
             DiscordWebSocket.from_client = descriptor  # type: ignore[method-assign]
-            claim()
-            kwargs.update(
-                initial=False,
-                resume=True,
-                session=continuation.session_id,
-                sequence=continuation.sequence,
-                gateway=continuation.gateway,
-            )
-            import yarl
-
-            kwargs["gateway"] = yarl.URL(continuation.gateway)
+            return socket
         factory = cast(Callable[..., Awaitable[DiscordWebSocket]], original)
         return await factory(client, **kwargs)
 
@@ -137,6 +134,7 @@ class GatewayHandover:
         self.runtime_started = False
         self.started = False
         self.agents: dict[str, Any] = {}
+        self.conversation: dict[str, Any] | None = None
         self._close_callers: set[asyncio.Task[Any]] = set()
         self._parsers: dict[str, Any] | None = None
         self._previous_factory: Any = None
@@ -173,11 +171,11 @@ class GatewayHandover:
             if continuation is not None:
                 self.status = "resuming"
                 self.agents = continuation.agents
+                self.conversation = continuation.conversation
                 await self.warm_cache()
                 self.buffer_parsers()
-                with resume_first_connection(self.bot, continuation, lambda: os.replace(self.path, self.active)):
-                    self.connect_task = asyncio.create_task(self.bot.connect(reconnect=reconnect))
-                    await self.connect_task
+                self.connect_task = asyncio.create_task(self.connect_resumed(continuation, reconnect=reconnect))
+                await self.connect_task
             else:
                 self.connect_task = asyncio.create_task(self.bot.connect(reconnect=reconnect))
                 await self.connect_task
@@ -188,6 +186,29 @@ class GatewayHandover:
             await self.close()
             if loop.get_task_factory() is factory:
                 loop.set_task_factory(self._previous_factory)
+
+    async def connect_resumed(self, continuation: GatewayContinuation, *, reconnect: bool) -> None:
+        backoff = ExponentialBackoff()
+        while not self.bot.is_closed():
+            try:
+                socket = await DiscordWebSocket.from_client(
+                    self.bot,
+                    initial=False,
+                    resume=True,
+                    session=continuation.session_id,
+                    sequence=continuation.sequence,
+                    gateway=URL(continuation.gateway),
+                )
+                break
+            except (OSError, aiohttp.ClientError, TimeoutError):
+                if not reconnect:
+                    raise
+                await asyncio.sleep(backoff.delay())
+        else:
+            return
+        self.bot.ws = socket
+        with use_first_connection(self.bot, socket):
+            await self.bot.connect(reconnect=reconnect)
 
     def task_factory(
         self, loop: asyncio.AbstractEventLoop, coroutine: Coroutine[Any, Any, Any], **kwargs: object
@@ -233,12 +254,12 @@ class GatewayHandover:
     def observe(self, event: dict[str, Any]) -> None:
         if not self.started:
             return
-        if event.get("op") == DiscordWebSocket.INVALIDATE_SESSION and event.get("d") is False:
+        if not self.runtime_started and event.get("op") == DiscordWebSocket.INVALIDATE_SESSION and event.get("d") is False:
             self.status = "failed"
             self.restore_parsers()
             self.buffer.clear()
         if event.get("op") == 0 and event.get("t") == "READY":
-            if self.status != "initial":
+            if not self.runtime_started and self.status != "initial":
                 self.status = "failed"
                 self.restore_parsers()
                 self.buffer.clear()
@@ -248,6 +269,9 @@ class GatewayHandover:
     async def resumed(self) -> None:
         if not self.buffering:
             return
+        self.buffering = False
+        self.path.unlink(missing_ok=True)
+        write_handover(self.active, {"bot_id": self.bot.user.id if self.bot.user else None, "active_at": time.time()})
         self.startup_caller = asyncio.current_task()
         self.bot._handle_ready()
         self.bot.dispatch("ready")
@@ -269,6 +293,8 @@ class GatewayHandover:
         async for summary in self.bot.fetch_guilds(limit=None):
             guild = await self.bot.fetch_guild(summary.id)
             self.bot._connection._add_guild(guild)
+            assert self.bot.user is not None
+            guild._add_member(await guild.fetch_member(self.bot.user.id))
             for channel in await guild.fetch_channels():
                 guild._add_channel(channel)
             for thread in await guild.active_threads():
@@ -279,7 +305,12 @@ class GatewayHandover:
 
         cog = self.bot.get_cog("AgentSessionDoodad")
         if isinstance(cog, AgentSessionDoodad):
-            cog.bridge.handover.load(self.agents)
+            try:
+                cog.bridge.handover.load(self.agents)
+                cog.bridge.conversations.restore(self.conversation)
+            except (ValueError, KeyError, TypeError, OverflowError, OSError):
+                self.status = "failed"
+                cog.bridge.handover.saved.clear()
             await cog.start_bridge()
             for record in cog.bridge.store.records.values():
                 if record.status == "closed":
@@ -318,7 +349,7 @@ class GatewayHandover:
 
         cog = self.bot.get_cog("AgentSessionDoodad")
         if isinstance(cog, AgentSessionDoodad):
-            self.agents = cog.bridge.handover.export()
+            complete = await cog.bridge.prepare_handover() and complete
         continuation = None
         if socket is not None and self.bot.user is not None and socket.session_id and socket.sequence is not None:
             continuation = GatewayContinuation(
@@ -332,5 +363,9 @@ class GatewayHandover:
             await cog.bridge.store.close()
             if cog.bridge.store.error is not None:
                 raise cog.bridge.store.error
-        if complete and continuation is not None and self.status != "failed":
+            snapshot = cog.bridge.handover.snapshot
+            complete = complete and snapshot is not None
+            if continuation is not None and snapshot is not None:
+                continuation = replace(continuation, agents=snapshot, conversation=cog.bridge.conversations.export())
+        if complete and continuation is not None:
             continuation.save(self.path)
