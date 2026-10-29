@@ -27,10 +27,6 @@ TABLE_EXPANSION_FACTOR = 2
 TABLE_EXPANSION_ALLOWANCE = 200
 
 
-def discord_text_length(text: str) -> int:
-    return len(text.encode("utf-16-le")) // 2
-
-
 def is_assistant_message(content: str) -> bool:
     """Say whether a bot-authored message is an assistant answer. Callers check authorship first."""
     return content.endswith(ASSISTANT_MESSAGE_MARKER) or content.startswith(LEGACY_ASSISTANT_LABEL)

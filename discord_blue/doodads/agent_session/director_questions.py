@@ -24,7 +24,6 @@ from discord_blue.doodads.agent_session.chunks import split_discord_message
 from discord_blue.doodads.agent_session.controls import DELIVERY_UNCONFIRMED
 from discord_blue.doodads.agent_session.formatting import (
     advance_code_fence,
-    discord_text_length,
     format_user_message,
     mark_assistant_message,
     markdown_table_end,
@@ -154,7 +153,7 @@ class QuestionCards:
             container.id = ANSWER_CARD_COMPONENT_ID if question.complete else ANSWER_CONTINUATION_COMPONENT_ID
             return view
         text = "\n\n".join(body for _, body in question.questions)
-        if discord_text_length(text) > 3000:
+        if len(text.encode("utf-16-le")) // 2 > 3000:
             text = " · ".join(body.split("\n", 1)[0] for _, body in question.questions)[:1000] + (
                 "\nFull questions, recommendations, costs and alternatives are attached below."
                 if question.has_attachment
@@ -379,7 +378,9 @@ class QuestionCards:
         complete: bool,
     ) -> tuple[StoredQuestion, list[discord.Message]]:
         full = "\n\n".join(body for _, body in question.questions)
-        question = replace(question, has_attachment=question.state != QuestionState.ANSWERED and discord_text_length(full) > 3000)
+        question = replace(
+            question, has_attachment=question.state != QuestionState.ANSWERED and len(full.encode("utf-16-le")) // 2 > 3000
+        )
         attachment = discord.File(BytesIO(full.encode()), filename="questions.md") if question.has_attachment else None
         sources: list[discord.Message] = []
         try:
