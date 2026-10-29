@@ -521,6 +521,7 @@ class QuestionCards:
         *,
         complete: bool,
     ) -> tuple[StoredQuestion, list[discord.Message]]:
+        self.drawn.pop(question.key, None)  # Publishing redraws the card outside refresh.
         full = "\n\n".join(body for _, body in question.questions)
         question = replace(
             question, has_attachment=question.state != QuestionState.ANSWERED and len(full.encode("utf-16-le")) // 2 > 3000
@@ -632,6 +633,7 @@ class QuestionCards:
             decision_url="",
             state=QuestionState.HELD if waiting else QuestionState.UNCERTAIN,
         )
+        self.drawn.pop(current.key, None)  # This edit bypasses refresh, so a later close must draw the card again.
         await interaction.response.edit_message(view=self.view(session_id, shown))
         return frozenset({message.id})
 
