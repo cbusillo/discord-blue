@@ -28,7 +28,7 @@ from discord_blue.doodads.agent_session import bridge as bridge_module
 from discord_blue.doodads.agent_session import cleanup as cleanup_module
 from discord_blue.doodads.agent_session import session_threads as session_threads_module
 from discord_blue.doodads.agent_session.protocol import SessionHello
-from discord_blue.doodads.agent_session.threads import session_start_message, expected_session_start_messages
+from discord_blue.doodads.agent_session.threads import session_start_message, expected_session_start_messages, identity_id
 from discord_blue.plugs.discord_plug import MAX_RATELIMIT_SLEEP_SECONDS
 from tests.discord_http import HttpBot, discord_bot, scaled_discord_sleeps
 from tests.fake_discord import BOT_ID, PARENT_ID, FakeDiscord, FakeThreadState, Fault
@@ -77,6 +77,7 @@ class Scenario:
             if any(
                 m.content in expected
                 or any(child.get("content") in expected for component in m.components for child in component.get("components", []))
+                or any(component.get("id") in {identity_id(start) for start in expected} for component in m.components)
                 for m in t.messages
             )
         ]

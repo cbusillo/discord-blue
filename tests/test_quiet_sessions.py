@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import unittest
 from types import SimpleNamespace
 from typing import cast
@@ -87,11 +89,18 @@ class QuietSessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(any(make_hello().cwd in text for text in thread.sent_messages))
             self.assertEqual(len(thread.sent_views), 1)
             view = cast(discord.ui.LayoutView, thread.sent_views[0])
-            details = next(item for item in view.children if isinstance(item, discord.ui.Container))
-            self.assertTrue(details.spoiler)
-            marker = next(item.content for item in details.children if isinstance(item, discord.ui.TextDisplay))
-            self.assertIn(marker, threads.expected_session_start_messages(make_hello()))
-            self.assertIn(marker, threads.session_message_markers(cast(discord.Message, cast(object, thread._history[-1]))))
+            shown = " ".join(item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay))
+            hello = make_hello()
+            self.assertNotIn(hello.cwd, shown)
+            self.assertNotIn(hello.session_id, shown)
+            self.assertNotIn(str(hello.pid), shown)
+            markers = threads.session_message_markers(cast(discord.Message, cast(object, thread._history[-1])))
+            starts = threads.expected_session_start_messages(hello)
+            self.assertTrue(any(threads.marker_matches(marker, starts) for marker in markers))
+            moved = threads.session_start_messages_without_pid(
+                threads.expected_session_start_messages(replace(hello, pid=hello.pid + 1))
+            )
+            self.assertTrue(any(threads.marker_matches_without_pid(marker, moved) for marker in markers))
 
     async def test_multicard_answer_has_one_heading_and_preserves_body(self) -> None:
         source = "First passage.\n\n" + "Later passage.\n" * 300

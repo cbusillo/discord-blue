@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 import secrets
@@ -20,6 +21,11 @@ DISCORD_THREAD_NAME_LIMIT = 100
 HARNESS_ICONS = {"claude": "\u2734\ufe0f", "codex": "\U0001f537"}
 DEFAULT_BRANCH_NAMES = {"main", "master", "develop", "development", "dev", "trunk"}
 SESSION_DETAILS_COMPONENT_ID = 216
+# A new thread's opening line carries its identity only in component ids, which Discord never shows: one id for the
+# session start text and one for that text without the PID, so discovery keeps its exact and PID-relaxed matches.
+IDENTITY_ID_BASE = 2**30
+IDENTITY_MARKER = "session-identity:"
+IDENTITY_WITHOUT_PID_MARKER = "session-identity-without-pid:"
 SESSION_START_PREFIX = "Agent session connected"
 SESSION_NOTIFICATION_PREFIX = "Agent session connected for "
 SESSION_NOTIFICATION_PREFIXES = (
@@ -145,12 +151,19 @@ def session_start_without_pid(content: str) -> str | None:
     return "\n".join(lines[:-1])
 
 
+def identity_id(text: str) -> int:
+    return IDENTITY_ID_BASE + int(hashlib.sha256(text.encode()).hexdigest(), 16) % IDENTITY_ID_BASE
+
+
 def session_identity_view(hello: SessionHello) -> discord.ui.LayoutView:
+    start = session_start_message(hello)
+    without_pid = session_start_without_pid(start) or start
+    harness = hello.host_label.partition(" on ")[0]
+    folder = Path(hello.cwd).name or hello.cwd
+    line = " · ".join(part for part in (harness, folder, hello.branch) if part)
     view = discord.ui.LayoutView(timeout=None)
-    view.add_item(discord.ui.TextDisplay("-# Session details · Tap to reveal"))
-    view.add_item(
-        discord.ui.Container(discord.ui.TextDisplay(session_start_message(hello)), spoiler=True, id=SESSION_DETAILS_COMPONENT_ID)
-    )
+    view.add_item(discord.ui.TextDisplay(f"-# {discord.utils.escape_markdown(line)}", id=identity_id(without_pid)))
+    view.add_item(discord.ui.Separator(visible=False, id=identity_id(start)))
     return view
 
 
@@ -159,7 +172,27 @@ def session_message_markers(message: discord.Message) -> list[str]:
     for component in message.components:
         if isinstance(component, discord.Container) and component.id == SESSION_DETAILS_COMPONENT_ID:
             markers.extend(child.content for child in component.children if isinstance(child, discord.TextDisplay))
+        elif isinstance(component, discord.TextDisplay) and (component.id or 0) >= IDENTITY_ID_BASE:
+            markers.append(f"{IDENTITY_WITHOUT_PID_MARKER}{component.id}")
+        elif isinstance(component, discord.SeparatorComponent) and (component.id or 0) >= IDENTITY_ID_BASE:
+            markers.append(f"{IDENTITY_MARKER}{component.id}")
     return markers
+
+
+def is_session_marker(marker: str) -> bool:
+    return marker.startswith((SESSION_START_PREFIX, IDENTITY_MARKER, IDENTITY_WITHOUT_PID_MARKER))
+
+
+def marker_matches(marker: str, starts: set[str]) -> bool:
+    """An opening marker naming one of these exact session starts, PID included."""
+    return marker in starts or marker in {f"{IDENTITY_MARKER}{identity_id(start)}" for start in starts}
+
+
+def marker_matches_without_pid(marker: str, starts_without_pid: set[str]) -> bool:
+    """An opening marker naming one of these session starts, whatever its PID."""
+    return session_start_without_pid(marker) in starts_without_pid or marker in {
+        f"{IDENTITY_WITHOUT_PID_MARKER}{identity_id(start)}" for start in starts_without_pid
+    }
 
 
 def notification_thread_id(content: str) -> int | None:

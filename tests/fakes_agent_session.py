@@ -29,6 +29,8 @@ def message_components(payload: list[dict[str, Any]]) -> list[discord.Component]
                 components.append(discord.TextDisplay(cast(Any, item)))
             case discord.ComponentType.container.value:
                 components.append(discord.Container(data=cast(Any, item), state=None))
+            case discord.ComponentType.separator.value:
+                components.append(discord.SeparatorComponent(cast(Any, item)))
             case _:
                 raise ValueError(f"Unsupported test component {item['type']}")
     return components
