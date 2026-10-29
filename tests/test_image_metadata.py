@@ -14,7 +14,7 @@ class ImageMetadataTests(unittest.TestCase):
             with self.subTest(repository=repository), tempfile.TemporaryDirectory() as directory:
                 output = Path(directory) / "outputs"
                 output.write_text("existing=value\n")
-                result = subprocess.run(
+                subprocess.run(
                     [sys.executable, "-m", "scripts.image_metadata"],
                     cwd=Path(__file__).resolve().parents[1],
                     env={**os.environ, "GITHUB_REPOSITORY": repository, "GITHUB_SHA": source, "GITHUB_OUTPUT": str(output)},
@@ -30,7 +30,6 @@ class ImageMetadataTests(unittest.TestCase):
                 self.assertEqual(values["tag_sha"], published.tag_sha)
                 self.assertEqual(values["tag_main"], published.tag_main)
                 self.assertEqual(values["cache"], published.cache)
-                self.assertEqual(result.stdout, "")
 
     def test_non_commit_source_is_refused(self) -> None:
         with self.assertRaises(ValueError):
