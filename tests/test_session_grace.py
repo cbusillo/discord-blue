@@ -9,7 +9,7 @@ from unittest.mock import patch
 import aiohttp
 
 from discord_blue.doodads.agent_session import bridge as bridge_module
-from discord_blue.doodads.agent_session import session_threads as session_threads_module
+from discord_blue.doodads.agent_session import cleanup as cleanup_module
 from discord_blue.doodads.agent_session.sessions import AgentSession
 from discord_blue.doodads.agent_session.store import StoredSession
 from tests.test_attach_scenarios import Scenario, hello_for, marker, scenario, until
@@ -189,7 +189,7 @@ class SessionGraceTests(unittest.IsolatedAsyncioTestCase):
         thread = fake.add_thread("late", marker=marker(hello), members={BOT_ID})
         with (
             patch.object(bridge_module, "SESSION_DISCONNECT_GRACE_SECONDS", 0.05),
-            patch.object(session_threads_module, "THREAD_CLOSE_WAIT_SECONDS", 0.05),
+            patch.object(cleanup_module, "THREAD_CLOSE_WAIT_SECONDS", 0.05),
         ):
             async with scenario(fake) as running, aiohttp.ClientSession() as http:
                 first = await attach(running, http, hello)
@@ -213,7 +213,7 @@ class SessionGraceTests(unittest.IsolatedAsyncioTestCase):
         fake = FakeDiscord(latency=0.002)
         hello = hello_for("lost")
         thread = fake.add_thread("lost", marker=marker(hello), members={BOT_ID})
-        with patch.object(bridge_module, "SESSION_DISCONNECT_GRACE_SECONDS", 0.2):
+        with patch.object(bridge_module, "SESSION_DISCONNECT_GRACE_SECONDS", 0.5):
             async with scenario(fake) as running, aiohttp.ClientSession() as http:
                 first = await attach(running, http, hello)
                 await first.receive_json(timeout=10)
