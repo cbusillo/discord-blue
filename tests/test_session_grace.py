@@ -9,6 +9,7 @@ from unittest.mock import patch
 import aiohttp
 
 from discord_blue.doodads.agent_session import bridge as bridge_module
+from discord_blue.doodads.agent_session import session_threads as session_threads_module
 from discord_blue.doodads.agent_session.sessions import AgentSession
 from discord_blue.doodads.agent_session.store import StoredSession
 from tests.test_attach_scenarios import Scenario, hello_for, marker, scenario, until
@@ -186,12 +187,14 @@ class SessionGraceTests(unittest.IsolatedAsyncioTestCase):
         fake = FakeDiscord(latency=0.002)
         hello = hello_for("late")
         thread = fake.add_thread("late", marker=marker(hello), members={BOT_ID})
-        with patch.object(bridge_module, "SESSION_DISCONNECT_GRACE_SECONDS", 0.2):
+        with (
+            patch.object(bridge_module, "SESSION_DISCONNECT_GRACE_SECONDS", 0.05),
+            patch.object(session_threads_module, "THREAD_CLOSE_WAIT_SECONDS", 0.05),
+        ):
             async with scenario(fake) as running, aiohttp.ClientSession() as http:
                 first = await attach(running, http, hello)
                 await first.receive_json(timeout=10)
-                # Only the archive is slow: it outlives close_thread's 1 s wait and lands after the reconnect.
-                fake.body_latency.append(("PATCH", "/channels/{channel}", lambda body: body.get("archived") is True, 2.0))
+                fake.body_latency.append(("PATCH", "/channels/{channel}", lambda body: body.get("archived") is True, 0.2))
                 await first.close()
                 self.assertTrue(await until(lambda: running.bridge.sessions.get("late") is None, timeout=5))
                 self.assertFalse(thread.archived, "the archive landed before the reconnect; the test proves nothing")
@@ -210,7 +213,7 @@ class SessionGraceTests(unittest.IsolatedAsyncioTestCase):
         fake = FakeDiscord(latency=0.002)
         hello = hello_for("lost")
         thread = fake.add_thread("lost", marker=marker(hello), members={BOT_ID})
-        with patch.object(bridge_module, "SESSION_DISCONNECT_GRACE_SECONDS", 1.0):
+        with patch.object(bridge_module, "SESSION_DISCONNECT_GRACE_SECONDS", 0.2):
             async with scenario(fake) as running, aiohttp.ClientSession() as http:
                 first = await attach(running, http, hello)
                 await first.receive_json(timeout=10)

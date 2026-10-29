@@ -190,11 +190,15 @@ class AttachScenarioTests(unittest.IsolatedAsyncioTestCase):
             gave_up = await running.connect(http)
             await gave_up.send_json(hello)
             await gave_up.close()  # The client's ack timeout fired before the attach finished.
-            await asyncio.sleep(1.0)  # Its reconnect delay; the abandoned attach finishes meanwhile.
+            self.assertTrue(
+                await until(
+                    lambda: (session := running.bridge.sessions.get("codex-thread")) is not None and session.grace_task is not None,
+                    timeout=2,
+                )
+            )
             retry = await running.connect(http)
             await retry.send_json({**hello, "session_epoch": "e2"})
             ack = await retry.receive_json(timeout=10)
-            await asyncio.sleep(0.5)
             await retry.close()
 
         self.assertEqual(ack["type"], "hello_ack")
