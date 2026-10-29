@@ -597,11 +597,11 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         expired = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), {"code": 10062, "message": "Expired"})
 
         class WaitingButton(discord.ui.Button):
-            async def callback(self, interaction: discord.Interaction) -> None:
+            async def callback(self, callback_interaction: discord.Interaction) -> None:
                 entered.set()
                 await release.wait()
-                await interaction.response.send_modal(discord.ui.Modal(title="inert"))
-                executed.append(interaction)
+                await callback_interaction.response.send_modal(discord.ui.Modal(title="inert"))
+                executed.append(callback_interaction)
 
         view = discord.ui.LayoutView(timeout=None)
         self.addCleanup(view.stop)
