@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, patch
 from aiohttp import WSMsgType
 
 from discord_blue.doodads.agent_session import bridge as bridge_module
-from discord_blue.doodads.agent_session import controls as controls_module
 from discord_blue.doodads.agent_session.controls import SessionControls
 from discord_blue.doodads.agent_session.interactions import SessionInteractions
 from discord_blue.doodads.agent_session.protocol import REMOTE_ACTIONS, RemoteApprovalRequest, RemoteRequestUserInput, SessionHello
@@ -68,7 +67,6 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.bridge.controls.send_thread_reply(cast(Any, message)))
         self.assertIn("does not support", message.replies[0])
         self.assertEqual(message.reactions, [])
-        self.assertIsNone(self.session.control_message_id)
         self.assertEqual(self.socket.sent_json, [])
         self.assertEqual(self.session.pending_commands, {})
         self.assertIn("online", self.bridge.controls.session_status_summary(self.thread, self.user))
@@ -125,39 +123,6 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(any(isinstance(item, (discord.ui.Select, discord.ui.Button)) for item in view.walk_children()))
         self.assertEqual(self.session.display_state, "waiting")
         self.assertNotIn("private-command", " ".join(self.thread.sent_messages))
-
-    async def test_end_confirmation_is_unreachable_and_stale_confirm_is_gated(self) -> None:
-        self.restrict()
-        control = FakeReplyMessage(950, self.thread)
-        self.thread.add_message(control)
-        self.session.control_message_id = control.id
-        await self.bridge.controls.handle_session_control_reaction(
-            self.session, cast(discord.Thread, self.thread), control.id, "⏹️", self.user
-        )
-        self.assertIsNone(self.session.pending_control_confirmation)
-        self.session.pending_control_confirmation = "end_session"
-        await self.bridge.controls.handle_pending_control_confirmation(
-            self.session, cast(discord.Thread, self.thread), control.id, "✅", self.user
-        )
-        self.assertEqual(self.socket.sent_json, [])
-        self.assertEqual(self.session.pending_commands, {})
-        self.assertNotIn("⏳", control.reactions)
-
-    def test_capabilities_filter_actions_preserve_local_status_and_status_indicator(self) -> None:
-        self.assertEqual(
-            self.bridge.controls.session_control_reactions(self.session), ["▶️", controls_module.REACTION_CONTROL_STATUS, "⏹️"]
-        )
-        self.restrict("reply", "status_request", "pause_current_turn", "end_session")
-        self.assertEqual(
-            self.bridge.controls.session_control_reactions(self.session), [controls_module.REACTION_CONTROL_STATUS, "⏹️"]
-        )
-        self.session.control_status_reaction = "🔄"
-        self.session.control_interruptions_enabled = True
-        self.assertEqual(self.bridge.controls.session_control_reactions(self.session), ["🔄", "⏸️", "⏹️"])
-        self.restrict()
-        self.assertEqual(self.bridge.controls.session_control_reactions(self.session), ["🔄"])
-        self.session.control_status_reaction = None
-        self.assertEqual(self.bridge.controls.session_control_reactions(self.session), [controls_module.REACTION_CONTROL_STATUS])
 
     async def test_input_send_failure_clears_reservation_and_reports_delivery_uncertainty(self) -> None:
         view = await self.fixture.prompt()
@@ -236,16 +201,17 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
                 self.socket.closed = False
                 message = FakeReplyMessage(2100, self.thread, "hello")
                 self.thread.add_message(message)
-                original = self.bridge.controls.show_active_session_controls
+                original = SessionControls.show_working
+                before = self.session.display_state
 
-                async def prepare(
+                def prepare(
+                    controls: SessionControls,
                     session: AgentSession,
-                    thread: discord.Thread,
-                    reaction: str,
-                    original_call: Callable[[AgentSession, discord.Thread, str], Awaitable[None]] = original,
+                    detail: str,
+                    original_call: Callable[[SessionControls, AgentSession, str], None] = original,
                     failure: str = failure_kind,
                 ) -> None:
-                    await original_call(session, thread, reaction)
+                    original_call(controls, session, detail)
                     if failure == "closed":
                         self.socket.closed = True
                     elif failure == "discord":
@@ -253,7 +219,7 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         raise RuntimeError("unexpected preparation failure")
 
-                with patch.object(self.bridge.controls, "show_active_session_controls", new=prepare):
+                with patch.object(SessionControls, "show_working", new=prepare):
                     try:
                         await self.bridge.controls.send_thread_reply(cast(Any, message))
                     except RuntimeError:
@@ -261,7 +227,7 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.session.pending_commands, {})
                 self.assertEqual(self.socket.sent_json, [])
                 self.assertNotIn("⏳", message.reactions)
-                self.assertIsNone(self.session.control_status_reaction)
+                self.assertEqual(self.session.display_state, before)
                 if failure_kind == "discord":
                     self.assertIn("Discord could not prepare", message.replies[0])
 
@@ -301,7 +267,7 @@ class CapabilityTransportTests(unittest.IsolatedAsyncioTestCase):
                     cast(AsyncMock, bridge.session_threads.find_or_create_session_thread).assert_not_awaited()
                     self.assertEqual(bridge.sessions.by_session, {})
 
-    async def test_reconnect_narrows_controls_and_rejects_prior_session_dispatch(self) -> None:
+    async def test_reconnect_narrows_capabilities_and_rejects_prior_session_dispatch(self) -> None:
         async with transport_tests.CleanupTransportTests().transport() as (bridge, thread, client, _finished):
             old = await client.ws_connect(
                 bridge_module.AGENT_SESSION_CONNECT_PATH, headers={"Authorization": "Bearer cleanup-transport-test"}
@@ -311,8 +277,6 @@ class CapabilityTransportTests(unittest.IsolatedAsyncioTestCase):
             await old.receive_json(timeout=2)
             prior = bridge.sessions.get("cleanup-session")
             assert prior is not None
-            await bridge.controls.post_session_controls(prior)
-            self.assertIn("▶️", bridge.controls.session_control_reactions(prior))
             current = await client.ws_connect(
                 bridge_module.AGENT_SESSION_CONNECT_PATH, headers={"Authorization": "Bearer cleanup-transport-test"}
             )
@@ -320,8 +284,6 @@ class CapabilityTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await current.receive_json(timeout=2))["capabilities"], [])
             attached = bridge.sessions.get("cleanup-session")
             assert attached is not None
-            await bridge.controls.post_session_controls(attached)
-            self.assertEqual(bridge.controls.session_control_reactions(attached), [controls_module.REACTION_CONTROL_STATUS])
             self.assertIn("offline", cast(str, bridge.controls.dispatch_error(prior, "reply")))
             response = await bridge.controls.send_continue_autonomously(thread, cast(discord.User, FakeInteraction(thread).user))
             self.assertIn("does not support", response)

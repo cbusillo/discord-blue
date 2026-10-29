@@ -170,6 +170,10 @@ class FakeThread:
         self.parent_id: int | None = None
         self.owner_id: int | None = 999
         self.message_count = 0
+        self.typing_requests = 0
+
+    async def typing(self) -> None:
+        self.typing_requests += 1
 
     def add_message(self, message: FakeReplyMessage) -> None:
         self._messages[message.id] = message

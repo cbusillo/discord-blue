@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from datetime import UTC, datetime
 
 import discord
 
@@ -14,7 +13,6 @@ from discord_blue.doodads.agent_session.formatting import advance_code_fence, st
 from discord_blue.doodads.agent_session.sessions import AgentSession
 
 
-STATUS_CARD_COMPONENT_ID = 213
 ANSWER_CARD_COMPONENT_ID = 214
 ANSWER_CONTINUATION_COMPONENT_ID = 215
 ANSWER_FILENAME = "answer.md"
@@ -146,59 +144,4 @@ def active_session_rows(sessions: list[AgentSession], guild_id: int) -> list[dis
 def notice_card(content: str) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(discord.ui.Container(discord.ui.TextDisplay(strip_assistant_markers(content)), accent_color=0x4D4E56))
-    return view
-
-
-def session_status_card(session: AgentSession, reactions: list[str]) -> discord.ui.LayoutView:
-    from discord_blue.doodads.agent_session.threads import session_thread_name
-
-    state = session.display_state
-    label, color = STATUS_LABELS[state]
-    identity = session_thread_name(session.hello)
-    detail = (
-        session.last_status_message
-        or {
-            "working": "The agent is working.",
-            "waiting": "Reply in this thread when you are ready.",
-            "done": "Reply to start the next turn.",
-            "failed": "Check the native terminal for the error.",
-            "disconnected": "The session is disconnected.",
-            "reconnecting": "Waiting for the next status update.",
-            "unknown": "Approval status is unconfirmed; check the native terminal.",
-        }[state]
-    )
-    if session.pending_control_confirmation:
-        label, color = "⏹ End this session?", 0xF0B232
-        detail = "Tap ✅ to confirm or ✖️ to keep the session open."
-    hints = {
-        "▶️": "continue",
-        "\N{INFORMATION SOURCE}\N{VARIATION SELECTOR-16}": "status",
-        "⏸️": "pause",
-        "⏹️": "end",
-    }
-    actions = " · ".join(f"{emoji} {hints[emoji]}" for emoji in reactions if emoji in hints)
-    children: list[discord.ui.Item[discord.ui.LayoutView]] = [
-        discord.ui.TextDisplay(f"### {label}\n{discord.utils.escape_markdown(strip_assistant_markers(identity))[:200]}"),
-        discord.ui.Separator(),
-        discord.ui.TextDisplay(strip_assistant_markers(detail)[:1000]),
-    ]
-    if actions and not session.pending_control_confirmation:
-        children.append(discord.ui.TextDisplay(f"-# Tap a reaction: {actions}"))
-    children.append(discord.ui.TextDisplay(f"-# Updated <t:{int(datetime.now(UTC).timestamp())}:R>"))
-    view = discord.ui.LayoutView(timeout=None)
-    view.add_item(discord.ui.Container(*children, accent_color=color, id=STATUS_CARD_COMPONENT_ID))
-    return view
-
-
-def disconnected_status_card() -> discord.ui.LayoutView:
-    view = discord.ui.LayoutView(timeout=None)
-    view.add_item(
-        discord.ui.Container(
-            discord.ui.TextDisplay("### ⏹ Disconnected"),
-            discord.ui.TextDisplay("The session is disconnected. Its answers remain in this thread."),
-            discord.ui.TextDisplay(f"-# Updated <t:{int(datetime.now(UTC).timestamp())}:R>"),
-            accent_color=STATUS_LABELS["disconnected"][1],
-            id=STATUS_CARD_COMPONENT_ID,
-        )
-    )
     return view

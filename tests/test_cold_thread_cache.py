@@ -6,7 +6,7 @@ After a reattach, Discord can deliver a thread's events before the reopened thre
 come from discord.py's own gateway parsers rather than stand-ins.
 
 Discord also shows a bot's reactions one at a time, as its rate limit spaces them, so an operator can tap the first
-of a message's controls while the bot is still adding the rest; that tap must count.
+of an approval's reactions while the bot is still adding the rest; that tap must count.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ async def next_command(websocket: aiohttp.ClientWebSocketResponse, kind: str) ->
 
 
 class ColdThreadCacheTests(unittest.IsolatedAsyncioTestCase):
-    async def test_a_reply_and_a_reaction_reach_a_session_whose_thread_is_not_cached(self) -> None:
+    async def test_a_reply_reaches_and_shows_work_in_a_thread_that_is_not_cached(self) -> None:
         fake = FakeDiscord(latency=0.002)
         hello = hello_for("cold-cache")
         thread = fake.add_thread("cold-cache", marker=marker(hello), archived=True, locked=True)
@@ -65,50 +65,13 @@ class ColdThreadCacheTests(unittest.IsolatedAsyncioTestCase):
             delivered = await next_command(websocket, "reply")
             queued = await until(lambda: (controls_module.REACTION_QUEUED, BOT_ID) in reply.reactions, timeout=2)
 
-            # The operator pauses the turn from the session controls; the reaction's thread is not cached either.
-            pause = controls_module.REACTION_CONTROL_PAUSE
-            self.assertTrue(await until(lambda: offering(thread, pause) is not None, 5), "no pause control was offered")
-            controls = offering(thread, pause)
-            assert controls is not None
-            reaction_add(running.bot, thread.id, controls.id, pause, OPERATOR)
-            paused = await next_command(websocket, "pause_current_turn")
+            # The queued reply shows the session working, in the thread that is not cached either.
+            typing = await until(lambda: ("POST", "/channels/{channel}/typing") in fake.requests, timeout=2)
             await websocket.close()
 
         self.assertEqual(delivered["text"], reply.content, "a reply from a bystander was delivered")
         self.assertTrue(queued, f"the reply was delivered without its queued reaction: {reply.reactions}")
-        self.assertEqual(paused["issued_by"], str(OPERATOR_ID))
-
-    async def test_a_control_tapped_as_soon_as_it_shows_is_not_ignored(self) -> None:
-        """A prompt typed in the TUI posts fresh session controls. The bot adds them one at a time, and an operator
-        who taps pause as soon as it shows must not be ignored because the bot is still adding end-session."""
-        fake = FakeDiscord(latency=0.002)
-        end_held = hold_reaction(fake, controls_module.REACTION_CONTROL_END)
-        hello = hello_for("fresh-controls")
-        thread = fake.add_thread("fresh-controls", marker=marker(hello), archived=True, locked=True)
-        async with running_cog(fake) as running, aiohttp.ClientSession() as http:
-            websocket = await http.ws_connect(running.url, headers={"Authorization": f"Bearer {TOKEN}"})
-            await websocket.send_json(hello)
-            await websocket.receive_json(timeout=10)
-            typed = {"type": "user_message", "session_id": "fresh-controls", "session_epoch": "e1", "message": "typed in the TUI"}
-            await websocket.send_json(typed)
-            pause = controls_module.REACTION_CONTROL_PAUSE
-            self.assertTrue(await until(lambda: offering(thread, pause) is not None, 5), "no pause control was offered")
-            controls = offering(thread, pause)
-            assert controls is not None
-            reaction_add(running.bot, thread.id, controls.id, pause, OPERATOR)
-            queued = (controls_module.REACTION_QUEUED, BOT_ID)
-            try:
-                paused = await next_command(websocket, "pause_current_turn")
-                # Then the end-session reaction the bot was adding lands; the controls must still show only queued.
-                await release_after_tap(end_held, lambda: queued in controls.reactions)
-                await until(lambda: queued in controls.reactions, 5)
-                final_reactions = list(controls.reactions)
-            finally:
-                end_held.released.set()
-            await websocket.close()
-
-        self.assertEqual(paused["issued_by"], str(OPERATOR_ID))
-        self.assertEqual(final_reactions, [queued], "the bot's remaining controls landed after the tap was handled")
+        self.assertTrue(typing, "the working session showed no typing indicator")
 
     async def test_an_approval_answered_as_soon_as_it_shows_offers_nothing_more(self) -> None:
         """The bot adds approve, then deny. An operator who approves as soon as approve shows gets the approval sent

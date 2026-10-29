@@ -221,7 +221,7 @@ class SessionRoutingTests(unittest.IsolatedAsyncioTestCase):
                 await doodad.route_thread_reply(cast(Any, reply))
                 self.assertEqual(websocket.sent_json[0]["kind"], "reply")
                 self.assertEqual(websocket.sent_json[0]["session_id"], hello.session_id)
-                self.assertTrue(session.control_interruptions_enabled)
+                self.assertEqual(session.display_state, "working")
 
     async def test_codex_preserves_explicit_native_source_without_prompt_inference(self) -> None:
         rpc = FakeRpc(thread("spawned", threadSource="spawned"), thread("manual", threadSource="user"), thread("legacy"))
