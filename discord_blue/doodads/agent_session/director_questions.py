@@ -48,7 +48,9 @@ SENTENCE_END = re.compile(r"[.?!](?=\s|$)")
 CHOICE_BULLET = re.compile(r"^\s*[-*]\s+\**On ([^:*\n]{1,60}?)\**:", re.IGNORECASE)
 RECOMMENDATION = re.compile(r"^\s*(?:[-*]\s+)?\**(?:my )?recommend(?:ation|ed)?\**:\**\s*(.+)", re.IGNORECASE)
 ALTERNATIVE = re.compile(r"^\s*(?:[-*]\s+)?\**alternatives?\**:\**\s*(.+)", re.IGNORECASE)
-CHOICE_END = re.compile(r"[.;:(]\s|[.;:]$|\s[-\u2013\u2014]\s")
+# Agents also recommend in prose: "**Q1.** Which color? I recommend blue because ...".
+INLINE_RECOMMENDATION = re.compile(r"\b(?:I recommend|my recommendation is)\s+(.+)", re.IGNORECASE)
+CHOICE_END = re.compile(r"[.;:(,]\s|[.;:]$|\s[-\u2013\u2014]\s|\s(?:because|since|so that)\s")
 CHOICE_LIMIT = 60
 MAX_CHOICES = 4
 # Discord allows 4000 characters of text in a form; leave room for the cut notice and link.
@@ -130,7 +132,7 @@ def question_choices(body: str) -> tuple[tuple[str, bool], ...]:
             continue  # Indented code and quotes are examples, not offered answers.
         if bullet := CHOICE_BULLET.match(line):
             bullets.append(bullet[1].strip())
-        elif (recommendation := RECOMMENDATION.match(line)) and not recommended:
+        elif (recommendation := RECOMMENDATION.match(line) or INLINE_RECOMMENDATION.search(line)) and not recommended:
             recommended = choice_text(recommendation[1])
         elif alternative := ALTERNATIVE.match(line):
             alternatives.extend(choice_text(part) for part in alternative[1].split(";"))
