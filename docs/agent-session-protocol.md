@@ -224,13 +224,13 @@ reconnect metadata-matching rules or delete conversation history. Background
 progress and pending cleanup state are visible in `/health`, with warnings for
 failed operations. A dead or stalled monitor is reported as unhealthy.
 
-Reconnect with the same session identity and metadata. New threads persist the
-complete legacy marker inside a native spoiler container identified as session
-details. The default reading path hides host, folder, branch, session and PID;
-tap to reveal them. The marker remains recoverable without the local store.
-Spoilers preserve the thread's existing audience and are not an access boundary.
-`/code status` remains operator-only and private. Discovery and orphan cleanup
-recognize both this component representation and old text markers. An unread
+Reconnect with the same session identity and metadata. New threads open with one
+small line naming the harness, folder and branch. The session start marker is
+kept as salted hashes in three component ids that Discord never displays: two
+for the marker without its PID (for PID-tolerant matching) and one for the full
+marker (for exact matching). Host, path, session and PID stay off the reading
+path; `/code status` remains operator-only and private. Discovery and orphan
+cleanup recognize these ids, the earlier spoiler container and old text markers. An unread
 candidate still blocks duplicate creation. Parent announcements are not required.
 Thread recovery matches persisted session markers; a changed PID can be tolerated only for one matching
 stable session ID. The optional assistant snapshot backfills a thread only when

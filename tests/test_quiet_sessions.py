@@ -94,6 +94,7 @@ class QuietSessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(hello.cwd, shown)
             self.assertNotIn(hello.session_id, shown)
             self.assertNotIn(str(hello.pid), shown)
+            self.assertNotIn(hello.host_label.partition(" on ")[2] or hello.host_label, shown)
             markers = threads.session_message_markers(cast(discord.Message, cast(object, thread._history[-1])))
             starts = threads.expected_session_start_messages(hello)
             self.assertTrue(any(threads.marker_matches(marker, starts) for marker in markers))
