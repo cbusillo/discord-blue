@@ -418,10 +418,8 @@ these prompts. The existing approval_decision, acknowledgement and resolution
 messages bind to an opaque approval_id for that exact snapshot and session
 epoch. A changed patch invalidates the old prompt.
 
-The Codex bridge supports new_session through /code new in an existing Codex
-thread: that thread's cwd selects the repository. It calls thread/start with
-cwd only, then mirrors the new thread; its first substantive prompt supplies the title. It does not change the
-daemon's configured trust, sandbox or approval policy.
+The operator flow and Codex-specific behavior for `new_session` are maintained
+in the [Codex bridge guide](../README.md#codex-bridge-runs-on-the-mac-next-to-codex).
 
 ## External CM conversation capability
 
