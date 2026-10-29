@@ -95,15 +95,19 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
 
         self.addCleanup(stop_views)
 
-    async def test_gap_reaction_waits_for_exact_native_request_and_keeps_original_message(self) -> None:
+    async def pending_approval(self) -> RemoteApprovalRequest:
         self.install_view_store()
         old = self.fixture.session
         self.bridge.sessions.register(old)
         request = RemoteApprovalRequest("approval", "call", "turn", old.session_id, old.session_epoch, ["echo", "inert"], "/", None)
         await self.bridge.interactions.handle_approval_request(request)
-        message_id = old.pending_approvals[request.approval_id].message_id
+        return request
+
+    async def test_gap_reaction_waits_for_exact_native_request_and_keeps_original_message(self) -> None:
+        request = await self.pending_approval()
+        message_id = self.fixture.session.pending_approvals[request.approval_id].message_id
         self.bridge.handover.load(self.bridge.handover.export())
-        self.bridge.sessions.remove(old.session_id)
+        self.bridge.sessions.remove(request.session_id)
         reaction = asyncio.create_task(
             self.bridge.handle_thread_reaction(
                 cast(discord.Thread, self.fixture.thread),
@@ -113,7 +117,7 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.replay.add(reaction)
-        session, socket = await self.reattach(epoch=old.session_epoch)
+        session, socket = await self.reattach(epoch=request.session_epoch)
         await asyncio.sleep(0)
         self.assertFalse(reaction.done())
         self.assertFalse(socket.sent_json[1:])
@@ -126,13 +130,9 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.fixture.thread.sent_views), 1)
 
     async def test_same_epoch_live_approval_remains_usable_without_a_second_card(self) -> None:
-        self.install_view_store()
-        old = self.fixture.session
-        self.bridge.sessions.register(old)
-        request = RemoteApprovalRequest("approval", "call", "turn", old.session_id, old.session_epoch, ["echo", "inert"], "/", None)
-        await self.bridge.interactions.handle_approval_request(request)
-        message_id = old.pending_approvals[request.approval_id].message_id
-        session, socket = await self.reattach(epoch=old.session_epoch, previous=old)
+        request = await self.pending_approval()
+        message_id = self.fixture.session.pending_approvals[request.approval_id].message_id
+        session, socket = await self.reattach(epoch=request.session_epoch, previous=self.fixture.session)
         await self.bridge.handle_event(session, "approval_request", asdict(request))
         self.assertTrue(
             await self.bridge.handle_thread_reaction(

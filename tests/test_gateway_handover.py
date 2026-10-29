@@ -233,7 +233,7 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         cog = AgentSessionDoodad(self.bot)
         await self.bot.add_cog(cog)
         task = await self.start_bot()
-        await wait_until(lambda: self.bot.handover.healthy())
+        self.assertTrue(await wait_until(lambda: self.bot.handover.healthy()))
         socket = FakeWebSocket()
         session = AgentSession(make_hello(), cast(web.WebSocketResponse, cast(object, socket)), thread_id=333)
         cog.bridge.sessions.register(session)
@@ -276,10 +276,10 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.bot.add_listener(on_message)
         with patch("discord_blue.gateway_handover.write_handover", side_effect=OSError("inert disk full")):
             task = await self.start_bot()
-            await wait_until(lambda: len(messages) == 1)
+            self.assertTrue(await wait_until(lambda: len(messages) == 1))
             self.assertFalse(self.bot.handover.healthy())
             await self.message()
-            await wait_until(lambda: len(messages) == 2)
+            self.assertTrue(await wait_until(lambda: len(messages) == 2))
         await self.finish(task)
 
     async def test_startup_failure_restores_dispatch_for_later_live_messages(self) -> None:
@@ -291,9 +291,9 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.bot.add_listener(on_message)
         with patch.object(self.bot, "_handle_ready", side_effect=RuntimeError("inert startup failure")):
             task = await self.start_bot()
-            await wait_until(lambda: self.bot.handover.status == "failed")
+            self.assertTrue(await wait_until(lambda: self.bot.handover.status == "failed"))
         await self.message()
-        await wait_until(lambda: len(messages) == 1)
+        self.assertTrue(await wait_until(lambda: len(messages) == 1))
         self.assertFalse(self.bot.handover.healthy())
         await self.finish(task)
 
@@ -381,7 +381,7 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
             patch("discord_blue.gateway_handover.ExponentialBackoff.delay", return_value=0),
         ):
             task = await self.start_bot()
-            await wait_until(lambda: self.bot.handover.healthy())
+            self.assertTrue(await wait_until(lambda: self.bot.handover.healthy()))
             self.assertEqual(attempts, 2)
             self.assertFalse(self.bot.handover.path.exists())
             await self.finish(task)
@@ -405,7 +405,7 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.01)
         self.assertEqual(calls, 1)
         release.set()
-        await wait_until(lambda: self.bot.handover.healthy())
+        self.assertTrue(await wait_until(lambda: self.bot.handover.healthy()))
         await self.finish(task)
 
     async def test_failed_replay_callback_cannot_turn_green_when_its_task_finishes(self) -> None:
@@ -414,7 +414,7 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
 
         self.bot.add_listener(on_message)
         task = await self.start_bot()
-        await wait_until(lambda: self.bot.handover.status == "failed")
+        self.assertTrue(await wait_until(lambda: self.bot.handover.status == "failed"))
         self.assertFalse(self.bot.handover.healthy())
         await self.finish(task)
 
