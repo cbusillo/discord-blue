@@ -185,8 +185,9 @@ class QuestionCards:
     def restore(self) -> None:
         for session_id, stored in tuple(self.bridge.store.records.items()):
             for question in stored.questions:
-                if question.state == QuestionState.UNCERTAIN and question.answer:
-                    # The acknowledgment that would settle it was lost with the previous process.
+                if question.state in {QuestionState.UNCERTAIN, QuestionState.UNCONFIRMED} and question.answer:
+                    # The acknowledgment that would settle it was lost with the previous process. An earlier
+                    # restart may have saved this state before its card was redrawn, so redraw it either way.
                     question = replace(question, state=QuestionState.UNCONFIRMED)
                     self.save(session_id, question)
                     self.unconfirmed_at_start.setdefault(session_id, []).append(question.key)

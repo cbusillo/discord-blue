@@ -624,7 +624,8 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         modal = await self.card()
         modal.fields[0]._value = "Yes"
         await modal.on_submit(cast(Any, FakeInteraction(self.fixture.thread)))
-        recovered = await self.restarted_cards()
+        await self.restarted_cards()
+        recovered = await self.restarted_cards()  # Restarted again before the session attached.
         stored = cast(StoredQuestion, recovered.record(modal.session_id, modal.question.key))
         self.assertEqual(stored.state, QuestionState.UNCONFIRMED)
         await recovered.close(modal.session_id, current_epoch=self.fixture.session.session_epoch)  # The session attaches.
