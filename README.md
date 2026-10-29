@@ -214,6 +214,8 @@ and the Director-opened Supervisor, use the main session channel and add
 reopen. A new spawned session waits for a distinct configured second channel
 instead of falling back to the main channel. Existing threads retain their
 parent channel; recovery, replies, approvals and cleanup support both parents.
+Each parent has its own FIFO admission queue, so a thread-creation cooldown in
+the spawned-session channel does not hold up Director sessions in the main channel.
 For question routing, follow the [Supervisor question queue](https://github.com/cbusillo/codex-skills/blob/main/skills/supervisor/SKILL.md).
 The bridge mirrors the shared daemon's Codex sessions; embedded sessions retain
 their existing visibility limit.

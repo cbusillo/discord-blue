@@ -3,17 +3,25 @@ from __future__ import annotations
 import dataclasses
 import asyncio
 import os
+import tempfile
 import unittest
 from collections.abc import AsyncIterator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+import aiohttp
+from aiohttp import web
+from aiohttp.test_utils import TestServer
+
+from discord_blue.claude_channel.__main__ import run_channel
+from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.doodads.agent_session.protocol import SessionHello
 from discord_blue.claude_channel.session import Identity
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
-from discord_blue.doodads.agent_session.session_threads import DiscoveryIncomplete
+from discord_blue.doodads.agent_session.session_threads import DiscoveryIncomplete, SessionThreads
 from discord_blue.doodads.agent_session.store import StoredSession
 from discord_blue.doodads.agent_session.threads import create_session_thread, session_start_message
 from discord_blue.config import AgentSessionConfig, Config, ConversationConfig, DiscordConfig
@@ -30,7 +38,7 @@ from tests.fakes_agent_session import (
     every_user_is_operator,
     make_hello,
 )
-from tests.test_claude_channel import IDENTITY, running_channel
+from tests.test_claude_channel import IDENTITY, FakeClaudeCode, running_channel
 from tests.test_codex_bridge import FakeRpc, running_bridge, thread
 
 
@@ -38,6 +46,68 @@ class SessionRoutingTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.enterContext(patch("discord_blue.doodads.agent_session.threads.discord.TextChannel", FakeTextChannel))
         self.enterContext(patch("discord_blue.doodads.agent_session.threads.discord.Thread", FakeThread))
+
+    async def test_new_claude_channel_attaches_while_other_parent_is_rate_limited(self) -> None:
+        for limited_spawned in (True, False):
+            with self.subTest(limited_spawned=limited_spawned):
+                config = SimpleNamespace(
+                    agent_session=AgentSessionConfig(), discord=DiscordConfig(), conversation=ConversationConfig()
+                )
+                config.agent_session.channel_id = 321
+                config.agent_session.spawned_channel_id = 654
+                config.agent_session.token = "routing-test"
+                main, spawned = FakeTextChannel(321, []), FakeTextChannel(654, [])
+                bot = FakeBot(cast(Any, config))
+                bot.get_channel = {321: main, 654: spawned}.get  # type: ignore[method-assign, assignment]
+                state_home = self.enterContext(tempfile.TemporaryDirectory())
+                bridge = AgentSessionBridge(cast(Any, bot), store_path=Path(state_home) / "sessions.json")
+                limited = spawned if limited_spawned else main
+                creating = asyncio.Event()
+
+                async def rate_limited(*, started: asyncio.Event = creating, **_kwargs: object) -> FakeThread:
+                    started.set()
+                    raise discord.RateLimited(300)
+
+                app = web.Application()
+                bridge.register_routes(app)
+                with (
+                    patch.object(limited, "create_thread", rate_limited),
+                    patch.object(SessionThreads, "delete_creation_duplicates", AsyncMock()),
+                ):
+                    async with TestServer(app) as server, aiohttp.ClientSession() as http:
+                        url = str(server.make_url("/agent-session/connect")).replace("http:", "ws:")
+                        waiting = await http.ws_connect(url, headers={"Authorization": f"Bearer {config.agent_session.token}"})
+                        await waiting.send_json(
+                            {
+                                "type": "hello",
+                                "session_id": "limited",
+                                "session_epoch": "limited-epoch",
+                                "cwd": "/work/limited",
+                                "session_kind": "spawned" if limited_spawned else "director",
+                            }
+                        )
+                        await asyncio.wait_for(creating.wait(), 2)
+                        claude = FakeClaudeCode()
+                        identity = dataclasses.replace(IDENTITY, spawned=not limited_spawned)
+                        channel_config = BridgeConfig(url, config.agent_session.token, Path("/unused"), "test")
+                        channel = asyncio.create_task(run_channel(claude.stdin, claude, channel_config, identity))
+                        try:
+                            await claude.initialize()
+                            async with asyncio.timeout(1):
+                                while not (session := bridge.sessions.get(identity.session_id)) or not session.acknowledged:
+                                    await asyncio.sleep(0.01)
+                            self.assertEqual(session.thread_id, (main if limited_spawned else spawned).threads[0].id)
+                            self.assertEqual(limited.threads, [])
+                        finally:
+                            bridge.session_threads.creation_stopping.set()
+                            claude.stdin.feed_eof()
+                            await asyncio.wait_for(channel, 5)
+                            await waiting.close()
+                            await asyncio.gather(*bridge._attach_tasks.values(), return_exceptions=True)
+                            for task in list(bridge._grace_tasks):
+                                task.cancel()
+                            await asyncio.gather(*bridge._grace_tasks, return_exceptions=True)
+                            bridge.threads.stop()
 
     def test_claude_reads_only_the_explicit_launcher_label(self) -> None:
         for label in ("spawned", "director", ""):

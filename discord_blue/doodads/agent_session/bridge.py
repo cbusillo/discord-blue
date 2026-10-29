@@ -95,8 +95,8 @@ class AgentSessionBridge:
         self._site: web.TCPSite | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
-        # One FIFO admission queue for attaches, including creation; a rate-limited create keeps its slot.
         self._session_attach_lock = asyncio.Lock()
+        self._spawned_session_attach_lock = asyncio.Lock()
         self._grace_tasks: set[asyncio.Task[None]] = set()
         # Every change to a session thread (reopen, join, members, notice, archive, leave, rename) goes through its
         # worker, one request at a time and never cancelled.
@@ -105,7 +105,7 @@ class AgentSessionBridge:
         # No await occurs while resolving the entry, so one event loop turn
         # cannot create two locks for the same session ID.
         self._session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
-        self.cleanups = SessionCleanups(self, self._session_attach_lock)
+        self.cleanups = SessionCleanups(self)
         self.session_threads = SessionThreads(self)
         # One attach per session ID; a reconnecting socket joins the one already running instead of starting over.
         self._attach_tasks: dict[str, asyncio.Task[SessionThread]] = {}
@@ -367,7 +367,7 @@ class AgentSessionBridge:
             logger.warning("Agent session %s task failed before shutdown: %r", name, result)
 
     async def disconnect_active_sessions(self) -> None:
-        async with self._session_attach_lock:
+        async with self._session_attach_lock, self._spawned_session_attach_lock:
             sessions = list(self.sessions.by_session.values())
 
         close_tasks = [asyncio.create_task(self.disconnect_active_session(session.session_id, session)) for session in sessions]
@@ -582,7 +582,7 @@ class AgentSessionBridge:
 
     def attaching(self) -> bool:
         """An attach is under way, so a thread or notification without a session may be about to get one."""
-        return self._session_attach_lock.locked() or bool(self._attach_tasks)
+        return self._session_attach_lock.locked() or self._spawned_session_attach_lock.locked() or bool(self._attach_tasks)
 
     async def handle_connect(self, request: web.Request) -> web.WebSocketResponse:
         if not self._authorized(request):
@@ -803,7 +803,8 @@ class AgentSessionBridge:
         progress survives a client that stops waiting for its ack.
         """
         session_id = hello.session_id
-        async with self.session_lifecycle_lock(session_id), self._session_attach_lock:
+        attach_lock = self._spawned_session_attach_lock if hello.spawned else self._session_attach_lock
+        async with self.session_lifecycle_lock(session_id), attach_lock:
             try:
                 if self._stopping:
                     raise BridgeStopping
