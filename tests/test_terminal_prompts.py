@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 
+from discord_blue.doodads.agent_session.controls import SessionControls
 from discord_blue.plugs.discord_plug import BlueBot
 from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN, UserMessage
 from discord_blue.doodads.agent_session.session_status import SessionStatusUpdates
@@ -141,6 +142,6 @@ class TerminalPromptTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.bot.config.agent_session.enabled = True
         cog = AgentSessionDoodad(cast(BlueBot, cast(object, self.bridge.bot)))
         message = SimpleNamespace(webhook_id=876, author=SimpleNamespace(bot=False, id=123))
-        with patch.object(type(cog.bridge.controls), "send_thread_reply", new_callable=AsyncMock) as send:
+        with patch.object(SessionControls, "send_thread_reply", new_callable=AsyncMock) as send:
             await cog.route_thread_reply(cast(discord.Message, cast(object, message)))
             send.assert_not_awaited()
