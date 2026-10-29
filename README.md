@@ -867,7 +867,8 @@ On graceful shutdown, the gateway reader stops and received callbacks drain.
 The bridge closes admission, finishes native attachments, payloads and conversation
 replies, and flushes state within one shutdown deadline. It saves a private,
 atomic checkpoint only after cleanup succeeds. The socket closes without
-invalidating its Discord session.
+invalidating its Discord session. Startup sends no Connected or Loaded-command
+notice.
 
 Rollout has two releases. This first release saves and consumes checkpoints but
 keeps replay disabled. After it is accepted, a second source change enables
@@ -882,22 +883,24 @@ session and request. Changed epochs cannot inherit old replies or approval
 authority. Native clients resend their pending requests; the bot retains only
 session and message routing IDs, then rebuilds prompt cards and stable controls
 from those fresh requests. Request contents, partial answers, views and native
-command state are not serialized. No per-start Connected message is sent.
+command state are not serialized.
 
 `components.discord.handover` reports resume progress and outstanding replay
 counts. Catch-up requires RESUMED, startup and replay completion, alongside
-heartbeat and store health. Missing, expired or unusable checkpoints and failed
-initial resume connections fall back to IDENTIFY, recording that earlier work
-could not be replayed. An unplanned restart can become healthy once Discord and
-the bridge recover. A failed planned resume or replay remains failed catch-up;
-a fresh IDENTIFY does not qualify that planned handover.
+heartbeat and store health. Missing, expired or unusable checkpoints start with
+IDENTIFY, recording that earlier work could not be replayed. Unplanned recovery
+can become healthy once Discord and the bridge recover. A failed planned resume
+or cache rebuild also falls back to IDENTIFY but remains failed catch-up, as
+does a replay error. A fresh IDENTIFY does not qualify that planned handover.
 
-With replay enabled, the CM conversation retains unacknowledged input, reply deduplication
-and observed-message context, bound to its configured destination and native
-epoch. Reconnection flushes older pending input before new sends. Native waits
+With replay enabled, the CM conversation retains unacknowledged input, reply
+deduplication and observed-message context, bound to its configured destination
+and native epoch. Reconnection flushes older pending input before new sends. Native waits
 are bounded; an offline action counts as handled after the person receives a
-notice that it was not delivered and should be retried. During replay, expired slash commands, components and modals receive
-a retry notice before any native side effect.
+notice that it was not delivered and should be retried. During replay, expired
+slash commands, components and modals receive a retry notice before any native
+side effect. Predecessor modal submissions and controls awaiting prompt reconstruction also ask for a retry. Autocomplete is
+discarded; Discord asks again as the person types.
 
 Container startup executes Python directly after dropping privileges, so the
 stop signal reaches the bot. The repository's Compose and systemd definitions

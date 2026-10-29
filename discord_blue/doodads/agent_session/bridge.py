@@ -1060,7 +1060,9 @@ class AgentSessionBridge:
         session = self.sessions.get_by_thread(thread.id)
         if session is None:
             if saved_prompt:
-                await self.post_thread_notice(thread.id, "Agent session is offline; approval was not delivered.")
+                await self.post_thread_notice(
+                    thread.id, "Agent session is offline; approval was not delivered. Please try again after reconnecting."
+                )
                 return True
             return False
 

@@ -69,6 +69,8 @@ class FakeWebSocket:
         self.close_messages: list[bytes] = []
 
     async def send_json(self, payload: dict[str, object]) -> None:
+        if self.closed:
+            raise ConnectionResetError("WebSocket is closed")
         self.sent_json.append(payload)
 
     async def close(self, *, message: bytes = b"", drain: bool = True) -> bool:

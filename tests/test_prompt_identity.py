@@ -45,7 +45,7 @@ class PromptIdentityTests(unittest.IsolatedAsyncioTestCase):
     async def test_reconnect_rejects_old_epoch_even_when_identifiers_match(self) -> None:
         old = await self.prompt()
         self.session = AgentSession(
-            hello=replace(make_hello(), session_epoch="epoch-2"), websocket=cast(Any, self.socket), thread_id=555
+            hello=replace(make_hello(), session_epoch="epoch-2"), websocket=cast(Any, self.socket), thread_id=555, acknowledged=True
         )
         self.bridge.sessions.register(self.session)
         current = await self.prompt()

@@ -14,11 +14,13 @@ from aiohttp import ClientSession, ClientWebSocketResponse, web, WSMsgType, WSCl
 from aiohttp.test_utils import TestServer
 import discord
 from discord.gateway import DiscordWebSocket
+from discord.ui.view import BaseView
 
 from discord_blue.gateway_handover import CHECKPOINT_MAX_AGE_SECONDS, GatewayContinuation
 from discord_blue.plugs.discord_plug import BlueBot
 from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 from discord_blue.doodads.agent_session.sessions import AgentSession
+from discord_blue.doodads.agent_session.protocol import RemoteApprovalRequest
 from discord_blue.config import AgentSessionConfig, ConversationConfig
 from tests.fakes_agent_prompts import prompt_fixture
 from tests.fakes_agent_session import FakeWebSocket, make_hello
@@ -86,6 +88,7 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.identified_event = asyncio.Event()
         self.reject_resume = False
         self.stall_resume = False
+        self.replay_interactions: list[dict[str, Any]] = []
         self.peer: web.WebSocketResponse | None = None
         self.last_sequence = self.continuation.sequence
         self.closed_code: int | None = None
@@ -121,6 +124,11 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
                     await peer.send_json({"op": DiscordWebSocket.INVALIDATE_SESSION, "d": False})
                     continue
                 await self.message()
+                for interaction in self.replay_interactions:
+                    self.last_sequence += 1
+                    await peer.send_json(
+                        {"op": DiscordWebSocket.DISPATCH, "s": self.last_sequence, "t": "INTERACTION_CREATE", "d": interaction}
+                    )
                 self.last_sequence += 1
                 await peer.send_json({"op": DiscordWebSocket.DISPATCH, "s": self.last_sequence, "t": "RESUMED", "d": {}})
                 self.received.set()
@@ -480,8 +488,25 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.bot.handover.buffer_parsers()
         for kind in (2, 3, 5):
             self.bot._connection.parsers["INTERACTION_CREATE"](
-                {"id": expired_id, "guild_id": str(self.guild.id), "channel_id": str(self.channel.id), "type": kind}
+                {"id": expired_id, "guild_id": str(self.guild.id), "channel": {"id": str(self.channel.id)}, "type": kind}
             )
+        for interaction_kind in (discord.InteractionType.modal_submit, discord.InteractionType.autocomplete):
+            self.bot._connection.parsers["INTERACTION_CREATE"](
+                {
+                    "id": str(discord.utils.time_snowflake(datetime.now(UTC))),
+                    "guild_id": str(self.guild.id),
+                    "channel_id": str(self.channel.id),
+                    "type": interaction_kind.value,
+                }
+            )
+        self.bot._connection.parsers["INTERACTION_CREATE"](
+            {
+                "id": expired_id,
+                "guild_id": str(self.guild.id),
+                "channel_id": str(self.channel.id),
+                "type": discord.InteractionType.autocomplete.value,
+            }
+        )
         notices: list[str] = []
 
         async def notice(_channel: discord.TextChannel, content: str, **_kwargs: object) -> None:
@@ -489,8 +514,192 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(discord.TextChannel, "send", notice):
             await self.bot.handover.resumed()
+            await asyncio.gather(*self.bot.handover.replay)
         self.assertEqual(dispatched, [])
-        self.assertEqual(len(notices), 3)
+        self.assertEqual(len(notices), 4)
+
+    async def test_unrestored_component_and_slow_notice_do_not_hold_up_message_replay(self) -> None:
+        await self.bot.login("inert-token")
+        self.bot._connection._add_guild(self.guild)
+        self.guild._add_channel(self.channel)
+        notices: list[str] = []
+        messages: list[dict[str, Any]] = []
+        controls: list[dict[str, Any]] = []
+        release = asyncio.Event()
+
+        async def notice(_channel: discord.TextChannel, content: str, **_kwargs: object) -> None:
+            await release.wait()
+            notices.append(content)
+
+        with prompt_fixture() as fixture:
+            fixture.thread.id = self.channel.id
+            fixture.session.thread_id = self.channel.id
+            request = RemoteApprovalRequest(
+                "pending", "call", "turn", fixture.session.session_id, fixture.session.session_epoch, ["echo"], "/", None
+            )
+            await fixture.bridge.interactions.handle_approval_request(request)
+            message_id = fixture.session.pending_approvals[request.approval_id].message_id
+            fixture.bridge.handover.load(fixture.bridge.handover.export())
+            fixture.bridge.sessions.remove(fixture.session.session_id)
+            cog = Mock(spec=AgentSessionDoodad)
+            cog.bridge = fixture.bridge
+            self.bot._connection.parsers["INTERACTION_CREATE"] = controls.append
+            self.bot._connection.parsers["MESSAGE_CREATE"] = messages.append
+            self.bot.handover.buffer_parsers()
+            self.bot._connection.parsers["INTERACTION_CREATE"](
+                {
+                    "id": str(discord.utils.time_snowflake(datetime.now(UTC))),
+                    "guild_id": str(self.guild.id),
+                    "channel": {"id": str(self.channel.id)},
+                    "type": discord.InteractionType.component.value,
+                    "message": {"id": str(message_id)},
+                }
+            )
+            payload = self.message_payload()
+            self.bot._connection.parsers["MESSAGE_CREATE"](payload)
+            with patch.object(self.bot, "get_cog", return_value=cog), patch.object(discord.TextChannel, "send", notice):
+                try:
+                    await asyncio.wait_for(self.bot.handover.resumed(), 0.2)
+                    self.assertEqual(messages, [payload])
+                    self.assertFalse(controls)
+                    self.assertFalse(self.bot.handover.healthy())
+                finally:
+                    release.set()
+                    await asyncio.gather(*self.bot.handover.replay)
+            self.assertEqual(len(notices), 1)
+            self.assertTrue(self.bot.handover.healthy())
+
+    def interaction(self) -> discord.Interaction[BlueBot]:
+        return discord.Interaction(
+            state=self.bot._connection,
+            data=cast(Any, self.interaction_payload()),
+        )
+
+    def interaction_payload(self) -> dict[str, Any]:
+        return {
+            "id": str(discord.utils.time_snowflake(datetime.now(UTC))),
+            "type": discord.InteractionType.component.value,
+            "token": "inert",
+            "version": 1,
+            "application_id": str(self.continuation.bot_id),
+            "attachment_size_limit": 1024,
+            "guild_id": str(self.guild.id),
+            "channel": {"id": str(self.channel.id), "type": 0},
+            "data": {"component_type": 2, "custom_id": "inert"},
+        }
+
+    async def test_sdk_view_expiry_after_dispatch_gets_notice_and_restores_error_hook(self) -> None:
+        await self.bot.login("inert-token")
+        self.bot._connection._add_guild(self.guild)
+        self.guild._add_channel(self.channel)
+        entered, release = asyncio.Event(), asyncio.Event()
+        executed: list[object] = []
+        expired = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), {"code": 10062, "message": "Expired"})
+
+        class WaitingButton(discord.ui.Button):
+            async def callback(self, interaction: discord.Interaction) -> None:
+                entered.set()
+                await release.wait()
+                await interaction.response.send_modal(discord.ui.Modal(title="inert"))
+                executed.append(interaction)
+
+        view = discord.ui.LayoutView(timeout=None)
+        self.addCleanup(view.stop)
+        button = WaitingButton()
+        view.add_item(discord.ui.ActionRow(button))
+        original = BaseView.on_error
+        notice = AsyncMock()
+        message = self.message_payload()
+        payload = self.interaction_payload()
+        payload["message"] = message
+        payload["data"]["custom_id"] = button.custom_id
+        self.bot.add_view(view, message_id=int(message["id"]))
+        self.replay_interactions.append(payload)
+        with (
+            patch.object(discord.InteractionResponse, "send_modal", side_effect=expired),
+            patch.object(discord.TextChannel, "send", notice),
+        ):
+            running = await self.start_bot()
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+                self.assertFalse(self.bot.handover.healthy())
+                release.set()
+                self.assertTrue(await wait_until(lambda: notice.await_count == 1))
+                for replayed, same_client in ((False, True), (True, False)):
+                    interaction = self.interaction()
+                    if not same_client:
+                        interaction._client = cast(Any, object())
+                    with self.assertLogs(BaseView.__module__, level="ERROR"):
+                        ordinary = asyncio.create_task(view._scheduled_task(button, interaction))
+                        if replayed:
+                            self.bot.handover.replay.add(ordinary)
+                            ordinary.add_done_callback(self.bot.handover.replay.discard)
+                        await ordinary
+                self.assertTrue(self.bot.handover.healthy())
+                with (
+                    patch.object(discord.InteractionResponse, "send_modal", side_effect=RuntimeError("inert callback failure")),
+                    self.assertLogs(BaseView.__module__, level="ERROR"),
+                ):
+                    failed = asyncio.create_task(view._scheduled_task(button, self.interaction()))
+                    self.bot.handover.replay.add(failed)
+                    failed.add_done_callback(self.bot.handover.replay.discard)
+                    await failed
+                self.assertFalse(self.bot.handover.healthy())
+            finally:
+                release.set()
+                await self.finish(running)
+        self.assertFalse(executed)
+        self.assertEqual(notice.await_count, 1)
+        self.assertIs(BaseView.on_error, original)
+
+    async def test_tree_expiry_uses_retry_notice_instead_of_retrying_expired_token(self) -> None:
+        await self.bot.login("inert-token")
+        self.bot._connection._add_guild(self.guild)
+        self.guild._add_channel(self.channel)
+        expired = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), {"code": 10062, "message": "Expired"})
+        error = discord.app_commands.CommandInvokeError(Mock(), expired)
+        notice = AsyncMock()
+        with (
+            patch.object(discord.TextChannel, "send", notice),
+            patch.object(discord.InteractionResponse, "send_message", side_effect=AssertionError("Expired token cannot respond")),
+        ):
+            task = asyncio.create_task(self.bot.tree.on_error(self.interaction(), error))
+            self.bot.handover.replay.add(task)
+            task.add_done_callback(self.bot.handover.replay.discard)
+            await task
+        self.assertEqual(notice.await_count, 1)
+        self.assertTrue(self.bot.handover.healthy())
+
+    async def test_failed_retry_notice_does_not_qualify_catch_up(self) -> None:
+        await self.bot.login("inert-token")
+        self.bot._connection._add_guild(self.guild)
+        self.guild._add_channel(self.channel)
+        expired = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), {"code": 10062, "message": "Expired"})
+        with patch.object(discord.TextChannel, "send", side_effect=RuntimeError("inert notice failure")):
+            error = discord.app_commands.CommandInvokeError(Mock(), expired)
+            task = asyncio.create_task(self.bot.tree.on_error(self.interaction(), error))
+            self.bot.handover.replay.add(task)
+            task.add_done_callback(self.bot.handover.replay.discard)
+            await task
+        self.assertFalse(self.bot.handover.healthy())
+
+    async def test_expired_permission_denial_response_still_notifies(self) -> None:
+        await self.bot.login("inert-token")
+        self.bot._connection._add_guild(self.guild)
+        self.guild._add_channel(self.channel)
+        expired = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), {"code": 10062, "message": "Expired"})
+        notice = AsyncMock()
+        with (
+            patch.object(discord.TextChannel, "send", notice),
+            patch.object(discord.InteractionResponse, "send_message", side_effect=expired),
+            self.assertLogs(discord.app_commands.CommandTree.__module__, level="ERROR"),
+        ):
+            task = asyncio.create_task(self.bot.tree.on_error(self.interaction(), discord.app_commands.CheckFailure("inert denial")))
+            self.bot.handover.replay.add(task)
+            task.add_done_callback(self.bot.handover.replay.discard)
+            await task
+        self.assertEqual(notice.await_count, 1)
+        self.assertTrue(self.bot.handover.healthy())
 
     async def test_shutdown_during_startup_drains_replay_created_after_close_begins(self) -> None:
         starting, start_release, replaying, replay_release = (asyncio.Event() for _ in range(4))

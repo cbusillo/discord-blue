@@ -20,15 +20,21 @@ class HomeCommandTree(discord.app_commands.CommandTree["BlueBot"]):
         return interaction.guild_id == self.client.config.discord.guild_id and bool(interaction.guild_id)
 
     async def on_error(self, interaction: discord.Interaction["BlueBot"], error: discord.app_commands.AppCommandError) -> None:
-        await super().on_error(interaction, error)
-        if isinstance(error, discord.app_commands.CheckFailure):
-            message = "You do not have permission to use this command."
-        else:
-            message = "That command failed. Details are in the bot's log."
-        if interaction.response.is_done():
-            await interaction.followup.send(message, ephemeral=True)
-        else:
-            await interaction.response.send_message(message, ephemeral=True)
+        if await self.client.handover.interaction_error(interaction, error):
+            return
+        try:
+            await super().on_error(interaction, error)
+            if isinstance(error, discord.app_commands.CheckFailure):
+                message = "You do not have permission to use this command."
+            else:
+                message = "That command failed. Details are in the bot's log."
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+        except discord.NotFound as response_error:
+            if not await self.client.handover.interaction_error(interaction, response_error):
+                raise
 
 
 class BlueBot(commands.Bot):

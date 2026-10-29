@@ -6,6 +6,7 @@ import asyncio
 import json
 import uuid
 from collections import OrderedDict
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -158,13 +159,11 @@ class ConversationRouter:
     async def queue_envelope(self, command_id: str, envelope: dict[str, Any]) -> bool:
         if asyncio.current_task() in self.bot.handover.replay:
             async with self.changed:
-                try:
+                with suppress(TimeoutError):
                     await asyncio.wait_for(
                         self.changed.wait_for(lambda: self.connection is not None and not self.connection.websocket.closed),
                         REPLAY_RECONNECT_WAIT_SECONDS,
                     )
-                except TimeoutError:
-                    self.handover.fallback()
         async with self.connection_lock:
             return await self.deliver_envelope(command_id, envelope)
 

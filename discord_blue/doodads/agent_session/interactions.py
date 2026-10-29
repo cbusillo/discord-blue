@@ -517,7 +517,7 @@ class SessionInteractions:
         session = self.bridge.sessions.get(session_id)
         if session is None or session.websocket.closed:
             await interaction.response.send_message(
-                "Agent session is offline; answer was not delivered.",
+                "Agent session is offline; answer was not delivered. Please try again after reconnecting.",
                 ephemeral=True,
             )
             return None
@@ -622,7 +622,7 @@ class SessionInteractions:
         session = self.bridge.sessions.get(session_id)
         if session is None or session.websocket.closed:
             await interaction.response.send_message(
-                "Agent session is offline; approval was not delivered.",
+                "Agent session is offline; approval was not delivered. Please try again after reconnecting.",
                 ephemeral=True,
             )
             return
@@ -687,7 +687,9 @@ class SessionInteractions:
             return True
         if session.websocket.closed:
             await self.bridge.controls.remove_message_reaction(thread, pending.message_id, emoji, user)
-            await self.bridge.post_thread_notice(thread.id, "Agent session is offline; approval was not delivered.")
+            await self.bridge.post_thread_notice(
+                thread.id, "Agent session is offline; approval was not delivered. Please try again after reconnecting."
+            )
             return True
 
         decision: Literal["approved", "denied"]

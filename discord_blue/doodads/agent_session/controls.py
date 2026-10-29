@@ -29,6 +29,7 @@ from discord_blue.doodads.agent_session.store import QuestionState, SessionStore
 from discord_blue.doodads.agent_session.thread_worker import ThreadWorkers
 from discord_blue.doodads.agent_session.threads import session_thread_name
 from discord_blue.plugs.discord_plug import BlueBot
+from discord_blue.gateway_handover import EXPIRED_INTERACTION_NOTICE
 
 logger = logging.getLogger(__name__)
 DELIVERY_UNCONFIRMED = "Agent session connection failed; action delivery could not be confirmed. Check the native TUI."
@@ -55,7 +56,7 @@ GO_AHEAD_CONTROL = SessionControl(
     kind="continue_autonomously",
     slash_command="go-ahead",
     operator_action="ask a session to continue",
-    offline_reply="Agent session is offline; go-ahead was not delivered.",
+    offline_reply="Agent session is offline; go-ahead was not delivered. Please try again after reconnecting.",
     reject_notice="Agent session could not go ahead",
     delivered=CONTINUE_AUTONOMOUSLY_DELIVERED,
     pending_status="Your request is queued.",
@@ -64,7 +65,7 @@ PAUSE_CONTROL = SessionControl(
     kind="pause_current_turn",
     slash_command="pause",
     operator_action="pause a turn",
-    offline_reply="Agent session is offline; pause was not delivered.",
+    offline_reply="Agent session is offline; pause was not delivered. Please try again after reconnecting.",
     reject_notice="Agent session could not pause the current turn",
     delivered=PAUSE_CURRENT_TURN_DELIVERED,
     pending_status="Pause requested; waiting for the native session.",
@@ -73,7 +74,7 @@ NEW_SESSION_CONTROL = SessionControl(
     kind="new_session",
     slash_command="new",
     operator_action="start a new session",
-    offline_reply="Agent session is offline; new session was not started.",
+    offline_reply="Agent session is offline; new session was not started. Please try again after reconnecting.",
     reject_notice="Agent session could not start a new session",
     delivered="Asked the agent session to start a new session in this folder.",
 )
@@ -116,9 +117,7 @@ async def defer_control(interaction: discord.Interaction, **kwargs: bool) -> boo
         if exc.code != 10062:
             raise
         if isinstance(interaction.channel, (discord.Thread, discord.TextChannel)):
-            await interaction.channel.send(
-                "That control expired during the update. Please try again.", allowed_mentions=discord.AllowedMentions.none()
-            )
+            await interaction.channel.send(EXPIRED_INTERACTION_NOTICE, allowed_mentions=discord.AllowedMentions.none())
         return False
     return True
 
@@ -156,7 +155,9 @@ class SessionControls:
 
     def dispatch_error(self, session: AgentSession, action: str) -> str | None:
         if self.bridge.sessions.get(session.session_id) is not session or session.websocket.closed:
-            return "Agent session is offline; action was not delivered."
+            return "Agent session is offline; action was not delivered. Please try again after reconnecting."
+        if not session.acknowledged:
+            return "Agent session is reconnecting; action was not delivered. Please try again shortly."
         if not session.hello.supports(action):
             label = {
                 "reply": "replies",
@@ -224,7 +225,9 @@ class SessionControls:
                         )
                         return True
             if saved_thread:
-                await message.reply("Agent session is offline; reply was not delivered.", mention_author=False)
+                await message.reply(
+                    "Agent session is offline; reply was not delivered. Please try again after reconnecting.", mention_author=False
+                )
                 return True
             return False
         # MESSAGE_CREATE can arrive before the reopened thread returns to discord.py's cache.
@@ -239,7 +242,9 @@ class SessionControls:
             return True
         await self.bridge.questions.decisions(session.session_id, text, url=message.jump_url)
         if session.websocket.closed:
-            await message.reply("Agent session is offline; reply was not delivered.", mention_author=False)
+            await message.reply(
+                "Agent session is offline; reply was not delivered. Please try again after reconnecting.", mention_author=False
+            )
             return True
         if not session.acknowledged:
             await message.reply("Agent session is reconnecting; send the reply again in a moment.", mention_author=False)
@@ -331,7 +336,6 @@ class SessionControls:
             return "This thread is not attached to a live agent session."
         if session.websocket.closed:
             return control.offline_reply
-
         command = RemoteCommand(
             command_id=str(uuid.uuid4()),
             session_id=session.session_id,

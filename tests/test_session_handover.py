@@ -324,7 +324,6 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await asyncio.wait_for(task, 1))
         self.assertEqual(len(message.replies), 1)
         self.assertFalse(self.fixture.socket.sent_json)
-        self.assertGreater(self.bridge.handover.fallbacks, 0)
 
     async def test_shutdown_snapshot_waits_for_incoming_ack_not_websocket_task_exit(self) -> None:
         session = self.fixture.session

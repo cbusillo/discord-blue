@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from copy import deepcopy
 from datetime import UTC, datetime
 import math
@@ -25,7 +25,6 @@ class SessionContinuation:
         self.changed = asyncio.Condition()
         self.incoming: dict[asyncio.Task[Any], int] = {}
         self.snapshot: dict[str, Any] | None = None
-        self.fallbacks = 0
 
     @contextmanager
     def section(self) -> Iterator[None]:
@@ -41,10 +40,6 @@ class SessionContinuation:
             else:
                 del self.incoming[task]
                 self.notify_soon()
-
-    def fallback(self) -> None:
-        if asyncio.current_task() in self.bridge.bot.handover.replay:
-            self.fallbacks += 1
 
     def retire(self, session_id: str, kind: str | None = None, request_id: str | None = None) -> None:
         record = self.saved.get(session_id)
@@ -187,10 +182,8 @@ class SessionContinuation:
             return current is not None and current.acknowledged and not current.websocket.closed
 
         async with self.changed:
-            try:
+            with suppress(TimeoutError):
                 await asyncio.wait_for(self.changed.wait_for(ready), self.grace_seconds)
-            except TimeoutError:
-                self.fallback()
         return self.bridge.sessions.get_by_thread(thread_id)
 
     def has_prompt(self, thread_id: int, message_id: int, *, kind: str = "approvals") -> bool:
@@ -198,12 +191,10 @@ class SessionContinuation:
 
     async def wait_for_prompt(self, thread_id: int, message_id: int) -> None:
         async with self.changed:
-            try:
+            with suppress(TimeoutError):
                 await asyncio.wait_for(
                     self.changed.wait_for(
                         lambda: not any(self.has_prompt(thread_id, message_id, kind=kind) for kind in ("approvals", "inputs"))
                     ),
                     self.grace_seconds,
                 )
-            except TimeoutError:
-                self.fallback()

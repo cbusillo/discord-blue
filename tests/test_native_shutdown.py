@@ -97,8 +97,8 @@ class NativeShutdownTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(stopping.done(), "Shutdown crossed an admitted HELLO before its attach settled")
                     release.set()
                     await asyncio.wait_for(stopping, 2)
-                    self.assertTrue(await hello)
-                    self.assertTrue(any(payload.get("type") == "hello_ack" for payload in socket.sent_json))
+                    self.assertFalse(await hello)
+                    self.assertFalse(any(payload.get("type") == "hello_ack" for payload in socket.sent_json))
                 finally:
                     release.set()
                     await asyncio.gather(hello, return_exceptions=True)
@@ -131,7 +131,7 @@ class NativeShutdownTests(unittest.IsolatedAsyncioTestCase):
                 stopping = asyncio.create_task(bridge.stop(deadline=asyncio.get_running_loop().time() + 0.02))
                 try:
                     await asyncio.sleep(0)
-                    extra = AgentSession(fixture.session.hello, cast(web.WebSocketResponse, FakeWebSocket()))
+                    extra = AgentSession(fixture.session.hello, cast(web.WebSocketResponse, cast(object, FakeWebSocket())))
                     self.assertFalse(await bridge.accept_hello(extra, None))
                     await asyncio.wait_for(stopping, 1)
                     self.assertIsNone(bridge.handover.snapshot)

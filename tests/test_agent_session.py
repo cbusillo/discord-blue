@@ -1642,7 +1642,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(websocket.sent_json, [])
         self.assertEqual(
             message.replies,
-            ["Agent session is offline; reply was not delivered."],
+            ["Agent session is offline; reply was not delivered. Please try again after reconnecting."],
         )
 
     async def test_continue_autonomously_routes_to_registered_session_websocket(self) -> None:
@@ -1650,7 +1650,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555, acknowledged=True)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -1677,7 +1677,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555, acknowledged=True)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -1703,7 +1703,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555, acknowledged=True)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -1730,7 +1730,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555, acknowledged=True)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -1983,6 +1983,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 connecting = asyncio.create_task(self.connect_transport(client))
                 try:
                     await asyncio.wait_for(entered.wait(), 2)
+                    await bridge.controls.send_pause_current_turn(thread, cast(Any, SimpleNamespace(id=123)))
                     reply = FakeReplyMessage(802, thread, "During reattach")
                     thread.add_message(reply)
                     reply.channel = cast(Any, SimpleNamespace(id=thread.id))
@@ -2215,7 +2216,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         doodad = AgentSessionDoodad(cast(Any, FakeBot(config, thread)))
         websocket = FakeWebSocket()
-        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555, acknowledged=True)
         doodad.bridge.sessions.register(session)
         doodad.bridge.sessions.bind_thread("session-1", 555)
         interaction = FakeInteraction(thread)
@@ -2233,7 +2234,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555, acknowledged=True)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -2269,7 +2270,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555, acknowledged=True)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
         session.pending_approvals["approval-1"] = PendingRemoteApproval(thread_id=555, message_id=901)
@@ -2452,6 +2453,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
+            acknowledged=True,
         )
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
@@ -2501,6 +2503,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
+            acknowledged=True,
         )
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)

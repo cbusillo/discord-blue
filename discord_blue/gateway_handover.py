@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 import aiohttp
 import discord
 from discord.gateway import DiscordWebSocket
+from discord.ui.view import BaseView
 from yarl import URL
 
 if TYPE_CHECKING:
@@ -28,6 +29,8 @@ SHUTDOWN_TIMEOUT_SECONDS = 90.0
 CHECKPOINT_MAX_AGE_SECONDS = 60.0
 RESUME_TIMEOUT_SECONDS = 30.0
 REPLAY_ENABLED = False
+INTERACTION_REPLAY_BUDGET_SECONDS = 2.0
+EXPIRED_INTERACTION_NOTICE = "That control expired during the update. Please try again."
 logger = logging.getLogger(__name__)
 
 
@@ -146,7 +149,6 @@ class GatewayHandover:
         self.buffer: list[tuple[str, Callable[[Any], None], Any]] = []
         self.buffering = False
         self.parsing_replay = False
-        self.runtime_started = False
         self.started = False
         self.agents: dict[str, Any] = {}
         self.conversation: dict[str, Any] | None = None
@@ -156,15 +158,11 @@ class GatewayHandover:
         self.resumed_event = asyncio.Event()
 
     def evidence(self) -> dict[str, object]:
-        caught_up = self.status == "replayed" and self.runtime_started and not self.replay
-        from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
-
-        cog = self.bot.get_cog("AgentSessionDoodad")
+        caught_up = self.status == "replayed" and not self.replay
         return {
             "status": "caught_up" if caught_up else self.status,
             "pending_events": len(self.replay),
             "buffered_events": len(self.buffer),
-            "native_fallbacks": cog.bridge.handover.fallbacks if isinstance(cog, AgentSessionDoodad) else 0,
         }
 
     def healthy(self) -> bool:
@@ -203,34 +201,35 @@ class GatewayHandover:
         self._previous_factory = loop.get_task_factory()
         factory = self.task_factory
         loop.set_task_factory(factory)
-        try:
-            if continuation is not None:
-                self.status = "resuming"
-                self.agents = continuation.agents
-                self.conversation = continuation.conversation
-                try:
-                    async with asyncio.timeout(RESUME_TIMEOUT_SECONDS):
-                        await self.warm_cache()
-                except (discord.DiscordException, OSError, aiohttp.ClientError, TimeoutError):
-                    logger.warning("Gateway cache unavailable; earlier work cannot be replayed", exc_info=True)
-                    continuation = None
-                    self.status = "failed"
-            if continuation is not None:
-                connection = self.connect_resumed(continuation, reconnect=reconnect)
-            else:
-                connection = self.bot.connect(reconnect=reconnect)
-            connect_task = asyncio.create_task(connection)
-            self.connect_task = connect_task
-            await connect_task
-        except asyncio.CancelledError:
-            if self.shutdown is None:
-                raise
-        finally:
+        with self.interaction_errors():
             try:
-                await self.close()
+                if continuation is not None:
+                    self.status = "resuming"
+                    self.agents = continuation.agents
+                    self.conversation = continuation.conversation
+                    try:
+                        async with asyncio.timeout(RESUME_TIMEOUT_SECONDS):
+                            await self.warm_cache()
+                    except (discord.DiscordException, OSError, aiohttp.ClientError, TimeoutError):
+                        logger.warning("Gateway cache unavailable; earlier work cannot be replayed", exc_info=True)
+                        continuation = None
+                        self.status = "failed"
+                if continuation is not None:
+                    connection = self.connect_resumed(continuation, reconnect=reconnect)
+                else:
+                    connection = self.bot.connect(reconnect=reconnect)
+                connect_task = asyncio.create_task(connection)
+                self.connect_task = connect_task
+                await connect_task
+            except asyncio.CancelledError:
+                if self.shutdown is None:
+                    raise
             finally:
-                if loop.get_task_factory() is factory:
-                    loop.set_task_factory(self._previous_factory)
+                try:
+                    await self.close()
+                finally:
+                    if loop.get_task_factory() is factory:
+                        loop.set_task_factory(self._previous_factory)
 
     async def connect_resumed(self, continuation: GatewayContinuation, *, reconnect: bool) -> None:
         connecting: asyncio.Task[None] | None = None
@@ -286,15 +285,19 @@ class GatewayHandover:
         if parent is not None and parent in {self.connect_task, self.gateway_task, self.startup_caller}:
             if parent is self.connect_task and self.buffering:
                 return task
-            self.events.add(task)
-            task.add_done_callback(self.events.discard)
+            self.track(task, self.events)
             if self.parsing_replay:
-                self.replay.add(task)
-                task.add_done_callback(self.replay.discard)
+                self.track(task, self.replay)
             elif parent is self.startup_caller:
-                self.startup.add(task)
-                task.add_done_callback(self.startup.discard)
+                self.track(task, self.startup)
         return task
+
+    @staticmethod
+    def track(task: asyncio.Task[Any], *groups: set[asyncio.Task[Any]]) -> None:
+        for group in groups:
+            if task not in group:
+                group.add(task)
+                task.add_done_callback(group.discard)
 
     def buffer_parsers(self) -> None:
         parsers = dict(self.bot._connection.parsers)
@@ -347,7 +350,7 @@ class GatewayHandover:
                 await asyncio.gather(*tuple(self.startup))
             self.parsing_replay = True
             for name, parser, payload in self.buffer:
-                if name == "INTERACTION_CREATE" and await self.reject_expired_interaction(payload):
+                if name == "INTERACTION_CREATE" and self.reject_interaction(payload):
                     continue
                 parser(payload)
             self.buffer.clear()
@@ -361,35 +364,67 @@ class GatewayHandover:
             self.restore_parsers()
             self.startup_caller = None
             self.resumed_event.set()
-        self.runtime_started = True
         self.status = "replayed" if self.status != "failed" else "failed"
         self.bot.dispatch("handover_replayed")
 
-    async def reject_expired_interaction(self, payload: dict[str, Any]) -> bool:
+    def reject_interaction(self, payload: dict[str, Any]) -> bool:
+        kind = payload["type"]
+        if kind == discord.InteractionType.autocomplete.value:
+            return True
+        channel_id = int(payload.get("channel", {}).get("id", payload.get("channel_id", 0)))
         created_at = discord.utils.snowflake_time(int(payload["id"])).timestamp()
-        guild_id = int(payload.get("guild_id", 0))
-        channel_id = int(payload.get("channel_id", 0))
+        rejected = (
+            kind == discord.InteractionType.modal_submit.value or time.time() - created_at >= INTERACTION_REPLAY_BUDGET_SECONDS
+        )
         from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 
         cog = self.bot.get_cog("AgentSessionDoodad")
-        if time.time() - created_at < 3 and guild_id == self.bot.config.discord.guild_id and isinstance(cog, AgentSessionDoodad):
+        if kind == discord.InteractionType.component.value and isinstance(cog, AgentSessionDoodad):
             message_id = int(payload.get("message", {}).get("id", 0))
-            if any(cog.bridge.handover.has_prompt(channel_id, message_id, kind=kind) for kind in ("approvals", "inputs")):
-                await cog.bridge.handover.wait_for_thread(channel_id)
-                await cog.bridge.handover.wait_for_prompt(channel_id, message_id)
-        if time.time() - created_at < 3:
+            rejected = rejected or any(
+                cog.bridge.handover.has_prompt(channel_id, message_id, kind=prompt_kind) for prompt_kind in ("approvals", "inputs")
+            )
+        if rejected and int(payload.get("guild_id", 0)) == self.bot.config.discord.guild_id:
+            self.track(asyncio.create_task(self.retry_interaction(channel_id)), self.events, self.replay)
+        return rejected
+
+    async def retry_interaction(self, channel_id: int) -> None:
+        channel = self.bot.get_channel(channel_id)
+        destination = channel if isinstance(channel, discord.abc.Messageable) else self.bot.get_partial_messageable(channel_id)
+        try:
+            await destination.send(EXPIRED_INTERACTION_NOTICE, allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            self.status = "failed"
+            logger.warning("Unable to post expired-control retry notice", exc_info=True)
+
+    async def interaction_error(self, interaction: discord.Interaction, error: Exception) -> bool:
+        if interaction.client is not self.bot or asyncio.current_task() not in self.replay:
             return False
-        if guild_id == self.bot.config.discord.guild_id:
-            channel = self.bot.get_channel(channel_id)
-            if isinstance(channel, (discord.TextChannel, discord.Thread)):
-                try:
-                    await channel.send(
-                        "That control expired during the update. Please try again.", allowed_mentions=discord.AllowedMentions.none()
-                    )
-                except (discord.DiscordException, OSError):
-                    self.status = "failed"
-                    logger.warning("Unable to post expired-control retry notice", exc_info=True)
-        return True
+        original = error.original if isinstance(error, discord.app_commands.CommandInvokeError) else error
+        if isinstance(original, discord.NotFound) and original.code == 10062:
+            if interaction.channel_id is not None:
+                await self.retry_interaction(interaction.channel_id)
+            return True
+        if not isinstance(error, discord.app_commands.CheckFailure):
+            self.status = "failed"
+        return False
+
+    @contextmanager
+    def interaction_errors(self) -> Iterator[None]:
+        view_error = BaseView.on_error
+
+        async def on_view_error(
+            view: BaseView, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[Any]
+        ) -> None:
+            if not await self.interaction_error(interaction, error):
+                await view_error(view, interaction, error, item)
+
+        BaseView.on_error = on_view_error  # type: ignore[method-assign]
+        try:
+            yield
+        finally:
+            if BaseView.on_error is on_view_error:
+                BaseView.on_error = view_error  # type: ignore[method-assign]
 
     async def warm_cache(self) -> None:
         user = self.bot.user
