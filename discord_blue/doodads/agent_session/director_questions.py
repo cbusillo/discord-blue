@@ -570,7 +570,8 @@ class QuestionCards:
                 question = replace(question, state=closed)
                 self.save(session_id, question)
                 await self.refresh(session_id, [question], thread=thread)
-        restored = [q for key in self.unconfirmed_at_start.pop(session_id, []) if (q := self.record(session_id, key))]
+        records = (self.record(session_id, key) for key in self.unconfirmed_at_start.pop(session_id, []))
+        restored = [question for question in records if question is not None]
         await self.refresh(session_id, restored, thread=thread)
 
     async def submit(
