@@ -525,7 +525,8 @@ class QuestionAnswerModal(discord.ui.Modal):
             self.add_item(discord.ui.Label(text=number[:45], description=body[:100] or None, component=field))
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        # Acknowledge silently: the card turning green is the success signal; only refusals get a private notice.
+        await interaction.response.defer()
         async with self.cards.lock(self.question.key):
             question = self.cards.record(self.session_id, self.question.key)
             error = self.cards.context_error(interaction, self.session_id, question)
@@ -613,6 +614,4 @@ class QuestionAnswerModal(discord.ui.Modal):
                         await send_agent_session_message(thread, error, silent=True)
                     except discord.DiscordException:
                         logger.warning("Unable to post Question answer failure in thread %s", thread.id)
-            await interaction.followup.send(
-                error or "Decision recorded. Watch your thread reply for native delivery confirmation.", ephemeral=True
-            )
+                await interaction.followup.send(error, ephemeral=True)

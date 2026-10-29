@@ -576,13 +576,10 @@ Behaviour and limits:
   still mirrored, but Claude Code drops channel messages, so the thread offers
   no replies and says how to resume with the flag.
 - Discord cannot pause, interrupt or end a Claude Code turn, and cannot answer
-  Claude's multiple-choice questions. A reply sent while Claude is working is
-  held, because Claude Code would otherwise queue it and could deliver it after
-  `/clear` or `/resume`. Held replies go out only when Claude Code reports it is
-  idle: its `idle_prompt` notification, about a minute after Claude finishes and
-  only while nobody is typing in the terminal. Each such moment delivers and
-  acknowledges the oldest held reply; the rest wait for the next. Held replies
-  are dropped, with a notice, if the conversation switches first.
+  Claude's multiple-choice questions. A reply goes to Claude Code as soon as it
+  arrives; while Claude is working, Claude Code queues it like a typed prompt.
+  A reply still in that queue when you run `/clear` or `/resume` can reach the
+  next conversation.
 - Discord cannot approve or deny Claude Code's permission prompts. Claude
   Code's channel permission request carries only a display preview and no
   tool-call ID, so a Discord decision could not be tied reliably to the call
@@ -649,8 +646,8 @@ the full decision. A session answer containing an explicit `Director decision:
 Q123. ...` record with a GitHub comment link also marks that question answered.
 This reads records delivered through the session, rather than polling GitHub.
 Recording an answer does not prove delivery to the native session; normal reply
-reactions and failure notices still report that separately. Claude may hold a
-busy reply until idle. An unanswered question stays visible when the session
+reactions and failure notices still report that separately. A delivered answer
+shows no private confirmation; only a refusal or failure does. An unanswered question stays visible when the session
 ends, with its full context and an **Unanswered** label.
 Older releases cannot restore these new cards' answer forms after a rollback;
 ordinary thread replies still work. Existing parent cards are retired lazily

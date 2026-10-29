@@ -466,6 +466,14 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.fixture.bridge.bot.config.agent_session.enabled = True
                 self.fixture.socket.closed = False
 
+    async def test_a_delivered_answer_shows_no_private_notice(self) -> None:
+        modal = await self.card()
+        modal.fields[0]._value = "Yes"
+        interaction = FakeInteraction(self.fixture.thread)
+        await modal.on_submit(cast(Any, interaction))
+        self.assertEqual(self.fixture.socket.sent_json[-1]["text"], "Q12: Yes")
+        self.assertEqual((interaction.response.messages, interaction.response.thinking), ([], False))
+
     async def test_recovery_deduplicates_each_number_and_preserves_answered_state(self) -> None:
         modal = await self.card()
         modal.fields[0]._value = "Yes"
