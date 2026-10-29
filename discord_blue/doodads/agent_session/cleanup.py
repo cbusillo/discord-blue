@@ -68,9 +68,8 @@ class CleanupHooks(Protocol):
 
 
 class SessionCleanups:
-    def __init__(self, bridge: CleanupHooks, attach_lock: asyncio.Lock) -> None:
+    def __init__(self, bridge: CleanupHooks) -> None:
         self.bridge = bridge
-        self.attach_lock = attach_lock
         self.pending: dict[tuple[str, str, int | None], PendingSessionCleanup] = {}
         self.finalizing: set[tuple[str, str, int | None]] = set()
         # Notifications with a DELETE sent (a count, as sweeps and cleanups can overlap) or already done: an attach or
@@ -402,13 +401,13 @@ class SessionCleanups:
     async def retry_pending_cleanups(self) -> None:
         for key, cleanup in list(self.pending.items()):
             self.bridge.record_maintenance_progress()
-            if self.pending.get(key) is not cleanup or self.attach_lock.locked():
+            if self.pending.get(key) is not cleanup or self.bridge.attaching():
                 continue
             lifecycle_lock = self.bridge.session_lifecycle_lock(cleanup.session_id)
             if lifecycle_lock.locked():
                 continue
             async with lifecycle_lock:
-                if self.attach_lock.locked():
+                if self.bridge.attaching():
                     continue
                 current = self.bridge.sessions.get(cleanup.session_id)
                 if current is not None and current.thread_id == cleanup.thread_id:
