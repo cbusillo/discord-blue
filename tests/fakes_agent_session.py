@@ -378,6 +378,7 @@ class FakeInteractionResponse:
         self.edits: list[tuple[str, bool]] = []
         self.edit_kwargs: list[dict[str, object]] = []
         self.modals: list[object] = []
+        self.message: FakeReplyMessage | None = None
         self.deferred = False
         self.ephemeral = False
         self.thinking = False
@@ -393,6 +394,9 @@ class FakeInteractionResponse:
     async def edit_message(self, content: str | None = None, **kwargs: object) -> None:
         self.edits.append((content or "", kwargs.get("view") is None))
         self.edit_kwargs.append(kwargs)
+        if self.message is not None and "view" in kwargs:
+            # Discord edits the component's own message, which a later fetch then reads.
+            await self.message.edit(content=self.message.content or None, view=kwargs["view"])
 
     async def send_modal(self, modal: object) -> None:
         self.modals.append(modal)
@@ -409,6 +413,7 @@ class FakeInteraction:
         self.user = SimpleNamespace(id=user_id)
         self.message = message
         self.response = FakeInteractionResponse()
+        self.response.message = message
         self.followup = SimpleNamespace(send=self.response.send_message)
 
     async def edit_original_response(self, content: str | None, **kwargs: object) -> None:
