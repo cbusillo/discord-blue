@@ -915,6 +915,8 @@ class AgentSessionBridge:
         if previous is None or previous.thread_id is None or self.sessions.get(previous.session_id) is not None:
             return
         self.sessions.register(previous)
+        # Its typing stopped while it was replaced; resume it if the session still works.
+        self.controls.show_activity(previous)
         if self._stopping or (not previous.websocket.closed and not previous.ended):
             return
         if previous.grace_task is None and not previous.ended:

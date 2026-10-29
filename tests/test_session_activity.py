@@ -148,6 +148,17 @@ class SessionActivityTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.sessions.remove_if_current(self.session)
         self.assertFalse(await self.typing_continues())
 
+    async def test_a_failed_reconnect_restores_typing_for_the_previous_connection(self) -> None:
+        from discord_blue.doodads.agent_session.sessions import AgentSession
+
+        await self.status("status_changed", "Turn started")
+        replacement = AgentSession(hello=self.session.hello, websocket=self.session.websocket, thread_id=self.session.thread_id)
+        self.bridge.sessions.register(replacement)
+        self.assertFalse(await self.typing_continues())
+        self.bridge.sessions.remove_if_current(replacement)
+        self.bridge.restore_replaced(self.session)
+        self.assertTrue(await self.typing_continues())
+
     async def test_a_failed_typing_request_keeps_the_session_and_retries(self) -> None:
         error = discord.HTTPException(cast(ClientResponse, cast(object, SimpleNamespace(status=503, reason="Unavailable"))), "")
         with patch.object(FakeThread, "typing", side_effect=error) as typing:
