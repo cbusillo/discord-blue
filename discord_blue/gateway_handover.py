@@ -194,9 +194,11 @@ class GatewayHandover:
             if self.shutdown is None:
                 raise
         finally:
-            await self.close()
-            if loop.get_task_factory() is factory:
-                loop.set_task_factory(self._previous_factory)
+            try:
+                await self.close()
+            finally:
+                if loop.get_task_factory() is factory:
+                    loop.set_task_factory(self._previous_factory)
 
     async def connect_resumed(self, continuation: GatewayContinuation, *, reconnect: bool) -> None:
         backoff = ExponentialBackoff()
@@ -312,6 +314,8 @@ class GatewayHandover:
             self.buffer.clear()
         except Exception:
             self.status = "failed"
+            logger.warning("Gateway resume failed with %s buffered events; catch-up is unconfirmed", len(self.buffer), exc_info=True)
+            self.buffer.clear()
             raise
         finally:
             self.parsing_replay = False

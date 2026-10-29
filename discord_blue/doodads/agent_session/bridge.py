@@ -810,7 +810,7 @@ class AgentSessionBridge:
                 restored = await self.handover.restore_prompt(session, message_type, payload)
             except (ValueError, KeyError, TypeError, discord.HTTPException, discord.RateLimited, OSError):
                 handover = self.bot.handover
-                if handover.replay or (handover.status != "initial" and not handover.runtime_started):
+                if handover.status != "initial" and not handover.runtime_started:
                     handover.status = "failed"
                 logger.warning("Unable to restore Agent session prompt", exc_info=True)
             if restored:
@@ -1048,7 +1048,7 @@ class AgentSessionBridge:
         if not self.is_operator(user) or emoji not in {REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY}:
             return False
 
-        saved_prompt = bool(self.bot.handover.replay) and self.handover.has_prompt(thread.id, message_id)
+        saved_prompt = asyncio.current_task() in self.bot.handover.replay and self.handover.has_prompt(thread.id, message_id)
         if saved_prompt:
             if await self.handover.wait_for_thread(thread.id) is not None:
                 await self.handover.wait_for_prompt(thread.id, message_id)

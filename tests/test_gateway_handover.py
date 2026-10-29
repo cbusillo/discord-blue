@@ -296,6 +296,23 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await wait_until(lambda: len(messages) == 1))
         self.assertFalse(self.bot.handover.healthy())
         await self.finish(task)
+        saved = GatewayContinuation.read(self.bot.handover.path, self.continuation.bot_id)
+        self.assertEqual(saved.sequence, self.last_sequence)
+
+    async def test_shutdown_error_still_restores_the_previous_task_factory(self) -> None:
+        loop = asyncio.get_running_loop()
+        previous_factory = loop.get_task_factory()
+        try:
+            with (
+                patch.object(self.bot, "connect", AsyncMock()),
+                patch.object(self.bot.handover, "close", AsyncMock(side_effect=OSError("inert checkpoint failure"))),
+            ):
+                task = asyncio.create_task(self.bot.start("inert-token"))
+                with self.assertRaises(OSError):
+                    await task
+            self.assertIs(loop.get_task_factory(), previous_factory)
+        finally:
+            loop.set_task_factory(previous_factory)
 
     async def test_ready_marker_failure_is_failed_health_without_ending_dispatch(self) -> None:
         await self.bot.login("inert-token")

@@ -159,6 +159,20 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.bridge.controls.send_thread_reply(cast(discord.Message, cast(object, message))))
         self.assertFalse(message.replies)
 
+    async def test_unrelated_live_reply_does_not_wait_for_another_events_replay(self) -> None:
+        release = asyncio.Event()
+        replayed = asyncio.create_task(release.wait())
+        self.replay.add(replayed)
+        message = FakeReplyMessage(779, self.fixture.thread, "live reply")
+        try:
+            self.assertFalse(
+                await asyncio.wait_for(self.bridge.controls.send_thread_reply(cast(discord.Message, cast(object, message))), 0.2)
+            )
+            self.assertFalse(message.replies)
+        finally:
+            release.set()
+            await replayed
+
     async def test_reconnect_restores_input_answers_and_custom_ids_without_an_extra_card(self) -> None:
         self.install_view_store()
         self.bridge.sessions.register(self.fixture.session)

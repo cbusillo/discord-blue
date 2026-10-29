@@ -55,7 +55,7 @@ class SessionContinuation:
     def fallback(self) -> None:
         self.fallbacks += 1
         handover = self.bridge.bot.handover
-        if not handover.runtime_started or handover.replay:
+        if asyncio.current_task() in handover.replay:
             handover.status = "failed"
 
     def retire(self, session_id: str, kind: str | None = None, request_id: str | None = None) -> None:
@@ -347,7 +347,7 @@ class SessionContinuation:
 
     async def wait_for_thread(self, thread_id: int) -> AgentSession | None:
         session = self.bridge.sessions.get_by_thread(thread_id)
-        if not self.bridge.bot.handover.replay:
+        if asyncio.current_task() not in self.bridge.bot.handover.replay:
             return session
         if not any(record["thread_id"] == thread_id for record in self.saved.values()):
             return session

@@ -156,7 +156,7 @@ class ConversationRouter:
         return await self.queue_envelope(f"delete-{payload.message_id}", {**envelope, "event": "deletion", "text": ""})
 
     async def queue_envelope(self, command_id: str, envelope: dict[str, Any]) -> bool:
-        if self.bot.handover.replay:
+        if asyncio.current_task() in self.bot.handover.replay:
             async with self.changed:
                 try:
                     await asyncio.wait_for(

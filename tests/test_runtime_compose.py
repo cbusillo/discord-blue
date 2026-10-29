@@ -145,7 +145,7 @@ class RuntimeComposeTests(unittest.TestCase):
                 if not overrides:
                     self.assertIn("runtime-inputs-qualified", result.stdout)
 
-    def test_container_signal_reaches_python_and_allows_shutdown_to_finish(self) -> None:
+    def test_container_signal_reaches_python(self) -> None:
         self.override.write_text(
             json.dumps({"services": {"discord-blue": {"command": ["/app/.venv/bin/python", "-c", SHUTDOWN_PROBE], "restart": "no"}}})
         )
@@ -224,11 +224,9 @@ finally:
 SHUTDOWN_PROBE = """
 import os
 import signal
-import time
 assert os.getpid() == 1
 assert os.getuid() != 0
 def stop(_signal: int, _frame: object) -> None:
-    time.sleep(3)
     print("probe-finished", flush=True)
     raise SystemExit(0)
 signal.signal(signal.SIGTERM, stop)

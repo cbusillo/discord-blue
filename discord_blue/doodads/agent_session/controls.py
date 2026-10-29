@@ -199,7 +199,7 @@ class SessionControls:
         text = message.content.strip()
         if not text or text.startswith("!"):
             return False
-        saved_thread = bool(self.bridge.bot.handover.replay) and any(
+        saved_thread = asyncio.current_task() in self.bridge.bot.handover.replay and any(
             record["thread_id"] == message.channel.id for record in self.bridge.handover.saved.values()
         )
         session = await self.bridge.handover.wait_for_thread(message.channel.id)
