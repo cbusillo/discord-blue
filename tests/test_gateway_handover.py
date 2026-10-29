@@ -622,11 +622,11 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         expired = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), {"code": 10062, "message": "Expired"})
 
         class WaitingButton(discord.ui.Button):
-            async def callback(self, callback_interaction: discord.Interaction) -> None:
+            async def callback(self, interaction: discord.Interaction) -> None:
                 entered.set()
                 await release.wait()
-                await callback_interaction.response.send_modal(discord.ui.Modal(title="inert"))
-                executed.append(callback_interaction)
+                await interaction.response.send_modal(discord.ui.Modal(title="inert"))
+                executed.append(interaction)
 
         view = discord.ui.LayoutView(timeout=None)
         self.addCleanup(view.stop)
@@ -651,11 +651,11 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
                 self.assertTrue(await wait_until(lambda: notice.await_count == 1))
                 for replayed, same_client in ((False, True), (True, False)):
-                    interaction = self.interaction()
+                    ordinary_interaction = self.interaction()
                     if not same_client:
-                        interaction._client = cast(Any, object())
+                        ordinary_interaction._client = cast(Any, object())
                     with self.assertLogs(BaseView.__module__, level="ERROR"):
-                        ordinary = asyncio.create_task(view._scheduled_task(button, interaction))
+                        ordinary = asyncio.create_task(view._scheduled_task(button, ordinary_interaction))
                         if replayed:
                             self.bot.handover.replay.add(ordinary)
                             ordinary.add_done_callback(self.bot.handover.replay.discard)

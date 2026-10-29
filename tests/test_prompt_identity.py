@@ -81,17 +81,21 @@ class PromptIdentityTests(unittest.IsolatedAsyncioTestCase):
         release = asyncio.Event()
         entered = [asyncio.Event(), asyncio.Event()]
         interactions = [FakeInteraction(self.thread), FakeInteraction(self.thread)]
-        tasks = []
-        for index, action in enumerate((view.submit, view.cancel)):
+        for index in range(len(interactions)):
             original = interactions[index].response.defer
 
-            async def defer(index: int = index, original: Callable[[], Awaitable[None]] = original) -> None:
-                entered[index].set()
+            async def defer(
+                entered_event: asyncio.Event = entered[index], respond: Callable[[], Awaitable[None]] = original
+            ) -> None:
+                entered_event.set()
                 await release.wait()
-                await original()
+                await respond()
 
             self.enterContext(patch.object(interactions[index].response, "defer", defer))
-            tasks.append(asyncio.create_task(action(cast(Any, interactions[index]))))
+        tasks = [
+            asyncio.create_task(view.submit(cast(Any, interactions[0]))),
+            asyncio.create_task(view.cancel(cast(Any, interactions[1]))),
+        ]
         try:
             await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered)), 1)
         finally:
