@@ -335,7 +335,6 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         socket.send_json = held_ack  # type: ignore[method-assign]
         socket.receive = AsyncMock(return_value=SimpleNamespace(type=WSMsgType.CLOSE))  # type: ignore[attr-defined]
         task = asyncio.create_task(self.bridge.conversations.serve(cast(Any, socket), hello()))
-        arriving: asyncio.Task[bool] | None = None
         try:
             await asyncio.wait_for(entered.wait(), 2)
             arriving = asyncio.create_task(self.bridge.conversations.receive_message(message()))
@@ -345,7 +344,6 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
             await asyncio.wait_for(task, 2)
-        assert arriving is not None
         self.assertTrue(await asyncio.wait_for(arriving, 2))
         self.assertEqual([payload["type"] for payload in socket.sent_json], ["hello_ack", "command"])
 

@@ -338,7 +338,6 @@ class AgentSessionBridge:
         self.handover.snapshot = None
         self._stopping = True
         self.session_threads.creation_stopping.set()
-        complete = True
         snapshot = None
         try:
             complete = await self.threads.bounded(self.close_native_connections(), max(0, deadline - loop.time()))

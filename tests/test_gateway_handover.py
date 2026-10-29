@@ -570,7 +570,7 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(self.bot.handover.healthy())
 
     def interaction(self) -> discord.Interaction[BlueBot]:
-        return discord.Interaction(
+        return discord.Interaction[BlueBot](
             state=self.bot._connection,
             data=cast(Any, self.interaction_payload()),
         )
