@@ -364,90 +364,16 @@ class PermissionNoticeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(leftover, [])
 
 
-class HeldReplyTests(unittest.IsolatedAsyncioTestCase):
-    async def test_replies_wait_for_claude_to_be_idle_and_are_dropped_when_the_conversation_changes(self) -> None:
+class ReplyDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_reply_during_a_turn_reaches_claude_at_once(self) -> None:
         async with running_channel() as (claude, discord):
             await claude.initialize()
             hello = await discord.next("hello")
             await hook(claude, "UserPromptSubmit", prompt="Long task")
-            # Claude Code would queue a message sent now and deliver it even after /clear, so it waits here.
-            await discord.sockets[-1].send_json(command(hello, "cmd-1", "reply", text="then do this"))
-            await discord.control(command(hello, "barrier-1", "status_request"))  # Controls run in order.
-            self.assertEqual(await claude.settle(), [])
-            await hook(claude, "Stop", last_assistant_message="Done.")
-            self.assertEqual(await claude.settle(), [])  # Another Stop hook may still keep Claude working.
-            await hook(claude, "Notification")
-            delivered = await claude.notification(CHANNEL)
-            acked = await discord.next("command_ack")  # Held, so acknowledged only once delivered.
-
-            echo = '<channel source="plugin:dui:dui" command_id="cmd-1">\nthen do this\n</channel>'
-            await hook(claude, "UserPromptSubmit", prompt=echo)
-            await discord.sockets[-1].send_json(command(hello, "cmd-2", "reply", text="and this, later"))
-            await discord.control(command(hello, "barrier-2", "status_request"))
-            await hook(claude, "SessionEnd")
-            after = await discord.next("hello")
-            dropped = [(await discord.next("notice"))["message"] for _ in range(2)][1]
-            now_idle = await discord.control(command(after, "cmd-3", "reply", text="for the new conversation"))
-            injected = await claude.notification(CHANNEL)
-            leftover = await claude.settle()
-
-        self.assertEqual((delivered["content"], acked["command_id"]), ("then do this", "cmd-1"))
-        self.assertIn("1 Discord reply was waiting for Claude Code to be idle and was not delivered", dropped)
-        self.assertEqual((now_idle["type"], injected["content"]), ("command_ack", "for the new conversation"))
-        self.assertEqual(leftover, [])
-
-    async def test_a_reply_after_stop_waits_for_the_idle_notification(self) -> None:
-        async with running_channel() as (claude, discord):
-            await claude.initialize()
-            hello = await discord.next("hello")
-            await hook(claude, "UserPromptSubmit", prompt="Task")
-            await hook(claude, "Stop", last_assistant_message="First pass.")
-            await discord.sockets[-1].send_json(command(hello, "cmd-1", "reply", text="after the task"))
-            await discord.control(command(hello, "barrier", "status_request"))
-            after_stop = await claude.settle()
-            # Another plugin's Stop hook blocked the stop, so Claude keeps working.
-            await hook(claude, "PreToolUse")
-            await hook(claude, "PostToolUse")
-            await hook(claude, "Stop", last_assistant_message="Done.")
-            after_continuation = await claude.settle()
-            await hook(claude, "Notification")
+            acked = await discord.control(command(hello, "cmd-1", "reply", text="then do this"))
             delivered = await claude.notification(CHANNEL)
 
-        self.assertEqual((after_stop, after_continuation), ([], []))
-        self.assertEqual(delivered["content"], "after the task")
-
-    async def test_each_idle_moment_releases_one_held_reply(self) -> None:
-        async with running_channel() as (claude, discord):
-            await claude.initialize()
-            hello = await discord.next("hello")
-            await hook(claude, "UserPromptSubmit", prompt="Task")
-            for command_id, text in (("cmd-1", "first"), ("cmd-2", "second")):
-                await discord.sockets[-1].send_json(command(hello, command_id, "reply", text=text))
-            await discord.control(command(hello, "barrier", "status_request"))
-            await hook(claude, "Stop", last_assistant_message="Done.")
-            await hook(claude, "Notification")
-            after_first_idle = [message["params"]["content"] for message in await claude.settle()]
-            claude.received.clear()
-            echo = '<channel source="plugin:dui:dui" command_id="cmd-1">\nfirst\n</channel>'
-            await hook(claude, "UserPromptSubmit", prompt=echo)
-            await hook(claude, "Stop", last_assistant_message="Answered first.")
-            await hook(claude, "Notification")
-            after_second_idle = [message["params"]["content"] for message in await claude.settle()]
-
-        self.assertEqual((after_first_idle, after_second_idle), (["first"], ["second"]))
-
-    async def test_an_idle_prompt_releases_replies_held_by_an_interrupted_turn(self) -> None:
-        async with running_channel() as (claude, discord):
-            await claude.initialize()
-            hello = await discord.next("hello")
-            await hook(claude, "UserPromptSubmit", prompt="Task the owner interrupts; Stop does not run")
-            await discord.sockets[-1].send_json(command(hello, "cmd-1", "reply", text="try another way"))
-            await discord.control(command(hello, "barrier", "status_request"))
-            self.assertEqual(await claude.settle(), [])
-            await hook(claude, "Notification")
-            delivered = await claude.notification(CHANNEL)
-
-        self.assertEqual(delivered["content"], "try another way")
+        self.assertEqual((acked["type"], delivered["content"]), ("command_ack", "then do this"))
 
 
 class LaunchTests(unittest.TestCase):
