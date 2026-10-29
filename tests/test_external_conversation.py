@@ -335,14 +335,19 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         socket.send_json = held_ack  # type: ignore[method-assign]
         socket.receive = AsyncMock(return_value=SimpleNamespace(type=WSMsgType.CLOSE))  # type: ignore[attr-defined]
         task = asyncio.create_task(self.bridge.conversations.serve(cast(Any, socket), hello()))
+        arriving: asyncio.Task[bool] | None = None
         try:
             await asyncio.wait_for(entered.wait(), 2)
-            self.assertFalse(await self.bridge.conversations.receive_message(message()))
+            arriving = asyncio.create_task(self.bridge.conversations.receive_message(message()))
+            await asyncio.sleep(0)
+            self.assertFalse(arriving.done())
             self.assertEqual(socket.sent_json, [])
         finally:
             release.set()
             await asyncio.wait_for(task, 2)
-        self.assertEqual([payload["type"] for payload in socket.sent_json], ["hello_ack"])
+        assert arriving is not None
+        self.assertTrue(await asyncio.wait_for(arriving, 2))
+        self.assertEqual([payload["type"] for payload in socket.sent_json], ["hello_ack", "command"])
 
     async def test_same_epoch_reconnect_replays_once_and_new_epoch_drops_old_input(self) -> None:
         websocket = await self.connect()

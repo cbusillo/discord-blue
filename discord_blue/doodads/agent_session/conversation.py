@@ -165,6 +165,10 @@ class ConversationRouter:
                     )
                 except TimeoutError:
                     self.handover.fallback()
+        async with self.connection_lock:
+            return await self.deliver_envelope(command_id, envelope)
+
+    async def deliver_envelope(self, command_id: str, envelope: dict[str, Any]) -> bool:
         channel, binding, connection = self.channel(), self.binding(), self.connection
         if channel is None:
             return False
@@ -241,10 +245,10 @@ class ConversationRouter:
                 connection.websocket = websocket
                 self.connection = connection
                 self.continuation = None
-                async with self.changed:
-                    self.changed.notify_all()
                 for payload in list(connection.pending.values()):
                     await websocket.send_json(payload)
+                async with self.changed:
+                    self.changed.notify_all()
             if old_socket is not None and not old_socket.closed:
                 await old_socket.close(message=b"replaced connection", drain=False)
         while not self.handover.bridge._stopping and not websocket.closed:

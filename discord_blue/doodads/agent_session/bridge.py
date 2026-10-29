@@ -336,6 +336,7 @@ class AgentSessionBridge:
         if deadline is None:
             deadline = loop.time() + SHUTDOWN_TIMEOUT_SECONDS
         self.handover.snapshot = None
+        self._stopping = True
         self.session_threads.creation_stopping.set()
         complete = False
         snapshot = None
@@ -345,11 +346,9 @@ class AgentSessionBridge:
                     await asyncio.wait_for(self.handover.changed.wait(), max(0, deadline - loop.time()))
                 if loop.time() >= deadline:
                     raise TimeoutError
-                self._stopping = True
                 snapshot = {"agents": self.handover.export(), "conversation": self.conversations.export()}
                 complete = True
         except TimeoutError:
-            self._stopping = True
             logger.warning("Agent session shutdown did not settle native work before its deadline")
         try:
             await self.threads.bounded(self.conversations.stop(), max(0, deadline - loop.time()))
@@ -362,14 +361,13 @@ class AgentSessionBridge:
             if background_task not in self.handover.incoming:
                 await self.stop_background_task(name, background_task)
         self._cleanup_task = self._heartbeat_task = None
-        if complete:
-            try:
-                await self.threads.bounded(self.disconnect_active_sessions(), max(0, deadline - loop.time()))
-            except TimeoutError:
-                complete = False
+        try:
+            await self.threads.bounded(self.disconnect_active_sessions(), max(0, deadline - loop.time()))
+        except TimeoutError:
+            complete = False
         self.threads.stop()
         try:
-            if self._runner is not None and not self.handover.incoming and not self._attach_tasks:
+            if self._runner is not None:
                 await self.threads.bounded(self._runner.cleanup(), max(0, deadline - loop.time()))
             await self.threads.bounded(self.store.close(), max(0, deadline - loop.time()))
             complete = complete and self.store.error is None and loop.time() < deadline
@@ -758,7 +756,7 @@ class AgentSessionBridge:
                     timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS,
                 )
                 return False
-            if self._stopping or self.sessions.get(hello.session_id) is not session:
+            if self.sessions.get(hello.session_id) is not session:
                 # A newer connection of this session joined the attach while this one waited; it gets the ack.
                 await self.close_session_websocket(
                     session.session_id,
@@ -809,9 +807,6 @@ class AgentSessionBridge:
             try:
                 restored = await self.handover.restore_prompt(session, message_type, payload)
             except (ValueError, KeyError, TypeError, discord.HTTPException, discord.RateLimited, OSError):
-                handover = self.bot.handover
-                if handover.status != "initial" and not handover.runtime_started:
-                    handover.status = "failed"
                 logger.warning("Unable to restore Agent session prompt", exc_info=True)
             if restored:
                 return
@@ -834,10 +829,7 @@ class AgentSessionBridge:
                 kind = "approvals" if message_type == "approval_resolved" else "inputs"
                 request_id = payload.get("approval_id" if kind == "approvals" else "call_id")
                 if isinstance(request_id, str):
-                    record = self.handover.saved.get(session.session_id, {})
-                    prompt = record.get(kind, {}).get(request_id)
-                    if kind == "approvals" or (prompt is not None and prompt["request"].get("turn_id") == payload.get("turn_id")):
-                        self.handover.retire(session.session_id, kind, request_id)
+                    self.handover.retire(session.session_id, kind, request_id)
                 await self.interactions.handle_prompt_resolved(message_type, payload)
             case "approval_request":
                 await self.interactions.handle_approval_request(RemoteApprovalRequest.from_payload(payload))
@@ -1048,7 +1040,7 @@ class AgentSessionBridge:
         if not self.is_operator(user) or emoji not in {REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY}:
             return False
 
-        saved_prompt = asyncio.current_task() in self.bot.handover.replay and self.handover.has_prompt(thread.id, message_id)
+        saved_prompt = self.handover.has_prompt(thread.id, message_id)
         if saved_prompt:
             if await self.handover.wait_for_thread(thread.id) is not None:
                 await self.handover.wait_for_prompt(thread.id, message_id)

@@ -1,6 +1,8 @@
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 import json
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -27,6 +29,7 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.folder = Path(self.enterContext(TemporaryDirectory()))
         self.enterContext(patch("pathlib.Path.home", return_value=self.folder))
+        self.enterContext(patch("discord_blue.gateway_handover.REPLAY_ENABLED", True, create=True))
         self.bot = BlueBot(cast(Any, SimpleNamespace(discord=SimpleNamespace(guild_id=1, bot_channel_id=2))))
         await self.bot._async_setup_hook()
         self.addAsyncCleanup(self.bot.close)
@@ -82,6 +85,7 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.identified = False
         self.identified_event = asyncio.Event()
         self.reject_resume = False
+        self.stall_resume = False
         self.peer: web.WebSocketResponse | None = None
         self.last_sequence = self.continuation.sequence
         self.closed_code: int | None = None
@@ -111,6 +115,8 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
                 await peer.send_json({"op": DiscordWebSocket.HEARTBEAT_ACK})
             elif payload["op"] == DiscordWebSocket.RESUME:
                 self.resume_payload = payload["d"]
+                if self.stall_resume:
+                    continue
                 if self.reject_resume:
                     await peer.send_json({"op": DiscordWebSocket.INVALIDATE_SESSION, "d": False})
                     continue
@@ -258,7 +264,8 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(task, 3)
                 await incoming
                 saved = GatewayContinuation.read(self.bot.handover.path, self.continuation.bot_id)
-                self.assertEqual(saved.agents[session.session_id]["active_command_id"], session.active_command_id)
+                self.assertEqual(session.active_command_id, "inert-command")
+                self.assertEqual(saved.agents[session.session_id]["epoch"], session.session_epoch)
                 self.assertEqual(saved.sequence, self.last_sequence)
                 self.assertTrue(socket.closed)
             finally:
@@ -266,21 +273,6 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
                 await incoming
                 if closing is not None:
                     await closing
-
-    async def test_marker_write_failure_keeps_replay_and_later_live_messages_flowing(self) -> None:
-        messages: list[discord.Message] = []
-
-        async def on_message(message: discord.Message) -> None:
-            messages.append(message)
-
-        self.bot.add_listener(on_message)
-        with patch("discord_blue.gateway_handover.write_handover", side_effect=OSError("inert disk full")):
-            task = await self.start_bot()
-            self.assertTrue(await wait_until(lambda: len(messages) == 1))
-            self.assertFalse(self.bot.handover.healthy())
-            await self.message()
-            self.assertTrue(await wait_until(lambda: len(messages) == 2))
-        await self.finish(task)
 
     async def test_startup_failure_restores_dispatch_for_later_live_messages(self) -> None:
         messages: list[discord.Message] = []
@@ -313,13 +305,6 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(loop.get_task_factory(), previous_factory)
         finally:
             loop.set_task_factory(previous_factory)
-
-    async def test_ready_marker_failure_is_failed_health_without_ending_dispatch(self) -> None:
-        await self.bot.login("inert-token")
-        self.bot.handover.started = True
-        with patch("discord_blue.gateway_handover.write_handover", side_effect=OSError("inert disk full")):
-            self.bot.dispatch("socket_raw_receive", json.dumps({"op": DiscordWebSocket.DISPATCH, "t": "READY"}))
-        self.assertFalse(self.bot.handover.healthy())
 
     async def test_rejected_resume_does_not_report_fresh_identify_as_catch_up(self) -> None:
         self.reject_resume = True
@@ -382,26 +367,133 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(edits[0].content, payload["content"])
         self.assertEqual(edits[0].guild, foreign)
 
-    async def test_first_connect_failure_retries_without_consuming_checkpoint(self) -> None:
-        attempts = 0
+    async def test_checkpoint_delete_failure_identifies_without_replay(self) -> None:
+        unlink = Path.unlink
 
-        async def connect(_url: str, **_kwargs: object) -> ClientWebSocketResponse:
-            nonlocal attempts
-            attempts += 1
-            self.assertTrue(self.bot.handover.path.exists())
-            if attempts == 1:
-                raise OSError("inert transient network failure")
-            return await self.http.ws_connect(self.server.make_url("/gateway"))
+        def refuse(path: Path, *, missing_ok: bool = False) -> None:
+            if path == self.bot.handover.path:
+                raise OSError("inert deletion refusal")
+            unlink(path, missing_ok=missing_ok)
 
-        with (
-            patch.object(self.bot.http, "ws_connect", side_effect=connect),
-            patch("discord_blue.gateway_handover.ExponentialBackoff.delay", return_value=0),
-        ):
-            task = await self.start_bot()
-            self.assertTrue(await wait_until(lambda: self.bot.handover.healthy()))
-            self.assertEqual(attempts, 2)
+        with patch.object(Path, "unlink", refuse):
+            task = self.begin()
+            await asyncio.wait_for(self.identified_event.wait(), 2)
+            self.assertIsNone(self.resume_payload)
+            self.assertTrue(self.bot.handover.healthy())
+            await self.finish(task)
+
+    async def identify_without_replay(self) -> None:
+        task = self.begin()
+        await asyncio.wait_for(self.identified_event.wait(), 2)
+        self.assertIsNone(self.resume_payload)
+        self.assertFalse(self.bot.handover.path.exists())
+        self.assertTrue(self.bot.handover.healthy())
+        await self.finish(task)
+
+    async def test_stale_checkpoint_is_consumed_without_replay(self) -> None:
+        value = json.loads(self.bot.handover.path.read_text())
+        value["saved_at"] = time.time() - 120
+        self.bot.handover.path.write_text(json.dumps(value))
+        await self.identify_without_replay()
+
+    async def test_checkpoint_only_release_consumes_checkpoint_and_identifies(self) -> None:
+        with patch("discord_blue.gateway_handover.REPLAY_ENABLED", False):
+            await self.identify_without_replay()
+
+    async def test_cache_discord_failure_falls_back_to_identify(self) -> None:
+        with patch.object(self.bot, "fetch_guild", side_effect=discord.DiscordException("inert cache failure")):
+            task = self.begin()
+            await asyncio.wait_for(self.identified_event.wait(), 2)
+            self.assertIsNone(self.resume_payload)
             self.assertFalse(self.bot.handover.path.exists())
             await self.finish(task)
+
+    async def test_dead_resume_gateway_falls_back_to_identify(self) -> None:
+        original = DiscordWebSocket.from_client
+
+        async def connect(client: discord.Client, **kwargs: object) -> DiscordWebSocket:
+            if kwargs.get("resume"):
+                raise discord.DiscordException("inert unavailable resume endpoint")
+            return await cast(Any, original)(client, **kwargs)
+
+        with patch.object(DiscordWebSocket, "from_client", side_effect=connect):
+            task = self.begin()
+            await asyncio.wait_for(self.identified_event.wait(), 2)
+            self.assertIsNone(self.resume_payload)
+            await self.finish(task)
+
+    async def test_silent_resume_gateway_has_a_finite_fallback(self) -> None:
+        self.stall_resume = True
+        with patch("discord_blue.gateway_handover.RESUME_TIMEOUT_SECONDS", 0.02):
+            task = self.begin()
+            await asyncio.wait_for(self.identified_event.wait(), 1)
+            self.assertIsNotNone(self.resume_payload)
+            self.assertFalse(self.bot.handover.path.exists())
+            self.assertTrue(self.bot.handover.healthy())
+            await self.finish(task)
+
+    async def test_unplanned_restart_without_checkpoint_recovers_health(self) -> None:
+        self.bot.handover.path.unlink()
+        task = self.begin()
+        await asyncio.wait_for(self.identified_event.wait(), 1)
+        self.assertIsNone(self.resume_payload)
+        self.assertTrue(self.bot.handover.healthy())
+        self.assertNotEqual(self.bot.handover.evidence()["status"], "caught_up")
+        await self.finish(task)
+
+    async def test_replay_rejects_expired_slash_component_and_modal_before_dispatch(self) -> None:
+        await self.bot.login("inert-token")
+        self.bot._connection._add_guild(self.guild)
+        self.guild._add_channel(self.channel)
+        expired_id = str(discord.utils.time_snowflake(datetime.now(UTC) - timedelta(seconds=10)))
+        dispatched: list[object] = []
+        self.bot._connection.parsers["INTERACTION_CREATE"] = dispatched.append
+        self.bot.handover.buffer_parsers()
+        for kind in (2, 3, 5):
+            self.bot._connection.parsers["INTERACTION_CREATE"](
+                {"id": expired_id, "guild_id": str(self.guild.id), "channel_id": str(self.channel.id), "type": kind}
+            )
+        notices: list[str] = []
+
+        async def notice(_channel: discord.TextChannel, content: str, **_kwargs: object) -> None:
+            notices.append(content)
+
+        with patch.object(discord.TextChannel, "send", notice):
+            await self.bot.handover.resumed()
+        self.assertEqual(dispatched, [])
+        self.assertEqual(len(notices), 3)
+
+    async def test_shutdown_during_startup_drains_replay_created_after_close_begins(self) -> None:
+        starting, start_release, replaying, replay_release = (asyncio.Event() for _ in range(4))
+
+        async def on_ready() -> None:
+            starting.set()
+            await start_release.wait()
+
+        async def on_message(_message: discord.Message) -> None:
+            replaying.set()
+            await replay_release.wait()
+
+        self.bot.add_listener(on_ready)
+        self.bot.add_listener(on_message)
+        task = await self.start_bot()
+        await asyncio.wait_for(starting.wait(), 2)
+        closing = asyncio.create_task(self.bot.close())
+        try:
+            await asyncio.sleep(0)
+            start_release.set()
+            await asyncio.wait_for(replaying.wait(), 2)
+            self.assertFalse(closing.done())
+            replay_release.set()
+            await asyncio.wait_for(closing, 2)
+            await asyncio.wait_for(task, 2)
+            self.assertFalse(self.bot.handover.replay)
+            saved = GatewayContinuation.read(self.bot.handover.path, self.continuation.bot_id)
+            self.assertEqual(saved.sequence, self.last_sequence)
+        finally:
+            start_release.set()
+            replay_release.set()
+            await closing
 
     async def test_repeated_resume_does_not_restart_startup_callbacks(self) -> None:
         entered, release = asyncio.Event(), asyncio.Event()

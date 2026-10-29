@@ -1986,24 +1986,27 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     reply = FakeReplyMessage(802, thread, "During reattach")
                     thread.add_message(reply)
                     reply.channel = cast(Any, SimpleNamespace(id=thread.id))
-                    self.assertTrue(await bridge.controls.send_thread_reply(cast(Any, reply)))
-                    self.assertEqual(len(reply.replies), 1)
-                    self.assertIn("reconnecting", reply.replies[0])
+                    delivering = asyncio.create_task(bridge.controls.send_thread_reply(cast(Any, reply)))
+                    await asyncio.sleep(0)
+                    self.assertFalse(delivering.done())
                     self.assertEqual(reply.reactions, [])
                     session = bridge.sessions.get("transport-session")
                     stale = FakeReplyMessage(
                         803, thread, "Earlier conversation", created_at=session.attached_at - timedelta(seconds=1)
                     )
-                    self.assertTrue(await bridge.controls.send_thread_reply(cast(Any, stale)))
-                    self.assertEqual(stale.replies, [controls_module.REPLY_BEFORE_RECONNECT])
+                    rejecting = asyncio.create_task(bridge.controls.send_thread_reply(cast(Any, stale)))
                     for text in ("", "!command"):
                         ignored = FakeReplyMessage(804, thread, text)
                         self.assertFalse(await bridge.controls.send_thread_reply(cast(Any, ignored)))
                         self.assertEqual(ignored.replies, [])
                 finally:
                     release.set()
-                # connect_transport verifies that hello_ack, rather than a command, is the first frame.
-                await connecting
+                websocket = await connecting
+                self.assertTrue(await delivering)
+                self.assertTrue(await rejecting)
+                delivered = await websocket.receive_json(timeout=2)
+                self.assertEqual((delivered["kind"], delivered["text"]), ("reply", reply.content))
+                self.assertEqual(stale.replies, [controls_module.REPLY_BEFORE_RECONNECT])
 
     async def test_uncached_reply_listener_still_checks_operator_authority(self) -> None:
         async with self.transport() as (bridge, thread, client):

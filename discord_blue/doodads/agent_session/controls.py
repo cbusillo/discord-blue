@@ -109,6 +109,20 @@ REACTION_APPROVAL_DENY = "✖️"
 TRANSIENT_REACTIONS = STATUS_REACTIONS
 
 
+async def defer_control(interaction: discord.Interaction, *, ephemeral: bool = False) -> bool:
+    try:
+        await interaction.response.defer(ephemeral=ephemeral)
+    except discord.NotFound as exc:
+        if exc.code != 10062:
+            raise
+        if isinstance(interaction.channel, (discord.Thread, discord.TextChannel)):
+            await interaction.channel.send(
+                "That control expired during the update. Please try again.", allowed_mentions=discord.AllowedMentions.none()
+            )
+        return False
+    return True
+
+
 @dataclasses.dataclass(slots=True)
 class ReactionWrites:
     """The bot's reaction changes to one message: one request at a time, and the latest change supersedes the rest."""
@@ -199,9 +213,7 @@ class SessionControls:
         text = message.content.strip()
         if not text or text.startswith("!"):
             return False
-        saved_thread = asyncio.current_task() in self.bridge.bot.handover.replay and any(
-            record["thread_id"] == message.channel.id for record in self.bridge.handover.saved.values()
-        )
+        saved_thread = self.bridge.handover.has_thread(message.channel.id)
         session = await self.bridge.handover.wait_for_thread(message.channel.id)
         if session is None:
             for session_id, stored in tuple(self.bridge.store.records.items()):

@@ -7,6 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
+from discord_blue.doodads.agent_session.controls import defer_control
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
@@ -104,11 +105,13 @@ class AgentSessionDoodad(commands.Cog):
             await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
 
+        if not await defer_control(interaction, ephemeral=True):
+            return
         response = await self.bridge.controls.send_continue_autonomously(
             interaction.channel,
             interaction.user,
         )
-        await interaction.response.send_message(response, ephemeral=True)
+        await interaction.followup.send(response, ephemeral=True)
 
     @code_group.command(
         name="active",
@@ -154,11 +157,13 @@ class AgentSessionDoodad(commands.Cog):
             await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
 
+        if not await defer_control(interaction, ephemeral=True):
+            return
         response = await self.bridge.controls.send_pause_current_turn(
             interaction.channel,
             interaction.user,
         )
-        await interaction.response.send_message(response, ephemeral=True)
+        await interaction.followup.send(response, ephemeral=True)
 
     @code_group.command(
         name="new",
@@ -169,11 +174,13 @@ class AgentSessionDoodad(commands.Cog):
             await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
 
+        if not await defer_control(interaction, ephemeral=True):
+            return
         response = await self.bridge.controls.send_new_session(
             interaction.channel,
             interaction.user,
         )
-        await interaction.response.send_message(response, ephemeral=True)
+        await interaction.followup.send(response, ephemeral=True)
 
     @code_group.command(
         name="end-session",
@@ -184,11 +191,13 @@ class AgentSessionDoodad(commands.Cog):
             await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
             return
 
+        if not await defer_control(interaction, ephemeral=True):
+            return
         response = await self.bridge.controls.send_end_session(
             interaction.channel,
             interaction.user,
         )
-        await interaction.response.send_message(response, ephemeral=True)
+        await interaction.followup.send(response, ephemeral=True)
 
     async def cog_unload(self) -> None:
         self.bot.tree.remove_command(self.reply_about_command.name, type=self.reply_about_command.type)

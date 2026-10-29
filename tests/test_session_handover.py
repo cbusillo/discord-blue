@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, cast
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
 import discord
@@ -17,8 +17,8 @@ from discord_blue.doodads.agent_session.handover import SessionContinuation
 from discord_blue.doodads.agent_session.interactions import RequestUserInputView
 from discord_blue.doodads.agent_session.protocol import RemoteApprovalRequest
 from discord_blue.doodads.agent_session.sessions import AgentSession
+from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 from discord_blue.doodads.agent_session.session_threads import SessionThread
-from discord_blue.gateway_handover import GatewayContinuation
 from tests.fakes_agent_prompts import prompt_fixture
 from tests.fakes_agent_session import FakeInteraction, FakeReplyMessage, FakeWebSocket
 
@@ -83,6 +83,41 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(payload.get("kind") == "reply" for payload in socket.sent_json))
         self.assertIn(REPLY_BEFORE_RECONNECT, message.replies)
 
+    async def test_live_reply_during_catch_up_waits_for_native_reattach(self) -> None:
+        message = FakeReplyMessage(778, self.fixture.thread, "live input during catch-up")
+        task = asyncio.create_task(self.bridge.controls.send_thread_reply(cast(Any, message)))
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        _session, socket = await self.reattach(epoch=self.fixture.session.session_epoch)
+        self.assertTrue(await asyncio.wait_for(task, 1))
+        self.assertEqual([payload["text"] for payload in socket.sent_json if payload.get("kind") == "reply"], [message.content])
+
+    async def test_expired_slash_controls_cannot_dispatch_native_commands(self) -> None:
+        self.bridge.sessions.register(self.fixture.session)
+        self.bridge.bot.config.agent_session.enabled = True
+        doodad = AgentSessionDoodad(cast(Any, self.bridge.bot))
+        doodad.bridge = self.bridge
+        for name in ("go_ahead_command", "pause_command", "new_session_command", "end_session_command"):
+            with self.subTest(name=name):
+                interaction = FakeInteraction(self.fixture.thread)
+                expired = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), {"code": 10062, "message": "Expired"})
+                with patch.object(interaction.response, "defer", AsyncMock(side_effect=expired)):
+                    await cast(Any, getattr(doodad, name)).callback(doodad, interaction)
+                self.assertFalse(self.fixture.socket.sent_json)
+        self.assertEqual(len(self.fixture.thread.sent_messages), 4)
+
+    async def test_expired_input_submission_cannot_dispatch_native_command(self) -> None:
+        self.bridge.sessions.register(self.fixture.session)
+        view = await self.fixture.prompt()
+        message = await self.fixture.thread.fetch_message(cast(int, view.message_id))
+        interaction = FakeInteraction(self.fixture.thread, message=message)
+        expired = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), {"code": 10062, "message": "Expired"})
+        with patch.object(interaction.response, "defer", AsyncMock(side_effect=expired)):
+            await view.submit(cast(Any, interaction))
+        self.assertFalse(self.fixture.socket.sent_json)
+        self.assertFalse(self.fixture.session.pending_user_inputs[view.request.call_id].submitted)
+        self.assertTrue(self.fixture.thread.sent_messages)
+
     def install_view_store(self) -> None:
         store = ViewStore(cast(Any, SimpleNamespace()))
         self.enterContext(
@@ -146,7 +181,23 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(decisions), 1)
         self.assertEqual(len(self.fixture.thread.sent_views), 1)
 
-    async def test_saved_offline_thread_does_not_reply_to_commands_or_post_replay_messages(self) -> None:
+    async def test_native_resend_cannot_reenable_an_already_answered_approval(self) -> None:
+        request = await self.pending_approval()
+        pending = self.fixture.session.pending_approvals[request.approval_id]
+        self.bridge.handover.load(self.bridge.handover.export())
+        message = await self.fixture.thread.fetch_message(pending.message_id)
+        interaction = FakeInteraction(self.fixture.thread, message=message)
+        await self.bridge.interactions.handle_approval_interaction(
+            cast(Any, interaction), request.session_id, request.approval_id, "approved", session_epoch=request.session_epoch
+        )
+        edits = len(message.edits)
+        await self.bridge.handle_event(self.fixture.session, "approval_request", asdict(request))
+        self.assertEqual(len(message.edits), edits)
+        self.assertEqual(len(self.fixture.socket.sent_json), 1)
+        self.assertEqual(pending.decision, "approved")
+
+    async def test_offline_thread_ignores_empty_input_and_reports_undelivered_replies(self) -> None:
+        self.bridge.handover.grace_seconds = 0.01
         for text in ("", " !code"):
             with self.subTest(text=text):
                 message = FakeReplyMessage(777, self.fixture.thread, text)
@@ -156,14 +207,14 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(message.replies)
         self.replay.clear()
         message = FakeReplyMessage(778, self.fixture.thread, "ordinary message after replay")
-        self.assertFalse(await self.bridge.controls.send_thread_reply(cast(discord.Message, cast(object, message))))
-        self.assertFalse(message.replies)
+        self.assertTrue(await self.bridge.controls.send_thread_reply(cast(discord.Message, cast(object, message))))
+        self.assertEqual(len(message.replies), 1)
 
     async def test_unrelated_live_reply_does_not_wait_for_another_events_replay(self) -> None:
         release = asyncio.Event()
         replayed = asyncio.create_task(release.wait())
         self.replay.add(replayed)
-        message = FakeReplyMessage(779, self.fixture.thread, "live reply")
+        message = FakeReplyMessage(779, type(self.fixture.thread)(9999), "live reply")
         try:
             self.assertFalse(
                 await asyncio.wait_for(self.bridge.controls.send_thread_reply(cast(discord.Message, cast(object, message))), 0.2)
@@ -173,13 +224,13 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             await replayed
 
-    async def test_reconnect_restores_input_answers_and_custom_ids_without_an_extra_card(self) -> None:
+    async def test_native_resend_rebuilds_input_controls_without_serialized_content(self) -> None:
         self.install_view_store()
         self.bridge.sessions.register(self.fixture.session)
         view = await self.fixture.prompt()
         assert view.message_id is not None
         self.bridge.bot._connection.store_view(view, view.message_id)
-        previous_ids = SessionContinuation.control_ids(view)
+        previous_ids = [item.custom_id for item in view.walk_children() if isinstance(item, (discord.ui.Button, discord.ui.Select))]
         self.bridge.handover.load(self.bridge.handover.export())
         self.bridge.sessions.remove(self.fixture.session.session_id)
         session, _socket = await self.reattach(epoch=self.fixture.session.session_epoch)
@@ -188,8 +239,11 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         restored = message.view
         assert isinstance(restored, RequestUserInputView)
         self.addCleanup(restored.stop)
-        self.assertEqual(restored.answers, view.answers)
-        self.assertEqual(SessionContinuation.control_ids(restored), previous_ids)
+        self.assertEqual(restored.answers, {})
+        self.assertEqual(
+            [item.custom_id for item in restored.walk_children() if isinstance(item, (discord.ui.Button, discord.ui.Select))],
+            previous_ids,
+        )
         self.assertEqual(len(self.fixture.thread.sent_views), 1)
         self.bridge.bot._connection.store_view(restored, view.message_id)
         restored.set_answer("answer", "later answer")
@@ -197,24 +251,6 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.handle_event(successor, "request_user_input", asdict(view.request))
         self.assertEqual(restored.answers["answer"], "later answer")
         self.assertEqual(len(self.fixture.thread.sent_views), 1)
-
-    async def test_native_command_ack_after_reconnect_settles_original_reply(self) -> None:
-        task, message = await self.gap_reply()
-        session, socket = await self.reattach(epoch=self.fixture.session.session_epoch)
-        self.assertTrue(await asyncio.wait_for(task, 2))
-        command = next(payload for payload in socket.sent_json if payload.get("kind") == "reply")
-        path = self.bridge.store.path.with_name("continuation.json")
-        bot_id = self.bridge.bot_user_id()
-        assert bot_id is not None
-        GatewayContinuation(bot_id, "inert-gateway-session", 0, "wss://gateway.discord.gg/", self.bridge.handover.export()).save(
-            path
-        )
-        self.bridge.handover.load(GatewayContinuation.read(path, bot_id).agents)
-        self.bridge.sessions.remove(session.session_id)
-        restored, _socket = await self.reattach(epoch=session.session_epoch)
-        await self.bridge.handle_event(restored, "command_ack", command)
-        self.assertEqual(restored.active_command_id, command["command_id"])
-        self.assertEqual(message.reactions, [])
 
     def test_unadopted_session_survives_another_handover(self) -> None:
         self.bridge.save_session(self.fixture.session, "grace")
@@ -276,7 +312,8 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(stopping, 1)
             self.assertFalse(incoming.done())
             assert self.bridge.handover.snapshot is not None
-            self.assertEqual(self.bridge.handover.snapshot["agents"][session.session_id]["active_command_id"], command_id)
+            self.assertEqual(session.active_command_id, command_id)
+            self.assertEqual(self.bridge.handover.snapshot["agents"][session.session_id]["epoch"], session.session_epoch)
             keep_alive.set()
             await incoming
 

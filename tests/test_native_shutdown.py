@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from typing import cast
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -103,4 +104,41 @@ class NativeShutdownTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.gather(hello, return_exceptions=True)
                     if stopping is not None:
                         await stopping
+                    bridge.threads.stop()
+
+    async def test_shutdown_closes_admission_and_cleans_up_after_drain_timeout(self) -> None:
+        with (
+            TemporaryDirectory() as folder,
+            patch("pathlib.Path.home", return_value=Path(folder)),
+            prompt_fixture() as fixture,
+        ):
+            bridge = fixture.bridge
+            entered, release = asyncio.Event(), asyncio.Event()
+            cleaned = asyncio.Event()
+
+            async def cleanup() -> None:
+                cleaned.set()
+
+            bridge._runner = cast(web.AppRunner, cast(object, SimpleNamespace(cleanup=cleanup)))
+
+            async def acknowledge(_payload: dict[str, object]) -> None:
+                entered.set()
+                await release.wait()
+
+            with patch.object(bridge.controls, "handle_command_ack", side_effect=acknowledge):
+                incoming = asyncio.create_task(bridge.handle_event(fixture.session, "command_ack", {}))
+                await asyncio.wait_for(entered.wait(), 1)
+                stopping = asyncio.create_task(bridge.stop(deadline=asyncio.get_running_loop().time() + 0.02))
+                try:
+                    await asyncio.sleep(0)
+                    extra = asyncio.create_task(bridge.handle_event(fixture.session, "command_ack", {}))
+                    await asyncio.wait_for(extra, 0.1)
+                    await asyncio.wait_for(stopping, 1)
+                    self.assertIsNone(bridge.handover.snapshot)
+                    self.assertTrue(fixture.socket.closed)
+                    self.assertTrue(cleaned.is_set())
+                finally:
+                    release.set()
+                    await incoming
+                    await stopping
                     bridge.threads.stop()

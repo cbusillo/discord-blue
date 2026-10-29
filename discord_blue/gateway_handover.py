@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import fcntl
 import json
 import logging
@@ -16,7 +16,6 @@ from urllib.parse import urlsplit
 
 import aiohttp
 import discord
-from discord.backoff import ExponentialBackoff
 from discord.gateway import DiscordWebSocket
 from yarl import URL
 
@@ -26,6 +25,9 @@ if TYPE_CHECKING:
 
 _STATE_LOCKS: dict[Path, int] = {}
 SHUTDOWN_TIMEOUT_SECONDS = 90.0
+CHECKPOINT_MAX_AGE_SECONDS = 60.0
+RESUME_TIMEOUT_SECONDS = 30.0
+REPLAY_ENABLED = False
 logger = logging.getLogger(__name__)
 
 
@@ -50,6 +52,7 @@ class GatewayContinuation:
     gateway: str
     agents: dict[str, Any]
     conversation: dict[str, Any] | None = None
+    saved_at: float = field(default_factory=time.time)
 
     @classmethod
     def read(cls, path: Path, bot_id: int) -> GatewayContinuation:
@@ -57,7 +60,8 @@ class GatewayContinuation:
         gateway = urlsplit(value["gateway"])
         hostname = gateway.hostname
         if (
-            value["bot_id"] != bot_id
+            not 0 <= time.time() - value["saved_at"] <= CHECKPOINT_MAX_AGE_SECONDS
+            or value["bot_id"] != bot_id
             or not isinstance(value["session_id"], str)
             or not value["session_id"]
             or type(value["sequence"]) is not int
@@ -73,11 +77,17 @@ class GatewayContinuation:
         ):
             raise ValueError("Invalid gateway continuation")
         return cls(
-            bot_id, value["session_id"], value["sequence"], value["gateway"], value.get("agents", {}), value.get("conversation")
+            bot_id,
+            value["session_id"],
+            value["sequence"],
+            value["gateway"],
+            value.get("agents", {}),
+            value.get("conversation"),
+            value["saved_at"],
         )
 
     def save(self, path: Path) -> None:
-        write_handover(path, self.__dict__)
+        write_handover(path, {**self.__dict__, "saved_at": time.time()})
 
 
 def write_handover(path: Path, value: object) -> None:
@@ -124,16 +134,16 @@ class GatewayHandover:
         self.bot = bot
         self.close_client = close_client
         self.path = Path.home() / ".discord-blue-handover.json"
-        self.active = self.path.with_suffix(".active")
         self.status = "initial"
         self.connect_task: asyncio.Task[None] | None = None
+        self.gateway_task: asyncio.Task[None] | None = None
         self.shutdown: asyncio.Task[None] | None = None
         self.shutdown_deadline: float | None = None
         self.events: set[asyncio.Task[Any]] = set()
         self.replay: set[asyncio.Task[Any]] = set()
         self.startup: set[asyncio.Task[Any]] = set()
         self.startup_caller: asyncio.Task[Any] | None = None
-        self.buffer: list[tuple[Callable[[Any], None], Any]] = []
+        self.buffer: list[tuple[str, Callable[[Any], None], Any]] = []
         self.buffering = False
         self.parsing_replay = False
         self.runtime_started = False
@@ -143,6 +153,7 @@ class GatewayHandover:
         self._close_callers: set[asyncio.Task[Any]] = set()
         self._parsers: dict[str, Any] | None = None
         self._previous_factory: Any = None
+        self.resumed_event = asyncio.Event()
 
     def evidence(self) -> dict[str, object]:
         caught_up = self.status == "replayed" and self.runtime_started and not self.replay
@@ -157,7 +168,29 @@ class GatewayHandover:
         }
 
     def healthy(self) -> bool:
-        return self.status == "initial" or self.evidence()["status"] == "caught_up"
+        return self.status in {"initial", "unreplayed"} or self.evidence()["status"] == "caught_up"
+
+    def take_checkpoint(self, bot_id: int) -> GatewayContinuation | None:
+        continuation = None
+        try:
+            continuation = GatewayContinuation.read(self.path, bot_id)
+        except FileNotFoundError:
+            self.status = "unreplayed"
+            logger.info("No Gateway checkpoint; earlier work cannot be replayed")
+        except (OSError, ValueError, KeyError, TypeError):
+            self.status = "unreplayed"
+            logger.warning("Gateway checkpoint unavailable or expired; earlier work cannot be replayed")
+        try:
+            self.path.unlink(missing_ok=True)
+        except OSError:
+            self.status = "unreplayed"
+            logger.warning("Unable to take Gateway checkpoint; earlier work cannot be replayed", exc_info=True)
+            return None
+        if continuation is not None and not REPLAY_ENABLED:
+            self.status = "unreplayed"
+            logger.info("Gateway checkpoint consumed; replay is disabled for the checkpoint-only release")
+            return None
+        return continuation
 
     async def start(self, token: str, *, reconnect: bool) -> None:
         hold_state_lock()
@@ -165,14 +198,7 @@ class GatewayHandover:
         await self.bot.login(token)
         user = self.bot.user
         assert user is not None
-        continuation = None
-        if self.path.exists():
-            try:
-                continuation = GatewayContinuation.read(self.path, user.id)
-            except (OSError, ValueError, KeyError, TypeError):
-                self.status = "failed"
-        elif self.active.exists():
-            self.status = "failed"
+        continuation = self.take_checkpoint(user.id)
         loop = asyncio.get_running_loop()
         self._previous_factory = loop.get_task_factory()
         factory = self.task_factory
@@ -182,8 +208,14 @@ class GatewayHandover:
                 self.status = "resuming"
                 self.agents = continuation.agents
                 self.conversation = continuation.conversation
-                await self.warm_cache()
-                self.buffer_parsers()
+                try:
+                    async with asyncio.timeout(RESUME_TIMEOUT_SECONDS):
+                        await self.warm_cache()
+                except (discord.DiscordException, OSError, aiohttp.ClientError, TimeoutError):
+                    logger.warning("Gateway cache unavailable; earlier work cannot be replayed", exc_info=True)
+                    continuation = None
+                    self.status = "unreplayed"
+            if continuation is not None:
                 connection = self.connect_resumed(continuation, reconnect=reconnect)
             else:
                 connection = self.bot.connect(reconnect=reconnect)
@@ -201,9 +233,11 @@ class GatewayHandover:
                     loop.set_task_factory(self._previous_factory)
 
     async def connect_resumed(self, continuation: GatewayContinuation, *, reconnect: bool) -> None:
-        backoff = ExponentialBackoff()
-        while not self.bot.is_closed():
-            try:
+        connecting: asyncio.Task[None] | None = None
+        resumed: asyncio.Task[bool] | None = None
+        try:
+            async with asyncio.timeout(RESUME_TIMEOUT_SECONDS):
+                self.buffer_parsers()
                 socket = await DiscordWebSocket.from_client(
                     self.bot,
                     resume=True,
@@ -211,16 +245,33 @@ class GatewayHandover:
                     sequence=continuation.sequence,
                     gateway=URL(continuation.gateway),
                 )
-                break
-            except (OSError, aiohttp.ClientError, TimeoutError):
-                if not reconnect:
-                    raise
-                await asyncio.sleep(backoff.delay())
-        else:
-            return
-        self.bot.ws = socket
-        with use_first_connection(self.bot, socket):
+                self.bot.ws = socket
+                with use_first_connection(self.bot, socket):
+                    connecting = asyncio.create_task(self.bot.connect(reconnect=reconnect))
+                    self.gateway_task = connecting
+                    resumed = asyncio.create_task(self.resumed_event.wait())
+                    await asyncio.wait({connecting, resumed}, return_when=asyncio.FIRST_COMPLETED)
+            await connecting
+        except (discord.DiscordException, OSError, aiohttp.ClientError, TimeoutError):
+            logger.warning("Gateway resume unavailable; reconnecting with IDENTIFY, earlier work cannot be replayed", exc_info=True)
+            if connecting is not None:
+                connecting.cancel()
+                await asyncio.gather(connecting, return_exceptions=True)
+            if self.bot.ws is not None and self.bot.ws.open:
+                await self.bot.ws.close()
+            self.restore_parsers()
+            self.buffer.clear()
+            self.status = "unreplayed"
             await self.bot.connect(reconnect=reconnect)
+        finally:
+            if resumed is not None:
+                resumed.cancel()
+                with suppress(asyncio.CancelledError):
+                    await resumed
+            if connecting is not None and not connecting.done():
+                connecting.cancel()
+                with suppress(asyncio.CancelledError):
+                    await connecting
 
     def task_factory(
         self, loop: asyncio.AbstractEventLoop, coroutine: Coroutine[Any, Any, Any], **kwargs: object
@@ -232,7 +283,9 @@ class GatewayHandover:
             else cast(Callable[..., asyncio.Task[Any]], asyncio.Task)(coroutine, loop=loop, **kwargs)
         )
         parent = asyncio.current_task(loop=loop)
-        if parent is not None and (parent is self.connect_task or parent is self.startup_caller):
+        if parent is not None and parent in {self.connect_task, self.gateway_task, self.startup_caller}:
+            if parent is self.connect_task and self.buffering:
+                return task
             self.events.add(task)
             task.add_done_callback(self.events.discard)
             if self.parsing_replay or (self.buffering and parent is self.connect_task):
@@ -248,14 +301,14 @@ class GatewayHandover:
         self._parsers = parsers
         self.buffering = True
 
-        def hold(parser: Callable[[Any], None]) -> Callable[[Any], None]:
+        def hold(name: str, parser: Callable[[Any], None]) -> Callable[[Any], None]:
             def append(payload: dict[str, Any]) -> None:
-                self.buffer.append((parser, payload))
+                self.buffer.append((name, parser, payload))
 
             return append
 
         self.bot._connection.parsers.update(
-            {name: parser if name in {"RESUMED", "READY"} else hold(parser) for name, parser in parsers.items()}
+            {name: parser if name in {"RESUMED", "READY"} else hold(name, parser) for name, parser in parsers.items()}
         )
 
     def restore_parsers(self) -> None:
@@ -269,47 +322,31 @@ class GatewayHandover:
         if not self.started:
             return
         if not self.runtime_started and event.get("op") == DiscordWebSocket.INVALIDATE_SESSION and event.get("d") is False:
-            self.discard_checkpoint()
             self.status = "failed"
             self.restore_parsers()
             self.buffer.clear()
+            self.resumed_event.set()
         if event.get("op") == 0 and event.get("t") == "READY":
-            self.discard_checkpoint()
-            if not self.runtime_started and self.status != "initial":
+            if not self.runtime_started and self.status not in {"initial", "unreplayed"}:
                 self.status = "failed"
                 self.restore_parsers()
                 self.buffer.clear()
-            self.record_active()
-
-    def discard_checkpoint(self) -> None:
-        try:
-            self.path.unlink(missing_ok=True)
-        except OSError:
-            self.status = "failed"
-            logger.warning("Unable to retire Gateway continuation", exc_info=True)
-
-    def record_active(self) -> None:
-        user = self.bot.user
-        try:
-            write_handover(self.active, {"bot_id": user.id if user else None, "active_at": time.time()})
-        except OSError:
-            self.status = "failed"
-            logger.warning("Unable to record active Gateway owner", exc_info=True)
+            self.resumed_event.set()
 
     async def resumed(self) -> None:
         if not self.buffering:
             return
         self.buffering = False
         try:
-            self.discard_checkpoint()
-            self.record_active()
             self.startup_caller = asyncio.current_task()
             self.bot._handle_ready()
             self.bot.dispatch("ready")
             if self.startup:
                 await asyncio.gather(*tuple(self.startup))
             self.parsing_replay = True
-            for parser, payload in self.buffer:
+            for name, parser, payload in self.buffer:
+                if name == "INTERACTION_CREATE" and await self.reject_expired_interaction(payload):
+                    continue
                 parser(payload)
             self.buffer.clear()
         except Exception:
@@ -321,9 +358,25 @@ class GatewayHandover:
             self.parsing_replay = False
             self.restore_parsers()
             self.startup_caller = None
+            self.resumed_event.set()
         self.runtime_started = True
         self.status = "replayed" if self.status != "failed" else "failed"
         self.bot.dispatch("handover_replayed")
+
+    async def reject_expired_interaction(self, payload: dict[str, Any]) -> bool:
+        if time.time() - discord.utils.snowflake_time(int(payload["id"])).timestamp() < 3:
+            return False
+        if int(payload.get("guild_id", 0)) == self.bot.config.discord.guild_id:
+            channel = self.bot.get_channel(int(payload.get("channel_id", 0)))
+            if isinstance(channel, (discord.TextChannel, discord.Thread)):
+                try:
+                    await channel.send(
+                        "That control expired during the update. Please try again.", allowed_mentions=discord.AllowedMentions.none()
+                    )
+                except (discord.DiscordException, OSError):
+                    self.status = "failed"
+                    logger.warning("Unable to post expired-control retry notice", exc_info=True)
+        return True
 
     async def warm_cache(self) -> None:
         user = self.bot.user
@@ -388,11 +441,13 @@ class GatewayHandover:
             connect_task.cancel()
             with suppress(asyncio.CancelledError):
                 await connect_task
-        pending = {task for task in self.events if not task.done() and task not in self._close_callers}
-        complete = not self.buffer
-        if pending:
+        complete = True
+        while pending := {task for task in self.events if not task.done() and task not in self._close_callers}:
             _done, remaining = await asyncio.wait(pending, timeout=max(0, deadline - loop.time()))
-            complete = complete and not remaining
+            if remaining:
+                complete = False
+                break
+        complete = complete and not self.buffer
         socket = self.bot.ws
         from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
 

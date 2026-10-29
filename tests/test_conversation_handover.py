@@ -169,3 +169,43 @@ class ConversationHandoverTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.destination.send.await_count, 1)
         finally:
             release.set()
+
+    async def test_reconnect_flushes_old_input_before_live_and_replayed_input(self) -> None:
+        bridge = AgentSessionBridge(cast(Any, self.bot))
+        client = await self.endpoint(bridge)
+        old = await self.connect(client)
+        await bridge.conversations.receive_message(message())
+        command = await old.receive_json(timeout=2)
+        await old.close()
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = web.WebSocketResponse.send_json
+
+        async def flush(socket: web.WebSocketResponse, payload: object) -> None:
+            if isinstance(payload, dict) and payload.get("command_id") == command["command_id"]:
+                entered.set()
+                await release.wait()
+            await original(socket, payload)
+
+        with patch.object(web.WebSocketResponse, "send_json", flush):
+            replacement = await client.ws_connect(
+                "/agent-session/conversation", headers={"Authorization": f"Bearer {self.bot.config.agent_session.token}"}
+            )
+            await replacement.send_json(hello())
+            self.assertEqual((await replacement.receive_json(timeout=2))["type"], "hello_ack")
+            await asyncio.wait_for(entered.wait(), 2)
+            live = asyncio.create_task(bridge.conversations.receive_message(message(message_id=201)))
+            replayed = asyncio.create_task(bridge.conversations.receive_message(message(message_id=202)))
+            self.bot.handover.replay = {replayed}
+            try:
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                self.assertFalse(live.done())
+                self.assertFalse(replayed.done())
+                release.set()
+                await asyncio.wait_for(asyncio.gather(live, replayed), 2)
+                delivered = [await replacement.receive_json(timeout=2) for _ in range(3)]
+                self.assertEqual(delivered[0], command)
+                self.assertEqual([payload["envelope"]["message_id"] for payload in delivered], [200, 201, 202])
+            finally:
+                release.set()
+                await asyncio.gather(live, replayed, return_exceptions=True)

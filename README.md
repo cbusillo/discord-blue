@@ -604,7 +604,7 @@ Behaviour and limits:
 - `/clear` or `/resume` inside a session keeps its thread but reconnects under a
   new epoch, so replies sent for the previous conversation are rejected. Discord Blue also refuses a reply written before the session last
   reconnected, and says so. A reply received while the session is still attaching
-  gets a reconnecting notice asking you to send it again; it is not delivered
+  waits briefly for reattachment, then gets a retry notice if it cannot be delivered
   ahead of the connection acknowledgment. The thread gets a notice for each switch.
 - Hooks reach the channel through an MCP tool, `dui_hook_event`, which the model
   can also see. Its description says never to call it, and calls that carry a
@@ -864,40 +864,39 @@ cross-host leader election mechanism. The lock file must not be removed while
 either process is running.
 
 On graceful shutdown, the gateway reader stops and received callbacks drain.
-The bridge then finishes admitted native attachments, payloads and conversation
-replies before freezing their continuation. One shutdown deadline covers these
-drains and the final state flush; an unfinished operation prevents a checkpoint
-and is not cancelled to make the handover look complete. A private, atomically
-written continuation is saved only after that shutdown succeeds. The socket closes
-without invalidating its Discord session. A successor rebuilds the SDK cache,
-starts the existing bridge, and resumes that session through discord.py's
-reconnect loop. The continuation is consumed once. Replayed replies and approval
-reactions wait for the matching native session and request; changed epochs
-cannot inherit old replies or approval authority. Pending prompt controls keep
-their original message and control IDs. No per-start Connected message is sent.
-With the agent bridge loaded, unconsumed native and conversation state survives
-another handover; a closed
-session, replaced epoch or explicitly resolved request retires its old state.
+The bridge closes admission, finishes native attachments, payloads and conversation
+replies, and flushes state within one shutdown deadline. It saves a private,
+atomic checkpoint only after cleanup succeeds. The socket closes without
+invalidating its Discord session.
 
-`components.discord.handover` reports the resume stage and outstanding replay
-counts. A resumed deployment is healthy only after RESUMED, startup and replay
-completion, alongside the existing heartbeat and store checks. Evidence also
-counts native fallbacks. Rejected resume,
-invalid continuation, a failed replay handler, or a native reconnect timeout
-cannot become successful catch-up proof through a fresh IDENTIFY. This failure
-belongs to the attempted handover. A subsequent clean stop can save the current
-session for the existing gated rollback; no manual state-file deletion is needed.
-An incompatible agent continuation records failed handover evidence and falls
-back to native reattachment and new prompt cards, retaining the gateway resume.
-It does not reuse old approval authority or crash-loop on the old shape.
+Rollout has two releases. This first release saves and consumes checkpoints but
+keeps replay disabled. After it is accepted, a second source change enables
+replay. Each startup reads and deletes the checkpoint before using it; deletion
+failure prevents replay. Checkpoints older than one minute are ignored. No
+Launchplane predecessor-identity contract is needed. Rolling back from release 2
+to release 1 skips catch-up for that transition.
 
-The existing CM conversation transport preserves unacknowledged input, explicit
-reply deduplication and observed-message context. Its replay waits for the same
-configured conversation to reconnect, and pending input is never transferred
-to a changed epoch or binding. Native reconnect waits are bounded; a timeout
-uses the existing offline or stale-session response instead of silently losing
-the event. Whether that response qualifies as successful catch-up remains held
-on the Director's pending decision; the current draft records failed catch-up.
+With replay enabled, the successor rebuilds the SDK cache and resumes the
+Gateway session. Replies and approval reactions wait for the matching native
+session and request. Changed epochs cannot inherit old replies or approval
+authority. Native clients resend their pending requests; the bot retains only
+session and message routing IDs, then rebuilds prompt cards and stable controls
+from those fresh requests. Request contents, partial answers, views and native
+command state are not serialized. No per-start Connected message is sent.
+
+`components.discord.handover` reports resume progress and outstanding replay
+counts. Catch-up requires RESUMED, startup and replay completion, alongside
+heartbeat and store health. Missing, expired or unusable checkpoints and failed
+initial resume connections fall back to IDENTIFY, recording that earlier work
+could not be replayed. An unplanned restart can become healthy once Discord and
+the bridge recover. A failed replay handler still reports failed catch-up.
+
+The CM conversation transport retains unacknowledged input, reply deduplication
+and observed-message context, bound to its configured destination and native
+epoch. Reconnection flushes older pending input before new sends. Native waits
+are bounded; an offline action counts as handled after the person receives a
+notice that it was not delivered and should be retried. Expired slash commands,
+components and modals receive a retry notice before any native side effect.
 
 Container startup executes Python directly after dropping privileges, so the
 stop signal reaches the bot. The repository's Compose and systemd definitions
@@ -907,15 +906,11 @@ Compose setting does not configure that application target. Deployment and
 rollback qualification must prove that native work settles, state flushes and
 the continuation is saved before the provider ends the process.
 
-The first installation over an older image cannot resume a session that image
-did not save. Neither can a rollback to an image without this feature. An
-unclean kill, missing shared state, session expiry or provider stop timeout can
-also prevent catch-up. These transitions cannot qualify as a successful
-handover; use the existing gated release and rollback paths and retain their
-exact runtime identity and health evidence. The next normal release between
-compatible images supplies the handover proof. Interaction expiry during the
-gap remains a release hold in
-[launchplane#5352](https://github.com/cbusillo/launchplane/issues/5352).
+The first installation over an older image has no usable checkpoint. An unclean
+kill, missing shared state, session expiry or provider stop timeout can also
+prevent catch-up. Use the existing gated release and rollback paths. The first
+normal release after replay is enabled supplies the single-owner, catch-up and
+no-red-flip proof on [launchplane#5352](https://github.com/cbusillo/launchplane/issues/5352).
 
 - CI proves the Docker image builds for every PR and push with read-only permissions.
 - A separate publishing job runs only on `main` pushes and manual `main` runs;
