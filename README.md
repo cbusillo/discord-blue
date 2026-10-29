@@ -890,12 +890,12 @@ Claude uses the orange eight-pointed star (✴️), and Codex uses the blue diam
 
 ## Session details and activity
 
-New threads keep machine identity in a **Session details** card hidden by
-Discord's native tap-to-reveal control. The complete marker stays in Discord
-history, so details and recovery survive a lost local store. Older text markers
-remain recognized. `/code status` also shows current or stored details privately
-to operators. Spoilers are a reading aid, not access control: details keep the
-thread's existing audience. Routine parent connection announcements are no longer
+New threads open with one small line naming the harness, folder and branch,
+such as `Claude Code · discord-blue · main`. Host, full path, session ID and PID
+are not shown; `/code status` shows them privately to operators. The session's
+identity is kept in Discord component ids that are never displayed, so discovery
+and recovery survive a lost local store. Older threads keep their tap-to-reveal
+**Session details** card, and older text markers remain recognized. Routine parent connection announcements are no longer
 posted. Use `/code active` and **Open thread** to find sessions you can access.
 Configured users already in a thread are not added again; completed session
 cleanup still removes members, archives and locks the thread.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack
 import hashlib
 import logging
 import re
@@ -808,41 +809,44 @@ class QuestionCards:
 
     async def refresh(self, session_id: str, questions: list[StoredQuestion], *, thread: discord.Thread | None = None) -> None:
         async def edit_cards() -> None:
-            # Edit every card at once, so a group changes together rather than one card at a time.
-            await asyncio.gather(*(edit_card(question) for question in questions))
+            # Take every card's lock in one fixed order, then edit each channel's cards together under its lock:
+            # a group changes in one burst, and separate refreshes still take turns in a channel.
+            async with AsyncExitStack() as held:
+                for key in sorted({question.key for question in questions}):
+                    await held.enter_async_context(self.edit_locks.setdefault(key, asyncio.Lock()))
+                by_channel: dict[int, tuple[discord.Thread | discord.TextChannel, list[StoredQuestion]]] = {}
+                for key in dict.fromkeys(question.key for question in questions):
+                    question = self.record(session_id, key) or next(q for q in questions if q.key == key)
+                    channel = (
+                        self.bridge.bot.get_channel(question.legacy_parent_id)
+                        if question.legacy_parent_id is not None
+                        else thread or self.bridge.thread_channel(question.thread_id)
+                    )
+                    if isinstance(channel, (discord.Thread, discord.TextChannel)) and question.message_id is not None:
+                        by_channel.setdefault(channel.id, (channel, []))[1].append(question)
+                for channel, cards in by_channel.values():
+                    async with self.channel_edit_locks.setdefault(channel.id, asyncio.Lock()):
+                        await asyncio.gather(*(edit_card(channel, card) for card in cards))
 
-        async def edit_card(question: StoredQuestion) -> None:
-            async with self.edit_locks.setdefault(question.key, asyncio.Lock()):
-                question = self.record(session_id, question.key) or question
-                channel = (
-                    self.bridge.bot.get_channel(question.legacy_parent_id)
-                    if question.legacy_parent_id is not None
-                    else thread or self.bridge.thread_channel(question.thread_id)
+        async def edit_card(channel: discord.Thread | discord.TextChannel, question: StoredQuestion) -> None:
+            assert question.message_id is not None
+            attachment = (
+                discord.File(BytesIO("\n\n".join(body for _, body in question.questions).encode()), filename="questions.md")
+                if question.has_attachment and question.state != QuestionState.ANSWERED and question.legacy_parent_id is None
+                else None
+            )
+            try:
+                await channel.get_partial_message(question.message_id).edit(
+                    view=self.view(session_id, question),
+                    allowed_mentions=agent_session_allowed_mentions(),
+                    attachments=[attachment] if attachment is not None else [],
                 )
-                if isinstance(channel, (discord.Thread, discord.TextChannel)) and question.message_id is not None:
-                    try:
-                        attachment = (
-                            discord.File(
-                                BytesIO("\n\n".join(body for _, body in question.questions).encode()), filename="questions.md"
-                            )
-                            if question.has_attachment
-                            and question.state != QuestionState.ANSWERED
-                            and question.legacy_parent_id is None
-                            else None
-                        )
-                        try:
-                            async with self.channel_edit_locks.setdefault(channel.id, asyncio.Lock()):
-                                await channel.get_partial_message(question.message_id).edit(
-                                    view=self.view(session_id, question),
-                                    allowed_mentions=agent_session_allowed_mentions(),
-                                    attachments=[attachment] if attachment is not None else [],
-                                )
-                            self.drawn[question.key] = question.state
-                        finally:
-                            if attachment is not None:
-                                attachment.close()
-                    except (OSError, discord.DiscordException):
-                        logger.warning("Unable to update Question card %s", question.message_id)
+                self.drawn[question.key] = question.state
+            except (OSError, discord.DiscordException):
+                logger.warning("Unable to update Question card %s", question.message_id)
+            finally:
+                if attachment is not None:
+                    attachment.close()
 
         if questions:
             try:

@@ -130,7 +130,7 @@ class SessionThreads:
             for marker in threads_module.session_message_markers(message)
         ]
         expected = threads_module.session_start_without_pid(record.marker)
-        if expected is None or not any(threads_module.session_start_without_pid(message) == expected for message in opening):
+        if expected is None or not any(threads_module.marker_matches_without_pid(message, {expected}) for message in opening):
             self.forget_stored_hint(session_id, record)
             return None
         return thread
@@ -319,10 +319,10 @@ class SessionThreads:
                 skipped_mapped += 1
                 continue
             opening = entry.opening or []
-            if any(message in expected_starts for message in opening):
+            if any(threads_module.marker_matches(message, expected_starts) for message in opening):
                 matches.append(entry.thread)
             elif expected_starts_without_pid and any(
-                threads_module.session_start_without_pid(message) in expected_starts_without_pid for message in opening
+                threads_module.marker_matches_without_pid(message, expected_starts_without_pid) for message in opening
             ):
                 pid_relaxed_matches.append(entry.thread)
         if not complete:

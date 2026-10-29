@@ -21,7 +21,7 @@ from discord_blue.doodads.agent_session import threads as threads_module
 from discord_blue.doodads.agent_session.sessions import AgentSession, AgentSessionRegistry, CleanupStep, PendingSessionCleanup
 from discord_blue.doodads.agent_session.store import SessionState, SessionStore, StoredSession
 from discord_blue.doodads.agent_session.thread_worker import THREAD_CLOSE_STEPS, ThreadWorkers
-from discord_blue.doodads.agent_session.threads import SESSION_NOTIFICATION_PREFIXES, SESSION_START_PREFIX
+from discord_blue.doodads.agent_session.threads import SESSION_NOTIFICATION_PREFIXES
 from discord_blue.plugs.discord_plug import BlueBot
 
 if TYPE_CHECKING:
@@ -260,7 +260,7 @@ class SessionCleanups:
             async for message in thread.history(limit=10, oldest_first=True):
                 if message.author.id != bot_user.id:
                     continue
-                if any(marker.startswith(SESSION_START_PREFIX) for marker in threads_module.session_message_markers(message)):
+                if any(threads_module.is_session_marker(marker) for marker in threads_module.session_message_markers(message)):
                     return True
         except discord.DiscordException:
             logger.warning("Unable to inspect Agent session thread %s", thread.id)
