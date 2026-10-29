@@ -627,7 +627,16 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         recovered = await self.restarted_cards()
         stored = cast(StoredQuestion, recovered.record(modal.session_id, modal.question.key))
         self.assertEqual(stored.state, QuestionState.UNCONFIRMED)
-        self.assertIn("delivery not confirmed", visible_view_text(recovered.view(modal.session_id, stored)))
+        await recovered.close(modal.session_id, current_epoch=self.fixture.session.session_epoch)  # The session attaches.
+        message = self.fixture.thread._messages[cast(int, stored.message_id)]
+        self.assertIn("delivery not confirmed", visible_view_text(message.view))
+
+    async def test_held_answers_stay_held_when_their_sending_mark_cannot_be_saved(self) -> None:
+        await self.hold_first_answer()
+        with patch.object(self.fixture.bridge.store, "flush", AsyncMock(side_effect=OSError("disk unavailable"))):
+            await self.fixture.bridge.controls.send_thread_reply(cast(Any, FakeReplyMessage(303, self.fixture.thread, "later")))
+        self.assertEqual([command["text"] for command in self.fixture.socket.sent_json], ["later"])
+        self.assertEqual(self.grouped("Q1")[0].state, QuestionState.HELD)
 
     async def test_a_typed_answer_carries_held_answers_with_it(self) -> None:
         await self.hold_first_answer()

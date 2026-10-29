@@ -156,6 +156,8 @@ class QuestionCards:
         self.bridge = bridge
         self.locks: dict[str, asyncio.Lock] = {}
         self.edit_locks: dict[str, asyncio.Lock] = {}
+        # Cards marked unconfirmed at startup, redrawn once their session attaches or ends and Discord is reachable.
+        self.unconfirmed_at_start: dict[str, list[str]] = {}
 
     def lock(self, key: str) -> asyncio.Lock:
         return self.locks.setdefault(key, asyncio.Lock())
@@ -187,6 +189,7 @@ class QuestionCards:
                     # The acknowledgment that would settle it was lost with the previous process.
                     question = replace(question, state=QuestionState.UNCONFIRMED)
                     self.save(session_id, question)
+                    self.unconfirmed_at_start.setdefault(session_id, []).append(question.key)
                 if question.message_id is not None:
                     view = self.view(session_id, question)
                     if question.legacy_parent_id is not None:
@@ -567,6 +570,8 @@ class QuestionCards:
                 question = replace(question, state=closed)
                 self.save(session_id, question)
                 await self.refresh(session_id, [question], thread=thread)
+        restored = [q for key in self.unconfirmed_at_start.pop(session_id, []) if (q := self.record(session_id, key))]
+        await self.refresh(session_id, restored, thread=thread)
 
     async def submit(
         self,
@@ -702,8 +707,11 @@ class QuestionCards:
             for q in (stored.questions if stored is not None else ())
             if q.state == QuestionState.HELD and q.epoch == session.session_epoch
         ]
-        for question in ready:
-            self.save(session.session_id, question)
+        if not all(self.save(session.session_id, question) for question in ready) or not await self.persist():
+            # Without a durable sending mark, a restart could send these answers a second time.
+            for question in ready:
+                self.save(session.session_id, replace(question, state=QuestionState.HELD))
+            return "", ()
         await self.refresh(session.session_id, ready)
         return (self.answer_text(ready), tuple(q.key for q in ready)) if ready else ("", ())
 
