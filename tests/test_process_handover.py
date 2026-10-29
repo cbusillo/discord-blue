@@ -39,6 +39,16 @@ with patch("pathlib.Path.home", return_value=folder), patch.object(entry, "get_c
 
 
 class ProcessHandoverTests(unittest.TestCase):
+    def start_process(self, folder: Path, role: str, descriptor: int) -> subprocess.Popen[bytes]:
+        process = subprocess.Popen(
+            [sys.executable, "-c", PROCESS, str(folder), role, str(descriptor)],
+            pass_fds=(descriptor,),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        self.addCleanup(self.stop, process)
+        return process
+
     def wait_for(self, path: Path) -> None:
         deadline = time.monotonic() + 10
         while not path.exists() and time.monotonic() < deadline:
@@ -51,22 +61,10 @@ class ProcessHandoverTests(unittest.TestCase):
             reader, writer = os.pipe()
             self.addCleanup(os.close, reader)
             os.set_blocking(reader, False)
-            old = subprocess.Popen(
-                [sys.executable, "-c", PROCESS, directory, "old", str(writer)],
-                pass_fds=(writer,),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
+            old = self.start_process(folder, "old", writer)
             os.close(writer)
-            self.addCleanup(self.stop, old)
             self.wait_for(folder / "old-config")
-            new = subprocess.Popen(
-                [sys.executable, "-c", PROCESS, directory, "new", str(reader)],
-                pass_fds=(reader,),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            self.addCleanup(self.stop, new)
+            new = self.start_process(folder, "new", reader)
             self.wait_for(folder / "new-entered")
             time.sleep(0.1)
             self.assertIsNone(new.poll(), "Successor reached configuration while predecessor lived")
@@ -79,22 +77,10 @@ class ProcessHandoverTests(unittest.TestCase):
             folder = Path(directory)
             reader, writer = os.pipe()
             self.addCleanup(os.close, reader)
-            old = subprocess.Popen(
-                [sys.executable, "-c", PROCESS, directory, "old", str(writer)],
-                pass_fds=(writer,),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
+            old = self.start_process(folder, "old", writer)
             os.close(writer)
-            self.addCleanup(self.stop, old)
             self.wait_for(folder / "old-config")
-            new = subprocess.Popen(
-                [sys.executable, "-c", PROCESS, directory, "new", str(reader)],
-                pass_fds=(reader,),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            self.addCleanup(self.stop, new)
+            new = self.start_process(folder, "new", reader)
             self.wait_for(folder / "new-entered")
             new.terminate()
             new.communicate(timeout=2)

@@ -57,10 +57,10 @@ def start_bot() -> None:
     signal.signal(signal.SIGTERM, terminate_before_loop)
     hold_state_lock()
     config = get_config()
+    loop = asyncio.get_event_loop()
     for _count in range(DISCORD_TOKEN_TIMEOUT):
         try:
             bot = BlueBot(config)
-            loop = asyncio.get_event_loop()
             handler = create_signal_handler(bot)
             for signal_to_add in (signal.SIGINT, signal.SIGTERM):
                 loop.add_signal_handler(signal_to_add, handler, signal_to_add)
