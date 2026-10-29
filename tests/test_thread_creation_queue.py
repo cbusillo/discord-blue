@@ -29,7 +29,7 @@ class Connection:
     host_label: str = HOST
     heartbeat_seconds: float = 1
     reconnect_seconds: float = 0.02
-    hello_timeout_seconds: float = 0.5
+    hello_timeout_seconds: float = 0.05
 
 
 class QueuedClient(AgentSessionClient):
@@ -45,7 +45,7 @@ class QueuedClient(AgentSessionClient):
 class ThreadCreationQueueTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_rate_limited_create_keeps_the_socket_and_delivers_queued_events(self) -> None:
         fake = FakeDiscord()
-        retry_after = 1.2  # Longer than the client's hello inactivity deadline.
+        retry_after = 0.12  # Longer than the client's hello inactivity deadline.
         fake.faults.append(Fault(*CREATE, status=429, retry_after=retry_after))
         attempts: list[float] = []
         async with scenario(fake) as running, aiohttp.ClientSession() as http:
@@ -55,13 +55,13 @@ class ThreadCreationQueueTests(unittest.IsolatedAsyncioTestCase):
 
             async def create(**kwargs: object) -> FakeThread:
                 attempts.append(time.monotonic())
-                with patch.object(running.bot.http, "max_ratelimit_timeout", 0.05):
+                with patch.object(running.bot.http, "max_ratelimit_timeout", 0.005):
                     return await original(**kwargs)
 
             client = QueuedClient(running.url, "waiting")
             client.publish("user_message", message="Queued while waiting")
             with (
-                patch.object(bridge_module, "HELLO_PENDING_INTERVAL_SECONDS", 0.04),
+                patch.object(bridge_module, "HELLO_PENDING_INTERVAL_SECONDS", 0.004),
                 patch.object(parent, "create_thread", create),
             ):
                 task = asyncio.create_task(client.run(http))
@@ -93,7 +93,7 @@ class ThreadCreationQueueTests(unittest.IsolatedAsyncioTestCase):
             return lambda body: f"burst-{window_start} " in body.get("name", "")
 
         for number in (2, 4, 6):
-            fake.faults.append(Fault(*CREATE, status=429, retry_after=0.2, body=matches(number)))
+            fake.faults.append(Fault(*CREATE, status=429, retry_after=0.02, body=matches(number)))
         active, peak = 0, 0
         async with scenario(fake) as running, aiohttp.ClientSession() as http:
             parent = cast(HttpChannel, running.bot.parent)
@@ -104,13 +104,13 @@ class ThreadCreationQueueTests(unittest.IsolatedAsyncioTestCase):
                 active += 1
                 peak = max(peak, active)
                 try:
-                    with patch.object(running.bot.http, "max_ratelimit_timeout", 0.05):
+                    with patch.object(running.bot.http, "max_ratelimit_timeout", 0.005):
                         return await original(**kwargs)
                 finally:
                     active -= 1
 
             with (
-                patch.object(bridge_module, "HELLO_PENDING_INTERVAL_SECONDS", 0.04),
+                patch.object(bridge_module, "HELLO_PENDING_INTERVAL_SECONDS", 0.004),
                 patch.object(parent, "create_thread", create),
             ):
                 sockets = [await running.connect(http) for _ in hellos]
@@ -136,18 +136,18 @@ class ThreadCreationQueueTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_socket_lost_during_cooldown_enters_grace_after_the_thread_is_bound(self) -> None:
         fake = FakeDiscord()
-        fake.faults.append(Fault(*CREATE, status=429, retry_after=0.5))
+        fake.faults.append(Fault(*CREATE, status=429, retry_after=0.05))
         async with scenario(fake) as running:
             parent = cast(HttpChannel, running.bot.parent)
             original = parent.create_thread
 
             async def create(**kwargs: object) -> FakeThread:
-                with patch.object(running.bot.http, "max_ratelimit_timeout", 0.05):
+                with patch.object(running.bot.http, "max_ratelimit_timeout", 0.005):
                     return await original(**kwargs)
 
             with (
                 patch.object(parent, "create_thread", create),
-                patch.object(bridge_module, "HELLO_PENDING_INTERVAL_SECONDS", 0.04),
+                patch.object(bridge_module, "HELLO_PENDING_INTERVAL_SECONDS", 0.004),
             ):
                 async with aiohttp.ClientSession() as http:
                     socket = await running.connect(http)
