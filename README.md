@@ -545,7 +545,8 @@ The thread is named `✴️ <repo> · <label>`: the session name (`-n` or
 `/resume` picker shows, read from the end of the transcript), else the first
 substantial typed prompt (tags such as pasted content and go-aheads such as
 "continue" don't count), else a non-default git branch. Labels are short, cut at
-a word boundary. It mirrors typed prompts and each turn's final answer. A Discord reply
+a word boundary. It mirrors typed prompts and each turn's final answer; an answer
+that another Stop hook rejects, sending Claude back to rewrite it, is never posted. A Discord reply
 becomes the session's next prompt. When Claude asks for a tool permission, the
 thread says which tool is waiting; approve or deny it in the terminal. The thread archives when the session exits.
 
@@ -623,8 +624,8 @@ Discord controls the final appearance on a phone.
 
 ## Numbered Question cards
 
-An answer containing a top-level bold numbered question ending in a question mark,
-such as `**Q123.** Ship it?`, puts that question in a silent **Question** card
+An answer containing a top-level bold numbered question whose first sentence ends
+in a question mark, such as `**Q123.** Ship it? I recommend yes.`, puts that question in a silent **Question** card
 inside the session thread. Its recommendation, cost and alternatives stay with
 it. Surrounding prose stays chat. Each Q number keeps one card in its session,
 even on backfill or reconnection; the parent channel gets no question posts. Quoted, tabled,

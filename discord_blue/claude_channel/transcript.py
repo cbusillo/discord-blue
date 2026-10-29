@@ -70,6 +70,17 @@ class TranscriptTitles:
         self.cached = (key, titles)
         return titles
 
+    async def stop_blocked(self, path: str, text: str) -> bool | None:
+        """Whether another Stop hook rejected this final text, sending Claude back to rewrite it; None while unknown."""
+        if not path.endswith(".jsonl") or not text.strip():
+            return None
+        try:
+            return await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(self.executor, stop_verdict, path, text), READ_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            return None
+
     @staticmethod
     def scan(path: str, size: int) -> Titles:
         start = max(0, size - TAIL_BYTES)
@@ -113,3 +124,40 @@ class TranscriptTitles:
         return Titles(
             custom=custom, ai=ai, before_first_prompt=before_first_prompt, scheduled_prompt_ids=frozenset(scheduled_prompt_ids)
         )
+
+
+def stop_verdict(path: str, text: str) -> bool | None:
+    """Claude Code records a rejected stop as a "Stop hook feedback" prompt after the text, then the hooks' summary."""
+    try:
+        with open(path, "rb") as transcript:
+            size = transcript.seek(0, os.SEEK_END)
+            start = max(0, size - TAIL_BYTES)
+            transcript.seek(start)
+            lines = transcript.read(TAIL_BYTES).split(b"\n")
+    except OSError:
+        return None
+    if start:
+        lines = lines[1:]
+    wanted = text.strip()
+    verdict: bool | None = None
+    found = feedback = False
+    for line in lines:
+        try:
+            record = json.loads(line) if line.strip() else None
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        kind = record.get("type")
+        content = record.get("message", {}).get("content") if isinstance(record.get("message"), dict) else None
+        if kind == "assistant" and isinstance(content, list):
+            texts = [block.get("text", "").strip() for block in content if isinstance(block, dict) and block.get("type") == "text"]
+            if any(block and wanted.endswith(block) for block in texts):
+                found, feedback, verdict = True, False, None
+        elif not found or verdict is not None:
+            continue
+        elif kind == "user" and isinstance(content, str) and content.startswith("Stop hook feedback"):
+            feedback = True
+        elif kind == "system" and record.get("subtype") in {"stop_hook_summary", "turn_duration"}:
+            verdict = feedback
+    return verdict
