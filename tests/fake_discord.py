@@ -205,6 +205,7 @@ class FakeDiscord:
         ("DELETE", "/channels/{channel}/messages/{message}"),
         ("GET", "/channels/{channel}/messages"),
         ("POST", "/channels/{channel}/messages"),
+        ("POST", "/channels/{channel}/typing"),
         ("GET", "/channels/{channel}/thread-members"),
         ("PUT", "/channels/{channel}/thread-members/{member}"),
         ("DELETE", "/channels/{channel}/thread-members/{member}"),
@@ -273,6 +274,8 @@ class FakeDiscord:
     def apply(self, method: str, template: str, ids: dict[str, str], query: dict[str, str], body: Json) -> tuple[int, Any]:
         channel_id = int(ids["channel"]) if "channel" in ids else None
         thread = self.threads.get(channel_id) if channel_id is not None else None
+        if template == "/channels/{channel}/typing":
+            return 204, None
         if channel_id is not None and channel_id != PARENT_ID and thread is None:
             return 404, {"message": "Unknown Channel", "code": 10003}
         if template == "/interactions/{interaction}/{token}/callback":

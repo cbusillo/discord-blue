@@ -860,7 +860,7 @@ Discord's circular avatar crop and checked at 32, 40 and 128 pixels.
 It is not applied to the bot or server. Session thread names use standard emoji:
 Claude uses the orange eight-pointed star (✴️), and Codex uses the blue diamond (🔷).
 
-## Session status cards
+## Session details and activity
 
 New threads keep machine identity in a **Session details** card hidden by
 Discord's native tap-to-reveal control. The complete marker stays in Discord
@@ -876,24 +876,18 @@ A new thread briefly settles its initial name before renaming, so a title learne
 just after connection can replace the temporary name in one edit. Later changes
 to capitalization, spacing or trailing sentence punctuation do not rename it,
 including any fallback branch label.
-The information reaction refreshes and acknowledges on the live card without a
-public status echo. Questions, approvals and failures still get new messages.
-
-Codex and Claude session threads use one persistent Components V2 status card:
-**Working**, **Waiting on you**, **Turn finished**, **Failed**, or **Disconnected**.
-A finished turn or disconnected session does not claim that a task succeeded.
-The card includes the session label, latest status detail, reaction controls and
-a relative update time. Ordinary terminal input and turn completion edit it in
-place. Its message ID is saved with session recovery hints, so reconnect can
-find it even after a long conversation. Legacy recovery searches thread history;
-a read or edit failure keeps the anchor, and confirmed deletion permits a replacement.
-Status-card edits suppress mentions; initial cards suppress notifications too.
-Questions, approvals, terminal-action requests and errors remain new messages.
-Routine session closure updates the card and keeps the existing archive/reopen
-lifecycle, without another session-ended post.
+While a Codex or Claude session works, its thread shows Discord's own
+"Doug is typing…" indicator at the bottom, refreshed every few seconds and
+stopped before the answer posts. There is no status card. Anything that needs
+you is its own message: Question cards, approvals, terminal-action requests and
+errors. `/code status` shows the latest status detail, and `/code go-ahead`,
+`/code pause` and `/code end-session` replace the old card's reactions.
+Routine session closure keeps the existing archive/reopen lifecycle, without a
+session-ended post. A status card left by an older release is deleted when its
+session reconnects or closes; historical answers stay.
 
 A spawned session omits an automated launch brief only when its client marks
-that exact input with native launch provenance. The card says where to read the full input in the native
+that exact input with native launch provenance. `/code status` says where to read the full input in the native
 terminal. Later human terminal input remains visible. Existing, resumed or uncertain inputs keep their mirrors. Codex proves the
 first turn from native pagination. Claude matches the explicit CLI launch brief against the first hook input, with a
 new transcript not yet created by Claude, or a fully read transcript containing no prior prompt.
@@ -931,12 +925,10 @@ inline content remains readable and the complete answer stays in the terminal.
 Only the first card notifies. If delivery stops between cards, reconnect backfill
 reposts the answer so its tail is not lost; the delivered prefix may repeat.
 
-[Local phone layout preview](docs/assets/dui/status-390.png) renders serialized
-component payloads; final typography and spacing are controlled by Discord.
-The update time makes stale cards visible. On a reconnect, the bridge recovers
-its existing status card and shows that state is unconfirmed until the next native update. Reaction controls remain
-bound to the current connection and epoch. Paused turns return to a waiting card,
-and Codex decision completion returns the card to working. Claude permission
-previews have no tool-call identifier, so subsequent tool activity shows
-**Check terminal** until completion confirms the outcome; parallel tools cannot
-claim that an unrelated approval was resolved.
+Typing runs as one background task per working session. It stops between
+requests rather than cancelling one, so a slow or failed typing request never
+holds native heartbeats, and it ends when the session stops working,
+disconnects or closes. A paused turn, a question or a terminal approval stops
+typing. Claude permission previews have no tool-call identifier, so later tool
+activity shows **Check terminal** in `/code status`, without typing, until
+completion confirms the outcome.

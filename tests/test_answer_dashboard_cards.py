@@ -122,7 +122,6 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             self.assertFalse(fixture.thread.sent_files)
-            self.assertIsNotNone(fixture.session.control_message_id)
             self.assertEqual(fixture.session.display_state, "done")
             self.assertTrue(fixture.thread.sent_kwargs[0].get("silent", False))
             fixture.session.hello.assistant_message = answer

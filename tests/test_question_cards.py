@@ -105,7 +105,7 @@ class QuestionCardTests(unittest.IsolatedAsyncioTestCase):
         await self.post([self.question(str(index)) for index in range(MAX_INPUT_QUESTIONS + 1)])
         self.assertEqual(self.fixture.session.pending_user_inputs, {})
         self.assertEqual(self.fixture.session.display_state, "waiting")
-        self.assertTrue(any("native TUI" in visible_view_text(view) for view in self.fixture.thread.sent_views))
+        self.assertTrue(any("native TUI" in message for message in self.fixture.thread.sent_messages))
 
     async def test_full_question_and_long_option_description_remain_visible(self) -> None:
         question = self.question()

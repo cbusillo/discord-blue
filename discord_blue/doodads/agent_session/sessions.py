@@ -26,8 +26,6 @@ class PendingRemoteCommand:
     status_revision: int | None = None
     previous_display_state: DisplayState = "waiting"
     previous_status_message: str | None = None
-    previous_status_reaction: str | None = None
-    previous_interruptions_enabled: bool = False
 
 
 @dataclass(slots=True)
@@ -64,7 +62,6 @@ class AgentSession:
     websocket: web.WebSocketResponse
     thread_id: int | None = None
     notification_message_id: int | None = None
-    control_message_id: int | None = None
     last_seen: datetime = field(default_factory=lambda: datetime.now(UTC))
     # False until hello_ack is sent: the heartbeat watchdog leaves an attaching connection alone.
     acknowledged: bool = False
@@ -84,13 +81,9 @@ class AgentSession:
     last_status_message: str | None = None
     display_state: DisplayState = "waiting"
     status_revision: int = 0
-    control_anchor_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    control_update_task: asyncio.Task[bool] | None = None
-    control_update_pending: bool = False
-    control_card_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    control_status_reaction: str | None = None
-    control_interruptions_enabled: bool = False
-    pending_control_confirmation: Literal["end_session"] | None = None
+    # The one task keeping Discord's typing indicator up in the thread; the wake makes it re-check at once.
+    typing_task: asyncio.Task[None] | None = None
+    typing_wake: asyncio.Event = field(default_factory=asyncio.Event)
 
     @property
     def session_id(self) -> str:

@@ -1,4 +1,4 @@
-"""The session status card and its reaction controls, and the commands an operator sends a session from Discord."""
+"""What a session shows while it works, and the commands an operator sends a session from Discord."""
 
 from __future__ import annotations
 
@@ -16,8 +16,6 @@ import discord
 if TYPE_CHECKING:
     from discord_blue.doodads.agent_session.director_questions import QuestionCards
 
-from discord_blue.doodads.agent_session.cards import STATUS_CARD_COMPONENT_ID, session_status_card
-from discord_blue.doodads.agent_session.messages import agent_session_allowed_mentions, send_agent_session_message
 from discord_blue.doodads.agent_session.protocol import RemoteCommand, payload_string
 from discord_blue.doodads.agent_session.sessions import (
     AgentSession,
@@ -93,7 +91,10 @@ REACTION_IN_PROGRESS = "🔄"
 REACTION_COMPACTING = "🧹"
 REACTION_FINISHED = "✅"
 REACTION_REJECTED = "❌"
-CONTROL_CARD_WAIT_SECONDS = 1
+# Discord shows a typing indicator for about ten seconds per request.
+TYPING_REFRESH_SECONDS = 8
+# How long an answer waits for a typing request already in flight, which would otherwise land after it.
+TYPING_SETTLE_SECONDS = 1
 STATUS_REACTIONS = {
     REACTION_QUEUED,
     REACTION_DELIVERED,
@@ -102,19 +103,9 @@ STATUS_REACTIONS = {
     REACTION_FINISHED,
     REACTION_REJECTED,
 }
-REACTION_CONTROL_CONTINUE = "▶️"
-REACTION_CONTROL_STATUS = "\N{INFORMATION SOURCE}\N{VARIATION SELECTOR-16}"
-REACTION_CONTROL_PAUSE = "⏸️"
-REACTION_CONTROL_END = "⏹️"
 REACTION_APPROVAL_APPROVE = "✅"
 REACTION_APPROVAL_DENY = "✖️"
-CONTROL_REACTIONS = {
-    REACTION_CONTROL_CONTINUE,
-    REACTION_CONTROL_STATUS,
-    REACTION_CONTROL_PAUSE,
-    REACTION_CONTROL_END,
-}
-TRANSIENT_REACTIONS = STATUS_REACTIONS | CONTROL_REACTIONS
+TRANSIENT_REACTIONS = STATUS_REACTIONS
 
 
 @dataclasses.dataclass(slots=True)
@@ -139,8 +130,6 @@ class ControlHooks(Protocol):
     async def post_thread_notice(self, thread_id: int, text: str) -> None: ...
 
     def thread_channel(self, thread_id: int) -> object | None: ...
-
-    def remember_control_anchor(self, session: AgentSession) -> None: ...
 
 
 class SessionControls:
@@ -182,8 +171,6 @@ class SessionControls:
         pending.status_revision = session.status_revision
         pending.previous_display_state = session.display_state
         pending.previous_status_message = session.last_status_message
-        pending.previous_status_reaction = session.control_status_reaction
-        pending.previous_interruptions_enabled = session.control_interruptions_enabled
         session.pending_commands[command.command_id] = pending
         delivered = False
         try:
@@ -269,7 +256,7 @@ class SessionControls:
             nonlocal queued
             queued = True
             await self.set_message_reaction(thread.id, message_id, REACTION_QUEUED)
-            await self.show_active_session_controls(session, thread, REACTION_QUEUED)
+            self.show_working(session, "Your request is queued.")
 
         delivered = False
         try:
@@ -278,9 +265,8 @@ class SessionControls:
         finally:
             if queued and not delivered:
                 await self.clear_message_transient_reactions(thread.id, message_id)
-                if self.bridge.sessions.get(session.session_id) is session and session.control_status_reaction == REACTION_QUEUED:
-                    self.restore_command_status(session, pending)
-                    await self.show_or_refresh_session_controls(session, thread)
+                self.restore_command_status(session, pending)
+                self.show_activity(session)
         return error
 
     async def send_continue_autonomously(self, channel: object, user: discord.User | discord.Member) -> str:
@@ -321,14 +307,14 @@ class SessionControls:
         )
         pending = PendingRemoteCommand(
             thread_id=channel.id,
-            message_id=session.control_message_id,
+            message_id=None,
             kind=control.kind,
             reject_notice=control.reject_notice,
         )
         if error := await self.dispatch_command(session, command, pending):
             return error
         if control.pending_status is not None:
-            await self.show_pending_control(session, channel, control.pending_status)
+            self.show_working(session, control.pending_status)
         return control.delivered
 
     def session_status_summary(
@@ -375,7 +361,6 @@ class SessionControls:
             await self.update_command_message_reaction(session, command, REACTION_DELIVERED)
             if command.kind == "reply" and command.status_revision == session.status_revision:
                 session.last_status_message = "Request delivered to the native session."
-                await self.update_control_anchor_status(session, command.thread_id, REACTION_DELIVERED)
 
     async def handle_command_reject(self, payload: dict[str, object]) -> None:
         command_context = self.command_context(payload)
@@ -395,9 +380,7 @@ class SessionControls:
                         message_id=command.message_id,
                     )
                 )
-            channel = self.bridge.thread_channel(command.thread_id)
-            if isinstance(channel, discord.Thread):
-                await self.show_or_refresh_session_controls(session, channel)
+            self.show_activity(session)
             if command.reject_notice is not None:
                 reason = payload_string(payload, "reason", "command was rejected")
                 await self.bridge.post_thread_notice(command.thread_id, f"{command.reject_notice}: {reason}")
@@ -412,8 +395,6 @@ class SessionControls:
             return
         session.display_state = command.previous_display_state
         session.last_status_message = command.previous_status_message
-        session.control_status_reaction = command.previous_status_reaction
-        session.control_interruptions_enabled = command.previous_interruptions_enabled
 
     def command_context(self, payload: dict[str, object]) -> tuple[str, AgentSession] | None:
         command_id = payload_string(payload, "command_id")
@@ -439,100 +420,10 @@ class SessionControls:
             return
         if command.message_id is None:
             return
-        if command.message_id == session.control_message_id:
-            if reaction != REACTION_REJECTED:
-                session.control_status_reaction = reaction
-            channel = self.bridge.thread_channel(command.thread_id)
-            if isinstance(channel, discord.Thread):
-                await self.refresh_session_controls(session, channel)
-            return
         if command.kind == "reply" and reaction != REACTION_REJECTED:
             await self.clear_message_transient_reactions(command.thread_id, command.message_id)
             return
         await self.set_message_reaction(command.thread_id, command.message_id, reaction)
-
-    async def handle_session_control_reaction(
-        self,
-        session: AgentSession,
-        thread: discord.Thread,
-        message_id: int,
-        emoji: str,
-        user: discord.User | discord.Member,
-    ) -> bool:
-        if session.pending_control_confirmation is not None:
-            return await self.handle_pending_control_confirmation(
-                session,
-                thread,
-                message_id,
-                emoji,
-                user,
-            )
-
-        if emoji == REACTION_CONTROL_CONTINUE:
-            response = await self.send_continue_autonomously(thread, user)
-            await self.remove_message_reaction(thread, message_id, emoji, user)
-            if response != CONTINUE_AUTONOMOUSLY_DELIVERED:
-                await self.bridge.post_thread_notice(thread.id, response)
-            return True
-        if emoji == REACTION_CONTROL_STATUS:
-            refreshed = await self.refresh_control_card(
-                session, thread, message_id, self.session_control_reactions(session), refresh_reactions=False
-            )
-            if not refreshed:
-                await self.refresh_session_controls(session, thread)
-            await self.remove_message_reaction(thread, message_id, emoji, user)
-            return True
-        if emoji == REACTION_CONTROL_PAUSE:
-            response = await self.send_pause_current_turn(thread, user)
-            await self.remove_message_reaction(thread, message_id, emoji, user)
-            if response != PAUSE_CURRENT_TURN_DELIVERED:
-                await self.bridge.post_thread_notice(thread.id, response)
-            return True
-        if emoji == REACTION_CONTROL_END:
-            if error := self.dispatch_error(session, "end_session"):
-                await self.remove_message_reaction(thread, message_id, emoji, user)
-                await self.bridge.post_thread_notice(thread.id, error)
-                return True
-            session.pending_control_confirmation = "end_session"
-            await self.refresh_session_controls(
-                session,
-                thread,
-                remove_user_reaction=(emoji, user),
-            )
-            return True
-        return False
-
-    async def handle_pending_control_confirmation(
-        self,
-        session: AgentSession,
-        thread: discord.Thread,
-        message_id: int,
-        emoji: str,
-        user: discord.User | discord.Member,
-    ) -> bool:
-        if emoji == REACTION_APPROVAL_DENY:
-            session.pending_control_confirmation = None
-            await self.refresh_session_controls(
-                session,
-                thread,
-                remove_user_reaction=(emoji, user),
-            )
-            return True
-        if emoji != REACTION_APPROVAL_APPROVE:
-            return False
-
-        session.pending_control_confirmation = None
-        response = await self.send_end_session(thread, user)
-        if response == END_SESSION_CONTROL.delivered:
-            await self.remove_message_reaction(thread, message_id, emoji, user)
-        else:
-            await self.refresh_session_controls(
-                session,
-                thread,
-                remove_user_reaction=(emoji, user),
-            )
-            await self.bridge.post_thread_notice(thread.id, response)
-        return True
 
     async def update_active_command_reaction(
         self,
@@ -548,13 +439,9 @@ class SessionControls:
         if command is None:
             return
         await self.update_command_message_reaction(session, command, reaction)
-        if command.message_id != session.control_message_id:
-            await self.update_control_anchor_status(session, command.thread_id, reaction)
         if clear:
             session.pending_commands.pop(command_id, None)
             session.active_command_id = None
-            if command.message_id == session.control_message_id:
-                session.control_status_reaction = None
 
     async def clear_rejected_command_reactions(self, session: AgentSession) -> None:
         rejected_messages = session.rejected_command_messages
@@ -567,72 +454,52 @@ class SessionControls:
         session: AgentSession,
         reaction: str,
     ) -> None:
-        if session.active_command_id is not None:
-            await self.update_active_command_reaction(session, reaction)
-            return
-        if session.thread_id is None:
-            return
-        await self.update_control_anchor_status(session, session.thread_id, reaction)
+        await self.update_active_command_reaction(session, reaction)
+        self.show_activity(session)
 
-    async def update_control_anchor_status(
-        self,
-        session: AgentSession,
-        thread_id: int,
-        reaction: str,
-    ) -> None:
-        channel = self.bridge.thread_channel(thread_id)
-        if not isinstance(channel, discord.Thread):
-            return
-        session.control_status_reaction = reaction
-        await self.show_or_refresh_session_controls(session, channel)
-
-    async def show_active_session_controls(
-        self,
-        session: AgentSession,
-        thread: discord.Thread,
-        reaction: str,
-    ) -> None:
-        session.display_state = "working"
-        session.last_status_message = "Your request is queued." if reaction == REACTION_QUEUED else "Working on your request."
-        session.control_status_reaction = reaction
-        session.control_interruptions_enabled = True
-        await self.show_or_refresh_session_controls(session, thread)
-
-    async def show_pending_control(self, session: AgentSession, thread: discord.Thread, detail: str) -> None:
+    def show_working(self, session: AgentSession, detail: str) -> None:
         session.display_state = "working"
         session.last_status_message = detail
-        session.control_status_reaction = REACTION_QUEUED
-        session.control_interruptions_enabled = False
-        if session.control_message_id is not None:
-            await self.refresh_session_controls(session, thread)
-        else:
-            await self.show_or_refresh_session_controls(session, thread)
+        self.show_activity(session)
 
-    async def previous_status_card(self, thread: discord.Thread) -> int | None:
-        if self.bridge.bot.user is None:
-            return None
-        try:
-            async for message in thread.history(limit=None):
-                if message.author.id == self.bridge.bot.user.id and any(
-                    isinstance(component, discord.Container) and component.id == STATUS_CARD_COMPONENT_ID
-                    for component in getattr(message, "components", [])
-                ):
-                    return message.id
-        except discord.DiscordException:
-            logger.warning("Unable to recover Agent session status card in %s", thread.id)
-            raise
-        return None
-
-    async def show_or_refresh_session_controls(
-        self,
-        session: AgentSession,
-        thread: discord.Thread,
-    ) -> None:
-        await self.spawn_session_controls(
-            session,
-            reaction=session.control_status_reaction,
-            interruptions_enabled=session.control_interruptions_enabled,
+    def working(self, session: AgentSession) -> bool:
+        return (
+            session.display_state == "working"
+            and session.thread_id is not None
+            and self.bridge.sessions.get(session.session_id) is session
         )
+
+    def show_activity(self, session: AgentSession) -> None:
+        """Keep Discord's typing indicator up in the thread exactly while the session works, from one task."""
+        task = session.typing_task
+        if task is not None and not task.done():
+            session.typing_wake.set()
+        elif self.working(session):
+            task = session.typing_task = asyncio.create_task(
+                self.keep_typing(session), name=f"agent-session-typing-{session.session_id}"
+            )
+            self.bridge.threads.background.add(task)
+            task.add_done_callback(self.bridge.threads.request_done)
+
+    async def keep_typing(self, session: AgentSession) -> None:
+        # Stops between requests, never canceled during one: see ThreadWorkers.stop.
+        while self.working(session):
+            session.typing_wake.clear()
+            channel = self.bridge.thread_channel(session.thread_id or 0)
+            if isinstance(channel, discord.Thread):
+                try:
+                    await channel.typing()
+                except discord.DiscordException:
+                    logger.debug("Unable to show typing in Agent session thread %s", channel.id)
+            with suppress(TimeoutError):
+                await asyncio.wait_for(session.typing_wake.wait(), TYPING_REFRESH_SECONDS)
+
+    @staticmethod
+    async def settle_activity(session: AgentSession) -> None:
+        """Let a typing request already in flight land first, so it cannot show typing again after a post."""
+        task = session.typing_task
+        if task is not None and not task.done():
+            await asyncio.wait({task}, timeout=TYPING_SETTLE_SECONDS)
 
     async def set_message_reaction(self, thread_id: int, message_id: int, reaction: str) -> None:
         channel = self.bridge.thread_channel(thread_id)
@@ -670,200 +537,6 @@ class SessionControls:
         for existing in TRANSIENT_REACTIONS:
             with suppress(discord.DiscordException):
                 await message.remove_reaction(existing, bot_user)
-
-    async def post_session_controls(self, session: AgentSession) -> None:
-        if session.thread_id is None:
-            return
-        channel = self.bridge.thread_channel(session.thread_id)
-        if not isinstance(channel, discord.Thread):
-            return
-        session.pending_control_confirmation = None
-        session.control_status_reaction = None
-        session.control_interruptions_enabled = False
-        await self.show_or_refresh_session_controls(session, channel)
-
-    async def spawn_session_controls(
-        self,
-        session: AgentSession,
-        *,
-        reaction: str | None,
-        interruptions_enabled: bool,
-    ) -> bool:
-        if session.thread_id is None:
-            return False
-        channel = self.bridge.thread_channel(session.thread_id)
-        if not isinstance(channel, discord.Thread):
-            return False
-        session.control_status_reaction = reaction
-        session.control_interruptions_enabled = interruptions_enabled
-        session.control_update_pending = True
-        task = session.control_update_task
-        if task is not None and not task.done():
-            return False
-        task = session.control_update_task = asyncio.create_task(self.update_session_controls(session, channel))
-        self.bridge.threads.background.add(task)
-        task.add_done_callback(self.bridge.threads.request_done)
-        await asyncio.wait({task}, timeout=CONTROL_CARD_WAIT_SECONDS)
-        return task.result() if task.done() else False
-
-    async def update_session_controls(self, session: AgentSession, channel: discord.Thread) -> bool:
-        updated = False
-        while session.control_update_pending:
-            session.control_update_pending = False
-            updated = await self.update_session_controls_once(session, channel)
-        return updated
-
-    async def update_session_controls_once(self, session: AgentSession, channel: discord.Thread) -> bool:
-        async with session.control_anchor_lock:
-            if self.bridge.sessions.get(session.session_id) is not session:
-                return False
-            if session.control_message_id is None:
-                try:
-                    session.control_message_id = await self.previous_status_card(channel)
-                except discord.DiscordException:
-                    return False
-                if self.bridge.sessions.get(session.session_id) is not session:
-                    return False
-                self.bridge.remember_control_anchor(session)
-            if session.control_message_id is not None:
-                await self.refresh_existing_anchor(session, channel)
-                return True
-            try:
-                message = await send_agent_session_message(
-                    channel,
-                    view=session_status_card(session, self.session_control_reactions(session)),
-                )
-            except discord.DiscordException:
-                return False
-            session.control_message_id = message.id
-            self.bridge.remember_control_anchor(session)
-            await self.write_message_reactions(message, self.session_control_reactions(session))
-            return True
-
-    @staticmethod
-    def session_control_reactions(session: AgentSession) -> list[str]:
-        if session.display_state == "disconnected":
-            return []
-        if session.display_state == "reconnecting":
-            return [REACTION_CONTROL_STATUS]
-        if session.pending_control_confirmation is not None and session.hello.supports("end_session"):
-            return [REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY]
-        if session.control_status_reaction is not None:
-            active_command = (
-                session.pending_commands.get(session.active_command_id) if session.active_command_id is not None else None
-            )
-            command_can_be_interrupted = active_command is not None and active_command.kind in {
-                "continue_autonomously",
-                "reply",
-            }
-            status_can_be_interrupted = session.control_status_reaction in {
-                REACTION_QUEUED,
-                REACTION_DELIVERED,
-                REACTION_IN_PROGRESS,
-                REACTION_COMPACTING,
-            }
-            if status_can_be_interrupted and (session.control_interruptions_enabled or command_can_be_interrupted):
-                return [session.control_status_reaction] + [
-                    emoji
-                    for emoji, action in [(REACTION_CONTROL_PAUSE, "pause_current_turn"), (REACTION_CONTROL_END, "end_session")]
-                    if session.hello.supports(action)
-                ]
-            return [session.control_status_reaction]
-        return [
-            emoji
-            for emoji, action in [
-                (REACTION_CONTROL_CONTINUE, "continue_autonomously"),
-                (REACTION_CONTROL_STATUS, None),
-                (REACTION_CONTROL_END, "end_session"),
-            ]
-            if action is None or session.hello.supports(action)
-        ]
-
-    async def refresh_control_card(
-        self,
-        session: AgentSession,
-        thread: discord.Thread,
-        message_id: int,
-        reactions: list[str],
-        *,
-        remove_user_reaction: tuple[str, discord.User | discord.Member] | None = None,
-        refresh_reactions: bool = True,
-    ) -> bool:
-        async with session.control_card_lock:
-            if self.bridge.sessions.get(session.session_id) is not session:
-                return True
-            try:
-                message = await thread.fetch_message(message_id)
-            except discord.NotFound:
-                return False
-            except discord.DiscordException:
-                logger.warning("Unable to fetch Agent session status card %s", message_id)
-                return True
-            if self.bridge.sessions.get(session.session_id) is not session:
-                return True
-            bot_user = self.bridge.bot.user
-            if bot_user is None or message.author.id != bot_user.id:
-                logger.warning("Agent session status anchor %s is not bot-authored", message_id)
-                return True
-            try:
-                await message.edit(
-                    content=None,
-                    embeds=[],
-                    view=session_status_card(session, reactions),
-                    allowed_mentions=agent_session_allowed_mentions(),
-                )
-            except discord.NotFound:
-                return False
-            except discord.DiscordException:
-                # Retain a reachable anchor on an edit failure; don't duplicate it.
-                logger.warning("Unable to update Agent session status card %s", message_id)
-            if refresh_reactions:
-                await self.write_message_reactions(message, reactions, clear=True, remove_user_reaction=remove_user_reaction)
-            return True
-
-    async def refresh_session_controls(
-        self,
-        session: AgentSession,
-        thread: discord.Thread,
-        *,
-        remove_user_reaction: tuple[str, discord.User | discord.Member] | None = None,
-    ) -> None:
-        async with session.control_anchor_lock:
-            await self.refresh_existing_anchor(session, thread, remove_user_reaction=remove_user_reaction)
-
-    async def refresh_existing_anchor(
-        self,
-        session: AgentSession,
-        thread: discord.Thread,
-        *,
-        remove_user_reaction: tuple[str, discord.User | discord.Member] | None = None,
-    ) -> None:
-        if session.control_message_id is None:
-            return
-        refreshed_id = session.control_message_id
-        replaced = await self.refresh_control_card(
-            session,
-            thread,
-            refreshed_id,
-            self.session_control_reactions(session),
-            remove_user_reaction=remove_user_reaction,
-        )
-        if replaced or session.control_message_id != refreshed_id:
-            return
-        try:
-            message = await send_agent_session_message(
-                thread,
-                view=session_status_card(session, self.session_control_reactions(session)),
-            )
-        except discord.DiscordException:
-            logger.warning("Unable to replace missing Agent session status card %s", refreshed_id)
-            return
-        session.control_message_id = message.id
-        for command in session.pending_commands.values():
-            if command.message_id == refreshed_id:
-                command.message_id = message.id
-        self.bridge.remember_control_anchor(session)
-        await self.write_message_reactions(message, self.session_control_reactions(session))
 
     async def clear_message_reactions(self, message: discord.Message) -> None:
         await self.write_message_reactions(message, [], clear=True)
