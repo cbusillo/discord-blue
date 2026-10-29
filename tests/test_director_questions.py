@@ -16,7 +16,9 @@ from discord_blue.doodads.agent_session.director_questions import (
     QuestionAnswerButton,
     QuestionAnswerModal,
     QuestionCards,
+    QuestionChoiceButton,
     detect_questions,
+    question_choices,
 )
 from discord_blue.doodads.agent_session.sessions import PendingSessionCleanup
 from discord_blue.doodads.agent_session.store import QuestionState, SessionStore, StoredQuestion
@@ -45,6 +47,14 @@ Recommendation: keep both.
         self.assertEqual([number for number, _ in questions], ["Q6", "Q7"])
         self.assertIn("Alternative: wait.", questions[0][1])
         self.assertIn("Recommendation: keep both.", questions[1][1])
+
+    def test_offered_answers_become_choices_only_when_short(self) -> None:
+        bullets = "**Q1.** Skip notes?\n- **My recommendation:** no.\n- **On yes:** I brief it.\n- **On no:** I record it."
+        self.assertEqual(question_choices(bullets), (("yes", False), ("no", True)))
+        lines = "**Q2.** Ship?\nRecommendation: ship it. Cost: none.\nAlternatives: wait a day; drop it"
+        self.assertEqual(question_choices(lines), (("ship it", True), ("wait a day", False), ("drop it", False)))
+        prose = "**Q3.** Which?\nRecommendation: " + "a long explanation that is a paragraph, not a button " * 2
+        self.assertEqual(question_choices(prose), ())
 
     def test_references_and_historical_labels_are_not_questions(self) -> None:
         for source in ("**Q12** was answered yesterday.", "**Q12 status**\nDone.", "See **Q12.** Later?", "**Q12.** Resolved."):
@@ -142,11 +152,15 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.fixture.bridge.controls.handle_command_ack(self.fixture.socket.sent_json[0])
         stored = cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key))
         self.assertEqual(stored.state, QuestionState.ANSWERED)
-        self.assertEqual(stored.decision_url, self.fixture.thread._history[1].jump_url)
         shown = visible_view_text(original.view)
-        self.assertIn("Ship it", shown)
+        self.assertIn("Ship it?", shown)  # The question stays readable beside its answer.
+        self.assertIn("Ship it", shown.split("Ship it?", 1)[1])
         self.assertNotIn("\n", shown)
-        self.assertIn(stored.decision_url, shown)
+        posted = [visible_view_text(m.view) if m.view else m.content for m in self.fixture.thread._history]
+        self.assertEqual([text for text in posted if "Ship it" in text], [shown])  # No copy of the answer is posted.
+        command_id = str(self.fixture.socket.sent_json[0]["command_id"])
+        anchor = self.fixture.session.pending_commands[command_id].message_id
+        self.assertEqual(anchor, original.id)  # Delivery reactions show on the card itself.
         self.assertFalse(
             any(isinstance(item, discord.ui.Button) for item in cast(discord.ui.LayoutView, original.view).walk_children())
         )
@@ -326,7 +340,7 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
             cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key)).state, QuestionState.ANSWERED
         )
         self.assertIn("yes", visible_view_text(message.view))
-        self.assertNotIn("Ship it?", visible_view_text(message.view))
+        self.assertNotIn("Recommendation", visible_view_text(message.view))
 
     async def test_reask_serializes_a_concurrent_decision_and_reopens_an_answered_revision(self) -> None:
         original = await self.card()
@@ -465,6 +479,32 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.fixture.bridge.sessions.register(self.fixture.session)
                 self.fixture.bridge.bot.config.agent_session.enabled = True
                 self.fixture.socket.closed = False
+
+    async def test_one_tap_choice_answers_the_card_and_a_changed_question_refuses_it(self) -> None:
+        modal = await self.card()
+        view = cast(discord.ui.LayoutView, self.fixture.thread._history[-1].view)
+        choices = [item for item in view.walk_children() if isinstance(item, QuestionChoiceButton)]
+        self.assertEqual([button.choice for button in choices], ["yes", "wait"])
+        self.assertIn("recommended", str(choices[0].label))
+        stale = choices[1]
+        await self.card("**Q12.** Ship it now?\nRecommendation: yes.")  # Re-asked: the old buttons are stale.
+        refused = FakeInteraction(self.fixture.thread, message=self.fixture.thread._history[0])
+        await stale.callback(cast(Any, refused))
+        self.assertEqual(self.fixture.socket.sent_json, [])
+        self.assertTrue(refused.response.messages)
+        current = cast(discord.ui.LayoutView, self.fixture.thread._history[0].view)
+        tap = next(item for item in current.walk_children() if isinstance(item, QuestionChoiceButton))
+        await tap.callback(cast(Any, FakeInteraction(self.fixture.thread, message=self.fixture.thread._history[0])))
+        self.assertEqual(self.fixture.socket.sent_json[-1]["text"], "Q12: yes")
+        stored = cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key))
+        self.assertEqual((stored.state, stored.answer), (QuestionState.ANSWERED, "yes"))
+
+    async def test_the_answer_form_shows_the_whole_question(self) -> None:
+        body = "**Q12.** Ship it?\n" + "Context that must stay readable. " * 20 + "\nRecommendation: yes."
+        modal = await self.card(body)
+        shown = "\n".join(item.content for item in modal.walk_children() if isinstance(item, discord.ui.TextDisplay))
+        self.assertIn("Recommendation: yes.", shown)
+        self.assertIn("Context that must stay readable. " * 20, shown)
 
     async def test_a_delivered_answer_shows_no_private_notice(self) -> None:
         modal = await self.card()

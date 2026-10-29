@@ -632,17 +632,25 @@ indented and fenced examples do not create cards. Large context is attached as
 `questions.md`. No mentions or push notifications are sent. Discord controls
 unread indicators and phone rendering.
 
-Tap **Answer** to use the existing answer form, or reply in the thread with the
-Q number, such as `Q123 yes, ship it`. The answer form sends that Q-prefixed
-reply through normal session controls. Only session operators can submit;
-changed cards, re-asked questions, reconnected sessions and repeat submissions refuse stale forms.
-Closing the form leaves the question waiting. Re-asking a question updates its
-card, reopens it if answered, and puts a short silent jump link at the current
-place in the conversation.
+When the question offers short answers, they become buttons on its card and one
+tap answers it. Write them as `- **On yes:** ...` bullets, or as a
+`Recommendation:` line plus `Alternatives:` separated by semicolons, with the
+short answer first and ended by a period. The recommended answer is marked and
+green. **Other…** (or **Answer**, when there are no short answers) opens a form
+that shows the whole question above a large answer box. You can also reply in
+the thread with the Q number, such as `Q123 yes, ship it`. Every route sends
+that Q-prefixed reply through normal session controls. Only session operators
+can answer; changed cards, re-asked questions, reconnected sessions and repeat
+submissions refuse stale buttons and forms. Closing the form leaves the
+question waiting. Re-asking a question updates its card, reopens it if
+answered, and puts a short silent jump link at the current place in the
+conversation.
 
-When an operator answers, the original card loses its buttons and changes to
-green, showing one compact line with the Q number, answer excerpt and a link to
-the full decision. A session answer containing an explicit `Director decision:
+When an operator answers, the card loses its buttons and turns green, showing
+one compact line with the Q number, the question and the answer. No copy of the
+answer is posted; the card carries the delivery reactions instead. A thread
+reply or recorded decision adds a link to it.
+A session answer containing an explicit `Director decision:
 Q123. ...` record with a GitHub comment link also marks that question answered.
 This reads records delivered through the session, rather than polling GitHub.
 Recording an answer does not prove delivery to the native session; normal reply
