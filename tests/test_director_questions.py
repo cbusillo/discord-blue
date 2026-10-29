@@ -64,6 +64,8 @@ Recommendation: keep both.
         )
         self.assertEqual(question_choices(example), (("adopt it", True), ("keep it", False)))
         self.assertEqual(question_choices("**Q5.** Describe it?\nRecommendation: free text answer."), ())
+        inline = "**Q6.** Which color? I recommend blue because it matches the logo.\n\nAlternatives: green; red"
+        self.assertEqual(question_choices(inline), (("blue", True), ("green", False), ("red", False)))
 
     def test_a_question_with_its_recommendation_on_the_same_line_is_a_card(self) -> None:
         text = "**Q1044.** Should CT125 also take full test runs? I recommend yes, set up as its own issue."
