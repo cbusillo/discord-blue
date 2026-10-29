@@ -60,8 +60,9 @@ HOOK_TOOL = {
 }
 # Hooks that only fire while Claude is working. Another plugin's Stop hook can keep a turn going after Stop.
 RUNNING_EVENTS = {"UserPromptSubmit", "PreToolUse", "PostToolUse"}
-# How long a final answer waits for the other Stop hooks' verdict before it is posted anyway.
-STOP_VERDICT_SECONDS = 3.0
+# How long a final answer waits for the other Stop hooks' verdict before it is posted anyway: past the hooks' own
+# timeouts, so a slow hook that rejects the answer still keeps it out. A new prompt or session end posts it sooner.
+STOP_VERDICT_SECONDS = 120.0
 STOP_VERDICT_POLL_SECONDS = 0.1
 # The `_meta` key Claude Code sets on a model's tool call; hook calls carry no tool use.
 MODEL_CALL = "claudecode/toolUseId"

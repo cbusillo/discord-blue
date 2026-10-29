@@ -142,29 +142,41 @@ def transcript_size(path: str) -> int | None:
 
 
 def stop_verdict(path: str, offset: int) -> bool | None:
-    """Claude Code writes a rejected stop as a "Stop hook feedback" prompt, then every Stop hook's summary.
+    """Whether the Stop hooks that ran at offset sent Claude back to work; None until their summary is written.
 
-    Those records follow the answer, after every Stop hook has returned, so only what is written after
-    offset, the transcript's end when this session's own Stop hook ran, decides; None until they appear.
+    Claude Code writes each Stop invocation's summary only after every Stop hook returns, this session's own
+    included, so the first summary after offset (the transcript's end when this session's hook ran) is this
+    stop's. Its toolUseID ties it to the invocation's hook attachments, which may land on either side of
+    offset: a blocking error or added context means Claude continues and this answer was not final.
     """
     try:
         with open(path, "rb") as transcript:
-            transcript.seek(offset)
-            lines = transcript.read(TAIL_BYTES).split(b"\n")
+            start = max(0, offset - TAIL_BYTES)
+            transcript.seek(start)
+            data = transcript.read(offset - start + TAIL_BYTES)
     except OSError:
         return None
-    feedback = False
-    for line in lines:
+    records: list[tuple[int, dict[str, object]]] = []
+    position = start
+    for line in data.split(b"\n"):
+        line_start, position = position, position + len(line) + 1
         try:
             record = json.loads(line) if line.strip() else None
         except ValueError:
             continue
-        if not isinstance(record, dict):
-            continue
-        message = record.get("message")
-        content = message.get("content") if isinstance(message, dict) else None
-        if record.get("type") == "user" and isinstance(content, str) and content.startswith("Stop hook feedback"):
-            feedback = True
-        elif record.get("type") == "system" and record.get("subtype") in {"stop_hook_summary", "turn_duration"}:
-            return feedback
-    return None
+        if isinstance(record, dict):
+            records.append((line_start, record))
+    summary = next((record for at, record in records if at >= offset and record.get("subtype") == "stop_hook_summary"), None)
+    if summary is None or not isinstance(stop := summary.get("toolUseID"), str):
+        return None
+    continued = {"hook_blocking_error", "hook_additional_context"}
+    for _, record in records:
+        attachment = record.get("attachment")
+        if (
+            isinstance(attachment, dict)
+            and attachment.get("toolUseID") == stop
+            and attachment.get("hookEvent") == "Stop"
+            and attachment.get("type") in continued
+        ):
+            return True
+    return False

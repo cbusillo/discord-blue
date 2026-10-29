@@ -53,10 +53,10 @@ def said(text: str) -> str:
     return record(type="assistant", message={"role": "assistant", "content": [{"type": "text", "text": text}]})
 
 
-def rejected(feedback: str) -> str:
-    return record(type="user", isMeta=True, message={"role": "user", "content": f"Stop hook feedback:\n{feedback}"}) + record(
-        type="system", subtype="stop_hook_summary", hookErrors=[feedback]
-    )
+def stopped(stop: str, verdict: str = "") -> str:
+    """One Stop invocation's records: an optional hook attachment that sends Claude back, then the hooks' summary."""
+    attachment = record(type="attachment", attachment={"type": verdict, "hookEvent": "Stop", "toolUseID": stop})
+    return (attachment if verdict else "") + record(type="system", subtype="stop_hook_summary", toolUseID=stop)
 
 
 def append(transcript: Path, *records: str) -> None:
@@ -307,25 +307,28 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_a_final_answer_another_stop_hook_rejects_is_never_posted(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            transcript = Path(directory) / "session.jsonl"
-            transcript.write_text(said("**Q1.** Draft?"))
-            path = str(transcript)
-            async with running_channel() as (claude, discord):
-                await claude.initialize()
-                await discord.next("hello")
-                await hook(claude, "UserPromptSubmit", prompt="Ask me something", transcript_path=path)
-                await hook(claude, "Stop", last_assistant_message="**Q1.** Draft?", transcript_path=path)
-                # Claude Code's shape for a stop another hook blocked, written once every Stop hook has returned.
-                append(transcript, rejected("State the cost."), said("**Q1.** Rewritten, with its cost?"))
-                await hook(claude, "Stop", last_assistant_message="**Q1.** Rewritten, with its cost?", transcript_path=path)
-                append(transcript, record(type="system", subtype="stop_hook_summary", hookErrors=[]))
-                posted = await discord.next("turn_complete")
-                events = await mirrored(claude, discord)
+    async def test_a_final_answer_another_stop_hook_sends_back_is_never_posted(self) -> None:
+        # A fast rejecting hook can be recorded before this session's own Stop hook even runs.
+        for verdict, early in (("hook_blocking_error", False), ("hook_blocking_error", True), ("hook_additional_context", False)):
+            with self.subTest(verdict=verdict, early=early), tempfile.TemporaryDirectory() as directory:
+                transcript = Path(directory) / "session.jsonl"
+                attachment = record(type="attachment", attachment={"type": verdict, "hookEvent": "Stop", "toolUseID": "s1"})
+                transcript.write_text(said("**Q1.** Draft?") + (attachment if early else ""))
+                path = str(transcript)
+                async with running_channel() as (claude, discord):
+                    await claude.initialize()
+                    await discord.next("hello")
+                    await hook(claude, "UserPromptSubmit", prompt="Ask me something", transcript_path=path)
+                    await hook(claude, "Stop", last_assistant_message="**Q1.** Draft?", transcript_path=path)
+                    summary = record(type="system", subtype="stop_hook_summary", toolUseID="s1")
+                    append(transcript, summary if early else stopped("s1", verdict), said("**Q1.** Rewritten?"))
+                    await hook(claude, "Stop", last_assistant_message="**Q1.** Rewritten?", transcript_path=path)
+                    append(transcript, stopped("s2"))
+                    posted = await discord.next("turn_complete")
+                    events = await mirrored(claude, discord)
 
-        self.assertEqual(posted["assistant_message"], "**Q1.** Rewritten, with its cost?")
-        self.assertNotIn("turn_complete", [event[0] for event in events])
+                self.assertEqual(posted["assistant_message"], "**Q1.** Rewritten?")
+                self.assertNotIn("turn_complete", [event[0] for event in events])
 
     async def test_an_answer_awaiting_its_verdict_posts_before_the_next_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
