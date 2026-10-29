@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -616,6 +617,30 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((question.state, self.accent(message)), (QuestionState.ANSWERED, STATUS_LABELS["done"][1]))
             self.assertIn("✓ sent", visible_view_text(message.view))
             self.assertEqual(message.reactions, [])
+
+    async def test_a_group_turns_sent_in_one_burst(self) -> None:
+        await self.hold_first_answer()
+        await self.answer_second(self.fixture.bridge.questions, "round")
+        events: list[str] = []
+        for number in ("Q1", "Q2"):
+            _, message = self.grouped(number)
+            original = message.edit
+
+            async def edit(
+                content: str | None = None,
+                _original: Callable[..., Awaitable[None]] = original,
+                _number: str = number,
+                **kwargs: object,
+            ) -> None:
+                events.append(f"start {_number}")
+                await asyncio.sleep(0.01)
+                await _original(content, **kwargs)
+                events.append(f"end {_number}")
+
+            message.edit = edit  # type: ignore[method-assign,assignment]
+        await self.fixture.bridge.controls.handle_command_ack(self.fixture.socket.sent_json[-1])
+        # Both cards start changing before either finishes, so neither shows sent while the other says sending.
+        self.assertEqual(sorted(events[:2]), ["start Q1", "start Q2"])
 
     async def test_a_rejected_answer_turns_its_card_red_without_reactions(self) -> None:
         modal = await self.card()

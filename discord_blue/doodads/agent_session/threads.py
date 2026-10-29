@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 import secrets
@@ -20,6 +21,14 @@ DISCORD_THREAD_NAME_LIMIT = 100
 HARNESS_ICONS = {"claude": "\u2734\ufe0f", "codex": "\U0001f537"}
 DEFAULT_BRANCH_NAMES = {"main", "master", "develop", "development", "dev", "trunk"}
 SESSION_DETAILS_COMPONENT_ID = 216
+# A new thread's opening line carries its identity only in component ids, which Discord never shows. One id holds
+# 30 bits, so the session start text without its PID spans two ids and the full text adds a third: discovery keeps its
+# PID-relaxed (60-bit) and exact (90-bit) matches.
+IDENTITY_ID_BASE = 2**30
+IDENTITY_SALTS = ("without-pid-a", "without-pid-b", "exact")
+IDENTITY_MARKER = "session-identity:"
+IDENTITY_WITHOUT_PID_MARKER = "session-identity-without-pid:"
+HARNESS_NAMES = {"claude": "Claude Code", "codex": "Codex"}
 SESSION_START_PREFIX = "Agent session connected"
 SESSION_NOTIFICATION_PREFIX = "Agent session connected for "
 SESSION_NOTIFICATION_PREFIXES = (
@@ -145,12 +154,33 @@ def session_start_without_pid(content: str) -> str | None:
     return "\n".join(lines[:-1])
 
 
+def identity_ids(start: str) -> tuple[int, int, int]:
+    """Component ids for a session start: two for its text without the PID, then one for the full text."""
+    without_pid = session_start_without_pid(start) or start
+    ids: list[int] = []
+    for salt, text in zip(IDENTITY_SALTS, (without_pid, without_pid, start), strict=True):
+        value = int(hashlib.sha256(f"{salt}\0{text}".encode()).hexdigest(), 16) % IDENTITY_ID_BASE
+        while IDENTITY_ID_BASE + value in ids:  # Discord requires distinct ids within a message.
+            value = (value + 1) % IDENTITY_ID_BASE
+        ids.append(IDENTITY_ID_BASE + value)
+    return ids[0], ids[1], ids[2]
+
+
+def identity_markers(ids: tuple[int, ...]) -> list[str]:
+    if len(ids) != len(IDENTITY_SALTS):
+        return []
+    return [f"{IDENTITY_WITHOUT_PID_MARKER}{ids[0]}-{ids[1]}", f"{IDENTITY_MARKER}{ids[0]}-{ids[1]}-{ids[2]}"]
+
+
 def session_identity_view(hello: SessionHello) -> discord.ui.LayoutView:
+    first, second, exact = identity_ids(session_start_message(hello))
+    # Only the harness name, folder and branch show; host labels can name the machine.
+    harness = HARNESS_NAMES.get(hello.harness or "")
+    line = " · ".join(part for part in (harness, Path(hello.cwd).name, hello.branch) if part)
     view = discord.ui.LayoutView(timeout=None)
-    view.add_item(discord.ui.TextDisplay("-# Session details · Tap to reveal"))
-    view.add_item(
-        discord.ui.Container(discord.ui.TextDisplay(session_start_message(hello)), spoiler=True, id=SESSION_DETAILS_COMPONENT_ID)
-    )
+    view.add_item(discord.ui.TextDisplay(f"-# {discord.utils.escape_markdown(line or 'Agent session')}", id=first))
+    view.add_item(discord.ui.Separator(visible=False, id=second))
+    view.add_item(discord.ui.Separator(visible=False, id=exact))
     return view
 
 
@@ -159,7 +189,28 @@ def session_message_markers(message: discord.Message) -> list[str]:
     for component in message.components:
         if isinstance(component, discord.Container) and component.id == SESSION_DETAILS_COMPONENT_ID:
             markers.extend(child.content for child in component.children if isinstance(child, discord.TextDisplay))
-    return markers
+    ids: list[int] = []
+    for component in message.components:
+        if isinstance(component, (discord.TextDisplay, discord.SeparatorComponent)) and component.id is not None:
+            if component.id >= IDENTITY_ID_BASE:
+                ids.append(component.id)
+    return markers + identity_markers(tuple(ids))
+
+
+def is_session_marker(marker: str) -> bool:
+    return marker.startswith((SESSION_START_PREFIX, IDENTITY_MARKER, IDENTITY_WITHOUT_PID_MARKER))
+
+
+def marker_matches(marker: str, starts: set[str]) -> bool:
+    """An opening marker naming one of these exact session starts, PID included."""
+    return marker in starts or marker in {identity_markers(identity_ids(start))[1] for start in starts}
+
+
+def marker_matches_without_pid(marker: str, starts_without_pid: set[str]) -> bool:
+    """An opening marker naming one of these session starts, whatever its PID."""
+    return session_start_without_pid(marker) in starts_without_pid or marker in {
+        identity_markers(identity_ids(start))[0] for start in starts_without_pid
+    }
 
 
 def notification_thread_id(content: str) -> int | None:
