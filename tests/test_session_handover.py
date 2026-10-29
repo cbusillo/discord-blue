@@ -14,6 +14,7 @@ from discord.ui.view import ViewStore
 
 from discord_blue.doodads.agent_session.controls import REACTION_APPROVAL_APPROVE, REPLY_BEFORE_RECONNECT
 from discord_blue.doodads.agent_session.handover import SessionContinuation
+from discord_blue.doodads.agent_session.interactions import RequestUserInputView
 from discord_blue.doodads.agent_session.protocol import RemoteApprovalRequest
 from discord_blue.doodads.agent_session.sessions import AgentSession
 from discord_blue.doodads.agent_session.session_threads import SessionThread
@@ -37,7 +38,7 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
     async def reattach(self, *, epoch: str, previous: AgentSession | None = None) -> tuple[AgentSession, FakeWebSocket]:
         socket = FakeWebSocket()
         hello = replace(self.fixture.session.hello, session_epoch=epoch)
-        session = AgentSession(hello, cast(web.WebSocketResponse, socket))
+        session = AgentSession(hello, cast(web.WebSocketResponse, cast(object, socket)))
         self.bridge.sessions.register(session)
 
         async def attached() -> SessionThread:
@@ -56,7 +57,7 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
             created_at=self.fixture.session.attached_at + timedelta(seconds=10),
         )
         self.fixture.thread.add_message(message)
-        task = asyncio.create_task(self.bridge.controls.send_thread_reply(cast(discord.Message, message)))
+        task = asyncio.create_task(self.bridge.controls.send_thread_reply(cast(discord.Message, cast(object, message))))
         self.replay.add(task)
         await asyncio.sleep(0)
         self.assertFalse(task.done())
@@ -133,7 +134,8 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         session, _socket = await self.reattach(epoch=self.fixture.session.session_epoch)
         await self.bridge.handle_event(session, "request_user_input", asdict(view.request))
         message = await self.fixture.thread.fetch_message(view.message_id)
-        restored = cast(Any, message.view)
+        restored = message.view
+        assert isinstance(restored, RequestUserInputView)
         self.addCleanup(restored.stop)
         self.assertEqual(restored.answers, view.answers)
         self.assertEqual(SessionContinuation.control_ids(restored), previous_ids)

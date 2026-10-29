@@ -52,6 +52,7 @@ class GatewayContinuation:
     def read(cls, path: Path, bot_id: int) -> GatewayContinuation:
         value = json.loads(path.read_text())
         gateway = urlsplit(value["gateway"])
+        hostname = gateway.hostname
         if (
             value["bot_id"] != bot_id
             or not isinstance(value["session_id"], str)
@@ -59,8 +60,8 @@ class GatewayContinuation:
             or type(value["sequence"]) is not int
             or value["sequence"] < 0
             or gateway.scheme != "wss"
-            or not gateway.hostname
-            or not gateway.hostname.endswith(".discord.gg")
+            or not hostname
+            or not hostname.endswith(".discord.gg")
             or gateway.username is not None
             or gateway.password is not None
             or gateway.port not in (None, 443)
@@ -154,11 +155,12 @@ class GatewayHandover:
         hold_state_lock()
         self.started = True
         await self.bot.login(token)
-        assert self.bot.user is not None
+        user = self.bot.user
+        assert user is not None
         continuation = None
         if self.path.exists():
             try:
-                continuation = GatewayContinuation.read(self.path, self.bot.user.id)
+                continuation = GatewayContinuation.read(self.path, user.id)
             except (OSError, ValueError, KeyError, TypeError):
                 self.status = "failed"
         elif self.active.exists():
@@ -174,11 +176,12 @@ class GatewayHandover:
                 self.conversation = continuation.conversation
                 await self.warm_cache()
                 self.buffer_parsers()
-                self.connect_task = asyncio.create_task(self.connect_resumed(continuation, reconnect=reconnect))
-                await self.connect_task
+                connection = self.connect_resumed(continuation, reconnect=reconnect)
             else:
-                self.connect_task = asyncio.create_task(self.bot.connect(reconnect=reconnect))
-                await self.connect_task
+                connection = self.bot.connect(reconnect=reconnect)
+            connect_task = asyncio.create_task(connection)
+            self.connect_task = connect_task
+            await connect_task
         except asyncio.CancelledError:
             if self.shutdown is None:
                 raise
@@ -193,7 +196,6 @@ class GatewayHandover:
             try:
                 socket = await DiscordWebSocket.from_client(
                     self.bot,
-                    initial=False,
                     resume=True,
                     session=continuation.session_id,
                     sequence=continuation.sequence,
@@ -213,9 +215,10 @@ class GatewayHandover:
     def task_factory(
         self, loop: asyncio.AbstractEventLoop, coroutine: Coroutine[Any, Any, Any], **kwargs: object
     ) -> asyncio.Task[Any]:
+        previous_factory = self._previous_factory
         task = (
-            self._previous_factory(loop, coroutine, **kwargs)
-            if self._previous_factory is not None
+            previous_factory(loop, coroutine, **kwargs)
+            if previous_factory is not None
             else cast(Callable[..., asyncio.Task[Any]], asyncio.Task)(coroutine, loop=loop, **kwargs)
         )
         parent = asyncio.current_task(loop=loop)
@@ -231,7 +234,8 @@ class GatewayHandover:
         return task
 
     def buffer_parsers(self) -> None:
-        self._parsers = dict(self.bot._connection.parsers)
+        parsers = dict(self.bot._connection.parsers)
+        self._parsers = parsers
         self.buffering = True
 
         def hold(parser: Callable[[Any], None]) -> Callable[[Any], None]:
@@ -241,7 +245,7 @@ class GatewayHandover:
             return append
 
         self.bot._connection.parsers.update(
-            {name: parser if name in {"RESUMED", "READY"} else hold(parser) for name, parser in self._parsers.items()}
+            {name: parser if name in {"RESUMED", "READY"} else hold(parser) for name, parser in parsers.items()}
         )
 
     def restore_parsers(self) -> None:
@@ -263,15 +267,17 @@ class GatewayHandover:
                 self.status = "failed"
                 self.restore_parsers()
                 self.buffer.clear()
-            if self.bot.user is not None:
-                write_handover(self.active, {"bot_id": self.bot.user.id, "active_at": time.time()})
+            user = self.bot.user
+            if user is not None:
+                write_handover(self.active, {"bot_id": user.id, "active_at": time.time()})
 
     async def resumed(self) -> None:
         if not self.buffering:
             return
         self.buffering = False
         self.path.unlink(missing_ok=True)
-        write_handover(self.active, {"bot_id": self.bot.user.id if self.bot.user else None, "active_at": time.time()})
+        user = self.bot.user
+        write_handover(self.active, {"bot_id": user.id if user else None, "active_at": time.time()})
         self.startup_caller = asyncio.current_task()
         self.bot._handle_ready()
         self.bot.dispatch("ready")
@@ -290,11 +296,12 @@ class GatewayHandover:
         self.status = "replayed" if self.status != "failed" else "failed"
 
     async def warm_cache(self) -> None:
+        user = self.bot.user
+        assert user is not None
         async for summary in self.bot.fetch_guilds(limit=None):
             guild = await self.bot.fetch_guild(summary.id)
             self.bot._connection._add_guild(guild)
-            assert self.bot.user is not None
-            guild._add_member(await guild.fetch_member(self.bot.user.id))
+            guild._add_member(await guild.fetch_member(user.id))
             for channel in await guild.fetch_channels():
                 guild._add_channel(channel)
             for thread in await guild.active_threads():
@@ -330,15 +337,18 @@ class GatewayHandover:
             self._close_callers.add(caller)
             if self.startup_caller is not None:
                 self._close_callers.add(self.startup_caller)
-        if self.shutdown is None:
-            self.shutdown = asyncio.create_task(self.finish())
-        await asyncio.shield(self.shutdown)
+        shutdown = self.shutdown
+        if shutdown is None:
+            shutdown = asyncio.create_task(self.finish())
+            self.shutdown = shutdown
+        await asyncio.shield(shutdown)
 
     async def finish(self) -> None:
-        if self.connect_task is not None and not self.connect_task.done():
-            self.connect_task.cancel()
+        connect_task = self.connect_task
+        if connect_task is not None and not connect_task.done():
+            connect_task.cancel()
             with suppress(asyncio.CancelledError):
-                await self.connect_task
+                await connect_task
         pending = {task for task in self.events if not task.done() and task not in self._close_callers}
         complete = not self.buffer
         if pending:
@@ -351,12 +361,11 @@ class GatewayHandover:
         if isinstance(cog, AgentSessionDoodad):
             complete = await cog.bridge.prepare_handover() and complete
         continuation = None
-        if socket is not None and self.bot.user is not None and socket.session_id and socket.sequence is not None:
-            continuation = GatewayContinuation(
-                self.bot.user.id, socket.session_id, socket.sequence, str(socket.gateway), self.agents
-            )
+        user = self.bot.user
+        if socket is not None and user is not None and socket.session_id and socket.sequence is not None:
+            continuation = GatewayContinuation(user.id, socket.session_id, socket.sequence, str(socket.gateway), self.agents)
             if socket.open:
-                await socket.close(code=4000)
+                await socket.close()
         self.restore_parsers()
         await self.close_client()
         if isinstance(cog, AgentSessionDoodad):

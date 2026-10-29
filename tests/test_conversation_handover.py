@@ -78,7 +78,7 @@ class ConversationHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.destination.send.await_count, 1)
         payload = cast(
             discord.RawMessageDeleteEvent,
-            SimpleNamespace(message_id=original.id, guild_id=FOREIGN, channel_id=CHANNEL_ID),
+            cast(object, SimpleNamespace(message_id=original.id, guild_id=FOREIGN, channel_id=CHANNEL_ID)),
         )
         self.assertTrue(await successor.conversations.receive_delete(payload))
         deletion = await socket.receive_json(timeout=2)
