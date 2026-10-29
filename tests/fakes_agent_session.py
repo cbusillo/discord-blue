@@ -85,6 +85,7 @@ class FakeReplyMessage:
         created_at: datetime | None = None,
     ) -> None:
         self.id = message_id
+        self.webhook_id: int | None = None
         self.jump_url = f"https://discord.com/channels/{GUILD_ID}/{channel.id}/{message_id}"
         self.created_at = created_at or datetime.now(UTC)
         self.channel = channel
@@ -168,6 +169,7 @@ class FakeThread:
         self._member_ids = list(members or [])
         self.removed_user_ids: list[int] = []
         self.parent_id: int | None = None
+        self.parent: object | None = None
         self.owner_id: int | None = 999
         self.message_count = 0
         self.typing_requests = 0
@@ -184,7 +186,7 @@ class FakeThread:
             self._member_ids.append(user.id)
 
     def permissions_for(self, _member: object) -> object:
-        return SimpleNamespace(manage_messages=self._manage_messages)
+        return SimpleNamespace(manage_messages=self._manage_messages, manage_webhooks=False)
 
     def delete_message(self, message_id: int) -> None:
         message = self._messages.pop(message_id, None)
@@ -353,7 +355,7 @@ class FakeTextChannel:
             yield thread
 
     def permissions_for(self, _member: object) -> object:
-        return SimpleNamespace(manage_messages=self._manage_messages)
+        return SimpleNamespace(manage_messages=self._manage_messages, manage_webhooks=False)
 
     async def create_thread(self, **_kwargs: object) -> FakeThread:
         thread = FakeThread(9000 + len(self._threads), manage_messages=self._manage_messages)

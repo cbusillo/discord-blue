@@ -51,7 +51,7 @@ class AgentSessionDoodad(commands.Cog):
 
     @commands.Cog.listener("on_message")
     async def route_thread_reply(self, message: discord.Message) -> None:
-        if message.author.bot:
+        if message.webhook_id is not None or message.author.bot:
             return
         if not self.bot.config.agent_session.enabled:
             return
