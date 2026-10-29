@@ -42,6 +42,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 QUESTION_START = re.compile(r"^\*\*(Q\d+)(?:[.:](?:\*\*|\s)|\*\*[:.\s])")
+# A sentence ends at ".", "?" or "!" before a space or the line's end, so "v1.2" does not end one.
+SENTENCE_END = re.compile(r"[.?!](?=\s|$)")
 # "- **On yes:** ..." bullets name the choices; otherwise Recommendation and Alternative lines do.
 CHOICE_BULLET = re.compile(r"^\s*[-*]\s+\**On ([^:*\n]{1,60}?)\**:", re.IGNORECASE)
 RECOMMENDATION = re.compile(r"^\s*(?:[-*]\s+)?\**(?:my )?recommend(?:ation|ed)?\**:\**\s*(.+)", re.IGNORECASE)
@@ -98,7 +100,7 @@ def question_sections(text: str) -> Iterator[QuestionSection]:
     starts = []
     for index, line in top_level_lines(lines):
         match = QUESTION_START.match(line)
-        if match is not None and line.rstrip("* \r\n").endswith("?"):
+        if match is not None and (line.rstrip("* \r\n").endswith("?") or first_sentence(line).endswith("?")):
             starts.append((index, match[1]))
     for index, (start, number) in enumerate(starts):
         end = starts[index + 1][0] if index + 1 < len(starts) else len(lines)
@@ -141,8 +143,18 @@ def question_choices(body: str) -> tuple[tuple[str, bool], ...]:
     return tuple(choices.values())[:MAX_CHOICES]
 
 
+def first_sentence(line: str) -> str:
+    """The text after a bold Q number up to its first sentence end: the question, without a recommendation after it."""
+    rest = QUESTION_START.sub("", line, count=1).replace("*", "").strip()
+    end = SENTENCE_END.search(rest)
+    return rest[: end.end()] if end is not None else rest
+
+
 def question_excerpt(body: str) -> str:
-    first = QUESTION_START.sub("", body.split("\n", 1)[0]).replace("*", "").strip()
+    line = body.split("\n", 1)[0]
+    first = first_sentence(line)
+    if not first.endswith("?"):  # An abbreviation such as "e.g." ended the sentence early; keep the whole line.
+        first = QUESTION_START.sub("", line, count=1).replace("*", "").strip()
     return first if len(first) <= 80 else first[:79] + "\u2026"
 
 

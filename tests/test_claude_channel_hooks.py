@@ -45,6 +45,25 @@ async def mirrored(
     return events
 
 
+def record(**fields: object) -> str:
+    return json.dumps(fields) + "\n"
+
+
+def said(text: str) -> str:
+    return record(type="assistant", message={"role": "assistant", "content": [{"type": "text", "text": text}]})
+
+
+def stopped(stop: str, verdict: str = "") -> str:
+    """One Stop invocation's records: an optional hook attachment that sends Claude back, then the hooks' summary."""
+    attachment = record(type="attachment", attachment={"type": verdict, "hookEvent": "Stop", "toolUseID": stop})
+    return (attachment if verdict else "") + record(type="system", subtype="stop_hook_summary", toolUseID=stop)
+
+
+def append(transcript: Path, *records: str) -> None:
+    with transcript.open("a") as lines:
+        lines.write("".join(records))
+
+
 class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
     def test_launch_identity_uses_the_explicit_supervisor_payload(self) -> None:
         brief = "Brief from the Supervisor.\nDo the work."
@@ -286,6 +305,66 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
                 ("title_changed", "Login bug triage"),
                 ("title_changed", "auth-refactor"),
             ],
+        )
+
+    async def test_a_final_answer_another_stop_hook_sends_back_is_never_posted(self) -> None:
+        # A fast rejecting hook can be recorded before this session's own Stop hook even runs.
+        # Hook output such as a failing test report can be large.
+        report = "x" * 300_000
+        cases = (("hook_blocking_error", False), ("hook_blocking_error", True), ("hook_additional_context", False))
+        for verdict, early in cases:
+            with self.subTest(verdict=verdict, early=early), tempfile.TemporaryDirectory() as directory:
+                transcript = Path(directory) / "session.jsonl"
+                attachment = record(
+                    type="attachment", attachment={"type": verdict, "hookEvent": "Stop", "toolUseID": "s1", "content": report}
+                )
+                transcript.write_text(said("**Q1.** Draft?") + (attachment if early else ""))
+                path = str(transcript)
+                async with running_channel() as (claude, discord):
+                    await claude.initialize()
+                    await discord.next("hello")
+                    await hook(claude, "UserPromptSubmit", prompt="Ask me something", transcript_path=path)
+                    await hook(claude, "Stop", last_assistant_message="**Q1.** Draft?", transcript_path=path)
+                    summary = record(type="system", subtype="stop_hook_summary", toolUseID="s1")
+                    append(transcript, summary if early else stopped("s1", verdict), said("**Q1.** Rewritten?"))
+                    await hook(claude, "Stop", last_assistant_message="**Q1.** Rewritten?", transcript_path=path)
+                    append(transcript, stopped("s2"))
+                    posted = await discord.next("turn_complete")
+                    events = await mirrored(claude, discord)
+
+                self.assertEqual(posted["assistant_message"], "**Q1.** Rewritten?")
+                self.assertNotIn("turn_complete", [event[0] for event in events])
+
+    async def test_an_answer_awaiting_its_verdict_posts_once_claude_waits_at_its_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "session.jsonl"
+            transcript.write_text(said("Done."))
+            path = str(transcript)
+            async with running_channel() as (claude, discord):
+                await claude.initialize()
+                await discord.next("hello")
+                await hook(claude, "Stop", last_assistant_message="Done.", transcript_path=path)
+                await hook(claude, "Notification")
+                posted = await discord.next("turn_complete")
+
+        self.assertEqual(posted["assistant_message"], "Done.")
+
+    async def test_an_answer_awaiting_its_verdict_posts_before_the_next_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "session.jsonl"
+            transcript.write_text(said("Done."))
+            path = str(transcript)
+            async with running_channel() as (claude, discord):
+                await claude.initialize()
+                await discord.next("hello")
+                await hook(claude, "Stop", last_assistant_message="Done.", transcript_path=path)
+                # No verdict recorded yet, but a new prompt shows the answer was accepted.
+                await hook(claude, "UserPromptSubmit", prompt="Next task please", transcript_path=path)
+                events = await mirrored(claude, discord)
+
+        self.assertEqual(
+            [event for event in events if event[0] in {"turn_complete", "user_message"}],
+            [("turn_complete", "Done."), ("user_message", "Next task please")],
         )
 
     async def test_the_model_cannot_post_through_the_hook_tool(self) -> None:
