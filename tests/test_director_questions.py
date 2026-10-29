@@ -5,6 +5,7 @@ import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -568,6 +569,26 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         await tap.callback(cast(Any, interaction))
         self.assertFalse(interaction.response.deferred)
         self.assertIn("sends when Q2 is answered", visible_view_text(interaction.response.edit_kwargs[0]["view"]))
+
+    async def test_a_card_shown_early_is_redrawn_when_its_refusal_notice_fails(self) -> None:
+        await self.fixture.bridge.status.post_assistant_message(self.fixture.thread.id, self.GROUP)
+        _, message = self.grouped("Q1")
+        tap = next(
+            item for item in cast(discord.ui.LayoutView, message.view).walk_children() if isinstance(item, QuestionChoiceButton)
+        )
+        interaction = FakeInteraction(self.fixture.thread, message=message)
+
+        async def lost(*_args: object, **_kwargs: object) -> None:
+            raise OSError("notice lost")
+
+        interaction.followup = SimpleNamespace(send=lost)
+        edits = len(message.edits)
+        cards: QuestionCards = self.fixture.bridge.questions
+        with patch.object(cards, "persist", AsyncMock(return_value=False)), self.assertRaises(OSError):
+            await tap.callback(cast(Any, interaction))
+        question, _ = self.grouped("Q1")
+        self.assertEqual((question.state, interaction.response.deferred), (QuestionState.WAITING, False))
+        self.assertGreater(len(message.edits), edits)  # The early answer view was replaced by the real card.
 
     async def test_answers_from_one_reply_go_to_the_agent_together(self) -> None:
         await self.hold_first_answer()

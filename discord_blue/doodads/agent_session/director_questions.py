@@ -587,8 +587,8 @@ class QuestionCards:
 
     async def acknowledge(
         self, interaction: discord.Interaction, session_id: str, expected: StoredQuestion, answers: list[str], user_id: int
-    ) -> bool:
-        """Show the answer on its own card as the interaction response, before any delivery work; False if not shown."""
+    ) -> None:
+        """Show the answer on its own card as the interaction response, before any delivery work."""
         current = self.record(session_id, expected.key)
         if (
             interaction.message is None
@@ -598,7 +598,7 @@ class QuestionCards:
             or self.context_error(interaction, session_id, current) is not None
         ):
             await interaction.response.defer()
-            return False
+            return
         own = {number for number, _ in current.questions}
         waiting = any(number not in own for number in self.open_numbers(session_id, current))
         shown = replace(
@@ -608,7 +608,6 @@ class QuestionCards:
             state=QuestionState.HELD if waiting else QuestionState.UNCERTAIN,
         )
         await interaction.response.edit_message(view=self.view(session_id, shown))
-        return True
 
     async def submit(
         self,
@@ -733,9 +732,13 @@ class QuestionCards:
         user_id: int,
     ) -> None:
         """Change the card at once, then record and deliver; a refused answer redraws the card as it really is."""
-        shown = await self.acknowledge(interaction, session_id, expected, answers, user_id)
-        if not await self.submit(interaction, session_id, session, expected, answers, user_id) and shown:
-            if (current := self.record(session_id, expected.key)) is not None:
+        recorded = False
+        try:
+            await self.acknowledge(interaction, session_id, expected, answers, user_id)
+            recorded = await self.submit(interaction, session_id, session, expected, answers, user_id)
+        finally:
+            # Redraw even when a refusal notice or the early edit itself failed, so no card keeps an unrecorded answer.
+            if not recorded and (current := self.record(session_id, expected.key)) is not None:
                 await self.refresh(session_id, [current])
 
     async def settle(self, session_id: str, keys: tuple[str, ...], state: QuestionState) -> None:
