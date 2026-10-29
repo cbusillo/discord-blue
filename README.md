@@ -220,6 +220,20 @@ For question routing, follow the [Supervisor question queue](https://github.com/
 The bridge mirrors the shared daemon's Codex sessions; embedded sessions retain
 their existing visibility limit.
 
+Terminal prompts from Claude Code and Codex appear with the session operator's
+guild display name and avatar, with a small “from terminal” line. The operator
+is the single member in `auto_join_user_ids`, and must hold the configured
+operator role. If that identity is missing or ambiguous, the bot keeps the
+quoted prompt mirror. Automated launch briefs and harness notifications keep
+their existing presentation. Discord replies are unchanged.
+
+The bot needs Manage Webhooks in each session parent channel for this display.
+It creates one webhook per parent and reuses it across threads and restarts.
+Without that permission, or if Discord refuses the webhook, it keeps the
+quoted bot mirror and logs the reason once per parent per bot run. Webhook
+messages never enter the session as replies. Long prompts are split across
+messages; mentions and link previews stay suppressed.
+
 ### Managed runtime Compose
 
 [compose.runtime.yml](compose.runtime.yml) is the deployment entrypoint for an
