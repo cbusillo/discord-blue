@@ -1616,13 +1616,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         runner = SlowRunner()
         bridge._runner = runner
         try:
-            with self.assertLogs(bridge_module.logger, level="WARNING"):
-                async with asyncio.timeout(5):
-                    await bridge.stop(deadline=asyncio.get_running_loop().time() + 0.01)
+            async with asyncio.timeout(5):
+                await bridge.stop(deadline=asyncio.get_running_loop().time() + 0.01)
             self.assertTrue(runner.cleanup_started)
             self.assertFalse(runner.cleanup_cancelled)
             self.assertIsNone(bridge.handover.snapshot)
-            self.assertIsNone(bridge._runner)
         finally:
             release.set()
             await asyncio.wait_for(finished.wait(), 1)

@@ -18,6 +18,7 @@ from discord_blue.doodads.agent_session.interactions import RequestUserInputView
 from discord_blue.doodads.agent_session.protocol import RemoteApprovalRequest
 from discord_blue.doodads.agent_session.sessions import AgentSession
 from discord_blue.doodads.agent_session.session_threads import SessionThread
+from discord_blue.gateway_handover import GatewayContinuation
 from tests.fakes_agent_prompts import prompt_fixture
 from tests.fakes_agent_session import FakeInteraction, FakeReplyMessage, FakeWebSocket
 
@@ -35,7 +36,7 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.handover.load(self.bridge.handover.export())
         self.bridge.sessions.remove(self.fixture.session.session_id)
         self.replay: set[asyncio.Task[Any]] = set()
-        self.enterContext(patch.object(self.bridge.bot, "handover", SimpleNamespace(replay=self.replay), create=True))
+        self.bridge.bot.handover.replay = self.replay
 
     async def reattach(self, *, epoch: str, previous: AgentSession | None = None) -> tuple[AgentSession, FakeWebSocket]:
         socket = FakeWebSocket()
@@ -124,6 +125,40 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.pending_approvals[request.approval_id].message_id, message_id)
         self.assertEqual(len(self.fixture.thread.sent_views), 1)
 
+    async def test_same_epoch_live_approval_remains_usable_without_a_second_card(self) -> None:
+        self.install_view_store()
+        old = self.fixture.session
+        self.bridge.sessions.register(old)
+        request = RemoteApprovalRequest("approval", "call", "turn", old.session_id, old.session_epoch, ["echo", "inert"], "/", None)
+        await self.bridge.interactions.handle_approval_request(request)
+        message_id = old.pending_approvals[request.approval_id].message_id
+        session, socket = await self.reattach(epoch=old.session_epoch, previous=old)
+        await self.bridge.handle_event(session, "approval_request", asdict(request))
+        self.assertTrue(
+            await self.bridge.handle_thread_reaction(
+                cast(discord.Thread, self.fixture.thread),
+                message_id,
+                REACTION_APPROVAL_APPROVE,
+                cast(discord.User, FakeInteraction(self.fixture.thread).user),
+            )
+        )
+        decisions = [payload for payload in socket.sent_json if payload.get("type") == "approval_decision"]
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(len(self.fixture.thread.sent_views), 1)
+
+    async def test_saved_offline_thread_does_not_reply_to_commands_or_post_replay_messages(self) -> None:
+        for text in ("", " !code"):
+            with self.subTest(text=text):
+                message = FakeReplyMessage(777, self.fixture.thread, text)
+                task = asyncio.create_task(self.bridge.controls.send_thread_reply(cast(discord.Message, cast(object, message))))
+                self.replay.add(task)
+                self.assertFalse(await task)
+                self.assertFalse(message.replies)
+        self.replay.clear()
+        message = FakeReplyMessage(778, self.fixture.thread, "ordinary message after replay")
+        self.assertFalse(await self.bridge.controls.send_thread_reply(cast(discord.Message, cast(object, message))))
+        self.assertFalse(message.replies)
+
     async def test_reconnect_restores_input_answers_and_custom_ids_without_an_extra_card(self) -> None:
         self.install_view_store()
         self.bridge.sessions.register(self.fixture.session)
@@ -154,7 +189,13 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         session, socket = await self.reattach(epoch=self.fixture.session.session_epoch)
         self.assertTrue(await asyncio.wait_for(task, 2))
         command = next(payload for payload in socket.sent_json if payload.get("kind") == "reply")
-        self.bridge.handover.load(self.bridge.handover.export())
+        path = self.bridge.store.path.with_name("continuation.json")
+        bot_id = self.bridge.bot_user_id()
+        assert bot_id is not None
+        GatewayContinuation(bot_id, "inert-gateway-session", 0, "wss://gateway.discord.gg/", self.bridge.handover.export()).save(
+            path
+        )
+        self.bridge.handover.load(GatewayContinuation.read(path, bot_id).agents)
         self.bridge.sessions.remove(session.session_id)
         restored, _socket = await self.reattach(epoch=session.session_epoch)
         await self.bridge.handle_event(restored, "command_ack", command)

@@ -61,7 +61,7 @@ class ConversationHandoverTests(unittest.IsolatedAsyncioTestCase):
         successor.conversations.restore(saved.conversation)
         client = await self.endpoint(successor)
         replay: set[asyncio.Task[Any]] = set()
-        self.enterContext(patch.object(self.bot, "handover", SimpleNamespace(replay=replay), create=True))
+        self.bot.handover.replay = replay
         task = asyncio.create_task(successor.conversations.receive_message(message(message_id=201)))
         replay.add(task)
         await asyncio.sleep(0)

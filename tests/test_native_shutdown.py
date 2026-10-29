@@ -33,8 +33,8 @@ class NativeShutdownTests(unittest.IsolatedAsyncioTestCase):
         ):
             bridge = fixture.bridge
             bridge.handover.snapshot = {"agents": {"stale": {}}, "conversation": None}
-            with patch.object(bridge.store, "close", AsyncMock(side_effect=RuntimeError("inert writer failure"))):
-                with self.assertRaises(RuntimeError):
+            with patch.object(bridge.store, "close", AsyncMock(side_effect=OSError("inert writer failure"))):
+                with self.assertRaises(OSError):
                     await bridge.stop()
             self.assertIsNone(bridge.handover.snapshot)
             bridge.threads.stop()

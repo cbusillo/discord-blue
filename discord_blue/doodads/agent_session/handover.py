@@ -54,8 +54,8 @@ class SessionContinuation:
 
     def fallback(self) -> None:
         self.fallbacks += 1
-        handover = getattr(self.bridge.bot, "handover", None)
-        if handover is not None and (not getattr(handover, "runtime_started", True) or handover.replay):
+        handover = self.bridge.bot.handover
+        if not handover.runtime_started or handover.replay:
             handover.status = "failed"
 
     def retire(self, session_id: str, kind: str | None = None, request_id: str | None = None) -> None:
@@ -347,8 +347,7 @@ class SessionContinuation:
 
     async def wait_for_thread(self, thread_id: int) -> AgentSession | None:
         session = self.bridge.sessions.get_by_thread(thread_id)
-        handover = getattr(self.bridge.bot, "handover", None)
-        if handover is None or not handover.replay:
+        if not self.bridge.bot.handover.replay:
             return session
         if not any(record["thread_id"] == thread_id for record in self.saved.values()):
             return session

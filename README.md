@@ -875,7 +875,8 @@ reconnect loop. The continuation is consumed once. Replayed replies and approval
 reactions wait for the matching native session and request; changed epochs
 cannot inherit old replies or approval authority. Pending prompt controls keep
 their original message and control IDs. No per-start Connected message is sent.
-Unconsumed native and conversation state survives another handover; a closed
+With the agent bridge loaded, unconsumed native and conversation state survives
+another handover; a closed
 session, replaced epoch or explicitly resolved request retires its old state.
 
 `components.discord.handover` reports the resume stage and outstanding replay

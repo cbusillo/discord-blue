@@ -36,7 +36,7 @@ from discord_blue.doodads.agent_session.cleanup import (
     SessionCleanups,
 )
 from discord_blue.doodads.agent_session.session_threads import SessionThreads
-from discord_blue.doodads.agent_session.controls import SessionControls
+from discord_blue.doodads.agent_session.controls import REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY, SessionControls
 from discord_blue.doodads.agent_session.interactions import SessionInteractions
 from discord_blue.doodads.agent_session.session_status import SessionStatusUpdates
 from discord_blue.doodads.agent_session.handover import SessionContinuation
@@ -242,15 +242,14 @@ class AgentSessionBridge:
         discord_ready = self.discord_ready()
         gateway = self.bot.gateway_health.evidence(ready=discord_ready)
         discord_healthy = gateway["status"] == "ok"
-        handover = getattr(self.bot, "handover", None)
-        if handover is not None:
-            discord_healthy = discord_healthy and handover.healthy()
+        handover = self.bot.handover
+        discord_healthy = discord_healthy and handover.healthy()
         monitor = self.agent_session_monitor_health()
         monitor_healthy = not self.bot.config.agent_session.enabled or monitor["status"] not in {"dead", "stalled"}
         payload = health_payload(
             discord_status="ok" if discord_healthy else "unhealthy",
             discord_gateway=gateway,
-            discord_handover=handover.evidence() if handover is not None else None,
+            discord_handover=handover.evidence(),
             agent_session_enabled=self.bot.config.agent_session.enabled,
             active_agent_sessions=len(self.sessions.live_sessions()),
             disconnected_agent_sessions=len(self.sessions.disconnected_sessions()),
@@ -810,11 +809,8 @@ class AgentSessionBridge:
             try:
                 restored = await self.handover.restore_prompt(session, message_type, payload)
             except (ValueError, KeyError, TypeError, discord.HTTPException, discord.RateLimited, OSError):
-                handover = getattr(self.bot, "handover", None)
-                if handover is not None and (
-                    handover.replay
-                    or (getattr(handover, "status", "initial") != "initial" and not getattr(handover, "runtime_started", True))
-                ):
+                handover = self.bot.handover
+                if handover.replay or (handover.status != "initial" and not handover.runtime_started):
                     handover.status = "failed"
                 logger.warning("Unable to restore Agent session prompt", exc_info=True)
             if restored:
@@ -1049,11 +1045,11 @@ class AgentSessionBridge:
         emoji: str,
         user: discord.User | discord.Member,
     ) -> bool:
-        if not self.is_operator(user):
+        if not self.is_operator(user) or emoji not in {REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY}:
             return False
 
-        saved_prompt = self.handover.has_prompt(thread.id, message_id)
-        if getattr(getattr(self.bot, "handover", None), "replay", None) and saved_prompt:
+        saved_prompt = bool(self.bot.handover.replay) and self.handover.has_prompt(thread.id, message_id)
+        if saved_prompt:
             if await self.handover.wait_for_thread(thread.id) is not None:
                 await self.handover.wait_for_prompt(thread.id, message_id)
         session = self.sessions.get_by_thread(thread.id)

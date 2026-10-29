@@ -196,7 +196,12 @@ class SessionControls:
                     input_pending.submitted = False
 
     async def send_thread_reply(self, message: discord.Message) -> bool:
-        saved_thread = any(record["thread_id"] == message.channel.id for record in self.bridge.handover.saved.values())
+        text = message.content.strip()
+        if not text or text.startswith("!"):
+            return False
+        saved_thread = bool(self.bridge.bot.handover.replay) and any(
+            record["thread_id"] == message.channel.id for record in self.bridge.handover.saved.values()
+        )
         session = await self.bridge.handover.wait_for_thread(message.channel.id)
         if session is None:
             for session_id, stored in tuple(self.bridge.store.records.items()):
@@ -205,6 +210,7 @@ class SessionControls:
                         await message.reply(
                             "Decision recorded. This session is not connected, so the reply was not delivered.", mention_author=False
                         )
+                        return True
             if saved_thread:
                 await message.reply("Agent session is offline; reply was not delivered.", mention_author=False)
                 return True
@@ -215,9 +221,6 @@ class SessionControls:
         if not isinstance(channel, discord.Thread):
             return False
         thread: discord.Thread = channel
-        text = message.content.strip()
-        if not text or text.startswith("!"):
-            return False
         if message.created_at < session.attached_at:
             # The client reconnected since (for Claude Code, after /clear or /resume); never deliver it to the new epoch.
             await message.reply(REPLY_BEFORE_RECONNECT, mention_author=False)

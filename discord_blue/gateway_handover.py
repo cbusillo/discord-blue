@@ -6,6 +6,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 import fcntl
 import json
+import logging
 import os
 from pathlib import Path
 import tempfile
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
 
 _STATE_LOCKS: dict[Path, int] = {}
 SHUTDOWN_TIMEOUT_SECONDS = 90.0
+logger = logging.getLogger(__name__)
 
 
 def hold_state_lock() -> None:
@@ -265,37 +267,52 @@ class GatewayHandover:
         if not self.started:
             return
         if not self.runtime_started and event.get("op") == DiscordWebSocket.INVALIDATE_SESSION and event.get("d") is False:
-            self.path.unlink(missing_ok=True)
+            self.discard_checkpoint()
             self.status = "failed"
             self.restore_parsers()
             self.buffer.clear()
         if event.get("op") == 0 and event.get("t") == "READY":
-            self.path.unlink(missing_ok=True)
+            self.discard_checkpoint()
             if not self.runtime_started and self.status != "initial":
                 self.status = "failed"
                 self.restore_parsers()
                 self.buffer.clear()
-            user = self.bot.user
-            if user is not None:
-                write_handover(self.active, {"bot_id": user.id, "active_at": time.time()})
+            self.record_active()
+
+    def discard_checkpoint(self) -> None:
+        try:
+            self.path.unlink(missing_ok=True)
+        except OSError:
+            self.status = "failed"
+            logger.warning("Unable to retire Gateway continuation", exc_info=True)
+
+    def record_active(self) -> None:
+        user = self.bot.user
+        try:
+            write_handover(self.active, {"bot_id": user.id if user else None, "active_at": time.time()})
+        except OSError:
+            self.status = "failed"
+            logger.warning("Unable to record active Gateway owner", exc_info=True)
 
     async def resumed(self) -> None:
         if not self.buffering:
             return
         self.buffering = False
-        self.path.unlink(missing_ok=True)
-        user = self.bot.user
-        write_handover(self.active, {"bot_id": user.id if user else None, "active_at": time.time()})
-        self.startup_caller = asyncio.current_task()
-        self.bot._handle_ready()
-        self.bot.dispatch("ready")
-        if self.startup:
-            await asyncio.gather(*tuple(self.startup))
-        self.parsing_replay = True
         try:
+            self.discard_checkpoint()
+            self.record_active()
+            self.startup_caller = asyncio.current_task()
+            self.bot._handle_ready()
+            self.bot.dispatch("ready")
+            if self.startup:
+                await asyncio.gather(*tuple(self.startup))
+            self.parsing_replay = True
             for parser, payload in self.buffer:
                 parser(payload)
             self.buffer.clear()
+        except Exception:
+            self.status = "failed"
+            raise
         finally:
             self.parsing_replay = False
             self.restore_parsers()
