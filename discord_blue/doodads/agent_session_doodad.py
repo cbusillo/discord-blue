@@ -40,7 +40,7 @@ class AgentSessionDoodad(commands.Cog):
             await self.bridge.conversations.receive_message(message)
 
     @commands.Cog.listener("on_conversation_message_edit")
-    async def route_conversation_edit(self, _before: discord.Message, after: discord.Message) -> None:
+    async def route_conversation_edit(self, _before: discord.Message | None, after: discord.Message) -> None:
         if self.bot.config.agent_session.enabled:
             await self.bridge.conversations.receive_message(after, amendment=True)
 

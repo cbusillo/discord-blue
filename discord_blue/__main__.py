@@ -9,6 +9,7 @@ from time import sleep
 from discord.errors import PrivilegedIntentsRequired
 
 from discord_blue.config import get_config
+from discord_blue.gateway_handover import hold_state_lock
 from discord_blue.plugs.discord_plug import BlueBot
 
 DISCORD_TOKEN_TIMEOUT = 120
@@ -48,6 +49,7 @@ def parse_args() -> Namespace:
 
 
 def start_bot() -> None:
+    hold_state_lock()
     config = get_config()
     for _count in range(DISCORD_TOKEN_TIMEOUT):
         try:

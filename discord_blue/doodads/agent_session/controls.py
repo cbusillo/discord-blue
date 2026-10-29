@@ -15,6 +15,7 @@ import discord
 
 if TYPE_CHECKING:
     from discord_blue.doodads.agent_session.director_questions import QuestionCards
+    from discord_blue.doodads.agent_session.handover import SessionContinuation
 
 from discord_blue.doodads.agent_session.protocol import RemoteCommand, payload_string
 from discord_blue.doodads.agent_session.sessions import (
@@ -124,6 +125,7 @@ class ControlHooks(Protocol):
     sessions: AgentSessionRegistry
     store: SessionStore
     threads: ThreadWorkers
+    handover: SessionContinuation
 
     def is_operator(self, user: discord.User | discord.Member) -> bool: ...
 
@@ -194,7 +196,7 @@ class SessionControls:
                     input_pending.submitted = False
 
     async def send_thread_reply(self, message: discord.Message) -> bool:
-        session = self.bridge.sessions.get_by_thread(message.channel.id)
+        session = await self.bridge.handover.wait_for_thread(message.channel.id)
         if session is None:
             for session_id, stored in tuple(self.bridge.store.records.items()):
                 if stored.thread_id == message.channel.id:

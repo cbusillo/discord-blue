@@ -25,13 +25,13 @@ class DiscordGatewayHealth:
         self.last_ack = None
         self.session_started = False
 
-    def receive(self, raw: str) -> None:
+    def receive(self, raw: str) -> dict[str, Any] | None:
         try:
             event = json.loads(raw)
         except (ValueError, TypeError):
-            return
+            return None
         if not isinstance(event, dict):
-            return
+            return None
         opcode = event.get("op")
         if opcode == 10:  # HELLO starts a new connection, including resumed sessions.
             self.disconnect()
@@ -45,6 +45,7 @@ class DiscordGatewayHealth:
             self.last_ack = time.monotonic()
         elif opcode == 0 and event.get("t") in ("READY", "RESUMED") and self.interval is not None:
             self.session_started = True
+        return event
 
     def evidence(self, *, ready: bool) -> dict[str, Any]:
         age = None if self.last_ack is None else max(0.0, time.monotonic() - self.last_ack)
@@ -116,6 +117,7 @@ def health_payload(
     *,
     discord_status: Literal["ok", "unhealthy"],
     discord_gateway: dict[str, Any] | None = None,
+    discord_handover: dict[str, object] | None = None,
     agent_session_enabled: bool = False,
     active_agent_sessions: int = 0,
     disconnected_agent_sessions: int | None = None,
@@ -141,6 +143,8 @@ def health_payload(
     agent_session_component = payload["components"]["agent_session"]
     if discord_gateway is not None:
         payload["components"]["discord"]["gateway"] = discord_gateway
+    if discord_handover is not None:
+        payload["components"]["discord"]["handover"] = discord_handover
     if disconnected_agent_sessions is not None:
         agent_session_component["disconnected_sessions"] = disconnected_agent_sessions
     if pending_agent_session_cleanups is not None:

@@ -39,6 +39,7 @@ from discord_blue.doodads.agent_session.session_threads import SessionThreads
 from discord_blue.doodads.agent_session.controls import SessionControls
 from discord_blue.doodads.agent_session.interactions import SessionInteractions
 from discord_blue.doodads.agent_session.session_status import SessionStatusUpdates
+from discord_blue.doodads.agent_session.handover import SessionContinuation
 
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
 from discord_blue.doodads.agent_session.store import SESSION_STORE_WAIT_TIMEOUT_SECONDS, SessionState, SessionStore, StoredSession
@@ -88,6 +89,7 @@ class AgentSessionBridge:
         self.store = SessionStore.for_path(store_path if store_path is not None else Path.home() / "agent-sessions.json")
         self.deliveries = DeliveryReceipts(self.store.path.with_name("bridge-deliveries.json"))
         self.sessions = AgentSessionRegistry()
+        self.handover = SessionContinuation(self, SESSION_DISCONNECT_GRACE_SECONDS)
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
@@ -238,11 +240,15 @@ class AgentSessionBridge:
         discord_ready = self.discord_ready()
         gateway = self.bot.gateway_health.evidence(ready=discord_ready)
         discord_healthy = gateway["status"] == "ok"
+        handover = getattr(self.bot, "handover", None)
+        if handover is not None:
+            discord_healthy = discord_healthy and handover.healthy()
         monitor = self.agent_session_monitor_health()
         monitor_healthy = not self.bot.config.agent_session.enabled or monitor["status"] not in {"dead", "stalled"}
         payload = health_payload(
             discord_status="ok" if discord_healthy else "unhealthy",
             discord_gateway=gateway,
+            discord_handover=handover.evidence() if handover is not None else None,
             agent_session_enabled=self.bot.config.agent_session.enabled,
             active_agent_sessions=len(self.sessions.live_sessions()),
             disconnected_agent_sessions=len(self.sessions.disconnected_sessions()),
@@ -727,7 +733,9 @@ class AgentSessionBridge:
             logger.info("Agent session %s left before its hello was acknowledged", hello.session_id)
             return False
         # Heartbeats start after the ack, so the watchdog's clock starts here too.
+        self.handover.reconnected(session, previous)
         session.acknowledged = True
+        await self.handover.notify()
         await self.questions.close(session.session_id, current_epoch=session.session_epoch)
         session.touch()
         if self.sessions.get(session.session_id) is session and not self._stopping:
@@ -958,7 +966,7 @@ class AgentSessionBridge:
         if not self.is_operator(user):
             return False
 
-        session = self.sessions.get_by_thread(thread.id)
+        session = await self.handover.wait_for_thread(thread.id)
         if session is None:
             return False
 
