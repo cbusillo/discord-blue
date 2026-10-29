@@ -45,6 +45,25 @@ async def mirrored(
     return events
 
 
+def record(**fields: object) -> str:
+    return json.dumps(fields) + "\n"
+
+
+def said(text: str) -> str:
+    return record(type="assistant", message={"role": "assistant", "content": [{"type": "text", "text": text}]})
+
+
+def rejected(feedback: str) -> str:
+    return record(type="user", isMeta=True, message={"role": "user", "content": f"Stop hook feedback:\n{feedback}"}) + record(
+        type="system", subtype="stop_hook_summary", hookErrors=[feedback]
+    )
+
+
+def append(transcript: Path, *records: str) -> None:
+    with transcript.open("a") as lines:
+        lines.write("".join(records))
+
+
 class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
     def test_launch_identity_uses_the_explicit_supervisor_payload(self) -> None:
         brief = "Brief from the Supervisor.\nDo the work."
@@ -289,36 +308,42 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_a_final_answer_another_stop_hook_rejects_is_never_posted(self) -> None:
-        def record(**fields: object) -> str:
-            return json.dumps(fields) + "\n"
-
-        def said(text: str) -> str:
-            return record(type="assistant", message={"role": "assistant", "content": [{"type": "text", "text": text}]})
-
         with tempfile.TemporaryDirectory() as directory:
             transcript = Path(directory) / "session.jsonl"
-            # Claude Code's shape for a stop another hook blocked: its feedback as a prompt, then the hooks' summary.
-            transcript.write_text(
-                said("**Q1.** Draft?")
-                + record(type="user", isMeta=True, message={"role": "user", "content": "Stop hook feedback:\nState the cost."})
-                + record(type="system", subtype="stop_hook_summary", hookErrors=["State the cost."])
-            )
+            transcript.write_text(said("**Q1.** Draft?"))
             path = str(transcript)
             async with running_channel() as (claude, discord):
                 await claude.initialize()
                 await discord.next("hello")
                 await hook(claude, "UserPromptSubmit", prompt="Ask me something", transcript_path=path)
                 await hook(claude, "Stop", last_assistant_message="**Q1.** Draft?", transcript_path=path)
-                with transcript.open("a") as lines:
-                    lines.write(said("**Q1.** Rewritten, with its cost?"))
-                    lines.write(record(type="system", subtype="stop_hook_summary", hookErrors=[]))
-                    lines.write(record(type="system", subtype="turn_duration"))
+                # Claude Code's shape for a stop another hook blocked, written once every Stop hook has returned.
+                append(transcript, rejected("State the cost."), said("**Q1.** Rewritten, with its cost?"))
                 await hook(claude, "Stop", last_assistant_message="**Q1.** Rewritten, with its cost?", transcript_path=path)
+                append(transcript, record(type="system", subtype="stop_hook_summary", hookErrors=[]))
                 posted = await discord.next("turn_complete")
                 events = await mirrored(claude, discord)
 
         self.assertEqual(posted["assistant_message"], "**Q1.** Rewritten, with its cost?")
         self.assertNotIn("turn_complete", [event[0] for event in events])
+
+    async def test_an_answer_awaiting_its_verdict_posts_before_the_next_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "session.jsonl"
+            transcript.write_text(said("Done."))
+            path = str(transcript)
+            async with running_channel() as (claude, discord):
+                await claude.initialize()
+                await discord.next("hello")
+                await hook(claude, "Stop", last_assistant_message="Done.", transcript_path=path)
+                # No verdict recorded yet, but a new prompt shows the answer was accepted.
+                await hook(claude, "UserPromptSubmit", prompt="Next task please", transcript_path=path)
+                events = await mirrored(claude, discord)
+
+        self.assertEqual(
+            [event for event in events if event[0] in {"turn_complete", "user_message"}],
+            [("turn_complete", "Done."), ("user_message", "Next task please")],
+        )
 
     async def test_the_model_cannot_post_through_the_hook_tool(self) -> None:
         async with running_channel() as (claude, discord):

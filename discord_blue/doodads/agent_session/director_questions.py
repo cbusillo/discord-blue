@@ -100,7 +100,7 @@ def question_sections(text: str) -> Iterator[QuestionSection]:
     starts = []
     for index, line in top_level_lines(lines):
         match = QUESTION_START.match(line)
-        if match is not None and first_sentence(line).endswith("?"):
+        if match is not None and (line.rstrip("* \r\n").endswith("?") or first_sentence(line).endswith("?")):
             starts.append((index, match[1]))
     for index, (start, number) in enumerate(starts):
         end = starts[index + 1][0] if index + 1 < len(starts) else len(lines)
@@ -151,7 +151,10 @@ def first_sentence(line: str) -> str:
 
 
 def question_excerpt(body: str) -> str:
-    first = first_sentence(body.split("\n", 1)[0])
+    line = body.split("\n", 1)[0]
+    first = first_sentence(line)
+    if not first.endswith("?"):  # An abbreviation such as "e.g." ended the sentence early; keep the whole line.
+        first = QUESTION_START.sub("", line, count=1).replace("*", "").strip()
     return first if len(first) <= 80 else first[:79] + "\u2026"
 
 

@@ -69,7 +69,10 @@ Recommendation: keep both.
         text = "**Q1044.** Should CT125 also take full test runs? I recommend yes, set up as its own issue."
         self.assertEqual([number for number, _ in detect_questions(text)], ["Q1044"])
         self.assertEqual(question_excerpt(text), "Should CT125 also take full test runs?")
-        self.assertEqual(detect_questions("**Q12.** Release v1.2 shipped. Anything else?"), ())
+        self.assertEqual(detect_questions("**Q12.** Release v1.2 shipped. Anything else"), ())
+        abbreviated = "**Q13.** Should we support e.g. CSV imports?"
+        self.assertEqual([number for number, _ in detect_questions(abbreviated)], ["Q13"])
+        self.assertEqual(question_excerpt(abbreviated), "Should we support e.g. CSV imports?")
 
     def test_references_and_historical_labels_are_not_questions(self) -> None:
         for source in ("**Q12** was answered yesterday.", "**Q12 status**\nDone.", "See **Q12.** Later?", "**Q12.** Resolved."):

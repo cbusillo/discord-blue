@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import stat
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
@@ -70,13 +71,20 @@ class TranscriptTitles:
         self.cached = (key, titles)
         return titles
 
-    async def stop_blocked(self, path: str, text: str) -> bool | None:
-        """Whether another Stop hook rejected this final text, sending Claude back to rewrite it; None while unknown."""
-        if not path.endswith(".jsonl") or not text.strip():
+    async def size(self, path: str) -> int | None:
+        """Where the transcript ends now: records written later answer for what happened after this point."""
+        return await self.bounded(transcript_size, path)
+
+    async def stop_blocked(self, path: str, offset: int) -> bool | None:
+        """Whether another Stop hook rejected the answer that ends at offset, sending Claude back to rewrite it."""
+        return await self.bounded(stop_verdict, path, offset)
+
+    async def bounded[T](self, read: Callable[..., T | None], path: str, *args: object) -> T | None:
+        if not path.endswith(".jsonl"):
             return None
         try:
             return await asyncio.wait_for(
-                asyncio.get_running_loop().run_in_executor(self.executor, stop_verdict, path, text), READ_TIMEOUT_SECONDS
+                asyncio.get_running_loop().run_in_executor(self.executor, read, path, *args), READ_TIMEOUT_SECONDS
             )
         except TimeoutError:
             return None
@@ -126,21 +134,26 @@ class TranscriptTitles:
         )
 
 
-def stop_verdict(path: str, text: str) -> bool | None:
-    """Claude Code records a rejected stop as a "Stop hook feedback" prompt after the text, then the hooks' summary."""
+def transcript_size(path: str) -> int | None:
+    try:
+        return os.stat(path).st_size
+    except OSError:
+        return None
+
+
+def stop_verdict(path: str, offset: int) -> bool | None:
+    """Claude Code writes a rejected stop as a "Stop hook feedback" prompt, then every Stop hook's summary.
+
+    Those records follow the answer, after every Stop hook has returned, so only what is written after
+    offset, the transcript's end when this session's own Stop hook ran, decides; None until they appear.
+    """
     try:
         with open(path, "rb") as transcript:
-            size = transcript.seek(0, os.SEEK_END)
-            start = max(0, size - TAIL_BYTES)
-            transcript.seek(start)
+            transcript.seek(offset)
             lines = transcript.read(TAIL_BYTES).split(b"\n")
     except OSError:
         return None
-    if start:
-        lines = lines[1:]
-    wanted = text.strip()
-    verdict: bool | None = None
-    found = feedback = False
+    feedback = False
     for line in lines:
         try:
             record = json.loads(line) if line.strip() else None
@@ -148,16 +161,10 @@ def stop_verdict(path: str, text: str) -> bool | None:
             continue
         if not isinstance(record, dict):
             continue
-        kind = record.get("type")
-        content = record.get("message", {}).get("content") if isinstance(record.get("message"), dict) else None
-        if kind == "assistant" and isinstance(content, list):
-            texts = [block.get("text", "").strip() for block in content if isinstance(block, dict) and block.get("type") == "text"]
-            if any(block and wanted.endswith(block) for block in texts):
-                found, feedback, verdict = True, False, None
-        elif not found or verdict is not None:
-            continue
-        elif kind == "user" and isinstance(content, str) and content.startswith("Stop hook feedback"):
+        message = record.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if record.get("type") == "user" and isinstance(content, str) and content.startswith("Stop hook feedback"):
             feedback = True
-        elif kind == "system" and record.get("subtype") in {"stop_hook_summary", "turn_duration"}:
-            verdict = feedback
-    return verdict
+        elif record.get("type") == "system" and record.get("subtype") in {"stop_hook_summary", "turn_duration"}:
+            return feedback
+    return None

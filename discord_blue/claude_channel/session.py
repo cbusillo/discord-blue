@@ -20,6 +20,7 @@ rejected.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -148,6 +149,7 @@ class ClaudeSession(AgentSessionClient):
         self.controls = CAPABILITIES if identity.channel else ["status_request"]
         self.waiting_locally = False
         self.pending_stop: asyncio.Task[None] | None = None
+        self.settle = asyncio.Event()
         # Replies this server injected; their prompts are already in Discord.
         self.injected: deque[str] = deque(maxlen=64)
         if not identity.channel:
@@ -196,6 +198,9 @@ class ClaudeSession(AgentSessionClient):
         )
         self.launch_brief_pending = False
         conversation = fields.get("session_id") or None
+        if event in {"SessionEnd", "UserPromptSubmit"} or (conversation and conversation != self.conversation_id):
+            # A new prompt means the last answer was accepted; either way it belongs before what follows.
+            await self.settle_turns()
         if event == "SessionEnd":
             # /clear or /resume ends this conversation; the next hook names the one that follows.
             await self.switch_conversation(None)
@@ -231,10 +236,11 @@ class ClaudeSession(AgentSessionClient):
                     self.publish("user_message", message=clip(typed))
         elif event == "Stop":
             self.waiting_locally = False
-            # Another plugin's Stop hook can reject this text and send Claude back to rewrite it. Its verdict is written
-            # only after every Stop hook returns, this one included, so it is read after returning, in Stop order.
+            # Another plugin's Stop hook can reject this answer and send Claude back to rewrite it. Its verdict is
+            # written only after every Stop hook returns, this one included, so it is read afterwards, in Stop order.
+            offset = await self.transcript.size(fields.get("transcript_path", ""))
             self.pending_stop = asyncio.create_task(
-                self.finish_turn(fields, self.pending_stop), name=f"claude-stop-{self.session_id}"
+                self.finish_turn(fields, offset, self.pending_stop), name=f"claude-stop-{self.session_id}"
             )
             # Claude Code writes its own title for the session as it answers.
             await self.retitle(fields)
@@ -244,19 +250,32 @@ class ClaudeSession(AgentSessionClient):
         elif event == "SessionStart":
             await self.retitle(fields)
 
-    async def finish_turn(self, fields: dict[str, str], previous: asyncio.Task[None] | None) -> None:
+    async def finish_turn(self, fields: dict[str, str], offset: int | None, previous: asyncio.Task[None] | None) -> None:
         if previous is not None:
             await asyncio.wait({previous})
-        text = fields.get("last_assistant_message", "")
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + STOP_VERDICT_SECONDS
-        while (blocked := await self.transcript.stop_blocked(fields.get("transcript_path", ""), text)) is None:
-            if not fields.get("transcript_path") or loop.time() >= deadline:
+        path = fields.get("transcript_path", "")
+        blocked = None if offset is None else await self.transcript.stop_blocked(path, offset)
+        deadline = asyncio.get_running_loop().time() + STOP_VERDICT_SECONDS
+        while offset is not None and blocked is None and not self.settle.is_set():
+            if asyncio.get_running_loop().time() >= deadline:
                 break  # Unknown: post it rather than lose a final answer.
-            await asyncio.sleep(STOP_VERDICT_POLL_SECONDS)
-        if blocked:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.settle.wait(), STOP_VERDICT_POLL_SECONDS)
+            blocked = await self.transcript.stop_blocked(path, offset)
+        if not blocked:
+            self.publish(
+                "turn_complete", message=TURN_DONE, assistant_message=clip(fields.get("last_assistant_message", "")) or None
+            )
+
+    async def settle_turns(self) -> None:
+        """Post any answer still awaiting its verdict now, before a new turn, conversation or session end follows it."""
+        if self.pending_stop is None or self.pending_stop.done():
             return
-        self.publish("turn_complete", message=TURN_DONE, assistant_message=clip(text) or None)
+        self.settle.set()
+        try:
+            await asyncio.wait({self.pending_stop})
+        finally:
+            self.settle.clear()
 
     async def flush_pending_input(self) -> None:
         pending, self.pending_input = self.pending_input, None
@@ -276,8 +295,7 @@ class ClaudeSession(AgentSessionClient):
         try:
             async with asyncio.timeout(SESSION_END_TIMEOUT_SECONDS):
                 await self.flush_pending_input()
-                if self.pending_stop is not None:
-                    await asyncio.wait({self.pending_stop})  # The last answer goes out before the session ends.
+                await self.settle_turns()
                 if self.websocket is not None and not self.websocket.closed and not self.stopped.is_set():
                     terminal = self.event("session_end")
                     sent = asyncio.Event()
