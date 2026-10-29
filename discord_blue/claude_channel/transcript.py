@@ -22,6 +22,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 TAIL_BYTES = 256 * 1024
+# Hook output, such as a failing test report, can be large; read whole records around a stop.
+STOP_READ_LIMIT = 16 * 1024 * 1024
 READ_TIMEOUT_SECONDS = 1.0
 
 
@@ -149,34 +151,41 @@ def stop_verdict(path: str, offset: int) -> bool | None:
     stop's. Its toolUseID ties it to the invocation's hook attachments, which may land on either side of
     offset: a blocking error or added context means Claude continues and this answer was not final.
     """
+    after = read_records(path, offset, STOP_READ_LIMIT)
+    summary = next((record for record in after if record.get("subtype") == "stop_hook_summary"), None)
+    if summary is None or not isinstance(stop := summary.get("toolUseID"), str):
+        return None
+    start = max(0, offset - STOP_READ_LIMIT)
+    # A hook that finished before this session's own may already be recorded before offset.
+    before = read_records(path, start, offset - start, partial_first=start > 0)
+    return any(continues(record, stop) for record in [*before, *after])
+
+
+def continues(record: dict[str, object], stop: str) -> bool:
+    attachment = record.get("attachment")
+    return (
+        isinstance(attachment, dict)
+        and attachment.get("toolUseID") == stop
+        and attachment.get("hookEvent") == "Stop"
+        and attachment.get("type") in {"hook_blocking_error", "hook_additional_context"}
+    )
+
+
+def read_records(path: str, start: int, length: int, *, partial_first: bool = False) -> list[dict[str, object]]:
     try:
         with open(path, "rb") as transcript:
-            start = max(0, offset - TAIL_BYTES)
             transcript.seek(start)
-            data = transcript.read(offset - start + TAIL_BYTES)
+            lines = transcript.read(length).split(b"\n")
     except OSError:
-        return None
-    records: list[tuple[int, dict[str, object]]] = []
-    position = start
-    for line in data.split(b"\n"):
-        line_start, position = position, position + len(line) + 1
+        return []
+    if partial_first:
+        lines = lines[1:]  # The first line was cut by the seek.
+    records = []
+    for line in lines:
         try:
             record = json.loads(line) if line.strip() else None
         except ValueError:
-            continue
+            continue  # Includes a last line still being written.
         if isinstance(record, dict):
-            records.append((line_start, record))
-    summary = next((record for at, record in records if at >= offset and record.get("subtype") == "stop_hook_summary"), None)
-    if summary is None or not isinstance(stop := summary.get("toolUseID"), str):
-        return None
-    continued = {"hook_blocking_error", "hook_additional_context"}
-    for _, record in records:
-        attachment = record.get("attachment")
-        if (
-            isinstance(attachment, dict)
-            and attachment.get("toolUseID") == stop
-            and attachment.get("hookEvent") == "Stop"
-            and attachment.get("type") in continued
-        ):
-            return True
-    return False
+            records.append(record)
+    return records

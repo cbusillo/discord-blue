@@ -309,10 +309,15 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_final_answer_another_stop_hook_sends_back_is_never_posted(self) -> None:
         # A fast rejecting hook can be recorded before this session's own Stop hook even runs.
-        for verdict, early in (("hook_blocking_error", False), ("hook_blocking_error", True), ("hook_additional_context", False)):
+        # Hook output such as a failing test report can be large.
+        report = "x" * 300_000
+        cases = (("hook_blocking_error", False), ("hook_blocking_error", True), ("hook_additional_context", False))
+        for verdict, early in cases:
             with self.subTest(verdict=verdict, early=early), tempfile.TemporaryDirectory() as directory:
                 transcript = Path(directory) / "session.jsonl"
-                attachment = record(type="attachment", attachment={"type": verdict, "hookEvent": "Stop", "toolUseID": "s1"})
+                attachment = record(
+                    type="attachment", attachment={"type": verdict, "hookEvent": "Stop", "toolUseID": "s1", "content": report}
+                )
                 transcript.write_text(said("**Q1.** Draft?") + (attachment if early else ""))
                 path = str(transcript)
                 async with running_channel() as (claude, discord):
@@ -329,6 +334,20 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(posted["assistant_message"], "**Q1.** Rewritten?")
                 self.assertNotIn("turn_complete", [event[0] for event in events])
+
+    async def test_an_answer_awaiting_its_verdict_posts_once_claude_waits_at_its_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "session.jsonl"
+            transcript.write_text(said("Done."))
+            path = str(transcript)
+            async with running_channel() as (claude, discord):
+                await claude.initialize()
+                await discord.next("hello")
+                await hook(claude, "Stop", last_assistant_message="Done.", transcript_path=path)
+                await hook(claude, "Notification")
+                posted = await discord.next("turn_complete")
+
+        self.assertEqual(posted["assistant_message"], "Done.")
 
     async def test_an_answer_awaiting_its_verdict_posts_before_the_next_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

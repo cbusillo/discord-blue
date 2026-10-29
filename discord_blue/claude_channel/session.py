@@ -60,10 +60,12 @@ HOOK_TOOL = {
 }
 # Hooks that only fire while Claude is working. Another plugin's Stop hook can keep a turn going after Stop.
 RUNNING_EVENTS = {"UserPromptSubmit", "PreToolUse", "PostToolUse"}
-# How long a final answer waits for the other Stop hooks' verdict before it is posted anyway: past the hooks' own
-# timeouts, so a slow hook that rejects the answer still keeps it out. A new prompt or session end posts it sooner.
-STOP_VERDICT_SECONDS = 120.0
+# A final answer waits for the other Stop hooks' verdict. Claude going idle, a new prompt or the session ending
+# posts it at once; this bound only covers a verdict never recorded, past the hooks' 600-second default timeout.
+STOP_VERDICT_SECONDS = 660.0
 STOP_VERDICT_POLL_SECONDS = 0.1
+STOP_VERDICT_SLOW_POLL_SECONDS = 1.0
+STOP_VERDICT_FAST_SECONDS = 5.0
 # The `_meta` key Claude Code sets on a model's tool call; hook calls carry no tool use.
 MODEL_CALL = "claudecode/toolUseId"
 
@@ -199,8 +201,8 @@ class ClaudeSession(AgentSessionClient):
         )
         self.launch_brief_pending = False
         conversation = fields.get("session_id") or None
-        if event in {"SessionEnd", "UserPromptSubmit"} or (conversation and conversation != self.conversation_id):
-            # A new prompt means the last answer was accepted; either way it belongs before what follows.
+        if event in {"SessionEnd", "UserPromptSubmit", "Notification"} or (conversation and conversation != self.conversation_id):
+            # Claude waiting at its prompt or taking a new one means the last answer stood; it posts before what follows.
             await self.settle_turns()
         if event == "SessionEnd":
             # /clear or /resume ends this conversation; the next hook names the one that follows.
@@ -256,12 +258,16 @@ class ClaudeSession(AgentSessionClient):
             await asyncio.wait({previous})
         path = fields.get("transcript_path", "")
         blocked = None if offset is None else await self.transcript.stop_blocked(path, offset)
-        deadline = asyncio.get_running_loop().time() + STOP_VERDICT_SECONDS
+        loop = asyncio.get_running_loop()
+        started = loop.time()
         while offset is not None and blocked is None and not self.settle.is_set():
-            if asyncio.get_running_loop().time() >= deadline:
+            waited = loop.time() - started
+            if waited >= STOP_VERDICT_SECONDS:
                 break  # Unknown: post it rather than lose a final answer.
+            # Most verdicts land within moments; a slow hook is then checked once a second.
+            poll = STOP_VERDICT_POLL_SECONDS if waited < STOP_VERDICT_FAST_SECONDS else STOP_VERDICT_SLOW_POLL_SECONDS
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self.settle.wait(), STOP_VERDICT_POLL_SECONDS)
+                await asyncio.wait_for(self.settle.wait(), poll)
             blocked = await self.transcript.stop_blocked(path, offset)
         if not blocked:
             self.publish(
