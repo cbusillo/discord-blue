@@ -87,6 +87,7 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.identified = False
         self.identified_event = asyncio.Event()
         self.reject_resume = False
+        self.fatal_resume = False
         self.stall_resume = False
         self.replay_interactions: list[dict[str, Any]] = []
         self.peer: web.WebSocketResponse | None = None
@@ -118,6 +119,9 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
                 await peer.send_json({"op": DiscordWebSocket.HEARTBEAT_ACK})
             elif payload["op"] == DiscordWebSocket.RESUME:
                 self.resume_payload = payload["d"]
+                if self.fatal_resume:
+                    await peer.close(code=4014)
+                    continue
                 if self.stall_resume:
                     continue
                 if self.reject_resume:
@@ -429,6 +433,27 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(self.identified_event.wait(), 2)
             self.assertIsNone(self.resume_payload)
             await self.finish(task)
+
+    async def test_fatal_gateway_error_before_resumed_still_falls_back(self) -> None:
+        self.fatal_resume = True
+        running = self.begin()
+        await asyncio.wait_for(self.identified_event.wait(), 1)
+        self.assertEqual(self.bot.handover.status, "failed")
+        await self.finish(running)
+
+    async def test_fatal_gateway_error_after_catch_up_does_not_retry_identify(self) -> None:
+        running = asyncio.create_task(self.bot.start("inert-token"))
+        try:
+            await asyncio.wait_for(self.received.wait(), 1)
+            self.assertTrue(await wait_until(self.bot.handover.healthy))
+            assert self.peer is not None
+            await self.peer.close(code=4014)
+            with self.assertRaises(discord.PrivilegedIntentsRequired):
+                await asyncio.wait_for(asyncio.shield(running), 1)
+            self.assertFalse(self.identified)
+        finally:
+            await self.bot.close()
+            await asyncio.gather(running, return_exceptions=True)
 
     async def test_silent_resume_gateway_has_a_finite_fallback(self) -> None:
         self.stall_resume = True

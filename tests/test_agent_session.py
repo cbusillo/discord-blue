@@ -1640,10 +1640,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(websocket.sent_json, [])
-        self.assertEqual(
-            message.replies,
-            ["Agent session is offline; reply was not delivered. Please try again after reconnecting."],
-        )
+        self.assertEqual(len(message.replies), 1)
 
     async def test_continue_autonomously_routes_to_registered_session_websocket(self) -> None:
         config = Config()

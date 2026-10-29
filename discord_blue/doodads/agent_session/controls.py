@@ -184,6 +184,12 @@ class SessionControls:
         if error := self.dispatch_error(session, command.kind):
             return error
         if input_pending is not None:
+            if (
+                input_pending.submitted
+                or input_pending.retired
+                or session.pending_user_inputs.get(command.call_id or "") is not input_pending
+            ):
+                return "This prompt is no longer active."
             input_pending.submitted = True
         pending.status_revision = session.status_revision
         pending.previous_display_state = session.display_state

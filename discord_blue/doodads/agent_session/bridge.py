@@ -355,7 +355,7 @@ class AgentSessionBridge:
             complete = False
             logger.warning("Agent session shutdown did not settle native work before its deadline")
         try:
-            await self.threads.bounded(self.conversations.stop(), max(0, deadline - loop.time()))
+            await self.threads.bounded(self.conversations.stop(), max(SESSION_STORE_WAIT_TIMEOUT_SECONDS, deadline - loop.time()))
         except TimeoutError:
             complete = False
         for task in list(self._grace_tasks):
@@ -366,21 +366,27 @@ class AgentSessionBridge:
                 await self.stop_background_task(name, background_task)
         self._cleanup_task = self._heartbeat_task = None
         try:
-            await self.threads.bounded(self.disconnect_active_sessions(), max(0, deadline - loop.time()))
+            await self.threads.bounded(
+                self.disconnect_active_sessions(), max(SESSION_STORE_WAIT_TIMEOUT_SECONDS, deadline - loop.time())
+            )
         except TimeoutError:
             complete = False
         self.threads.stop()
         try:
             if self._runner is not None:
-                await self.threads.bounded(self._runner.cleanup(), max(0, deadline - loop.time()))
-            await self.threads.bounded(self.store.close(), max(0, deadline - loop.time()))
-            complete = complete and self.store.error is None and loop.time() < deadline
+                await self.threads.bounded(self._runner.cleanup(), max(SESSION_STORE_WAIT_TIMEOUT_SECONDS, deadline - loop.time()))
         except TimeoutError:
             complete = False
-            logger.warning("Agent session shutdown or store flush exceeded its deadline")
         finally:
-            self._runner = None
-            self._site = None
+            try:
+                await self.threads.bounded(self.store.close(), max(SESSION_STORE_WAIT_TIMEOUT_SECONDS, deadline - loop.time()))
+                complete = complete and self.store.error is None and loop.time() < deadline
+            except TimeoutError:
+                complete = False
+                logger.warning("Agent session shutdown or store flush exceeded its deadline")
+            finally:
+                self._runner = None
+                self._site = None
         if complete:
             self.handover.snapshot = snapshot
 

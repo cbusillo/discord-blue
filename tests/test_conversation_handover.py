@@ -175,11 +175,14 @@ class ConversationHandoverTests(unittest.IsolatedAsyncioTestCase):
         client = await self.endpoint(bridge)
         old = await self.connect(client)
         old_message = message()
-        live_message = message(message_id=old_message.id + 1)
-        replay_message = message(message_id=old_message.id + 2)
+        replay_message = message(message_id=old_message.id + 1)
+        live_message = message(message_id=old_message.id + 2)
         await bridge.conversations.receive_message(old_message)
         command = await old.receive_json(timeout=2)
         await old.close()
+        replayed = asyncio.create_task(bridge.conversations.receive_message(replay_message))
+        self.bot.handover.replay = {replayed}
+        await asyncio.sleep(0)
         entered, release = asyncio.Event(), asyncio.Event()
         original = web.WebSocketResponse.send_json
 
@@ -197,8 +200,6 @@ class ConversationHandoverTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await replacement.receive_json(timeout=2))["type"], "hello_ack")
             await asyncio.wait_for(entered.wait(), 2)
             live = asyncio.create_task(bridge.conversations.receive_message(live_message))
-            replayed = asyncio.create_task(bridge.conversations.receive_message(replay_message))
-            self.bot.handover.replay = {replayed}
             try:
                 await asyncio.sleep(0)
                 await asyncio.sleep(0)
@@ -210,7 +211,7 @@ class ConversationHandoverTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(delivered[0], command)
                 self.assertEqual(
                     [payload["envelope"]["message_id"] for payload in delivered],
-                    [old_message.id, live_message.id, replay_message.id],
+                    [old_message.id, replay_message.id, live_message.id],
                 )
             finally:
                 release.set()

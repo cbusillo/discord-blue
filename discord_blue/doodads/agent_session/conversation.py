@@ -44,6 +44,7 @@ class ConversationRouter:
         self.seen: OrderedDict[str, None] = OrderedDict()
         self.observed: OrderedDict[int, dict[str, Any]] = OrderedDict()
         self.connection_lock = asyncio.Lock()
+        self.input_lock = asyncio.Lock()
         self.changed = asyncio.Condition()
         self.continuation: dict[str, Any] | None = None
 
@@ -157,15 +158,16 @@ class ConversationRouter:
         return await self.queue_envelope(f"delete-{payload.message_id}", {**envelope, "event": "deletion", "text": ""})
 
     async def queue_envelope(self, command_id: str, envelope: dict[str, Any]) -> bool:
-        if asyncio.current_task() in self.bot.handover.replay:
-            async with self.changed:
-                with suppress(TimeoutError):
-                    await asyncio.wait_for(
-                        self.changed.wait_for(lambda: self.connection is not None and not self.connection.websocket.closed),
-                        REPLAY_RECONNECT_WAIT_SECONDS,
-                    )
-        async with self.connection_lock:
-            return await self.deliver_envelope(command_id, envelope)
+        async with self.input_lock:
+            if asyncio.current_task() in self.bot.handover.replay:
+                async with self.changed:
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(
+                            self.changed.wait_for(lambda: self.connection is not None and not self.connection.websocket.closed),
+                            REPLAY_RECONNECT_WAIT_SECONDS,
+                        )
+            async with self.connection_lock:
+                return await self.deliver_envelope(command_id, envelope)
 
     async def deliver_envelope(self, command_id: str, envelope: dict[str, Any]) -> bool:
         channel, binding, connection = self.channel(), self.binding(), self.connection

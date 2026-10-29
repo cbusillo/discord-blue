@@ -865,7 +865,8 @@ either process is running.
 
 On graceful shutdown, the gateway reader stops and received callbacks drain.
 The bridge closes admission, finishes native attachments, payloads and conversation
-replies, and flushes state within one shutdown deadline. It saves a private,
+replies within the shutdown deadline, then finishes bounded cleanup and store
+flush. It saves a private,
 atomic checkpoint only after cleanup succeeds. The socket closes without
 invalidating its Discord session. Startup sends no Connected or Loaded-command
 notice.

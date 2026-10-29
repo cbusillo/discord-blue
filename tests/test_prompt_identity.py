@@ -76,6 +76,30 @@ class PromptIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(interaction.response.edits, [])
         self.assertTrue(interaction.response.messages)
 
+    async def test_concurrent_submit_cancel_recheck_after_slow_defer(self) -> None:
+        view = await self.prompt()
+        release = asyncio.Event()
+        entered = [asyncio.Event(), asyncio.Event()]
+        interactions = [FakeInteraction(self.thread), FakeInteraction(self.thread)]
+        tasks = []
+        for index, action in enumerate((view.submit, view.cancel)):
+            original = interactions[index].response.defer
+
+            async def defer(index: int = index, original: Callable[[], Awaitable[None]] = original) -> None:
+                entered[index].set()
+                await release.wait()
+                await original()
+
+            self.enterContext(patch.object(interactions[index].response, "defer", defer))
+            tasks.append(asyncio.create_task(action(cast(Any, interactions[index]))))
+        try:
+            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered)), 1)
+        finally:
+            release.set()
+            await asyncio.gather(*tasks)
+        self.assertEqual(len(self.socket.sent_json), 1)
+        self.assertEqual(len(self.session.pending_commands), 1)
+
     async def test_simultaneous_submit_cancel_sends_once(self) -> None:
         view = await self.prompt()
         started, release = asyncio.Event(), asyncio.Event()

@@ -30,7 +30,7 @@ CHECKPOINT_MAX_AGE_SECONDS = 60.0
 RESUME_TIMEOUT_SECONDS = 30.0
 REPLAY_ENABLED = False
 INTERACTION_REPLAY_BUDGET_SECONDS = 2.0
-EXPIRED_INTERACTION_NOTICE = "That control expired during the update. Please try again."
+EXPIRED_INTERACTION_NOTICE = "That control expired. Please try again."
 logger = logging.getLogger(__name__)
 
 
@@ -250,7 +250,8 @@ class GatewayHandover:
                     self.gateway_task = connecting
                     resumed = asyncio.create_task(self.resumed_event.wait())
                     await asyncio.wait({connecting, resumed}, return_when=asyncio.FIRST_COMPLETED)
-            await connecting
+                    if not self.resumed_event.is_set() and connecting.done():
+                        connecting.result()
         except (discord.DiscordException, OSError, aiohttp.ClientError, TimeoutError):
             logger.warning("Gateway resume unavailable; reconnecting with IDENTIFY, earlier work cannot be replayed", exc_info=True)
             if connecting is not None:
@@ -262,6 +263,8 @@ class GatewayHandover:
             self.buffer.clear()
             self.status = "failed"
             await self.bot.connect(reconnect=reconnect)
+        else:
+            await connecting
         finally:
             if resumed is not None:
                 resumed.cancel()

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -25,6 +26,43 @@ class NativeShutdownTests(unittest.IsolatedAsyncioTestCase):
             await fixture.bridge.stop(deadline=asyncio.get_running_loop().time() - 1)
             self.assertIsNone(fixture.bridge.handover.snapshot)
             fixture.bridge.threads.stop()
+
+    async def test_expired_drain_still_waits_for_disconnect_and_store_close(self) -> None:
+        with (
+            TemporaryDirectory() as folder,
+            patch("pathlib.Path.home", return_value=Path(folder)),
+            prompt_fixture() as fixture,
+        ):
+            bridge = fixture.bridge
+            await bridge.store.start()
+            closed = asyncio.Event()
+            original = bridge.store.close
+
+            async def close() -> None:
+                await asyncio.sleep(0.02)
+                await original()
+                closed.set()
+
+            async def cleanup() -> None:
+                await asyncio.sleep(0.1)
+
+            bridge._runner = cast(web.AppRunner, cast(object, SimpleNamespace(cleanup=cleanup)))
+            with (
+                patch.object(bridge.store, "close", close),
+                patch("discord_blue.doodads.agent_session.bridge.SESSION_STORE_WAIT_TIMEOUT_SECONDS", 0.05),
+            ):
+                try:
+                    await bridge.stop(deadline=asyncio.get_running_loop().time() - 1)
+                    self.assertTrue(closed.is_set())
+                    self.assertIsNone(bridge.sessions.get(fixture.session.session_id))
+                    saved = json.loads(bridge.store.path.read_text())
+                    self.assertEqual(saved[fixture.session.session_id]["status"], "grace")
+                    self.assertIsNone(bridge.handover.snapshot)
+                finally:
+                    if bridge.threads.background:
+                        await asyncio.gather(*bridge.threads.background, return_exceptions=True)
+                    await original()
+                    bridge.threads.stop()
 
     async def test_failed_cleanup_cannot_reuse_or_publish_a_snapshot(self) -> None:
         with (
@@ -152,6 +190,12 @@ class NativeShutdownTests(unittest.IsolatedAsyncioTestCase):
             bridge = fixture.bridge
             closing, release = asyncio.Event(), asyncio.Event()
             original = fixture.socket.close
+            original_export = bridge.handover.export
+            exported = []
+
+            def export() -> dict[str, object]:
+                exported.append(fixture.session.active_command_id)
+                return original_export()
 
             async def close(*, message: bytes = b"", drain: bool = True) -> None:
                 closing.set()
@@ -164,6 +208,7 @@ class NativeShutdownTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch.object(fixture.socket, "close", close),
                 patch.object(bridge.controls, "handle_command_ack", acknowledge),
+                patch.object(bridge.handover, "export", export),
             ):
                 stopping = asyncio.create_task(bridge.stop())
                 try:
@@ -174,3 +219,5 @@ class NativeShutdownTests(unittest.IsolatedAsyncioTestCase):
                     release.set()
                     await stopping
                     bridge.threads.stop()
+            self.assertEqual(exported, ["late-native-ack"])
+            self.assertIsNotNone(bridge.handover.snapshot)
