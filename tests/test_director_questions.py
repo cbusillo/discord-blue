@@ -55,6 +55,8 @@ Recommendation: keep both.
         self.assertEqual(question_choices(lines), (("ship it", True), ("wait a day", False), ("drop it", False)))
         prose = "**Q3.** Which?\nRecommendation: " + "a long explanation that is a paragraph, not a button " * 2
         self.assertEqual(question_choices(prose), ())
+        example = "**Q4.** Adopt this template?\n```\n- **On yes:** x\n```\n    - **On no:** y\nRecommendation: adopt it."
+        self.assertEqual(question_choices(example), (("adopt it", True),))
 
     def test_references_and_historical_labels_are_not_questions(self) -> None:
         for source in ("**Q12** was answered yesterday.", "**Q12 status**\nDone.", "See **Q12.** Later?", "**Q12.** Resolved."):
@@ -505,6 +507,14 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         shown = "\n".join(item.content for item in modal.walk_children() if isinstance(item, discord.ui.TextDisplay))
         self.assertIn("Recommendation: yes.", shown)
         self.assertIn("Context that must stay readable. " * 20, shown)
+
+    async def test_a_long_form_answer_stays_readable_on_the_card(self) -> None:
+        modal = await self.card()
+        answer = "Proceed with the migration, " + "but only after the backup check passes and staff are told. " * 4
+        modal.fields[0]._value = answer
+        await modal.on_submit(cast(Any, FakeInteraction(self.fixture.thread)))
+        card = self.fixture.thread._messages[cast(int, modal.question.message_id)]
+        self.assertIn(discord.utils.escape_markdown(answer.strip()), visible_view_text(card.view))
 
     async def test_a_delivered_answer_shows_no_private_notice(self) -> None:
         modal = await self.card()

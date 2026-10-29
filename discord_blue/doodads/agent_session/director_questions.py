@@ -114,7 +114,9 @@ def question_choices(body: str) -> tuple[tuple[str, bool], ...]:
     bullets: list[str] = []
     alternatives: list[str] = []
     recommended = ""
-    for line in body.splitlines():
+    for _, line in top_level_lines(body.splitlines()):
+        if line.startswith(("    ", "\t", ">")):
+            continue  # Indented code and quotes are examples, not offered answers.
         if bullet := CHOICE_BULLET.match(line):
             bullets.append(bullet[1].strip())
         elif (recommendation := RECOMMENDATION.match(line)) and not recommended:
@@ -189,6 +191,10 @@ class QuestionCards:
             view = notice_card(f"**{numbers}** · {asked} → **{answer}**{link}")
             container = view.children[0]
             assert isinstance(container, discord.ui.Container)
+            if len(question.answer) > 120 or "\n" in question.answer.strip():
+                # The card is the only record of a form answer, so a long or grouped answer stays readable in full.
+                full = discord.utils.escape_markdown(question.answer.strip())[:ANSWER_CHUNK_LIMIT]
+                container.add_item(discord.ui.TextDisplay(f">>> {full}"))
             container.accent_color = STATUS_LABELS["done"][1]
             container.id = ANSWER_CARD_COMPONENT_ID if question.complete else ANSWER_CONTINUATION_COMPONENT_ID
             return view
@@ -543,7 +549,8 @@ class QuestionCards:
                     await self.outcome(session_id, question.key, QuestionState.NOT_DELIVERED)
                     await interaction.followup.send("The answer could not be saved; it was not delivered.", ephemeral=True)
                     return
-                answered = replace(question, state=QuestionState.ANSWERED, answer=answers[0], decision_url="")
+                answer = answers[0] if len(answers) == 1 else text
+                answered = replace(question, state=QuestionState.ANSWERED, answer=answer, decision_url="")
                 self.save(session_id, answered)
                 await self.refresh(session_id, [answered])
                 error = reply_context_error(
