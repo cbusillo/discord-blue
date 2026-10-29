@@ -20,9 +20,11 @@ from discord_blue.doodads.agent_session.interactions import SessionInteractions
 from discord_blue.doodads.agent_session.messages import send_agent_session_message, send_assistant_message
 from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN, SessionStatus, UserMessage
 from discord_blue.doodads.agent_session.sessions import AgentSession, AgentSessionRegistry
+from discord_blue.doodads.agent_session.terminal_prompts import TerminalPrompts, is_operator_prompt
 
 if TYPE_CHECKING:
     from discord_blue.doodads.agent_session.director_questions import QuestionCards
+    from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +32,13 @@ logger = logging.getLogger(__name__)
 class StatusHooks(Protocol):
     """What status routing needs from the bridge."""
 
+    bot: BlueBot
     questions: QuestionCards
     sessions: AgentSessionRegistry
     controls: SessionControls
     interactions: SessionInteractions
+
+    def is_operator(self, user: discord.User | discord.Member) -> bool: ...
 
     def thread_channel(self, thread_id: int) -> object | None: ...
 
@@ -45,6 +50,7 @@ class StatusHooks(Protocol):
 class SessionStatusUpdates:
     def __init__(self, bridge: StatusHooks) -> None:
         self.bridge = bridge
+        self.terminal_prompts = TerminalPrompts(bridge.bot, bridge.is_operator)
 
     async def handle_session_status(self, message_type: str, status: SessionStatus) -> None:
         session = self.bridge.sessions.get(status.session_id)
@@ -126,7 +132,13 @@ class SessionStatusUpdates:
             return
 
         if not hide_brief:
-            await send_agent_session_message(channel, format_user_message(message)[:DISCORD_MESSAGE_LIMIT])
+            mirrored = (
+                user_message.input_origin is None
+                and is_operator_prompt(user_message.message)
+                and await self.terminal_prompts.send(channel, message)
+            )
+            if not mirrored:
+                await send_agent_session_message(channel, format_user_message(message)[:DISCORD_MESSAGE_LIMIT])
         session.status_revision += 1
         self.bridge.controls.show_working(
             session,
