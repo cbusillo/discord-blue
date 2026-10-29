@@ -21,7 +21,7 @@ from discord_blue.doodads.agent_session.protocol import SessionHello
 from discord_blue.claude_channel.session import Identity
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
-from discord_blue.doodads.agent_session.session_threads import DiscoveryIncomplete
+from discord_blue.doodads.agent_session.session_threads import DiscoveryIncomplete, SessionThreads
 from discord_blue.doodads.agent_session.store import StoredSession
 from discord_blue.doodads.agent_session.threads import create_session_thread, session_start_message
 from discord_blue.config import AgentSessionConfig, Config, ConversationConfig, DiscordConfig
@@ -50,15 +50,14 @@ class SessionRoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_new_claude_channel_attaches_while_other_parent_is_rate_limited(self) -> None:
         for limited_spawned in (True, False):
             with self.subTest(limited_spawned=limited_spawned):
-                config = cast(
-                    Config,
-                    SimpleNamespace(agent_session=AgentSessionConfig(), discord=DiscordConfig(), conversation=ConversationConfig()),
+                config = SimpleNamespace(
+                    agent_session=AgentSessionConfig(), discord=DiscordConfig(), conversation=ConversationConfig()
                 )
                 config.agent_session.channel_id = 321
                 config.agent_session.spawned_channel_id = 654
                 config.agent_session.token = "routing-test"
                 main, spawned = FakeTextChannel(321, []), FakeTextChannel(654, [])
-                bot = FakeBot(config)
+                bot = FakeBot(cast(Any, config))
                 bot.get_channel = {321: main, 654: spawned}.get  # type: ignore[method-assign, assignment]
                 state_home = self.enterContext(tempfile.TemporaryDirectory())
                 bridge = AgentSessionBridge(cast(Any, bot), store_path=Path(state_home) / "sessions.json")
@@ -73,7 +72,7 @@ class SessionRoutingTests(unittest.IsolatedAsyncioTestCase):
                 bridge.register_routes(app)
                 with (
                     patch.object(limited, "create_thread", rate_limited),
-                    patch.object(bridge.session_threads, "delete_creation_duplicates", AsyncMock()),
+                    patch.object(SessionThreads, "delete_creation_duplicates", AsyncMock()),
                 ):
                     async with TestServer(app) as server, aiohttp.ClientSession() as http:
                         url = str(server.make_url("/agent-session/connect")).replace("http:", "ws:")
