@@ -224,14 +224,14 @@ class SessionControls:
             await message.reply("Agent session is reconnecting; send the reply again in a moment.", mention_author=False)
             return True
 
-        # Answers held for finished Question card groups travel with this reply.
-        held, keys = await self.bridge.questions.release_ready(session)
+        # Answers already given on Question cards travel with this reply.
+        held, keys = await self.bridge.questions.release_held(session)
         error = await self.send_reply(
             session, thread, message.author, f"{held}\n\n{text}" if held else text, message.id, question_keys=keys
         )
         if error is not None:
-            if error != DELIVERY_UNCONFIRMED:
-                await self.bridge.questions.settle(session.session_id, keys, QuestionState.HELD)
+            outcome = QuestionState.UNCONFIRMED if error == DELIVERY_UNCONFIRMED else QuestionState.HELD
+            await self.bridge.questions.settle(session.session_id, keys, outcome)
             await message.reply(error, mention_author=False)
         return True
 
@@ -275,8 +275,9 @@ class SessionControls:
             error = await self.dispatch_command(session, command, pending, before_send=show_queued)
             delivered = error is None
         finally:
-            if queued and not delivered and react:
-                await self.clear_message_transient_reactions(thread.id, message_id)
+            if queued and not delivered:
+                if react:
+                    await self.clear_message_transient_reactions(thread.id, message_id)
                 self.restore_command_status(session, pending)
                 self.show_activity(session)
         return error

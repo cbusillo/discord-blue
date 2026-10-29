@@ -22,7 +22,7 @@ from discord_blue.doodads.agent_session.director_questions import (
     detect_questions,
     question_choices,
 )
-from discord_blue.doodads.agent_session.sessions import PendingSessionCleanup
+from discord_blue.doodads.agent_session.sessions import AgentSession, PendingSessionCleanup
 from discord_blue.doodads.agent_session.store import QuestionState, SessionStore, StoredQuestion
 from tests.fakes_agent_prompts import PromptFixture, prompt_fixture
 from tests.fakes_agent_session import FakeInteraction, FakeReplyMessage, FakeThread, FakeWebSocket, visible_view_text
@@ -533,7 +533,7 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
     GROUP = "**Q1.** Which color?\nRecommendation: blue.\nAlternatives: green\n\n**Q2.** Which shape?\nRecommendation: square."
 
     def grouped(self, number: str) -> tuple[StoredQuestion, FakeReplyMessage]:
-        cards = self.fixture.bridge.questions
+        cards: QuestionCards = self.fixture.bridge.questions
         question = cast(StoredQuestion, cards.record(self.fixture.session.session_id, cards.key(self.fixture.session, number)))
         return question, self.fixture.thread._messages[cast(int, question.message_id)]
 
@@ -597,6 +597,37 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.fixture.bridge.questions = recovered
         await self.answer_second(recovered, "round")
         self.assertEqual([command["text"] for command in self.fixture.socket.sent_json], ["Q1: blue\n\nQ2: round"])
+
+    async def test_an_answer_waits_for_a_card_still_being_posted(self) -> None:
+        cards: QuestionCards = self.fixture.bridge.questions
+        original = cards.post
+
+        async def only_first(
+            session: AgentSession, thread: discord.Thread, text: str, *, complete: bool, replay: bool, group: str
+        ) -> None:
+            if "**Q1.**" in text:  # Q2's card has not been posted yet.
+                await original(session, thread, text, complete=complete, replay=replay, group=group)
+
+        with patch.object(cards, "post", only_first):
+            await self.fixture.bridge.status.post_assistant_message(self.fixture.thread.id, self.GROUP)
+        _, message = self.grouped("Q1")
+        tap = next(
+            item for item in cast(discord.ui.LayoutView, message.view).walk_children() if isinstance(item, QuestionChoiceButton)
+        )
+        await tap.callback(cast(Any, FakeInteraction(self.fixture.thread, message=message)))
+        self.assertEqual((self.grouped("Q1")[0].state, self.fixture.socket.sent_json), (QuestionState.HELD, []))
+        self.assertIn("sends when Q2 is answered", visible_view_text(message.view))
+        await self.fixture.bridge.controls.send_thread_reply(cast(Any, FakeReplyMessage(302, self.fixture.thread, "Q2 round")))
+        self.assertEqual([command["text"] for command in self.fixture.socket.sent_json], ["Q1: blue\n\nQ2 round"])
+
+    async def test_a_restart_while_sending_says_delivery_is_not_confirmed(self) -> None:
+        modal = await self.card()
+        modal.fields[0]._value = "Yes"
+        await modal.on_submit(cast(Any, FakeInteraction(self.fixture.thread)))
+        recovered = await self.restarted_cards()
+        stored = cast(StoredQuestion, recovered.record(modal.session_id, modal.question.key))
+        self.assertEqual(stored.state, QuestionState.UNCONFIRMED)
+        self.assertIn("delivery not confirmed", visible_view_text(recovered.view(modal.session_id, stored)))
 
     async def test_a_typed_answer_carries_held_answers_with_it(self) -> None:
         await self.hold_first_answer()
@@ -698,8 +729,9 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         modal.fields[0]._value = "Yes"
         with patch.object(FakeWebSocket, "send_json", side_effect=OSError("connection lost")):
             await modal.on_submit(cast(Any, FakeInteraction(self.fixture.thread)))
+        self.assertNotEqual(self.fixture.session.display_state, "working")  # No typing left running for a failed send.
         await modal.on_submit(cast(Any, FakeInteraction(self.fixture.thread)))
         stored = cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key))
-        self.assertEqual((stored.state, stored.answer), (QuestionState.UNCERTAIN, "Yes"))  # Still shown as sending.
+        self.assertEqual((stored.state, stored.answer), (QuestionState.UNCONFIRMED, "Yes"))
         self.assertEqual(self.fixture.socket.sent_json, [])
         self.assertTrue(self.fixture.thread.sent_messages[-1])

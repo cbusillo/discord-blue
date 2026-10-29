@@ -34,6 +34,8 @@ class QuestionState(StrEnum):
     ANSWERED = "Answered"
     # Answered, but sent with the rest of its group once every card from the same agent reply is answered.
     HELD = "Waiting to send"
+    # Sent, but its acknowledgment can no longer arrive: the bot restarted or the conversation ended first.
+    UNCONFIRMED = "Delivery not confirmed"
 
 
 @dataclass(frozen=True, slots=True)

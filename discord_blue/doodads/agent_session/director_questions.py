@@ -57,6 +57,7 @@ ANSWERED_STATES = {
     QuestionState.UNCERTAIN: STATUS_LABELS["working"][1],
     QuestionState.ANSWERED: STATUS_LABELS["done"][1],
     QuestionState.NOT_DELIVERED: STATUS_LABELS["failed"][1],
+    QuestionState.UNCONFIRMED: STATUS_LABELS["disconnected"][1],
 }
 
 
@@ -180,8 +181,12 @@ class QuestionCards:
             return False
 
     def restore(self) -> None:
-        for session_id, stored in self.bridge.store.records.items():
+        for session_id, stored in tuple(self.bridge.store.records.items()):
             for question in stored.questions:
+                if question.state == QuestionState.UNCERTAIN and question.answer:
+                    # The acknowledgment that would settle it was lost with the previous process.
+                    question = replace(question, state=QuestionState.UNCONFIRMED)
+                    self.save(session_id, question)
                 if question.message_id is not None:
                     view = self.view(session_id, question)
                     if question.legacy_parent_id is not None:
@@ -196,12 +201,11 @@ class QuestionCards:
         return [q for q in stored.questions if q.group == question.group and q.epoch == question.epoch]
 
     def open_numbers(self, session_id: str, question: StoredQuestion) -> list[str]:
-        return [
-            number
-            for member in self.members(session_id, question)
-            if member.state == QuestionState.WAITING
-            for number, _ in member.questions
-        ]
+        """Questions of the group still waiting, including any whose card is not posted yet."""
+        cards = {number: member for member in self.members(session_id, question) for number, _ in member.questions}
+        expected = question.group.partition(":")[2].split(",") if ":" in question.group else []
+        numbers = [*expected, *(number for number in cards if number not in expected)]
+        return [number for number in numbers if number not in cards or cards[number].state == QuestionState.WAITING]
 
     @staticmethod
     def answer_text(questions: list[StoredQuestion]) -> str:
@@ -229,6 +233,8 @@ class QuestionCards:
                 link = " · sending"
             elif question.state == QuestionState.NOT_DELIVERED:
                 link = " · not sent"
+            elif question.state == QuestionState.UNCONFIRMED:
+                link = " · delivery not confirmed; check the session"
             view = notice_card(f"**{numbers}** · {asked} → **{answer}**{link}")
             container = view.children[0]
             assert isinstance(container, discord.ui.Container)
@@ -282,7 +288,8 @@ class QuestionCards:
             parts.append((remaining, None))
         full_text = text
         shown: set[str] = set()
-        group = uuid.uuid4().hex
+        # Every question in the reply belongs to the group before its card exists, so an early answer still waits.
+        group = f"{uuid.uuid4().hex}:{','.join(section.number for section in sections)}"
         for index, (body, number) in enumerate(parts):
             if number is not None:
                 current = self.record(session.session_id, self.key(session, number))
@@ -547,11 +554,16 @@ class QuestionCards:
                     continue
                 if question.legacy_parent_id is None and (
                     question.epoch == current_epoch
-                    or question.state not in {QuestionState.WAITING, QuestionState.CLOSED, QuestionState.HELD}
+                    or question.state
+                    not in {QuestionState.WAITING, QuestionState.CLOSED, QuestionState.HELD, QuestionState.UNCERTAIN}
+                    or (question.state == QuestionState.UNCERTAIN and not question.answer)
                 ):
                     continue
-                # An answer still held for its group never reached the agent, so it shows as not sent.
-                closed = QuestionState.NOT_DELIVERED if question.state == QuestionState.HELD else QuestionState.CLOSED
+                # A held answer never reached the agent; one still sending can no longer be acknowledged.
+                closed = {
+                    QuestionState.HELD: QuestionState.NOT_DELIVERED,
+                    QuestionState.UNCERTAIN: QuestionState.UNCONFIRMED,
+                }.get(question.state, QuestionState.CLOSED)
                 question = replace(question, state=closed)
                 self.save(session_id, question)
                 await self.refresh(session_id, [question], thread=thread)
@@ -589,7 +601,6 @@ class QuestionCards:
                 return
             text = "\n\n".join(f"{number}: {answer}" for (number, _), answer in zip(question.questions, answers, strict=True))
             answered = replace(question, answer=answers[0] if len(answers) == 1 else text, decision_url="")
-            siblings = [q for q in self.members(session_id, question) if q.key != question.key]
             dispatch_started = False
             sending: list[StoredQuestion] = []
             try:
@@ -608,7 +619,10 @@ class QuestionCards:
                 ):
                     await interaction.followup.send(error, ephemeral=True)
                     return
-                if any(q.state == QuestionState.WAITING for q in siblings):
+                # Read the group only now: a re-ask or typed answer may have changed it during the awaits above.
+                siblings = [q for q in self.members(session_id, question) if q.key != question.key]
+                own = {number for number, _ in question.questions}
+                if any(number not in own for number in self.open_numbers(session_id, question)):
                     held = replace(answered, state=QuestionState.HELD)
                     self.save(session_id, held)
                     if not await self.persist():
@@ -652,12 +666,12 @@ class QuestionCards:
                 error = DELIVERY_UNCONFIRMED if dispatch_started else "Answer was not delivered."
             if error is None:
                 return
-            if sending and error != DELIVERY_UNCONFIRMED:
+            if sending:
+                outcome = QuestionState.UNCONFIRMED if error == DELIVERY_UNCONFIRMED else QuestionState.NOT_DELIVERED
                 try:
-                    await self.settle(session_id, tuple(q.key for q in sending), QuestionState.NOT_DELIVERED)
+                    await self.settle(session_id, tuple(q.key for q in sending), outcome)
                 except OSError:
                     logger.exception("Unable to persist definite Question answer failure")
-            if sending:
                 try:
                     await send_agent_session_message(thread, f"{question.questions[0][0]}: {error}", silent=True)
                 except discord.DiscordException:
@@ -676,18 +690,17 @@ class QuestionCards:
                 settled.append(question)
         await self.refresh(session_id, settled)
 
-    async def release_ready(self, session: AgentSession) -> tuple[str, tuple[str, ...]]:
-        """Answers held for groups with no card left waiting, now marked as sending with a typed reply."""
+    async def release_held(self, session: AgentSession) -> tuple[str, tuple[str, ...]]:
+        """Every answer held in this conversation, now marked as sending with a typed reply.
+
+        Typing in the thread is an explicit message, so answers already given go with it rather than waiting
+        for cards that may never be answered or never posted.
+        """
         stored = self.bridge.store.records.get(session.session_id)
-        held = [
-            q
-            for q in (stored.questions if stored is not None else ())
-            if q.state == QuestionState.HELD and q.epoch == session.session_epoch
-        ]
         ready = [
             replace(q, state=QuestionState.UNCERTAIN)
-            for q in held
-            if not any(m.state == QuestionState.WAITING for m in self.members(session.session_id, q))
+            for q in (stored.questions if stored is not None else ())
+            if q.state == QuestionState.HELD and q.epoch == session.session_epoch
         ]
         for question in ready:
             self.save(session.session_id, question)
