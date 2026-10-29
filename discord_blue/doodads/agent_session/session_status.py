@@ -99,6 +99,7 @@ class SessionStatusUpdates:
             return
 
         if message_type == "turn_complete" and status.assistant_message:
+            await self.bridge.controls.settle_activity(session)
             await self.post_assistant_message(session.thread_id, status.assistant_message)
         if message_type == "turn_complete":
             await self.bridge.controls.clear_rejected_command_reactions(session)

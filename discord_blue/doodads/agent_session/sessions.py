@@ -81,8 +81,9 @@ class AgentSession:
     last_status_message: str | None = None
     display_state: DisplayState = "waiting"
     status_revision: int = 0
-    # Set while Discord's typing indicator is kept up in the thread; setting it stops the indicator.
-    typing_stop: asyncio.Event | None = None
+    # The one task keeping Discord's typing indicator up in the thread; the wake makes it re-check at once.
+    typing_task: asyncio.Task[None] | None = None
+    typing_wake: asyncio.Event = field(default_factory=asyncio.Event)
 
     @property
     def session_id(self) -> str:

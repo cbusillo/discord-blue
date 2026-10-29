@@ -2675,7 +2675,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     protocol_module.UserMessage(session_id="session-1", session_epoch="epoch-1", message=raw)
                 )
                 self.assertEqual(thread.sent_messages, [])
-                self.assertIsNone(session.typing_stop)
+                self.assertIsNone(session.typing_task)
 
     async def test_filter_preserves_xml_and_literal_tag_examples(self) -> None:
         answer = (

@@ -93,6 +93,8 @@ REACTION_FINISHED = "✅"
 REACTION_REJECTED = "❌"
 # Discord shows a typing indicator for about ten seconds per request.
 TYPING_REFRESH_SECONDS = 8
+# How long an answer waits for a typing request already in flight, which would otherwise land after it.
+TYPING_SETTLE_SECONDS = 1
 STATUS_REACTIONS = {
     REACTION_QUEUED,
     REACTION_DELIVERED,
@@ -460,25 +462,29 @@ class SessionControls:
         session.last_status_message = detail
         self.show_activity(session)
 
-    def show_activity(self, session: AgentSession) -> None:
-        """Keep Discord's typing indicator up in the thread exactly while the session works."""
-        working = (
+    def working(self, session: AgentSession) -> bool:
+        return (
             session.display_state == "working"
             and session.thread_id is not None
             and self.bridge.sessions.get(session.session_id) is session
         )
-        if working and session.typing_stop is None:
-            stop = session.typing_stop = asyncio.Event()
-            task = asyncio.create_task(self.keep_typing(session, stop), name=f"agent-session-typing-{session.session_id}")
+
+    def show_activity(self, session: AgentSession) -> None:
+        """Keep Discord's typing indicator up in the thread exactly while the session works, from one task."""
+        task = session.typing_task
+        if task is not None and not task.done():
+            session.typing_wake.set()
+        elif self.working(session):
+            task = session.typing_task = asyncio.create_task(
+                self.keep_typing(session), name=f"agent-session-typing-{session.session_id}"
+            )
             self.bridge.threads.background.add(task)
             task.add_done_callback(self.bridge.threads.request_done)
-        elif not working and session.typing_stop is not None:
-            session.typing_stop.set()
-            session.typing_stop = None
 
-    async def keep_typing(self, session: AgentSession, stop: asyncio.Event) -> None:
-        # Stopped between requests, never canceled during one: see ThreadWorkers.stop.
-        while not stop.is_set() and self.bridge.sessions.get(session.session_id) is session:
+    async def keep_typing(self, session: AgentSession) -> None:
+        # Stops between requests, never canceled during one: see ThreadWorkers.stop.
+        while self.working(session):
+            session.typing_wake.clear()
             channel = self.bridge.thread_channel(session.thread_id or 0)
             if isinstance(channel, discord.Thread):
                 try:
@@ -486,7 +492,14 @@ class SessionControls:
                 except discord.DiscordException:
                     logger.debug("Unable to show typing in Agent session thread %s", channel.id)
             with suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), TYPING_REFRESH_SECONDS)
+                await asyncio.wait_for(session.typing_wake.wait(), TYPING_REFRESH_SECONDS)
+
+    @staticmethod
+    async def settle_activity(session: AgentSession) -> None:
+        """Let a typing request already in flight land first, so it cannot show typing again after a post."""
+        task = session.typing_task
+        if task is not None and not task.done():
+            await asyncio.wait({task}, timeout=TYPING_SETTLE_SECONDS)
 
     async def set_message_reaction(self, thread_id: int, message_id: int, reaction: str) -> None:
         channel = self.bridge.thread_channel(thread_id)

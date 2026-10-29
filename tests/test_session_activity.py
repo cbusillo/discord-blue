@@ -12,8 +12,6 @@ from aiohttp import ClientResponse
 from discord_blue.agent_client import AgentSessionClient
 from discord_blue.doodads.agent_session import controls as controls_module
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
-from discord_blue.doodads.agent_session.director_questions import QuestionCards
-from discord_blue.doodads.agent_session.sessions import AgentSession
 from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN, SessionStatus, UserMessage
 from tests.fakes_agent_prompts import PromptFixture, prompt_fixture
 from tests.fakes_agent_session import FakeReplyMessage, FakeThread
@@ -65,17 +63,69 @@ class SessionActivityTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(await self.typing_continues(), working)
         self.assertFalse(any(isinstance(view, discord.ui.LayoutView) for view in self.thread.sent_views))
 
-    async def test_typing_stops_before_the_answer_is_posted(self) -> None:
+    async def test_a_typing_request_in_flight_lands_before_the_answer(self) -> None:
+        landed: list[int] = []
+        gate = asyncio.Event()
+
+        async def slow_typing(thread: FakeThread) -> None:
+            await gate.wait()
+            landed.append(len(thread.sent_messages))
+
+        with patch.object(FakeThread, "typing", new=slow_typing):
+            await self.status("status_changed", "Turn started")
+            await asyncio.sleep(0)
+            completing = asyncio.create_task(self.status("turn_complete", "Waiting", answer="Useful answer"))
+            await asyncio.sleep(0.02)
+            self.assertEqual(self.thread.sent_messages, [])
+            gate.set()
+            await completing
+        self.assertEqual(landed, [0])
+        self.assertTrue(any("Useful answer" in message for message in self.thread.sent_messages))
+
+    async def test_work_that_restarts_during_a_typing_request_keeps_one_task(self) -> None:
+        gate = asyncio.Event()
+        in_flight = 0
+        most = 0
+
+        async def slow_typing(_thread: FakeThread) -> None:
+            nonlocal in_flight, most
+            in_flight += 1
+            most = max(most, in_flight)
+            await gate.wait()
+            in_flight -= 1
+
+        with patch.object(FakeThread, "typing", new=slow_typing):
+            await self.status("status_changed", "Turn started")
+            await asyncio.sleep(0)
+            task = self.session.typing_task
+            await self.status("status_changed", "Waiting on a decision in the Codex TUI")
+            await self.status("status_changed", "Turn started")
+            self.assertIs(self.session.typing_task, task)
+            gate.set()
+            await asyncio.sleep(0.03)
+        self.assertEqual(most, 1)
+        self.assertTrue(await self.typing_continues())
+
+    async def test_an_approval_that_stays_native_waits_and_stops_typing(self) -> None:
+        from discord_blue.doodads.agent_session.protocol import RemoteApprovalRequest
+
         await self.status("status_changed", "Turn started")
-        typing_when_answered: list[bool] = []
-
-        async def send_answer(_cards: QuestionCards, _session: AgentSession, _thread: discord.Thread, text: str) -> None:
-            typing_when_answered.append(self.session.typing_stop is not None)
-            self.assertEqual(text, "Useful answer")
-
-        with patch.object(QuestionCards, "send_answer", new=send_answer):
-            await self.status("turn_complete", "Waiting", answer="Useful answer")
-        self.assertEqual(typing_when_answered, [False])
+        self.session.hello.capabilities = frozenset({"reply"})
+        await self.bridge.interactions.handle_approval_request(
+            RemoteApprovalRequest(
+                session_id=self.session.session_id,
+                session_epoch=self.session.session_epoch,
+                approval_id="approval",
+                call_id="call",
+                turn_id="turn",
+                command=["make", "test"],
+                cwd="/work",
+                reason=None,
+            )
+        )
+        self.assertEqual(self.session.display_state, "waiting")
+        self.assertIn("native TUI", self.thread.sent_messages[-1])
+        self.assertFalse(await self.typing_continues())
 
     async def test_stale_epoch_cannot_change_state(self) -> None:
         await self.status("status_changed", "Turn started")

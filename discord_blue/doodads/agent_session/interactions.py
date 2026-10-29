@@ -368,15 +368,13 @@ class SessionInteractions:
             return
 
         if not session.hello.supports("approval_decision"):
-            await self.bridge.post_thread_notice(
-                session.thread_id, "Action required in the native TUI; this client does not support answering from Discord."
+            await self.stays_native(
+                session, "Action required in the native TUI; this client does not support answering from Discord."
             )
             return
         if approval.approval_kind != "command" or approval.content_text is not None:
             if approval.content_text is None or not approval_content_displayable(approval.approval_kind, approval.content_text):
-                await self.bridge.post_thread_notice(
-                    session.thread_id, "Action required in the native TUI; Discord cannot show this request in full."
-                )
+                await self.stays_native(session, "Action required in the native TUI; Discord cannot show this request in full.")
                 return
         content = self.format_approval_request(approval)
         if approval.command_text is not None and (
@@ -385,9 +383,7 @@ class SessionInteractions:
             or len(self.format_approval_request(dataclasses.replace(approval, reason=None))) > DISCORD_MESSAGE_LIMIT
         ):
             # Never offer to approve a command Discord cannot show exactly and whole.
-            await self.bridge.post_thread_notice(
-                session.thread_id, "Action required in the native TUI; Discord cannot show this command in full."
-            )
+            await self.stays_native(session, "Action required in the native TUI; Discord cannot show this command in full.")
             return
 
         channel = self.bridge.thread_channel(session.thread_id)
@@ -410,9 +406,17 @@ class SessionInteractions:
             message,
             [REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY],
         )
+        self.wait_on_operator(session, "Approval required. Review the request in this thread.")
+
+    async def stays_native(self, session: AgentSession, detail: str) -> None:
+        self.wait_on_operator(session, detail)
+        if session.thread_id is not None:
+            await self.bridge.post_thread_notice(session.thread_id, detail)
+
+    def wait_on_operator(self, session: AgentSession, detail: str) -> None:
         session.status_revision += 1
         session.display_state = "waiting"
-        session.last_status_message = "Approval required. Review the request in this thread."
+        session.last_status_message = detail
         self.bridge.controls.show_activity(session)
 
     async def handle_request_user_input(self, request: RemoteRequestUserInput) -> None:
@@ -465,18 +469,10 @@ class SessionInteractions:
             turn_id=request.turn_id,
             call_id=request.call_id,
         )
-        session.status_revision += 1
-        session.display_state = "waiting"
-        session.last_status_message = "Answer required. Use the question controls in this thread."
-        self.bridge.controls.show_activity(session)
+        self.wait_on_operator(session, "Answer required. Use the question controls in this thread.")
 
     async def user_input_stays_native(self, session: AgentSession) -> None:
-        session.status_revision += 1
-        session.display_state = "waiting"
-        session.last_status_message = "Answer required in the native TUI; this prompt cannot use Discord controls."
-        self.bridge.controls.show_activity(session)
-        if session.thread_id is not None:
-            await self.bridge.post_thread_notice(session.thread_id, session.last_status_message)
+        await self.stays_native(session, "Answer required in the native TUI; this prompt cannot use Discord controls.")
 
     async def user_input_context(
         self,
