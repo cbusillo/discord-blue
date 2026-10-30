@@ -897,7 +897,8 @@ does a replay error. A fresh IDENTIFY does not qualify that planned handover.
 With replay enabled, the CM conversation retains unacknowledged input, reply
 deduplication and observed-message context, bound to its configured destination
 and native epoch. Reconnection flushes older pending input before new sends. Native waits
-are bounded; an offline action counts as handled after the person receives a
+are bounded, with one CM reconnect budget for the catch-up backlog; an offline
+action counts as handled after the person receives a
 notice that it was not delivered and should be retried. During replay, expired
 slash commands, components and modals receive a retry notice before any native
 side effect. Predecessor modal submissions and controls awaiting prompt reconstruction also ask for a retry. Autocomplete is

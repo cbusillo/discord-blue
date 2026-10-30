@@ -170,6 +170,27 @@ class ConversationHandoverTests(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
 
+    async def test_offline_replay_backlog_shares_one_reconnect_wait(self) -> None:
+        bridge = AgentSessionBridge(cast(Any, self.bot))
+        with patch("discord_blue.doodads.agent_session.conversation.REPLAY_RECONNECT_WAIT_SECONDS", 0.1):
+            replayed = [
+                asyncio.create_task(bridge.conversations.receive_message(message(message_id=300 + index))) for index in range(6)
+            ]
+            self.bot.handover.replay = set(replayed)
+            await asyncio.sleep(0)
+            live = asyncio.create_task(bridge.conversations.receive_message(message(message_id=400)))
+            tasks = [*replayed, live]
+            try:
+                results = await asyncio.wait_for(asyncio.gather(*tasks), 0.4)
+                self.assertFalse(any(results))
+                self.assertEqual(self.destination.send.await_count, len(tasks))
+                self.assertFalse(bridge.conversations.seen)
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                self.bot.handover.replay.clear()
+
     async def test_reconnect_flushes_old_input_before_live_and_replayed_input(self) -> None:
         bridge = AgentSessionBridge(cast(Any, self.bot))
         client = await self.endpoint(bridge)
