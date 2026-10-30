@@ -341,7 +341,8 @@ continue to describe accepted outbound actions, not incoming event support.
 
 Question objects carry `id`, `header`, `question`, `isOther`, `isSecret`,
 `options` (objects with `label` and `description`), and optionally
-`multiSelect`; a multi-select answer lists every chosen label. Do not send secrets through
+`multiSelect`, only to servers that list the multi_select feature; a
+multi-select answer lists every chosen label. Do not send secrets through
 Discord; the existing form is not a secret-entry channel. The Discord form
 uses the same Components V2 cards as session status. Each question has a named
 picker or a write-answer form. Selecting an option updates the card; **Send

@@ -13,7 +13,7 @@ APPROVAL_COMMAND_DISPLAY_LIMIT = 1600
 
 # What this server supports beyond the base protocol, listed in hello_ack as `features`. A client must not
 # rely on a feature the server did not list: an older server ignores it.
-SERVER_FEATURES: frozenset[str] = frozenset({"command_text", "approval_content", "tool_content"})
+SERVER_FEATURES: frozenset[str] = frozenset({"command_text", "approval_content", "tool_content", "multi_select"})
 
 
 def command_text_displayable(text: str) -> bool:

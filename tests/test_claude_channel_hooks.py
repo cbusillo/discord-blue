@@ -598,6 +598,51 @@ class DialogTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((status["message"], notice["message"]), (waiting_message(tool_name),) * 2)
                 self.assertIsNone(answer)
 
+    async def test_identical_parallel_calls_keep_their_own_cards(self) -> None:
+        async with running_channel(features=FEATURES) as (claude, discord):
+            await claude.initialize()
+            await discord.next("hello")
+            await tool_call(claude, "Bash", COMMAND, "toolu_a")
+            await tool_call(claude, "Bash", COMMAND, "toolu_b")
+            first, second = open_dialog(claude, "Bash", COMMAND), open_dialog(claude, "Bash", COMMAND)
+            cards = [await discord.next("approval_request"), await discord.next("approval_request")]
+            await hook(claude, "PostToolUse", tool_use_id="toolu_a")
+            resolved = await discord.next("approval_resolved")
+            first_answer = await hook_answer(claude, first)
+            await hook(claude, "PostToolUse", tool_use_id="toolu_b")
+            later = await discord.next("approval_resolved")
+            second_answer = await hook_answer(claude, second)
+
+        by_call = {card["call_id"]: card["approval_id"] for card in cards}
+        self.assertEqual((resolved["approval_id"], later["approval_id"]), (by_call["toolu_a"], by_call["toolu_b"]))
+        self.assertEqual((first_answer, second_answer), (None, None))
+
+    async def test_a_terminal_only_dialog_leaves_an_open_question_answerable(self) -> None:
+        # Discord Blue retires open question cards on any status change.
+        async with running_channel(features=FEATURES) as (claude, discord):
+            await claude.initialize()
+            await discord.next("hello")
+            open_dialog(claude, "AskUserQuestion", QUESTION)
+            await discord.next("request_user_input")
+            open_dialog(claude, "Write", {"file_path": "/work/big.txt", "content": "x" * 5000})
+            following = await discord.next("status_changed", "notice")
+
+        self.assertEqual((following["type"], following["message"]), ("notice", waiting_message("Write")))
+
+    async def test_an_older_server_gets_no_multi_select_question(self) -> None:
+        older = [feature for feature in FEATURES if feature != "multi_select"]
+        single = {"questions": QUESTION["questions"][:1]}
+        async with running_channel(features=older) as (claude, discord):
+            await claude.initialize()
+            await discord.next("hello")
+            open_dialog(claude, "AskUserQuestion", QUESTION)
+            status = await discord.next("status_changed", "request_user_input")
+            open_dialog(claude, "AskUserQuestion", single)
+            card = await discord.next("request_user_input")
+
+        self.assertEqual(status["message"], waiting_message("AskUserQuestion"))
+        self.assertEqual([q["question"] for q in card["questions"]], ["Which color?"])
+
     async def test_a_timed_out_hook_hands_the_dialog_back_to_the_terminal(self) -> None:
         async with running_channel(features=FEATURES) as (claude, discord):
             await claude.initialize()

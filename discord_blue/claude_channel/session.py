@@ -302,7 +302,12 @@ class ClaudeSession(AgentSessionClient):
         return "" if decision is None else hook_decision(decision)
 
     def tool_use_id(self, tool_name: str, tool_input: Json | None) -> str | None:
-        return next((i for name, called, i in reversed(self.tool_calls) if (name, called) == (tool_name, tool_input)), None)
+        """The oldest unclaimed matching call, so identical parallel calls each keep their own ID."""
+        for call in self.tool_calls:
+            if call[:2] == (tool_name, tool_input):
+                self.tool_calls.remove(call)
+                return call[2]
+        return None
 
     def dialog_prompt(self, key: str, dialog: Dialog, fields: dict[str, str]) -> Json | None:
         """The Discord prompt for a dialog Discord can show whole, or None to keep it in the terminal."""
@@ -341,8 +346,11 @@ class ClaudeSession(AgentSessionClient):
 
     def shows(self, prompt: Json) -> bool:
         """Whether the connected Discord Blue shows this prompt as sent; until one connects, assume it does."""
-        if self.server_features is None or prompt["type"] != "approval_request":
+        if self.server_features is None:
             return True
+        if prompt["type"] == "request_user_input":
+            # An older server shows a multi-select question as a single choice.
+            return "multi_select" in self.server_features or not any(q["multiSelect"] for q in prompt["questions"])
         return ("command_text" if prompt.get("command_text") is not None else "tool_content") in self.server_features
 
     def on_server_features(self) -> None:
@@ -353,7 +361,9 @@ class ClaudeSession(AgentSessionClient):
 
     def wait_locally(self, tool_name: str) -> None:
         message = waiting_message(tool_name)
-        self.publish("status_changed", message=message)
+        # Discord Blue retires open question cards on any status; an open card already shows the session waiting.
+        if not self.prompts:
+            self.publish("status_changed", message=message)
         # The thread also gets it as a message, since a status only changes the reaction.
         self.publish("notice", message=message)
 
