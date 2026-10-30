@@ -604,7 +604,7 @@ Behaviour and limits:
 - `/clear` or `/resume` inside a session keeps its thread but reconnects under a
   new epoch, so replies sent for the previous conversation are rejected. Discord Blue also refuses a reply written before the session last
   reconnected, and says so. A reply received while the session is still attaching
-  gets a reconnecting notice asking you to send it again; it is not delivered
+  waits briefly for reattachment, then gets a retry notice if it cannot be delivered
   ahead of the connection acknowledgment. The thread gets a notice for each switch.
 - Hooks reach the channel through an MCP tool, `dui_hook_event`, which the model
   can also see. Its description says never to call it, and calls that carry a
@@ -855,6 +855,68 @@ the self-hosted runners needed by Build. The required `ci-gate` proves validatio
 and image build; it does not prove a production release.
 Consult the [overall direction](https://github.com/cbusillo/direction/blob/HEAD/DIRECTION.md)
 for release authority before production work.
+
+Process replacement uses the existing shared HOME volume. A kernel file lock
+is held from before configuration loads until process exit. A successor waits
+before it can connect to Discord, write state, or bind the bridge. This requires
+every replacement to use the same volume on the same host; it is not a
+cross-host leader election mechanism. The lock file must not be removed while
+either process is running.
+
+On graceful shutdown, the gateway reader stops and received callbacks drain.
+The bridge closes admission, finishes native attachments, payloads and conversation
+replies within the shutdown deadline, then finishes bounded cleanup and store
+flush. It saves a private,
+atomic checkpoint only after cleanup succeeds. The socket closes without
+invalidating its Discord session. Startup sends no Connected or Loaded-command
+notice.
+
+Rollout has two releases. This first release saves and consumes checkpoints but
+keeps replay disabled. After it is accepted, a second source change enables
+replay. Each startup reads and deletes the checkpoint before using it; deletion
+failure prevents replay. Checkpoints older than one minute are ignored. No
+Launchplane predecessor-identity contract is needed. Rolling back from release 2
+to release 1 skips catch-up for that transition.
+
+With replay enabled, the successor rebuilds the SDK cache and resumes the
+Gateway session. Replies and approval reactions wait for the matching native
+session and request. Changed epochs cannot inherit old replies or approval
+authority. Native clients resend their pending requests; the bot retains only
+session and message routing IDs, then rebuilds prompt cards and stable controls
+from those fresh requests. Request contents, partial answers, views and native
+command state are not serialized.
+
+`components.discord.handover` reports resume progress and outstanding replay
+counts. Catch-up requires RESUMED, startup and replay completion, alongside
+heartbeat and store health. Missing, expired or unusable checkpoints start with
+IDENTIFY, recording that earlier work could not be replayed. Unplanned recovery
+can become healthy once Discord and the bridge recover. A failed planned resume
+or cache rebuild also falls back to IDENTIFY but remains failed catch-up, as
+does a replay error. A fresh IDENTIFY does not qualify that planned handover.
+
+With replay enabled, the CM conversation retains unacknowledged input, reply
+deduplication and observed-message context, bound to its configured destination
+and native epoch. Reconnection flushes older pending input before new sends. Native waits
+are bounded, with one CM reconnect budget for the catch-up backlog; an offline
+action counts as handled after the person receives a
+notice that it was not delivered and should be retried. During replay, expired
+slash commands, components and modals receive a retry notice before any native
+side effect. Predecessor modal submissions and controls awaiting prompt reconstruction also ask for a retry. Autocomplete is
+discarded; Discord asks again as the person types.
+
+Container startup executes Python directly after dropping privileges, so the
+stop signal reaches the bot. The repository's Compose and systemd definitions
+allow two minutes for shutdown. A Dokploy application target needs its effective
+stop grace qualified through its existing gated setup path as well; the product
+Compose setting does not configure that application target. Deployment and
+rollback qualification must prove that native work settles, state flushes and
+the continuation is saved before the provider ends the process.
+
+The first installation over an older image has no usable checkpoint. An unclean
+kill, missing shared state, session expiry or provider stop timeout can also
+prevent catch-up. Use the existing gated release and rollback paths. The first
+normal release after replay is enabled supplies the single-owner, catch-up and
+no-red-flip proof on [launchplane#5352](https://github.com/cbusillo/launchplane/issues/5352).
 
 - CI proves the Docker image builds for every PR and push with read-only permissions.
 - A separate publishing job runs only on `main` pushes and manual `main` runs;

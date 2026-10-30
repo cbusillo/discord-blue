@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import discord
 
 from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
+from discord_blue.doodads.agent_session.controls import defer_control
 from discord_blue.doodads.agent_session.cards import ANSWER_CARD_COMPONENT_ID, ANSWER_CONTINUATION_COMPONENT_ID
 from discord_blue.doodads.agent_session.formatting import (
     ASSISTANT_MESSAGE_MARKER,
@@ -115,7 +116,8 @@ class ReplyAboutModal(discord.ui.Modal):
         if not self.reply.value.strip():
             await interaction.response.send_message("Write a reply, then open Reply about this again.", ephemeral=True)
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not await defer_control(interaction, ephemeral=True, thinking=True):
+            return
         async with self.lock:
             if self.submitted:
                 await interaction.followup.send("This reply form has already been submitted.", ephemeral=True)

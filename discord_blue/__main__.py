@@ -9,6 +9,7 @@ from time import sleep
 from discord.errors import PrivilegedIntentsRequired
 
 from discord_blue.config import get_config
+from discord_blue.gateway_handover import SHUTDOWN_TIMEOUT_SECONDS, hold_state_lock
 from discord_blue.plugs.discord_plug import BlueBot
 
 DISCORD_TOKEN_TIMEOUT = 120
@@ -24,6 +25,8 @@ def track_background_task(task: asyncio.Task[None]) -> None:
 def create_signal_handler(bot: BlueBot) -> Callable[[signal.Signals], None]:
     def handler(current_signal: signal.Signals) -> None:
         loop = asyncio.get_running_loop()
+        if bot.handover.shutdown_deadline is None:
+            bot.handover.shutdown_deadline = loop.time() + SHUTDOWN_TIMEOUT_SECONDS
         track_background_task(loop.create_task(bot.on_signal(current_signal)))
 
     return handler
@@ -48,17 +51,24 @@ def parse_args() -> Namespace:
 
 
 def start_bot() -> None:
+    def terminate_before_loop(_signal: int, _frame: object) -> None:
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, terminate_before_loop)
+    hold_state_lock()
     config = get_config()
+    loop = asyncio.get_event_loop()
     for _count in range(DISCORD_TOKEN_TIMEOUT):
         try:
             bot = BlueBot(config)
-            loop = asyncio.get_event_loop()
             handler = create_signal_handler(bot)
             for signal_to_add in (signal.SIGINT, signal.SIGTERM):
                 loop.add_signal_handler(signal_to_add, handler, signal_to_add)
             loop.run_until_complete(bot.start(config.discord.token))
             return
         except PrivilegedIntentsRequired:
+            loop.remove_signal_handler(signal.SIGTERM)
+            signal.signal(signal.SIGTERM, terminate_before_loop)
             logger.error("Privileged intents required")
             logger.error(
                 "Enable the existing application's required Gateway intents in Discord Developer Portal > Bot; see README.md"

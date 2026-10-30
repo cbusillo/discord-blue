@@ -14,6 +14,7 @@ from discord_blue.doodads.agent_session.protocol import SessionHello
 from tests.fake_discord import GUILD_ID
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
 from discord_blue.health import DiscordGatewayHealth
+from discord_blue.gateway_handover import GatewayHandover
 
 if TYPE_CHECKING:
     from discord_blue.config import Config
@@ -68,6 +69,8 @@ class FakeWebSocket:
         self.close_messages: list[bytes] = []
 
     async def send_json(self, payload: dict[str, object]) -> None:
+        if self.closed:
+            raise ConnectionResetError("WebSocket is closed")
         self.sent_json.append(payload)
 
     async def close(self, *, message: bytes = b"", drain: bool = True) -> bool:
@@ -443,6 +446,13 @@ class FakeBot:
         self.gateway_health.receive('{"op":10,"d":{"heartbeat_interval":45000}}')
         self.gateway_health.receive('{"op":11}')
         self.gateway_health.receive('{"op":0,"t":"READY"}')
+        self.handover = GatewayHandover(cast(Any, self), self.close)
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def get_cog(self, _name: str) -> None:
+        return None
 
     def is_closed(self) -> bool:
         return self.closed

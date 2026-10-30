@@ -45,7 +45,7 @@ class PromptIdentityTests(unittest.IsolatedAsyncioTestCase):
     async def test_reconnect_rejects_old_epoch_even_when_identifiers_match(self) -> None:
         old = await self.prompt()
         self.session = AgentSession(
-            hello=replace(make_hello(), session_epoch="epoch-2"), websocket=cast(Any, self.socket), thread_id=555
+            hello=replace(make_hello(), session_epoch="epoch-2"), websocket=cast(Any, self.socket), thread_id=555, acknowledged=True
         )
         self.bridge.sessions.register(self.session)
         current = await self.prompt()
@@ -75,6 +75,34 @@ class PromptIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(old.answers, {"answer": "yes"})
         self.assertEqual(interaction.response.edits, [])
         self.assertTrue(interaction.response.messages)
+
+    async def test_concurrent_submit_cancel_recheck_after_slow_defer(self) -> None:
+        view = await self.prompt()
+        release = asyncio.Event()
+        entered = [asyncio.Event(), asyncio.Event()]
+        interactions = [FakeInteraction(self.thread), FakeInteraction(self.thread)]
+        for index in range(len(interactions)):
+            original = interactions[index].response.defer
+
+            async def defer(
+                entered_event: asyncio.Event = entered[index], respond: Callable[[], Awaitable[None]] = original
+            ) -> None:
+                entered_event.set()
+                await release.wait()
+                await respond()
+
+            self.enterContext(patch.object(interactions[index].response, "defer", defer))
+        tasks = [
+            asyncio.create_task(view.submit(cast(Any, interactions[0]))),
+            asyncio.create_task(view.cancel(cast(Any, interactions[1]))),
+        ]
+        try:
+            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered)), 1)
+        finally:
+            release.set()
+            await asyncio.gather(*tasks)
+        self.assertEqual(len(self.socket.sent_json), 1)
+        self.assertEqual(len(self.session.pending_commands), 1)
 
     async def test_simultaneous_submit_cancel_sends_once(self) -> None:
         view = await self.prompt()

@@ -169,6 +169,17 @@ class InteractiveModalTests(unittest.IsolatedAsyncioTestCase):
         await modal.on_submit(cast(Any, FakeInteraction(self.fixture.thread)))
         self.assertIn("earlier context", str(self.fixture.socket.sent_json[0]["text"]))
 
+    async def test_expired_context_reply_gets_retry_notice_without_native_dispatch(self) -> None:
+        modal = await self.reply_form(self.source())
+        modal.reply._value = "Please explain."
+        interaction = FakeInteraction(self.fixture.thread)
+        expired = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), {"code": 10062, "message": "Expired"})
+        with patch.object(interaction.response, "defer", AsyncMock(side_effect=expired)):
+            await modal.on_submit(cast(Any, interaction))
+        self.assertFalse(self.fixture.socket.sent_json)
+        self.assertFalse(modal.submitted)
+        self.assertTrue(self.fixture.thread.sent_messages)
+
     async def test_context_reply_revalidates_deletion_reconnect_operator_and_changed_answer(self) -> None:
         for invalid in ("deleted", "epoch", "operator", "answer", "thread"):
             with self.subTest(invalid=invalid):

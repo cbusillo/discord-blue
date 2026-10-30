@@ -23,7 +23,7 @@ class PromptFixture:
         )
         self.bridge = bridge_module.AgentSessionBridge(cast(BlueBot, FakeBot(config, thread=self.thread)))
         self.socket = FakeWebSocket()
-        self.session = AgentSession(hello=make_hello(), websocket=cast(Any, self.socket), thread_id=555)
+        self.session = AgentSession(hello=make_hello(), websocket=cast(Any, self.socket), thread_id=555, acknowledged=True)
         self.bridge.sessions.register(self.session)
 
     async def prompt(self, call_id: str = "call-1") -> interactions_module.RequestUserInputView:

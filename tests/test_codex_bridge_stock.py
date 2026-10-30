@@ -304,7 +304,9 @@ class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
             goal = await tui.rpc.request("thread/goal/set", {"threadId": thread_id, "objective": "ship it", "status": "paused"})
 
             url = f"ws://127.0.0.1:{server.port}/agent-session/connect"
-            config = BridgeConfig(server_url=url, token=TOKEN, socket_path=codex.socket_path, host_label="Codex on test")
+            config = BridgeConfig(
+                server_url=url, token=TOKEN, socket_path=codex.socket_path, host_label="Codex on test", reconnect_seconds=0.05
+            )
             bridge = GatedBridge(config)
             running = asyncio.create_task(bridge.run())
             try:
@@ -339,6 +341,10 @@ class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
                 approval = await discord.next("approval_request")
                 # Stock sends one shell string; its argv is the shell wrapper the command runs under.
                 self.assertEqual(approval["command"][-1], "touch approved.txt")
+                await discord.close()
+                reattached = await discord.next("hello")
+                self.assertEqual(reattached["session_epoch"], hello["session_epoch"])
+                self.assertEqual(await discord.next("approval_request"), approval)
                 decision = {"type": "approval_decision", "approval_id": approval["approval_id"], "decision": "approved", **ids}
                 self.assertEqual((await discord.control(decision))["type"], "approval_decision_ack")
                 await turn
@@ -348,6 +354,10 @@ class StockAppServerTests(unittest.IsolatedAsyncioTestCase):
                 turn = asyncio.create_task(tui.turn(thread_id, "ASK me", collaborationMode=plan))
                 prompt = await discord.next("request_user_input")
                 self.assertEqual([q["id"] for q in prompt["questions"]], [q["id"] for q in ASK_QUESTIONS])
+                await discord.close()
+                reattached = await discord.next("hello")
+                self.assertEqual(reattached["session_epoch"], hello["session_epoch"])
+                self.assertEqual(await discord.next("request_user_input"), prompt)
                 response = {"answers": {"pick": {"answers": ["Beta"]}}}
                 answer = {"type": "command", "command_id": "c2", "kind": "request_user_input_response", **ids}
                 answer |= {"call_id": prompt["call_id"], "turn_id": prompt["turn_id"], "response": response}

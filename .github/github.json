@@ -8,6 +8,7 @@
     "packageManifest": "pyproject.toml",
     "lockfile": "uv.lock",
     "dockerfile": "Dockerfile",
+    "containerEntrypoint": "docker/entrypoint.sh",
     "dockerignore": ".dockerignore",
     "compose": "docker-compose.yml",
     "runtimeCompose": "compose.runtime.yml",

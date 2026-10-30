@@ -36,9 +36,10 @@ from discord_blue.doodads.agent_session.cleanup import (
     SessionCleanups,
 )
 from discord_blue.doodads.agent_session.session_threads import SessionThreads
-from discord_blue.doodads.agent_session.controls import SessionControls
+from discord_blue.doodads.agent_session.controls import REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY, SessionControls
 from discord_blue.doodads.agent_session.interactions import SessionInteractions
 from discord_blue.doodads.agent_session.session_status import SessionStatusUpdates
+from discord_blue.doodads.agent_session.handover import SessionContinuation
 
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
 from discord_blue.doodads.agent_session.store import SESSION_STORE_WAIT_TIMEOUT_SECONDS, SessionState, SessionStore, StoredSession
@@ -50,6 +51,7 @@ from discord_blue.doodads.agent_session.threads import distinct_thread_name
 from discord_blue.doodads.agent_session.threads import session_start_message
 from discord_blue.health import health_payload
 from discord_blue.release_delivery import DeliveryReceipts, production_delivery
+from discord_blue.gateway_handover import SHUTDOWN_TIMEOUT_SECONDS
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
@@ -65,7 +67,6 @@ SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = 1
 MAINTENANCE_INTERVAL_SECONDS = 300
 SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS = SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
 SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = 5
-SHUTDOWN_ATTACH_SETTLE_SECONDS = 10
 SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS = SESSION_NOTIFICATION_CLEANUP_TIMEOUT_SECONDS + SESSION_THREAD_CLEANUP_TIMEOUT_SECONDS
 
 AGENT_SESSION_CONNECT_PATH = "/agent-session/connect"
@@ -81,9 +82,10 @@ class BridgeStopping(ThreadCreationStopped):
 class AgentSessionBridge:
     def __init__(self, bot: BlueBot, *, store_path: Path | None = None) -> None:
         self.bot = bot
+        self.handover = SessionContinuation(self, SESSION_DISCONNECT_GRACE_SECONDS)
         from discord_blue.doodads.agent_session.conversation import ConversationRouter
 
-        self.conversations = ConversationRouter(bot)
+        self.conversations = ConversationRouter(bot, self.handover)
         # The container sets HOME to its existing durable /var/lib/discord-blue mount.
         self.store = SessionStore.for_path(store_path if store_path is not None else Path.home() / "agent-sessions.json")
         self.deliveries = DeliveryReceipts(self.store.path.with_name("bridge-deliveries.json"))
@@ -133,6 +135,8 @@ class AgentSessionBridge:
         if self._runner is not None:
             return
         self._stopping = False
+        self.handover.snapshot = None
+        self.session_threads.creation_stopping.clear()
         self._monitor_started_at = time.monotonic()
         self._monitor_last_progress = self._monitor_started_at
         self._monitor_has_run = False
@@ -238,11 +242,14 @@ class AgentSessionBridge:
         discord_ready = self.discord_ready()
         gateway = self.bot.gateway_health.evidence(ready=discord_ready)
         discord_healthy = gateway["status"] == "ok"
+        handover = self.bot.handover
+        discord_healthy = discord_healthy and handover.healthy()
         monitor = self.agent_session_monitor_health()
         monitor_healthy = not self.bot.config.agent_session.enabled or monitor["status"] not in {"dead", "stalled"}
         payload = health_payload(
             discord_status="ok" if discord_healthy else "unhealthy",
             discord_gateway=gateway,
+            discord_handover=handover.evidence(),
             agent_session_enabled=self.bot.config.agent_session.enabled,
             active_agent_sessions=len(self.sessions.live_sessions()),
             disconnected_agent_sessions=len(self.sessions.disconnected_sessions()),
@@ -324,35 +331,76 @@ class AgentSessionBridge:
         is_ready = getattr(self.bot, "is_ready", None)
         return not callable(is_ready) or bool(is_ready())
 
-    async def stop(self) -> None:
-        await self.conversations.stop()
-        if self._runner is None:
-            return
+    async def stop(self, *, deadline: float | None = None) -> None:
+        loop = asyncio.get_running_loop()
+        if deadline is None:
+            deadline = loop.time() + SHUTDOWN_TIMEOUT_SECONDS
+        self.handover.snapshot = None
         self._stopping = True
         self.session_threads.creation_stopping.set()
+        snapshot = None
+        try:
+            complete = await self.threads.bounded(self.close_native_connections(), max(0, deadline - loop.time()))
+        except TimeoutError:
+            complete = False
+        try:
+            async with self.handover.changed:
+                while self.handover.incoming or self._attach_tasks:
+                    await asyncio.wait_for(self.handover.changed.wait(), max(0, deadline - loop.time()))
+                if loop.time() >= deadline:
+                    raise TimeoutError
+                if complete:
+                    snapshot = {"agents": self.handover.export(), "conversation": self.conversations.export()}
+        except TimeoutError:
+            complete = False
+            logger.warning("Agent session shutdown did not settle native work before its deadline")
+        try:
+            await self.threads.bounded(self.conversations.stop(), max(SESSION_STORE_WAIT_TIMEOUT_SECONDS, deadline - loop.time()))
+        except TimeoutError:
+            complete = False
         for task in list(self._grace_tasks):
-            task.cancel()
-        await self.stop_background_task("maintenance", self._cleanup_task)
-        self._cleanup_task = None
-        await self.stop_background_task("heartbeat", self._heartbeat_task)
-        self._heartbeat_task = None
-        # Queued attaches stop at the lock and put back the sessions they replaced, so shutdown saves those too. They
-        # are waited for, not cancelled: one may be sending a Discord request.
-        if self._attach_tasks:
-            await asyncio.wait(list(self._attach_tasks.values()), timeout=SHUTDOWN_ATTACH_SETTLE_SECONDS)
-        await self.disconnect_active_sessions()
+            if task not in self.handover.incoming:
+                task.cancel()
+        for name, background_task in (("maintenance", self._cleanup_task), ("heartbeat", self._heartbeat_task)):
+            if background_task not in self.handover.incoming:
+                await self.stop_background_task(name, background_task)
+        self._cleanup_task = self._heartbeat_task = None
+        try:
+            await self.threads.bounded(
+                self.disconnect_active_sessions(), max(SESSION_STORE_WAIT_TIMEOUT_SECONDS, deadline - loop.time())
+            )
+        except TimeoutError:
+            complete = False
         self.threads.stop()
         try:
-            await asyncio.wait_for(self._runner.cleanup(), timeout=SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS)
+            if self._runner is not None:
+                await self.threads.bounded(self._runner.cleanup(), max(SESSION_STORE_WAIT_TIMEOUT_SECONDS, deadline - loop.time()))
         except TimeoutError:
-            logger.warning("Agent session bridge runner cleanup timed out during shutdown")
+            complete = False
         finally:
-            self._runner = None
-            self._site = None
             try:
-                await self.threads.bounded(self.store.close(), SESSION_STORE_WAIT_TIMEOUT_SECONDS)
+                await self.threads.bounded(self.store.close(), max(SESSION_STORE_WAIT_TIMEOUT_SECONDS, deadline - loop.time()))
+                complete = complete and self.store.error is None and loop.time() < deadline
             except TimeoutError:
-                logger.warning("Agent session store is still flushing at shutdown")
+                complete = False
+                logger.warning("Agent session shutdown or store flush exceeded its deadline")
+            finally:
+                self._runner = None
+                self._site = None
+        if complete:
+            self.handover.snapshot = snapshot
+
+    async def close_native_connections(self) -> bool:
+        sessions = tuple(session for session in self.sessions.by_session.values() if not session.websocket.closed)
+        await asyncio.gather(
+            *(
+                self.close_session_websocket(
+                    session.session_id, session, message=b"bridge shutdown", timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
+                )
+                for session in sessions
+            )
+        )
+        return all(session.websocket.closed for session in sessions)
 
     @staticmethod
     async def stop_background_task(name: str, task: asyncio.Task[None] | None) -> None:
@@ -444,55 +492,59 @@ class AgentSessionBridge:
         close_message: bytes = b"session disconnected",
         shutdown: bool = False,
     ) -> bool:
-        lifecycle_lock = self.session_lifecycle_lock(session.session_id)
-        async with lifecycle_lock:
-            removed = self.sessions.remove_if_current(session)
-            if removed is None:
-                return False
-            if removed.thread_id is not None:
-                self._attached_threads.pop(removed.thread_id, None)
+        with self.handover.section():
+            lifecycle_lock = self.session_lifecycle_lock(session.session_id)
+            async with lifecycle_lock:
+                removed = self.sessions.remove_if_current(session)
+                if removed is None:
+                    return False
+                self.handover.retire(session.session_id)
+                if removed.thread_id is not None:
+                    self._attached_threads.pop(removed.thread_id, None)
 
-            fallback_cleanup = self.cleanups.pending_cleanup_for_session(removed)
-            self.save_session(removed, "closing")
-            self.cleanups.finalizing.add(fallback_cleanup.key)
-            try:
-                websocket_timeout = SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS if shutdown else SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
-                if not removed.websocket.closed:
-                    await self.close_session_websocket(
-                        removed.session_id,
-                        removed,
-                        message=close_message,
-                        timeout=websocket_timeout,
-                    )
-
+                fallback_cleanup = self.cleanups.pending_cleanup_for_session(removed)
+                self.save_session(removed, "closing")
+                self.cleanups.finalizing.add(fallback_cleanup.key)
                 try:
-                    async with asyncio.timeout(SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS):
-                        # Only waits are bounded here; every Discord request inside runs to completion.
-                        residual = await self.cleanups.close_session_thread(removed, fallback_cleanup)
-                except TimeoutError:
-                    logger.warning(
-                        "Agent session thread cleanup for %s timed out%s",
-                        removed.session_id,
-                        " during shutdown" if shutdown else "",
+                    websocket_timeout = (
+                        SHUTDOWN_WEBSOCKET_CLOSE_TIMEOUT_SECONDS if shutdown else SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
                     )
-                    residual = fallback_cleanup
-                if residual is not None:
-                    self.cleanups.save_cleanup(residual)
-                    self.cleanups.remember_pending_cleanup(residual)
-                else:
-                    self.save_session(removed, "closed")
-                await self.questions.close(removed.session_id)
-                return True
-            except asyncio.CancelledError:
-                self.cleanups.save_cleanup(fallback_cleanup)
-                self.cleanups.remember_pending_cleanup(fallback_cleanup)
-                raise
-            except Exception:
-                self.cleanups.save_cleanup(fallback_cleanup)
-                self.cleanups.remember_pending_cleanup(fallback_cleanup)
-                raise
-            finally:
-                self.cleanups.finalizing.discard(fallback_cleanup.key)
+                    if not removed.websocket.closed:
+                        await self.close_session_websocket(
+                            removed.session_id,
+                            removed,
+                            message=close_message,
+                            timeout=websocket_timeout,
+                        )
+
+                    try:
+                        async with asyncio.timeout(SHUTDOWN_THREAD_CLEANUP_TIMEOUT_SECONDS):
+                            # Only waits are bounded here; every Discord request inside runs to completion.
+                            residual = await self.cleanups.close_session_thread(removed, fallback_cleanup)
+                    except TimeoutError:
+                        logger.warning(
+                            "Agent session thread cleanup for %s timed out%s",
+                            removed.session_id,
+                            " during shutdown" if shutdown else "",
+                        )
+                        residual = fallback_cleanup
+                    if residual is not None:
+                        self.cleanups.save_cleanup(residual)
+                        self.cleanups.remember_pending_cleanup(residual)
+                    else:
+                        self.save_session(removed, "closed")
+                    await self.questions.close(removed.session_id)
+                    return True
+                except asyncio.CancelledError:
+                    self.cleanups.save_cleanup(fallback_cleanup)
+                    self.cleanups.remember_pending_cleanup(fallback_cleanup)
+                    raise
+                except Exception:
+                    self.cleanups.save_cleanup(fallback_cleanup)
+                    self.cleanups.remember_pending_cleanup(fallback_cleanup)
+                    raise
+                finally:
+                    self.cleanups.finalizing.discard(fallback_cleanup.key)
 
     @staticmethod
     async def close_session_websocket(
@@ -512,38 +564,42 @@ class AgentSessionBridge:
 
     async def cleanup_stale_sessions(self) -> None:
         await asyncio.sleep(STARTUP_RECONNECT_GRACE_SECONDS)
-        while True:
-            self.record_maintenance_progress()
-            try:
-                self.store.retry_failed_write()
-                await self.cleanups.recover_stored_cleanups()
-                await self.cleanups.retry_pending_cleanups()
-                await self.session_threads.retry_creation_checks()
-                if time.monotonic() - self._monitor_started_at >= STARTUP_SWEEP_HOLD_SECONDS:
-                    await self.cleanups.cleanup_stale_session_notifications()
-                    await self.cleanups.cleanup_stale_session_threads()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Agent session maintenance iteration failed")
-            finally:
-                self._maintenance_has_run = True
+        while not self.session_threads.creation_stopping.is_set():
+            with self.handover.section():
                 self.record_maintenance_progress()
+                try:
+                    self.store.retry_failed_write()
+                    await self.cleanups.recover_stored_cleanups()
+                    await self.cleanups.retry_pending_cleanups()
+                    await self.session_threads.retry_creation_checks()
+                    if time.monotonic() - self._monitor_started_at >= STARTUP_SWEEP_HOLD_SECONDS:
+                        await self.cleanups.cleanup_stale_session_notifications()
+                        await self.cleanups.cleanup_stale_session_threads()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Agent session maintenance iteration failed")
+                finally:
+                    self._maintenance_has_run = True
+                    self.record_maintenance_progress()
             await asyncio.sleep(MAINTENANCE_INTERVAL_SECONDS)
 
     async def monitor_heartbeats(self) -> None:
-        while True:
+        while not self.session_threads.creation_stopping.is_set():
             await asyncio.sleep(self.bot.config.agent_session.heartbeat_check_interval_seconds)
-            self.record_monitor_progress()
-            try:
-                await self.close_timed_out_sessions()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Agent session heartbeat iteration failed")
-            finally:
-                self._monitor_has_run = True
+            if self.session_threads.creation_stopping.is_set():
+                return
+            with self.handover.section():
                 self.record_monitor_progress()
+                try:
+                    await self.close_timed_out_sessions()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Agent session heartbeat iteration failed")
+                finally:
+                    self._monitor_has_run = True
+                    self.record_monitor_progress()
 
     def record_monitor_progress(self) -> None:
         self._monitor_last_progress = time.monotonic()
@@ -634,11 +690,12 @@ class AgentSessionBridge:
                         break
                     # The newest connection is the session's from now on; the attach answers only it. It is
                     # registered here so the finally below ends it however the attach turns out.
-                    previous = self.sessions.get(hello.session_id)
-                    session = opened = AgentSession(hello=hello, websocket=websocket)
-                    self.sessions.register(opened)
-                    if not await self.accept_hello(opened, previous):
-                        break
+                    with self.handover.section():
+                        previous = self.sessions.get(hello.session_id)
+                        session = opened = AgentSession(hello=hello, websocket=websocket)
+                        self.sessions.register(opened)
+                        if not await self.accept_hello(opened, previous):
+                            break
                     continue
                 if (
                     session is None
@@ -656,8 +713,9 @@ class AgentSessionBridge:
                     )
                     continue
                 if message_type == "session_end":
-                    # A clean end: close the thread now instead of waiting out a grace period.
-                    session.ended = True
+                    with self.handover.section():
+                        session.ended = True
+                        await self.end_connection(session)
                     break
                 # Awaited inline, so the session's events are handled in the order they arrive.
                 await self.handle_event(session, message_type, payload)
@@ -669,80 +727,110 @@ class AgentSessionBridge:
 
     async def accept_hello(self, session: AgentSession, previous: AgentSession | None) -> bool:
         """Wait for the session's attach and acknowledge its hello; False when the connection should close."""
-        hello = session.hello
-        websocket = session.websocket
-        task = self.attach_task(hello, previous)
-        try:
-            if hello.hello_pending:
-                # Wait without cancelling the attach or an in-flight discord.py request. Only the
-                # current socket receives progress; events remain queued until the final ack.
-                while not task.done():
-                    done, _ = await asyncio.wait({task}, timeout=HELLO_PENDING_INTERVAL_SECONDS)
-                    if done:
-                        break
-                    if self.sessions.get(hello.session_id) is not session or websocket.closed:
-                        raise ConnectionError("session left while waiting for a thread")
-                    await websocket.send_json(
-                        {
-                            "type": "hello_pending",
-                            "session_id": hello.session_id,
-                            "session_epoch": hello.session_epoch,
-                            "message": "Waiting for a thread",
-                        }
-                    )
-            session_thread = await asyncio.shield(task)
-        except ThreadCreationStopped:
-            await websocket.close(message=b"bridge shutdown", drain=False)
-            return False
-        except ConnectionError:
-            logger.info("Agent session %s left while waiting for a thread", hello.session_id)
-            if self.sessions.get(hello.session_id) is session:
-                # A dropped socket still owns this attach. Let it bind before end_connection decides
-                # between grace and finalization; otherwise it would archive the just-created thread.
-                with suppress(discord.DiscordException, ValueError, ThreadCreationStopped):
-                    await asyncio.shield(task)
-            return False
-        except (discord.DiscordException, ValueError):
-            await websocket.close(message=b"unable to attach Discord thread", drain=False)
-            return False
-        if self.sessions.get(hello.session_id) is not session:
-            # A newer connection of this session joined the attach while this one waited; it gets the ack.
-            await websocket.close(message=b"replaced by a newer connection", drain=False)
-            return False
-        if session.thread_id != session_thread.thread.id:
-            # This connection joined after the attach bound the thread to an earlier one: it is the
-            # thread's owner now, so it is bound before it is acknowledged.
-            self.sessions.bind_thread(hello.session_id, session_thread.thread.id, session_thread.notification_message_id)
-        try:
-            await websocket.send_json(
-                {
-                    "type": "hello_ack",
-                    "features": sorted(SERVER_FEATURES),
-                    "thread_id": session_thread.thread.id,
-                    **({"capabilities": sorted(hello.capabilities)} if hello.capabilities is not None else {}),
-                }
-            )
-        except ConnectionError:
-            # The client stopped waiting; it will reconnect, so the connection's end starts a grace period.
-            logger.info("Agent session %s left before its hello was acknowledged", hello.session_id)
-            return False
-        # Heartbeats start after the ack, so the watchdog's clock starts here too.
-        session.acknowledged = True
-        await self.questions.close(session.session_id, current_epoch=session.session_epoch)
-        session.touch()
-        if self.sessions.get(session.session_id) is session and not self._stopping:
-            self.save_session(session, "live")
-        # Attached, acknowledged and outside every lock: bring the thread's name up to date in the
-        # background. The thread's worker coalesces and rate-limits; nothing here waits on Discord.
-        self.request_thread_name(session)
-        if previous is not None and self.sessions.get(session.session_id) is session:
-            session.display_state = "reconnecting"
-            session.last_status_message = "Reconnected. Waiting for the next status update."
-        self.schedule_legacy_card_retirement(session)
-        return True
+        with self.handover.section():
+            hello = session.hello
+            websocket = session.websocket
+            if self._stopping:
+                await self.close_session_websocket(
+                    session.session_id, session, message=b"bridge shutdown", timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
+                )
+                return False
+            task = self.attach_task(hello, previous)
+            try:
+                if hello.hello_pending:
+                    # Wait without cancelling the attach or an in-flight discord.py request. Only the
+                    # current socket receives progress; events remain queued until the final ack.
+                    while not task.done():
+                        done, _ = await asyncio.wait({task}, timeout=HELLO_PENDING_INTERVAL_SECONDS)
+                        if done:
+                            break
+                        if self.sessions.get(hello.session_id) is not session or websocket.closed:
+                            raise ConnectionError("session left while waiting for a thread")
+                        await websocket.send_json(
+                            {
+                                "type": "hello_pending",
+                                "session_id": hello.session_id,
+                                "session_epoch": hello.session_epoch,
+                                "message": "Waiting for a thread",
+                            }
+                        )
+                session_thread = await asyncio.shield(task)
+            except ThreadCreationStopped:
+                await self.close_session_websocket(
+                    session.session_id, session, message=b"bridge shutdown", timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS
+                )
+                return False
+            except ConnectionError:
+                logger.info("Agent session %s left while waiting for a thread", hello.session_id)
+                if self.sessions.get(hello.session_id) is session:
+                    # A dropped socket still owns this attach. Let it bind before end_connection decides
+                    # between grace and finalization; otherwise it would archive the just-created thread.
+                    with suppress(discord.DiscordException, ValueError, ThreadCreationStopped):
+                        await asyncio.shield(task)
+                return False
+            except (discord.DiscordException, ValueError):
+                await self.close_session_websocket(
+                    session.session_id,
+                    session,
+                    message=b"unable to attach Discord thread",
+                    timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS,
+                )
+                return False
+            if self.sessions.get(hello.session_id) is not session:
+                # A newer connection of this session joined the attach while this one waited; it gets the ack.
+                await self.close_session_websocket(
+                    session.session_id,
+                    session,
+                    message=b"replaced by a newer connection",
+                    timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS,
+                )
+                return False
+            if session.thread_id != session_thread.thread.id:
+                # This connection joined after the attach bound the thread to an earlier one: it is the
+                # thread's owner now, so it is bound before it is acknowledged.
+                self.sessions.bind_thread(hello.session_id, session_thread.thread.id, session_thread.notification_message_id)
+            try:
+                await websocket.send_json(
+                    {
+                        "type": "hello_ack",
+                        "features": sorted(SERVER_FEATURES),
+                        "thread_id": session_thread.thread.id,
+                        **({"capabilities": sorted(hello.capabilities)} if hello.capabilities is not None else {}),
+                    }
+                )
+            except ConnectionError:
+                # The client stopped waiting; it will reconnect, so the connection's end starts a grace period.
+                logger.info("Agent session %s left before its hello was acknowledged", hello.session_id)
+                return False
+            # Heartbeats start after the ack, so the watchdog's clock starts here too.
+            self.handover.reconnected(session, previous)
+            session.acknowledged = True
+            await self.handover.notify()
+            await self.questions.close(session.session_id, current_epoch=session.session_epoch)
+            session.touch()
+            if self.sessions.get(session.session_id) is session and not self._stopping:
+                self.save_session(session, "live")
+            # Attached, acknowledged and outside every lock: bring the thread's name up to date in the
+            # background. The thread's worker coalesces and rate-limits; nothing here waits on Discord.
+            self.request_thread_name(session)
+            if previous is not None and self.sessions.get(session.session_id) is session:
+                session.display_state = "reconnecting"
+                session.last_status_message = "Reconnected. Waiting for the next status update."
+            self.schedule_legacy_card_retirement(session)
+            return True
 
     async def handle_event(self, session: AgentSession, message_type: object, payload: dict[str, object]) -> None:
-        """Route one event from the session's current connection; unknown types are ignored."""
+        with self.handover.section():
+            restored = False
+            try:
+                restored = await self.handover.restore_prompt(session, message_type, payload)
+            except (ValueError, KeyError, TypeError, discord.HTTPException, discord.RateLimited, OSError):
+                logger.warning("Unable to restore Agent session prompt", exc_info=True)
+            if restored:
+                return
+            await self.handle_current_event(session, message_type, payload)
+
+    async def handle_current_event(self, session: AgentSession, message_type: object, payload: dict[str, object]) -> None:
         match message_type:
             case "heartbeat":
                 session.touch()
@@ -756,11 +844,17 @@ class AgentSessionBridge:
                 if isinstance(notice := payload.get("message"), str) and notice.strip():
                     await self.post_thread_notice(session.thread_id, notice)
             case "approval_resolved" | "request_user_input_resolved":
+                kind = "approvals" if message_type == "approval_resolved" else "inputs"
+                request_id = payload.get("approval_id" if kind == "approvals" else "call_id")
+                if isinstance(request_id, str):
+                    self.handover.retire(session.session_id, kind, request_id)
                 await self.interactions.handle_prompt_resolved(message_type, payload)
             case "approval_request":
                 await self.interactions.handle_approval_request(RemoteApprovalRequest.from_payload(payload))
             case "request_user_input":
-                await self.interactions.handle_request_user_input(RemoteRequestUserInput.from_payload(payload))
+                request = RemoteRequestUserInput.from_payload(payload)
+                self.handover.retire(session.session_id, "inputs")
+                await self.interactions.handle_request_user_input(request)
             case "approval_decision_ack":
                 logger.info("Agent session approval decision ack: %s", payload.get("approval_id"))
                 await self.interactions.handle_approval_decision_ack(payload)
@@ -786,6 +880,7 @@ class AgentSessionBridge:
     def attach_done(self, session_id: str, task: asyncio.Task[SessionThread]) -> None:
         if self._attach_tasks.get(session_id) is task:
             del self._attach_tasks[session_id]
+        self.handover.notify_soon()
         if not task.cancelled():
             task.exception()  # Retrieved here; every socket that still waits gets it too.
 
@@ -817,7 +912,10 @@ class AgentSessionBridge:
                     self.sessions.remove_if_current(current)
                 self.restore_replaced(previous)
                 raise
-            if previous is not None:
+            if previous is not None and (previous.session_epoch, previous.thread_id) != (
+                hello.session_epoch,
+                session_thread.thread.id,
+            ):
                 # Provisional replacement can fail and restore this connection, so only retire its views after attach succeeds.
                 self.sessions.stop_approval_views(previous)
             if previous is not None and previous.grace_task is not None:
@@ -827,6 +925,7 @@ class AgentSessionBridge:
             self._attached_threads[session_thread.thread.id] = session_thread.thread
             current = self.sessions.get(session_id)
             if current is not None:
+                self.handover.reconnected(current, previous)
                 self.save_session(current, "attaching")
                 try:
                     await self.threads.bounded(self.store.flush(), SESSION_STORE_WAIT_TIMEOUT_SECONDS)
@@ -845,23 +944,24 @@ class AgentSessionBridge:
 
     async def end_connection(self, session: AgentSession) -> None:
         """A connection closed: a clean end closes the thread now; any other drop waits out a grace period."""
-        if self.sessions.get(session.session_id) is not session:
-            # Replaced: the thread is the newer connection's now. Should that one fail to attach, this one is put back
-            # (restore_replaced), and its grace starts then; ending it here would close the thread under it.
-            with suppress(Exception):
-                await asyncio.wait_for(session.websocket.close(), timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS)
-            return
-        if self._stopping and not session.ended:
-            # stop() saves and disconnects it; a server shutdown is not a session_end.
-            return
-        if session.ended or session.thread_id is None:
-            await self.finalize_session(session)
-            return
-        if not session.websocket.closed:
-            with suppress(Exception):
-                await asyncio.wait_for(session.websocket.close(), timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS)
-        if self.sessions.get(session.session_id) is session:
-            self.start_grace(session)
+        with self.handover.section():
+            if self.sessions.get(session.session_id) is not session:
+                # Replaced: the thread is the newer connection's now. Should that one fail to attach, this one is put back
+                # (restore_replaced), and its grace starts then; ending it here would close the thread under it.
+                with suppress(Exception):
+                    await asyncio.wait_for(session.websocket.close(), timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS)
+                return
+            if self._stopping and not session.ended:
+                # stop() saves and disconnects it; a server shutdown is not a session_end.
+                return
+            if session.ended or session.thread_id is None:
+                await self.finalize_session(session)
+                return
+            if not session.websocket.closed:
+                with suppress(Exception):
+                    await asyncio.wait_for(session.websocket.close(), timeout=SESSION_WEBSOCKET_CLOSE_TIMEOUT_SECONDS)
+            if self.sessions.get(session.session_id) is session:
+                self.start_grace(session)
 
     def schedule_legacy_card_retirement(self, session: AgentSession) -> None:
         if self.legacy_status_card(session.session_id, session.thread_id) is None or session.thread_id is None:
@@ -894,7 +994,7 @@ class AgentSessionBridge:
 
     async def end_after_grace(self, session: AgentSession) -> None:
         # A reconnect replaced this session in the registry; the thread belongs to it now.
-        if self.sessions.get(session.session_id) is not session:
+        if self.session_threads.creation_stopping.is_set() or self.sessions.get(session.session_id) is not session:
             return
         try:
             await self.finalize_session(session, close_message=b"disconnect grace expired")
@@ -955,11 +1055,20 @@ class AgentSessionBridge:
         emoji: str,
         user: discord.User | discord.Member,
     ) -> bool:
-        if not self.is_operator(user):
+        if not self.is_operator(user) or emoji not in {REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY}:
             return False
 
+        saved_prompt = self.handover.has_prompt(thread.id, message_id)
+        if saved_prompt:
+            if await self.handover.wait_for_thread(thread.id) is not None:
+                await self.handover.wait_for_prompt(thread.id, message_id)
         session = self.sessions.get_by_thread(thread.id)
         if session is None:
+            if saved_prompt:
+                await self.post_thread_notice(
+                    thread.id, "Agent session is offline; approval was not delivered. Please try again after reconnecting."
+                )
+                return True
             return False
 
         for approval_id, pending in session.pending_approvals.items():
@@ -971,6 +1080,9 @@ class AgentSessionBridge:
                     emoji,
                     user,
                 )
+        if saved_prompt:
+            await self.post_thread_notice(thread.id, "This approval is no longer active.")
+            return True
         return False
 
     def thread_name_for(self, hello: SessionHello) -> str:

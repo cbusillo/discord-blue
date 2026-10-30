@@ -6,6 +6,7 @@ from discord.ext import commands
 
 from discord_blue.config import Config
 from discord_blue.health import DiscordGatewayHealth
+from discord_blue.gateway_handover import GatewayHandover
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=discord.Guild | discord.TextChannel)
@@ -19,15 +20,21 @@ class HomeCommandTree(discord.app_commands.CommandTree["BlueBot"]):
         return interaction.guild_id == self.client.config.discord.guild_id and bool(interaction.guild_id)
 
     async def on_error(self, interaction: discord.Interaction["BlueBot"], error: discord.app_commands.AppCommandError) -> None:
-        await super().on_error(interaction, error)
-        if isinstance(error, discord.app_commands.CheckFailure):
-            message = "You do not have permission to use this command."
-        else:
-            message = "That command failed. Details are in the bot's log."
-        if interaction.response.is_done():
-            await interaction.followup.send(message, ephemeral=True)
-        else:
-            await interaction.response.send_message(message, ephemeral=True)
+        if await self.client.handover.interaction_error(interaction, error):
+            return
+        try:
+            await super().on_error(interaction, error)
+            if isinstance(error, discord.app_commands.CheckFailure):
+                message = "You do not have permission to use this command."
+            else:
+                message = "That command failed. Details are in the bot's log."
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+        except discord.NotFound as response_error:
+            if not await self.client.handover.interaction_error(interaction, response_error):
+                raise
 
 
 class BlueBot(commands.Bot):
@@ -46,6 +53,24 @@ class BlueBot(commands.Bot):
             enable_debug_events=True,
             max_ratelimit_timeout=MAX_RATELIMIT_SLEEP_SECONDS,
         )
+        self.handover = GatewayHandover(self, super().close)
+
+    async def start(self, token: str, *, reconnect: bool = True) -> None:
+        await self.handover.start(token, reconnect=reconnect)
+
+    async def close(self) -> None:
+        await self.handover.close()
+
+    async def on_resumed(self) -> None:
+        await self.handover.resumed()
+
+    async def on_error(self, event_method: str, /, *args: object, **kwargs: object) -> None:
+        import asyncio
+
+        current = asyncio.current_task()
+        if current in self.handover.replay or current in self.handover.startup:
+            self.handover.status = "failed"
+        await super().on_error(event_method, *args, **kwargs)
 
     def dispatch(self, event: str, /, *args: object, **kwargs: object) -> None:
         # Observe synchronously: queued callbacks must not revive proof after disconnect.
@@ -54,7 +79,9 @@ class BlueBot(commands.Bot):
         elif event == "socket_raw_receive" and args:
             raw = args[0]
             if isinstance(raw, str):
-                self.gateway_health.receive(raw)
+                payload = self.gateway_health.receive(raw)
+                if payload is not None:
+                    self.handover.observe(payload)
         # Gate before Cog listeners and prefix parsing, including unrelated loaded doodads.
         guild_ids = []
         for obj in args:
@@ -72,6 +99,14 @@ class BlueBot(commands.Bot):
                 super().dispatch("conversation_message", *args, **kwargs)
             elif event == "message_edit":
                 super().dispatch("conversation_message_edit", *args, **kwargs)
+            elif event == "raw_message_edit" and args:
+                edited = args[0]
+                if (
+                    isinstance(edited, discord.RawMessageUpdateEvent)
+                    and edited.cached_message is None
+                    and edited.message is not None
+                ):
+                    super().dispatch("conversation_message_edit", None, edited.message)
             elif event == "raw_message_delete":
                 super().dispatch("conversation_message_delete", *args, **kwargs)
             elif event == "guild_join":
@@ -110,8 +145,6 @@ class BlueBot(commands.Bot):
 
         self.destination_guild = await self.blue_guild()
         self.bot_channel = await self.blue_bot_channel(self.destination_guild)
-
-        await self.bot_channel.send("Connected")
 
     async def on_signal(self, signal: int) -> None:
         logger.info(f"Received signal {signal}")

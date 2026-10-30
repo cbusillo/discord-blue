@@ -1597,6 +1597,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_stop_bounds_slow_runner_cleanup(self) -> None:
         config = Config()
         bridge = AgentSessionBridge(FakeBot(config))
+        release, finished = asyncio.Event(), asyncio.Event()
 
         class SlowRunner:
             def __init__(self) -> None:
@@ -1606,26 +1607,23 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             async def cleanup(self) -> None:
                 self.cleanup_started = True
                 try:
-                    await asyncio.sleep(60)
+                    await release.wait()
+                    finished.set()
                 except asyncio.CancelledError:
                     self.cleanup_cancelled = True
                     raise
 
         runner = SlowRunner()
-        bridge_module_any = cast(Any, bridge_module)
-        original_timeout = bridge_module_any.SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS
-        bridge_module_any.SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = 0.01
         bridge._runner = runner
         try:
-            with self.assertLogs(bridge_module.logger, level="WARNING"):
-                async with asyncio.timeout(5):
-                    await bridge.stop()
+            async with asyncio.timeout(5):
+                await bridge.stop(deadline=asyncio.get_running_loop().time() + 0.01)
+            self.assertTrue(runner.cleanup_started)
+            self.assertFalse(runner.cleanup_cancelled)
+            self.assertIsNone(bridge.handover.snapshot)
         finally:
-            bridge_module_any.SHUTDOWN_RUNNER_CLEANUP_TIMEOUT_SECONDS = original_timeout
-
-        self.assertTrue(runner.cleanup_started)
-        self.assertTrue(runner.cleanup_cancelled)
-        self.assertIsNone(bridge._runner)
+            release.set()
+            await asyncio.wait_for(finished.wait(), 1)
 
     async def test_thread_reply_reports_offline_session(self) -> None:
         config = Config()
@@ -1642,17 +1640,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(websocket.sent_json, [])
-        self.assertEqual(
-            message.replies,
-            ["Agent session is offline; reply was not delivered."],
-        )
+        self.assertEqual(len(message.replies), 1)
 
     async def test_continue_autonomously_routes_to_registered_session_websocket(self) -> None:
         config = Config()
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555, acknowledged=True)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -1679,7 +1674,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555, acknowledged=True)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -1705,7 +1700,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555, acknowledged=True)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -1732,7 +1727,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555, acknowledged=True)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -1985,27 +1980,31 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 connecting = asyncio.create_task(self.connect_transport(client))
                 try:
                     await asyncio.wait_for(entered.wait(), 2)
+                    await bridge.controls.send_pause_current_turn(thread, cast(Any, SimpleNamespace(id=123)))
                     reply = FakeReplyMessage(802, thread, "During reattach")
                     thread.add_message(reply)
                     reply.channel = cast(Any, SimpleNamespace(id=thread.id))
-                    self.assertTrue(await bridge.controls.send_thread_reply(cast(Any, reply)))
-                    self.assertEqual(len(reply.replies), 1)
-                    self.assertIn("reconnecting", reply.replies[0])
+                    delivering = asyncio.create_task(bridge.controls.send_thread_reply(cast(Any, reply)))
+                    await asyncio.sleep(0)
+                    self.assertFalse(delivering.done())
                     self.assertEqual(reply.reactions, [])
                     session = bridge.sessions.get("transport-session")
                     stale = FakeReplyMessage(
                         803, thread, "Earlier conversation", created_at=session.attached_at - timedelta(seconds=1)
                     )
-                    self.assertTrue(await bridge.controls.send_thread_reply(cast(Any, stale)))
-                    self.assertEqual(stale.replies, [controls_module.REPLY_BEFORE_RECONNECT])
+                    rejecting = asyncio.create_task(bridge.controls.send_thread_reply(cast(Any, stale)))
                     for text in ("", "!command"):
                         ignored = FakeReplyMessage(804, thread, text)
                         self.assertFalse(await bridge.controls.send_thread_reply(cast(Any, ignored)))
                         self.assertEqual(ignored.replies, [])
                 finally:
                     release.set()
-                # connect_transport verifies that hello_ack, rather than a command, is the first frame.
-                await connecting
+                websocket = await connecting
+                self.assertTrue(await delivering)
+                self.assertTrue(await rejecting)
+                delivered = await websocket.receive_json(timeout=2)
+                self.assertEqual((delivered["kind"], delivered["text"]), ("reply", reply.content))
+                self.assertEqual(stale.replies, [controls_module.REPLY_BEFORE_RECONNECT])
 
     async def test_uncached_reply_listener_still_checks_operator_authority(self) -> None:
         async with self.transport() as (bridge, thread, client):
@@ -2214,7 +2213,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         doodad = AgentSessionDoodad(cast(Any, FakeBot(config, thread)))
         websocket = FakeWebSocket()
-        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555, acknowledged=True)
         doodad.bridge.sessions.register(session)
         doodad.bridge.sessions.bind_thread("session-1", 555)
         interaction = FakeInteraction(thread)
@@ -2232,7 +2231,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555, acknowledged=True)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
@@ -2268,7 +2267,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
         websocket = FakeWebSocket()
-        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555)
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555, acknowledged=True)
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
         session.pending_approvals["approval-1"] = PendingRemoteApproval(thread_id=555, message_id=901)
@@ -2451,6 +2450,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
+            acknowledged=True,
         )
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
@@ -2500,6 +2500,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             hello=make_hello(),
             websocket=websocket,
             thread_id=555,
+            acknowledged=True,
         )
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)

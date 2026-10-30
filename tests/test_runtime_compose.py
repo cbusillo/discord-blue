@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -144,6 +145,32 @@ class RuntimeComposeTests(unittest.TestCase):
                 if not overrides:
                     self.assertIn("runtime-inputs-qualified", result.stdout)
 
+    def test_container_signal_reaches_python(self) -> None:
+        self.override.write_text(
+            json.dumps({"services": {"discord-blue": {"command": ["/app/.venv/bin/python", "-c", SHUTDOWN_PROBE], "restart": "no"}}})
+        )
+        self.command.extend(["--file", str(self.override)])
+        self.assertEqual(self.compose("up", "--detach", "discord-blue").returncode, 0)
+        container = self.compose("ps", "--quiet", "discord-blue").stdout.strip()
+        deadline = time.monotonic() + 15
+        logs = ""
+        while "probe-ready" not in logs and time.monotonic() < deadline:
+            logs = subprocess.run(
+                ["docker", "logs", container], env=self.env, text=True, capture_output=True, check=True, timeout=10
+            ).stdout
+            time.sleep(0.05)
+        self.assertIn("probe-ready", logs)
+        self.assertEqual(self.compose("stop", "discord-blue").returncode, 0)
+        logs = subprocess.run(
+            ["docker", "logs", container], env=self.env, text=True, capture_output=True, check=True, timeout=10
+        ).stdout
+        self.assertIn("probe-finished", logs)
+        result = subprocess.run(
+            ["docker", "inspect", container], env=self.env, capture_output=True, text=True, check=True, timeout=10
+        )
+        (stopped,) = json.loads(result.stdout)
+        self.assertEqual(stopped["State"]["ExitCode"], 0)
+
 
 ENTRYPOINT_PROBE = """
 print("probe-started", flush=True)
@@ -155,6 +182,7 @@ from pathlib import Path
 from unittest.mock import patch
 from discord_blue import __main__ as server
 from discord_blue.health import runtime_identity
+assert os.getpid() == 1
 
 class OfflineBot:
     def __init__(self, config):
@@ -190,4 +218,19 @@ try:
     print("runtime-inputs-qualified")
 finally:
     loop.close()
+"""
+
+
+SHUTDOWN_PROBE = """
+import os
+import signal
+assert os.getpid() == 1
+assert os.getuid() != 0
+def stop(_signal: int, _frame: object) -> None:
+    print("probe-finished", flush=True)
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, stop)
+print("probe-ready", flush=True)
+while True:
+    signal.pause()
 """

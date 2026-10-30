@@ -156,6 +156,21 @@ Pending snapshots coalesce in memory, including while the volume is stalled.
 Maintenance retries a failed snapshot. Attach and shutdown bound their wait for
 the writer; a write already running finishes without cancellation.
 
+The private gateway checkpoint retains the Discord session and sequence,
+same-epoch attachment time and prompt message routing IDs. Native clients resend
+pending requests on reconnect, so request contents, views, partial answers and
+command state are rebuilt rather than serialized. Saved IDs alone never
+authorize an action: the native session must reattach and resend its pending
+request before an old approval reaction can run. Stable control IDs are derived
+from that native request's identity.
+
+The checkpoint also retains external conversation input, reply deduplication
+and observed-message context, bound to its destination and native epoch. It
+can contain private conversation text; keep it on the private HOME volume and
+out of logs and exported health evidence. Startup consumes it before replay,
+refuses replay when deletion fails, and ignores records older than one minute.
+The initial checkpoint-only release keeps replay disabled until its acceptance.
+
 Server shutdown keeps live threads, members and notifications intact and closes
 only their WebSockets. On startup, live, attaching and grace records receive
 at least a fresh disconnect-grace window (five minutes), preserving a longer

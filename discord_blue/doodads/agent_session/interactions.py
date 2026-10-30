@@ -13,7 +13,12 @@ import discord
 
 from discord_blue.doodads.agent_session.cards import notice_card
 from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
-from discord_blue.doodads.agent_session.controls import REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY, SessionControls
+from discord_blue.doodads.agent_session.controls import (
+    REACTION_APPROVAL_APPROVE,
+    REACTION_APPROVAL_DENY,
+    SessionControls,
+    defer_control,
+)
 from discord_blue.doodads.agent_session.formatting import strip_assistant_markers
 from discord_blue.doodads.agent_session.messages import (
     agent_session_allowed_mentions,
@@ -47,6 +52,14 @@ logger = logging.getLogger(__name__)
 
 MAX_INPUT_QUESTIONS = 5
 INPUT_ANSWER_PREVIEW_LIMIT = 180
+
+
+def bind_prompt_controls(view: discord.ui.LayoutView, identity: str) -> None:
+    for item in view.walk_children():
+        if isinstance(item, (discord.ui.Button, discord.ui.Select)):
+            question = getattr(item, "question", None)
+            key = getattr(item, "decision", None) or (question.id if question is not None else "")
+            item.custom_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{identity}:{type(item).__name__}:{key}").hex
 
 
 class ApprovalButton(discord.ui.Button[discord.ui.LayoutView]):
@@ -84,6 +97,7 @@ class ApprovalView(discord.ui.LayoutView):
                 accent_color=0xF0B232,
             )
         )
+        bind_prompt_controls(self, f"{approval.session_id}:{approval.session_epoch}:{approval.approval_id}")
 
 
 class RequestUserInputSelect(discord.ui.Select[discord.ui.LayoutView]):
@@ -206,6 +220,7 @@ class RequestUserInputView(discord.ui.LayoutView):
             children.append(discord.ui.ActionRow(AnswerTogetherButton(self)))
         children.append(discord.ui.ActionRow(RequestUserInputSubmitButton(self), RequestUserInputCancelButton(self)))
         self.add_item(discord.ui.Container(*children, accent_color=0xF0B232))
+        bind_prompt_controls(self, f"{request.session_id}:{request.session_epoch}:{request.turn_id}:{request.call_id}")
 
     def question_text(self, question: RequestUserInputQuestion) -> str:
         answer = self.answers.get(question.id, "")
@@ -314,6 +329,8 @@ class InteractionHooks(Protocol):
     sessions: AgentSessionRegistry
     controls: SessionControls
 
+    def bot_user_id(self) -> int | None: ...
+
     def is_operator(self, user: discord.User | discord.Member) -> bool: ...
 
     async def post_thread_notice(self, thread_id: int, text: str) -> None: ...
@@ -358,7 +375,19 @@ class SessionInteractions:
                 pending.decision, pending.decided_by = None, None
         return None
 
-    async def handle_approval_request(self, approval: RemoteApprovalRequest) -> None:
+    async def prompt_message(self, channel: discord.Thread, view: discord.ui.LayoutView, message_id: int | None) -> discord.Message:
+        if message_id is not None:
+            try:
+                message = await channel.fetch_message(message_id)
+            except discord.NotFound:
+                pass
+            else:
+                if message.author.id == self.bridge.bot_user_id():
+                    await message.edit(view=view, allowed_mentions=agent_session_allowed_mentions())
+                    return message
+        return await send_agent_session_message(channel, view=view, silent=False)
+
+    async def handle_approval_request(self, approval: RemoteApprovalRequest, *, message_id: int | None = None) -> None:
         session = self.bridge.sessions.get(approval.session_id)
         if session is None or session.thread_id is None:
             logger.warning("Agent session approval for unknown session: %s", approval.session_id)
@@ -391,7 +420,7 @@ class SessionInteractions:
             return
 
         view = ApprovalView(self, approval, content[:DISCORD_MESSAGE_LIMIT])
-        message = await send_agent_session_message(channel, view=view, silent=False)
+        message = await self.prompt_message(channel, view, message_id)
         previous = session.pending_approvals.get(approval.approval_id)
         if previous is not None and previous.view is not None:
             previous.view.stop()
@@ -419,7 +448,7 @@ class SessionInteractions:
         session.last_status_message = detail
         self.bridge.controls.show_activity(session)
 
-    async def handle_request_user_input(self, request: RemoteRequestUserInput) -> None:
+    async def handle_request_user_input(self, request: RemoteRequestUserInput, *, message_id: int | None = None) -> None:
         session = self.bridge.sessions.get(request.session_id)
         if session is None or session.thread_id is None:
             logger.warning("Agent session request_user_input for unknown session: %s", request.session_id)
@@ -457,11 +486,7 @@ class SessionInteractions:
         if view.content_length() + answer_budget > 4000:
             await self.user_input_stays_native(session)
             return
-        message = await send_agent_session_message(
-            channel,
-            view=view,
-            silent=False,
-        )
+        message = await self.prompt_message(channel, view, message_id)
         view.message_id = message.id
         session.pending_user_inputs[request.call_id] = PendingRemoteUserInput(
             thread_id=session.thread_id,
@@ -492,7 +517,7 @@ class SessionInteractions:
         session = self.bridge.sessions.get(session_id)
         if session is None or session.websocket.closed:
             await interaction.response.send_message(
-                "Agent session is offline; answer was not delivered.",
+                "Agent session is offline; answer was not delivered. Please try again after reconnecting.",
                 ephemeral=True,
             )
             return None
@@ -540,6 +565,8 @@ class SessionInteractions:
         if context is None:
             return
         session, pending = context
+        if not await defer_control(interaction):
+            return
         command_id = str(uuid.uuid4())
         pending_command = PendingRemoteCommand(
             thread_id=pending.thread_id,
@@ -558,7 +585,7 @@ class SessionInteractions:
             issued_by=str(interaction.user.id),
         )
         if error := await self.bridge.controls.dispatch_command(session, command, pending_command, input_pending=pending):
-            await interaction.response.send_message(error, ephemeral=True)
+            await interaction.followup.send(error, ephemeral=True)
             return
         async with pending.ui_lock:
             if (
@@ -566,11 +593,11 @@ class SessionInteractions:
                 or self.bridge.sessions.get(session_id) is not session
                 or session.pending_user_inputs.get(call_id) is not pending
             ):
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "Answer sent; this prompt is no longer active. Check the native TUI for its outcome.", ephemeral=True
                 )
                 return
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=None,
                 view=notice_card(self.format_request_user_input_pending(interaction.user, cancelled=cancelled)),
                 allowed_mentions=agent_session_allowed_mentions(),
@@ -595,7 +622,7 @@ class SessionInteractions:
         session = self.bridge.sessions.get(session_id)
         if session is None or session.websocket.closed:
             await interaction.response.send_message(
-                "Agent session is offline; approval was not delivered.",
+                "Agent session is offline; approval was not delivered. Please try again after reconnecting.",
                 ephemeral=True,
             )
             return
@@ -618,7 +645,8 @@ class SessionInteractions:
             await interaction.response.send_message("This approval has already been answered.", ephemeral=True)
             return
 
-        await interaction.response.defer()
+        if not await defer_control(interaction):
+            return
         if error := await self.dispatch_approval(session, pending, approval_id, decision, interaction.user.id):
             await interaction.followup.send(error, ephemeral=True)
             return
@@ -659,7 +687,9 @@ class SessionInteractions:
             return True
         if session.websocket.closed:
             await self.bridge.controls.remove_message_reaction(thread, pending.message_id, emoji, user)
-            await self.bridge.post_thread_notice(thread.id, "Agent session is offline; approval was not delivered.")
+            await self.bridge.post_thread_notice(
+                thread.id, "Agent session is offline; approval was not delivered. Please try again after reconnecting."
+            )
             return True
 
         decision: Literal["approved", "denied"]
