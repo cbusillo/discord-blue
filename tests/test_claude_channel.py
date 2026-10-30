@@ -13,20 +13,13 @@ from aiohttp.test_utils import TestServer
 
 from discord_blue.claude_channel.__main__ import run_channel
 from discord_blue.claude_channel.mcp import METHOD_NOT_FOUND, PROTOCOL_VERSIONS
-from discord_blue.claude_channel.session import CAPABILITIES, CHANNEL, PERMISSION_REQUEST, WAITING_LOCALLY, Identity, waiting_message
+from discord_blue.claude_channel.session import CAPABILITIES, CHANNEL, WAITING_LOCALLY, Identity, waiting_message
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.doodads.agent_session.protocol import REMOTE_ACTIONS, SessionHello
 from tests.fakes_discord_blue import TOKEN, FakeDiscordBlue
 
 Json = dict[str, Any]
 IDENTITY = Identity(session_id="433c3568-3ee5-46df-8728-9756255b9028", cwd="/work/project", branch="fix/login", pid=4242)
-# The permission request Claude Code 2.1.284 sent in the spike, verbatim.
-SPIKE_REQUEST = {
-    "request_id": "poeyw",
-    "tool_name": "Bash",
-    "description": "Create relay-test.txt file",
-    "input_preview": '{ "command": "touch relay-test.txt", "description": "Create relay-test.txt file" }',
-}
 
 
 class FakeClaudeCode:
@@ -87,9 +80,9 @@ class FakeClaudeCode:
 
 @asynccontextmanager
 async def running_channel(
-    *, configured: bool = True, identity: Identity = IDENTITY
+    *, configured: bool = True, identity: Identity = IDENTITY, features: list[str] | None = None
 ) -> AsyncIterator[tuple[FakeClaudeCode, FakeDiscordBlue]]:
-    discord = FakeDiscordBlue()
+    discord = FakeDiscordBlue(features)
     app = web.Application()
     app.router.add_get("/agent-session/connect", discord.connect)
     async with TestServer(app, host="127.0.0.1") as server:
@@ -144,8 +137,7 @@ class ClaudeChannelTests(unittest.IsolatedAsyncioTestCase):
             unknown = await claude.request("resources/list")
 
         result = initialized["result"]
-        channel: Json = {"claude/channel": {}, "claude/channel/permission": {}}
-        self.assertEqual(result["capabilities"], {"experimental": channel, "tools": {}})
+        self.assertEqual(result["capabilities"], {"experimental": {"claude/channel": {}}, "tools": {}})
         self.assertEqual(result["protocolVersion"], "2025-11-25")
         # Claude Code registers no channel that negotiated the 2026-07-28 revision.
         self.assertIn(newest, PROTOCOL_VERSIONS)
@@ -178,23 +170,6 @@ class ClaudeChannelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(injected, {"content": "try again", "meta": {"command_id": "cmd-1"}})
         self.assertEqual(leftover, [])
 
-    async def test_a_permission_prompt_is_announced_but_only_the_terminal_can_answer_it(self) -> None:
-        async with running_channel() as (claude, discord):
-            await claude.initialize()
-            hello = await discord.next("hello")
-            claude.send({"method": PERMISSION_REQUEST, "params": SPIKE_REQUEST})
-            waiting = await discord.next()
-            refused = await discord.control(decision(hello, "poeyw", "approved"))
-            leftover = await claude.settle()
-
-        self.assertEqual((waiting["type"], waiting["message"]), ("status_changed", f"{WAITING_LOCALLY} (Bash)"))
-        # Nothing from the preview or description reaches Discord.
-        self.assertNotIn("relay-test", json.dumps(waiting))
-        self.assertNotIn("approval_decision", CAPABILITIES)
-        self.assertEqual(refused["type"], "approval_decision_reject")
-        # No permission verdict ever goes back to Claude Code.
-        self.assertEqual(leftover, [])
-
     async def test_ending_the_claude_session_closes_the_discord_session(self) -> None:
         async with running_channel() as (claude, discord):
             await claude.initialize()
@@ -221,7 +196,6 @@ class WaitingMessageTests(unittest.TestCase):
             ("mcp__github__create_issue", "mcp__github__create_issue"),
             ("Bash`\n```\n@everyone", "a tool"),
             ("", "a tool"),
-            (None, "a tool"),
         ):
             with self.subTest(tool_name=tool_name):
-                self.assertEqual(waiting_message({"tool_name": tool_name}), f"{WAITING_LOCALLY} ({shown})")
+                self.assertEqual(waiting_message(tool_name), f"{WAITING_LOCALLY} ({shown})")

@@ -339,8 +339,10 @@ Prompt UI edits serialize with retirement, and retired input commands cannot
 repaint newer prompts when delayed acknowledgements arrive. Capability names
 continue to describe accepted outbound actions, not incoming event support.
 
-Question objects carry `id`, `header`, `question`, `isOther`, `isSecret`, and
-`options` (objects with `label` and `description`). Do not send secrets through
+Question objects carry `id`, `header`, `question`, `isOther`, `isSecret`,
+`options` (objects with `label` and `description`), and optionally
+`multiSelect`, only to servers that list the multi_select feature; a
+multi-select answer lists every chosen label. Do not send secrets through
 Discord; the existing form is not a secret-entry channel. The Discord form
 uses the same Components V2 cards as session status. Each question has a named
 picker or a write-answer form. Selecting an option updates the card; **Send
@@ -406,8 +408,8 @@ Use real Codex and Claude Code sessions to verify hello acknowledgement, mirrore
 output, and reconnect without duplicate threads or repeated command execution.
 Exercise only each client's advertised controls: Codex supports reply, pause,
 status, command/file-change/turn-scoped permission approvals, new sessions and user input; the Claude channel supports status,
-plus replies when the channel is enabled, with permission decisions kept in the
-terminal. Neither client advertises end-session or autonomous continuation controls;
+tool approvals (`approval_kind` `tool` when the server lists `tool_content`) and user input, plus replies when the
+channel is enabled. Neither client advertises end-session or autonomous continuation controls;
 new-session is supported by Codex only. The Server
 controls table describes the protocol surface, not a promise that every client
 implements it. Unit/transport tests validate the server and local clients; live
@@ -427,6 +429,10 @@ the native TUI without approve/deny reactions. Older servers are never sent
 these prompts. The existing approval_decision, acknowledgement and resolution
 messages bind to an opaque approval_id for that exact snapshot and session
 epoch. A changed patch invalidates the old prompt.
+
+Servers that also advertise tool_content accept approval_kind tool: a JSON
+snapshot of one Claude Code tool call, `{"tool": name, "input": {...}}`, shown
+the same way. Approving allows that call once with exactly that input.
 
 The operator flow and Codex-specific behavior for `new_session` are maintained
 in the [Codex bridge guide](../README.md#codex-bridge-runs-on-the-mac-next-to-codex).

@@ -15,7 +15,7 @@ import aiohttp
 
 from discord_blue.claude_channel.mcp import LINE_LIMIT, ChannelServer, Json, Output
 from discord_blue.claude_channel.conversation import CMConversation, INSTRUCTIONS as CM_INSTRUCTIONS, REPLY_TOOL
-from discord_blue.claude_channel.session import HOOK_TOOL, PERMISSION_REQUEST, ClaudeSession, Identity, host_label
+from discord_blue.claude_channel.session import HOOK_TOOL, ClaudeSession, Identity, host_label
 from discord_blue.bridge_version import bridge_version
 from discord_blue.codex_bridge.config import DEFAULT_CONFIG_PATH, BridgeConfig, load_config
 
@@ -49,15 +49,8 @@ async def run_channel(
     *,
     conversation: bool = False,
 ) -> None:
-    # Without a session to mirror, relay nothing: an unanswered relay would only add noise.
-    mirroring = config is not None and identity is not None
     server = ChannelServer(
-        reader,
-        output,
-        name="dui",
-        version="0.1.0",
-        instructions=CM_INSTRUCTIONS if conversation else INSTRUCTIONS,
-        permission_relay=mirroring and not conversation,
+        reader, output, name="dui", version="0.1.0", instructions=CM_INSTRUCTIONS if conversation else INSTRUCTIONS
     )
     if config is None or identity is None:
         # The plugin's hooks still call their tool; answer them quietly rather than fail every hook.
@@ -70,7 +63,6 @@ async def run_channel(
         server.add_tool(REPLY_TOOL, session.reply_tool)
     else:
         session = ClaudeSession(config, identity, server.notify)
-        server.on_notification(PERMISSION_REQUEST, session.on_permission_request)
     server.add_tool(HOOK_TOOL, session.on_hook_call)
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=20)) as http:
         mirror = asyncio.create_task(session.run(http), name="claude-channel-session")

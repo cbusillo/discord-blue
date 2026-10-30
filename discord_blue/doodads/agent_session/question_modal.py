@@ -21,6 +21,7 @@ def questionnaire_fits_modal(request: RemoteRequestUserInput) -> bool:
         and sum(1 + bool(q.options and q.is_other) for q in request.questions) <= 5
         and all(
             not q.is_secret
+            and not q.multi_select
             and _text_length(q.header or q.id) + (8 if q.options and q.is_other else 0) <= 45
             and _text_length(q.question) <= 100
             and (not q.options or 2 <= len(q.options) + q.is_other <= 10)

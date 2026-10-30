@@ -115,16 +115,19 @@ class RequestUserInputSelect(discord.ui.Select[discord.ui.LayoutView]):
             for index, option in enumerate(question.options)
         ]
         placeholder = (question.header or question.question or "Choose an answer")[:150]
-        super().__init__(placeholder=placeholder, options=options)
+        super().__init__(placeholder=placeholder, options=options, max_values=len(options) if question.multi_select else 1)
         self.parent_view = parent_view
         self.question = question
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        if not self.values:
+        labels = [
+            self.question.options[int(value)].label
+            for value in self.values
+            if value.isdecimal() and int(value) < len(self.question.options)
+        ]
+        if not labels:
             return
-        value = self.values[0]
-        if value.isdecimal() and int(value) < len(self.question.options):
-            await self.parent_view.edit_answer(interaction, self.question.id, self.question.options[int(value)].label)
+        await self.parent_view.edit_answer(interaction, self.question.id, labels if self.question.multi_select else labels[0])
 
 
 class RequestUserInputAnswerModal(discord.ui.Modal):
@@ -200,6 +203,8 @@ class RequestUserInputView(discord.ui.LayoutView):
         self.session_id = session_id
         self.request = request
         self.answers: dict[str, str] = {}
+        # A multi-select question's choices; its entry in answers shows them joined.
+        self.picks: dict[str, list[str]] = {}
         self.message_id: int | None = None
 
         self.question_texts: dict[str, discord.ui.TextDisplay] = {}
@@ -251,7 +256,7 @@ class RequestUserInputView(discord.ui.LayoutView):
             is not None
         )
 
-    async def edit_answer(self, interaction: discord.Interaction, question_id: str, answer: str) -> None:
+    async def edit_answer(self, interaction: discord.Interaction, question_id: str, answer: str | list[str]) -> None:
         context = await self.interactions.user_input_context(
             cast(discord.Interaction[BlueBot], interaction),
             self.session_id,
@@ -273,20 +278,33 @@ class RequestUserInputView(discord.ui.LayoutView):
                 allowed_mentions=agent_session_allowed_mentions(),
             )
 
-    def set_answer(self, question_id: str, answer: str) -> None:
+    def set_answer(self, question_id: str, answer: str | list[str]) -> None:
+        if isinstance(answer, list):
+            self.picks[question_id] = answer
+            answer = ", ".join(answer)
         self.answers[question_id] = answer
         for question in self.request.questions:
             if question.id == question_id:
                 self.question_texts[question_id].content = self.question_text(question)
         for item in self.walk_children():
             if isinstance(item, RequestUserInputSelect) and item.question.id == question_id:
+                picks = self.picks.get(question_id) if item.question.multi_select else None
                 selected = False
                 for index, option in enumerate(item.options):
-                    option.default = not item.question.is_secret and not selected and item.question.options[index].label == answer
+                    label = item.question.options[index].label
+                    if picks is not None:
+                        option.default = label in picks
+                        continue
+                    option.default = not item.question.is_secret and not selected and label == answer
                     selected = selected or option.default
 
     def response_payload(self) -> dict[str, object]:
-        return {"answers": {question.id: {"answers": [self.answers.get(question.id, "")]} for question in self.request.questions}}
+        return {
+            "answers": {
+                question.id: {"answers": self.picks.get(question.id) or [self.answers.get(question.id, "")]}
+                for question in self.request.questions
+            }
+        }
 
     async def submit(self, interaction: discord.Interaction[BlueBot]) -> None:
         missing = [

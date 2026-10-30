@@ -13,7 +13,7 @@ APPROVAL_COMMAND_DISPLAY_LIMIT = 1600
 
 # What this server supports beyond the base protocol, listed in hello_ack as `features`. A client must not
 # rely on a feature the server did not list: an older server ignores it.
-SERVER_FEATURES: frozenset[str] = frozenset({"command_text", "approval_content"})
+SERVER_FEATURES: frozenset[str] = frozenset({"command_text", "approval_content", "tool_content", "multi_select"})
 
 
 def command_text_displayable(text: str) -> bool:
@@ -22,13 +22,15 @@ def command_text_displayable(text: str) -> bool:
 
 
 def format_content_approval(kind: str, text: str) -> str:
-    label = {"file_change": "File change", "permissions": "Permissions (this turn only)"}.get(kind, "Unsupported")
+    label = {"file_change": "File change", "permissions": "Permissions (this turn only)", "tool": "Tool call"}.get(
+        kind, "Unsupported"
+    )
     return f"**{label} approval requested**\nQuick review: `✅` approve · `✖️` deny\n\n```json\n{text}\n```"
 
 
 def approval_content_displayable(kind: str, text: str) -> bool:
     return (
-        kind in {"file_change", "permissions"}
+        kind in {"file_change", "permissions", "tool"}
         and bool(text)
         and "```" not in text
         and len(format_content_approval(kind, text).encode("utf-16-le")) // 2 <= DISCORD_MESSAGE_LIMIT
@@ -194,6 +196,7 @@ class RequestUserInputQuestion:
     is_other: bool
     is_secret: bool
     options: list[RequestUserInputQuestionOption]
+    multi_select: bool = False
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "RequestUserInputQuestion":
@@ -208,6 +211,7 @@ class RequestUserInputQuestion:
             is_other=bool(payload.get("isOther") or False),
             is_secret=bool(payload.get("isSecret") or False),
             options=options,
+            multi_select=payload.get("multiSelect") is True and bool(options),
         )
 
 

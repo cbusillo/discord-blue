@@ -353,8 +353,8 @@ both new answer cards and older text answers, so it does not repost them.
 waiting on you first, then uncertain or failed sessions, working sessions and
 completed sessions. Each attached session has an **Open thread** button.
 Disconnected sessions are excluded. Status and Harness menus filter both Codex
-and Claude sessions. **Waiting on you** includes unconfirmed approvals that
-need a terminal check. **Previous**, **Next**, and **Refresh** update the same
+and Claude sessions. **Waiting on you** includes sessions waiting on a
+terminal check. **Previous**, **Next**, and **Refresh** update the same
 private message from the live session list. Changing a filter returns to page
 one; Refresh preserves the current page when it still exists. The snapshot
 time shows when the list was read. Controls expire after ten minutes idle;
@@ -562,8 +562,9 @@ substantial typed prompt (tags such as pasted content and go-aheads such as
 "continue" don't count), else a non-default git branch. Labels are short, cut at
 a word boundary. It mirrors typed prompts and each turn's final answer; an answer
 that another Stop hook rejects, sending Claude back to rewrite it, is never posted. A Discord reply
-becomes the session's next prompt. When Claude asks for a tool permission, the
-thread says which tool is waiting; approve or deny it in the terminal. The thread archives when the session exits.
+becomes the session's next prompt. When Claude opens a dialog in the terminal,
+asking to use a tool or asking you a question, the thread shows the same request
+and you can answer from either place; the first answer counts. The thread archives when the session exits.
 
 One-time setup on the Mac:
 
@@ -589,18 +590,26 @@ Behaviour and limits:
   `--dangerously-load-development-channels` flag enables one, the flag's
   warning appears on every launch, and the flag and protocol may change.
 - The plugin loads in every session. A session started without the flag is
-  still mirrored, but Claude Code drops channel messages, so the thread offers
-  no replies and says how to resume with the flag.
-- Discord cannot pause, interrupt or end a Claude Code turn, and cannot answer
-  Claude's multiple-choice questions. A reply goes to Claude Code as soon as it
+  still mirrored and its dialogs can be answered from Discord, but Claude Code
+  drops channel messages, so the thread offers no replies and says how to
+  resume with the flag.
+- Discord cannot pause, interrupt or end a Claude Code turn. A reply goes to Claude Code as soon as it
   arrives; while Claude is working, Claude Code queues it like a typed prompt.
   A reply still in that queue when you run `/clear` or `/resume` can reach the
   next conversation.
-- Discord cannot approve or deny Claude Code's permission prompts. Claude
-  Code's channel permission request carries only a display preview and no
-  tool-call ID, so a Discord decision could not be tied reliably to the call
-  it would allow. The notice names only the tool: the preview can hold secrets
-  Claude Code does not mask, such as passwords or private keys.
+- Each dialog reaches the channel as the plugin's `PermissionRequest` hook
+  call, which waits while the dialog is open, for up to a day. A Discord answer
+  becomes that call's decision, so it can only apply to that dialog. A command
+  shows as a command; any other tool shows its exact input. Approve allows that
+  call once with exactly the input shown; Discord never offers "always allow".
+  A request Discord cannot show whole stays in the terminal, and the thread says
+  which tool is waiting there.
+- Claude's questions appear as question cards. A multi-select question offers
+  only its listed options in Discord; type your own answer in the terminal.
+  Cancel declines the question.
+- Claude Code tells no hook when you reject a request in the terminal, so the
+  card stays until the turn moves on. Answering it then says it was already
+  answered in the terminal and closes it.
 - `/clear` or `/resume` inside a session keeps its thread but reconnects under a
   new epoch, so replies sent for the previous conversation are rejected. Discord Blue also refuses a reply written before the session last
   reconnected, and says so. A reply received while the session is still attaching
@@ -633,8 +642,8 @@ secret questions, too many fields, and choices beyond Discord's radio limits
 use the picker instead of a shortened form. These forms require discord.py 2.7.
 
 Reply about this works with Codex and enabled Claude channels; Claude still
-holds busy replies until idle. Answer together is for Codex structured questions.
-It does not add Claude native question responses or permission decisions.
+holds busy replies until idle. Answer together covers Codex structured questions
+and Claude's single-choice questions; a multi-select question uses its picker.
 Discord controls the final appearance on a phone.
 
 ## Numbered Question cards
@@ -1019,6 +1028,4 @@ Typing runs as one background task per working session. It stops between
 requests rather than cancelling one, so a slow or failed typing request never
 holds native heartbeats, and it ends when the session stops working,
 disconnects or closes. A paused turn, a question or a terminal approval stops
-typing. Claude permission previews have no tool-call identifier, so later tool
-activity shows **Check terminal** in `/code status`, without typing, until
-completion confirms the outcome.
+typing.
