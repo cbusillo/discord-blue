@@ -864,6 +864,8 @@ class AgentSessionBridge:
             case "command_ack":
                 logger.info("Agent session command ack: %s", payload.get("command_id"))
                 await self.controls.handle_command_ack(payload)
+                if (call_id := await self.interactions.handle_user_input_ack(payload)) is not None:
+                    self.handover.retire(session.session_id, "inputs", call_id)
             case "command_reject":
                 logger.warning("Agent session command reject: %s", payload)
                 await self.controls.handle_command_reject(payload)

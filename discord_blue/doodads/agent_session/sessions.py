@@ -56,6 +56,10 @@ class PendingRemoteUserInput:
     turn_id: str
     call_id: str
     submitted: bool = False
+    # Who sent the answer from Discord and whether it was a cancel, shown once the agent accepts it.
+    answered_by: str | None = None
+    cancelled: bool = False
+    accepted: bool = False
     retired: bool = False
     ui_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 

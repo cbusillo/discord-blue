@@ -2491,6 +2491,36 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Answer sent", visible_view_text(interaction.response.edit_kwargs[0]["view"]))
         self.assertNotIn("suppress_embeds", interaction.response.edit_kwargs[0])
 
+    async def test_an_accepted_answer_marks_its_card_answered_and_a_later_status_keeps_it(self) -> None:
+        thread = FakeThread(555)
+        websocket = FakeWebSocket()
+        bridge = AgentSessionBridge(FakeBot(Config(), thread))
+        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555, acknowledged=True)
+        bridge.sessions.register(session)
+        bridge.sessions.bind_thread("session-1", 555)
+        option = RequestUserInputQuestionOption(label="Safe", description="Run the full path")
+        question = RequestUserInputQuestion(
+            id="mode", header="Build mode", question="Choose a mode", is_other=False, is_secret=False, options=[option]
+        )
+        await bridge.interactions.handle_request_user_input(
+            RemoteRequestUserInput(
+                call_id="call-1", turn_id="turn-1", session_id="session-1", session_epoch="epoch-1", questions=[question]
+            )
+        )
+        card = await thread.fetch_message(session.pending_user_inputs["call-1"].message_id)
+        view = cast(Any, thread.sent_views[0])
+        view.set_answer("mode", "Safe")
+        await view.submit(cast(Any, FakeInteraction(thread)))
+        identity = {"session_id": "session-1", "session_epoch": "epoch-1"}
+
+        await bridge.handle_event(session, "command_ack", {**identity, "command_id": websocket.sent_json[0]["command_id"]})
+        answered = visible_view_text(card.view)
+        await bridge.handle_event(session, "status_changed", {**identity, "message": "Answered; continuing the turn."})
+
+        self.assertIn("Answered", answered)
+        self.assertNotIn("call-1", session.pending_user_inputs)
+        self.assertEqual(visible_view_text(card.view), answered)
+
     async def test_request_user_input_cancel_sends_empty_response(self) -> None:
         config = Config()
         thread = FakeThread(555)
