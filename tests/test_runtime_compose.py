@@ -26,10 +26,10 @@ class RuntimeComposeTests(unittest.TestCase):
             LAUNCHPLANE_IMAGE_REFERENCE=os.environ["DISCORD_BLUE_COMPOSE_TEST_IMAGE"],
             LAUNCHPLANE_SOURCE_GIT_REF="fictional-source",
             LAUNCHPLANE_RUNTIME_IDENTITY_JSON=json.dumps({"product": "fixture-bot", "environment": "testing"}),
-            DISCORD_BLUE_RUNTIME_CONFIG=(
-                '[discord]\nguild_id=123\nbot_channel_id=456\nloaded_doodads=["agent_session_doodad"]\n'
-                '[agent_session]\nenabled=true\nlisten_host="127.0.0.1"\nlisten_port=18787\n'
-            ),
+            DISCORD_BLUE_GUILD_ID="123",
+            DISCORD_BLUE_BOT_CHANNEL_ID="456",
+            DISCORD_BLUE_SPAWNED_CHANNEL_ID="654",
+            DISCORD_BLUE_AUTO_JOIN_USER_IDS="[789]",
             DISCORD_TOKEN="fictional-bot-value",
             AGENT_SESSION_TOKEN="fictional-bridge-value",
         )
@@ -121,7 +121,7 @@ class RuntimeComposeTests(unittest.TestCase):
         self.command.extend(["--file", str(self.override)])
         cases: tuple[dict[str, str], ...] = (
             {},
-            {"DISCORD_BLUE_RUNTIME_CONFIG": '[discord]\ntoken="fictional-do-not-persist"'},
+            {"DISCORD_BLUE_GUILD_ID": "fictional-do-not-persist"},
             {"DISCORD_BLUE_STATE_DIR": "/fictional-wrong-state"},
         )
         for overrides in cases:
@@ -140,7 +140,7 @@ class RuntimeComposeTests(unittest.TestCase):
                     self.assertNotIn("probe-started", result.stdout)
                 else:
                     self.assertIn("probe-started", result.stdout)
-                if "DISCORD_BLUE_RUNTIME_CONFIG" in overrides:
+                if "DISCORD_BLUE_GUILD_ID" in overrides:
                     self.assertIn("runtime-config-refused", result.stdout)
                 if not overrides:
                     self.assertIn("runtime-inputs-qualified", result.stdout)
@@ -193,9 +193,12 @@ class OfflineBot:
         assert config.discord.guild_id > 0 and config.discord.bot_channel_id > 0
         assert "agent_session_doodad" in config.discord.loaded_doodads
         assert config.agent_session.enabled
-        supplied = tomllib.loads(os.environ["DISCORD_BLUE_RUNTIME_CONFIG"])["agent_session"]
-        assert config.agent_session.listen_host == supplied["listen_host"]
-        assert config.agent_session.listen_port == supplied["listen_port"]
+        from discord_blue.runtime_config import runtime_overrides
+        defaults = runtime_overrides()["agent_session"]
+        assert config.agent_session.listen_host == defaults["listen_host"]
+        assert config.agent_session.listen_port == defaults["listen_port"]
+        assert config.agent_session.spawned_channel_id == int(os.environ["DISCORD_BLUE_SPAWNED_CHANNEL_ID"])
+        assert config.agent_session.auto_join_user_ids == json.loads(os.environ["DISCORD_BLUE_AUTO_JOIN_USER_IDS"])
         assert runtime_identity() == json.loads(os.environ["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"])
         config.debug = True
         config.save()

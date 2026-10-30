@@ -149,7 +149,7 @@ class Config(Serializable):
         except (FileNotFoundError, OSError, tomllib.TOMLDecodeError):
             logger.exception("Error loading configuration")
             exit(1)
-        overrides = runtime_overrides({"discord": self.discord, "agent_session": self.agent_session})
+        overrides = runtime_overrides()
         self._runtime_originals: dict[str, dict[str, Any]] = {}
         for section, values in overrides.items():
             original = data.get(section, {})

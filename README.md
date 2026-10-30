@@ -157,53 +157,46 @@ The image exposes port `8787`, and the local Compose file binds it to
 
 ### Managed server runtime inputs
 
-An isolated server can start from an empty state volume using runtime inputs
-delivered by Launchplane. `DISCORD_TOKEN` supplies `[discord].token` and
-`AGENT_SESSION_TOKEN` supplies the server's `[agent_session].token`. Both are
-optional overrides of local TOML, enabled only when `DISCORD_BLUE_RUNTIME_CONFIG`
-is supplied; a supplied empty credential refuses startup in that mode.
-The local bridge client separately supports `AGENT_SESSION_TOKEN`; supplying
-the server's value does not configure the client.
+An isolated server can start from an empty state volume using four non-secret
+lane settings delivered by Launchplane:
 
-`DISCORD_BLUE_RUNTIME_CONFIG` carries **non-secret TOML** settings in the
-`discord` and `agent_session` sections. Fields use their existing config types;
-unknown fields, other sections and `token` fields refuse startup. For example,
-with sample IDs that must be replaced by the lane's recorded isolated IDs:
+| Setting | Value |
+| --- | --- |
+| `DISCORD_BLUE_GUILD_ID` | Positive Discord guild ID |
+| `DISCORD_BLUE_BOT_CHANNEL_ID` | Positive main agent-session channel ID |
+| `DISCORD_BLUE_SPAWNED_CHANNEL_ID` | Positive spawned-session channel ID, distinct from the main channel |
+| `DISCORD_BLUE_AUTO_JOIN_USER_IDS` | JSON list of positive user IDs, for example `[789, 987]`; use `[]` for none |
 
-```toml
-[discord]
-guild_id = 123
-bot_channel_id = 456
-loaded_doodads = ["agent_session_doodad"]
+Managed servers load `agent_session_doodad`, enable the bridge, listen on
+`0.0.0.0:8787`, and use the `Agent Admin` operator role by default. The main
+bridge channel follows the bot channel setting, including when old local state
+names another channel. These managed defaults override local values in memory.
 
-[agent_session]
-enabled = true
-listen_host = "0.0.0.0"
-listen_port = 8787
-operator_role_name = "Agent Admin"
-auto_join_user_ids = [789]
-spawned_channel_id = 654
-```
+`DISCORD_TOKEN` supplies `[discord].token` and `AGENT_SESSION_TOKEN` supplies
+the server's `[agent_session].token`. They remain lane-managed secrets in their
+existing storage; existing local credentials can also satisfy startup. Supplied
+credentials trim surrounding whitespace and must be nonempty. The local bridge
+client separately supports `AGENT_SESSION_TOKEN`; supplying the server's value
+does not configure the client.
 
-Managed runtime mode requires a Discord token and positive guild/channel IDs
-from these inputs or existing local TOML, plus a bridge token when the bridge is
-enabled. Incomplete input refuses startup before any interactive setup or save.
-Runtime credential overrides trim surrounding whitespace, matching the client.
-
-Store the non-secret TOML as a lane runtime setting and the two credentials as
-that lane's managed secrets. The admin supplies secrets in Launchplane's
-signed-in screens. Use a separate state volume and testing identity; do not
-copy production state or credentials. Runtime overrides stay in memory and
-are excluded from subsequent TOML saves, which preserve existing local values.
-Without runtime inputs, local TOML and interactive setup retain their behavior.
+Any lane setting or `LAUNCHPLANE_RUNTIME_IDENTITY_JSON` enables managed mode.
+All four settings are required in that mode, even with existing local state.
+Missing or invalid settings, a missing Discord token, or a missing bridge token
+refuse startup before interactive setup or a save. Runtime overrides stay in
+memory and are excluded from subsequent TOML saves, preserving local values.
+Without managed inputs, local TOML and interactive setup retain their behavior.
 The local development Compose file does not deliver these inputs.
 
-`[agent_session].spawned_channel_id` is the separate channel for sessions the
-Supervisor or a lead launches. Set it in the lane's existing
-`DISCORD_BLUE_RUNTIME_CONFIG` through Launchplane's supported product-config
-dry-run/apply path. Use that lane's existing Discord guild and an already
-available channel; changing Discord access is a separate decision. Production
-uses the setting only through a decided, gated release.
+Before releasing this change, populate the four settings on both lanes through
+Launchplane's supported product-config dry-run/apply using each lane's existing
+values. Keep the existing settings and secrets in their current storage. There
+is no fallback to the old `DISCORD_BLUE_RUNTIME_CONFIG` blob; remove that old
+setting only after the gated release is healthy. Preparing or merging source
+does not perform this migration or authorize a deployment.
+
+Use each lane's existing Discord guild and available channels. Changing Discord
+access is a separate decision. Production uses the new settings only through a
+decided, gated release.
 
 The launcher supplies `DISCORD_BLUE_SESSION_KIND=spawned`. Codex's daemon
 ingress persists it as native `threadSource=spawned`; the Codex bridge sends
@@ -246,7 +239,7 @@ canonical Build manifest, never a mutable tag or a local build. It also supplies
 candidate and lane. Source checkout must be pinned to the reviewed completing
 commit, independently of selecting the runtime image.
 
-The Compose file explicitly passes those identity inputs, the non-secret TOML
+The Compose file explicitly passes those identity inputs, the four lane settings
 and credentials described above, and `DISCORD_BLUE_STATE_DIR`. Every input must be nonempty before Compose can create a
 container. Set `DISCORD_BLUE_STATE_DIR` to `/var/lib/discord-blue`, matching the
 image's home and the Compose-scoped named volume; a different state-dir input
@@ -261,8 +254,8 @@ The provider must select a lane-unique Compose project name before creating
 resources. Invalid managed inputs remain unhealthy under the restart policy
 until corrected.
 
-The lane's non-secret TOML must load `agent_session_doodad`, enable the bridge,
-and listen on `0.0.0.0:8787`. The service name is `discord-blue`. Only the
+The managed defaults load the agent-session bridge and listen on
+`0.0.0.0:8787`. The service name is `discord-blue`. Only the
 target's default network reaches its HTTP `/health` and authenticated WebSocket
 `/agent-session/connect` listener; this file publishes no host port. Launchplane
 owns the private TLS overlay, certificates, receiver/monitor trust, activation
@@ -270,7 +263,7 @@ and recovery, as described in its
 [private transport contract](https://github.com/cbusillo/launchplane/blob/main/docs/private-testing-transport.md).
 It must qualify the provider's actual converted source, network, volume and
 image bindings before activation. Compose validation is not live TLS, healthy
-Discord login or deployment proof. Missing credentials or invalid runtime TOML
+Discord login or deployment proof. Missing credentials or invalid runtime settings
 refuse startup; `/health` becomes available only after Discord readiness.
 
 For updates, use Launchplane's reviewed artifact/source selection and gated
