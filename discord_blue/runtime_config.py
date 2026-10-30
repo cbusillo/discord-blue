@@ -1,42 +1,50 @@
-"""Optional server inputs delivered by the runtime, separate from local TOML."""
-
+import json
 import os
-import tomllib
-from typing import Any, get_args, get_origin, get_type_hints
+from typing import Any
 
 
-def _matches_type(value: object, expected: object) -> bool:
-    if get_origin(expected) is list:
-        (item_type,) = get_args(expected)
-        return isinstance(value, list) and all(_matches_type(item, item_type) for item in value)
-    return type(value) is expected
-
-
-def runtime_overrides(sections: dict[str, object]) -> dict[str, dict[str, Any]]:
-    """Validate every input before returning overrides; never include values in errors."""
-    overrides: dict[str, dict[str, Any]] = {}
-    raw = os.environ.get("DISCORD_BLUE_RUNTIME_CONFIG")
-    if raw is None:
-        return overrides
+def runtime_overrides() -> dict[str, dict[str, Any]]:
+    settings = (
+        "DISCORD_BLUE_GUILD_ID",
+        "DISCORD_BLUE_BOT_CHANNEL_ID",
+        "DISCORD_BLUE_SPAWNED_CHANNEL_ID",
+        "DISCORD_BLUE_AUTO_JOIN_USER_IDS",
+    )
+    if "LAUNCHPLANE_RUNTIME_IDENTITY_JSON" not in os.environ and not any(key in os.environ for key in settings):
+        return {}
+    for key in settings:
+        if not os.environ.get(key, "").strip():
+            raise ValueError(f"{key} must be supplied")
+    ids = []
+    for key in settings[:3]:
+        raw = os.environ[key].strip()
+        if not raw.isascii() or not raw.isdecimal() or int(raw) <= 0:
+            raise ValueError(f"{key} must be a positive ID")
+        ids.append(int(raw))
+    guild_id, bot_channel_id, spawned_channel_id = ids
     try:
-        parsed = tomllib.loads(raw)
-    except tomllib.TOMLDecodeError:
-        raise ValueError("DISCORD_BLUE_RUNTIME_CONFIG must be valid non-secret TOML") from None
-    if not parsed:
-        raise ValueError("DISCORD_BLUE_RUNTIME_CONFIG must contain non-secret settings")
-    for section, values in parsed.items():
-        if section not in sections or not isinstance(values, dict):
-            raise ValueError("Unsupported runtime configuration section")
-        types = get_type_hints(type(sections[section]))
-        for key, value in values.items():
-            if key == "token" or key not in types or not _matches_type(value, types[key]):
-                raise ValueError("Unsupported runtime configuration field or type")
-        overrides[section] = values
-    for env_key, section in (("DISCORD_TOKEN", "discord"), ("AGENT_SESSION_TOKEN", "agent_session")):
-        value = os.environ.get(env_key)
+        auto_join = json.loads(os.environ[settings[3]])
+    except json.JSONDecodeError:
+        raise ValueError(f"{settings[3]} must be a JSON list of positive IDs") from None
+    if not isinstance(auto_join, list) or any(type(value) is not int or value <= 0 for value in auto_join):
+        raise ValueError(f"{settings[3]} must be a JSON list of positive IDs")
+    overrides = {
+        "discord": {"guild_id": guild_id, "bot_channel_id": bot_channel_id, "loaded_doodads": ["agent_session_doodad"]},
+        "agent_session": {
+            "enabled": True,
+            "listen_host": "0.0.0.0",
+            "listen_port": 8787,
+            "operator_role_name": "Agent Admin",
+            "channel_id": bot_channel_id,
+            "spawned_channel_id": spawned_channel_id,
+            "auto_join_user_ids": auto_join,
+        },
+    }
+    for key, section in (("DISCORD_TOKEN", "discord"), ("AGENT_SESSION_TOKEN", "agent_session")):
+        value = os.environ.get(key)
         if value is not None:
             value = value.strip()
             if not value or value == "from_terminal":
-                raise ValueError(f"{env_key} must be nonempty")
-            overrides.setdefault(section, {})["token"] = value
+                raise ValueError(f"{key} must be nonempty")
+            overrides[section]["token"] = value
     return overrides
