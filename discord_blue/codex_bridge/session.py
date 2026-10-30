@@ -71,7 +71,7 @@ class Rpc(Protocol):
     async def respond(self, request_id: RequestId, result: Json | None = None) -> None: ...
 
 
-__all__ = ["Rejected", "Rpc", "ThreadSession", "latest_turn"]
+__all__ = ["REPLY_LIMIT", "TEXT_LIMIT", "TURN_DONE", "Rejected", "Rpc", "ThreadSession", "command_argv", "latest_turn"]
 
 
 def command_argv(command: str) -> list[str]:
