@@ -592,6 +592,7 @@ class SessionInteractions:
             kind="request_user_input_response",
             input_prompt=pending,
         )
+        pending.answered_by, pending.cancelled = str(interaction.user), cancelled
         command = RemoteCommand(
             command_id=command_id,
             session_id=session.session_id,
@@ -606,6 +607,8 @@ class SessionInteractions:
             await interaction.followup.send(error, ephemeral=True)
             return
         async with pending.ui_lock:
+            if pending.accepted:
+                return  # The agent already accepted this answer, and the card says so.
             if (
                 pending.retired
                 or self.bridge.sessions.get(session_id) is not session
@@ -736,6 +739,20 @@ class SessionInteractions:
             session, approval_id, lambda pending: self.format_approval_finished(pending.decision, pending.decided_by)
         )
 
+    async def handle_user_input_ack(self, payload: dict[str, object]) -> str | None:
+        """Close a question card once the agent accepts its Discord answer; return the closed card's call ID."""
+        session = self.bridge.sessions.get(payload_string(payload, "session_id"))
+        command = session.pending_commands.get(payload_string(payload, "command_id")) if session is not None else None
+        if session is None or command is None or command.kind != "request_user_input_response":
+            return None
+        pending = command.input_prompt
+        if pending is None or session.pending_user_inputs.get(pending.call_id) is not pending:
+            return None
+        session.pending_user_inputs.pop(pending.call_id)
+        pending.accepted = True
+        await self.retire_user_input(session, pending, self.format_request_user_input_finished(pending))
+        return pending.call_id
+
     async def handle_approval_decision_reject(self, payload: dict[str, object]) -> None:
         session_id = payload_string(payload, "session_id")
         approval_id = payload_string(payload, "approval_id")
@@ -857,6 +874,12 @@ class SessionInteractions:
     def format_approval_finished(decision: str | None, decided_by: int | None) -> str:
         label = f"Submitted: {decision}" if decision in {"approved", "denied"} else "Decision acknowledged"
         by = f"\nby: `{decided_by}`" if decided_by is not None else ""
+        return f"**{label}**{by}"
+
+    @staticmethod
+    def format_request_user_input_finished(pending: PendingRemoteUserInput) -> str:
+        label = "Answer cancelled" if pending.cancelled else "Answered"
+        by = f"\nby: `{pending.answered_by}`" if pending.answered_by else ""
         return f"**{label}**{by}"
 
     @staticmethod
