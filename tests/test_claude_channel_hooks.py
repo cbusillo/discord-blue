@@ -12,11 +12,19 @@ from unittest.mock import patch
 import aiohttp
 
 from discord_blue.claude_channel.launch import loaded_as_channel, launch_prompt, matches_launch_prompt
-from discord_blue.claude_channel.session import CHANNEL, HOOK_TOOL, MODEL_CALL, PERMISSION_REQUEST, ClaudeSession, waiting_message
-from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN, SessionHello
+from discord_blue.claude_channel.session import (
+    ANSWERED_IN_TERMINAL,
+    CHANNEL,
+    CONTINUING,
+    HOOK_TOOL,
+    MODEL_CALL,
+    ClaudeSession,
+    waiting_message,
+)
+from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN, SERVER_FEATURES, SessionHello
 from tests.fakes_discord_blue import FakeDiscordBlue
 from tests.test_thread_titles import HARNESS_PROMPTS
-from tests.test_claude_channel import IDENTITY, FakeClaudeCode, command, running_channel
+from tests.test_claude_channel import IDENTITY, FakeClaudeCode, command, decision, running_channel
 
 Json = dict[str, Any]
 SWITCHED = (
@@ -379,13 +387,14 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Ignored", answer)
         self.assertEqual(events, [])
 
-    async def test_a_session_without_the_channel_flag_offers_no_controls_and_says_why(self) -> None:
+    async def test_a_session_without_the_channel_flag_answers_dialogs_but_not_replies_and_says_why(self) -> None:
         async with running_channel(identity=dataclasses.replace(IDENTITY, channel=False)) as (claude, discord):
             await claude.initialize()
             hello = SessionHello.from_payload(await discord.next("hello"))
             notice = await discord.next("notice")
 
-        self.assertEqual(hello.capabilities, frozenset({"status_request"}))
+        # Dialogs reach Discord through the hooks; replies need the channel.
+        self.assertEqual(hello.capabilities, frozenset({"status_request", "approval_decision", "request_user_input_response"}))
         self.assertIn(f"claude --resume {IDENTITY.session_id} --dangerously-load-development-channels", notice["message"])
 
     async def test_a_conversation_switch_rejects_controls_meant_for_the_old_one(self) -> None:
@@ -421,26 +430,189 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class PermissionNoticeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_a_permission_prompt_is_announced_without_anything_from_the_request(self) -> None:
-        # Claude Code does not mask an ordinary password, so neither the preview nor the description may reach Discord.
-        request = {
-            "request_id": "poeyw",
-            "tool_name": "Bash",
-            "description": "Log in with hunter2",
-            "input_preview": '{ "command": "psql postgres://app:hunter2@db/prod ````" }',
-        }
-        async with running_channel() as (claude, discord):
+FEATURES = sorted(SERVER_FEATURES)
+COMMAND = {"command": "touch notes.txt", "description": "Create notes.txt"}
+QUESTION = {
+    "questions": [
+        {
+            "question": "Which color?",
+            "header": "Color",
+            "options": [{"label": "Red", "description": "Warm"}, {"label": "Blue", "description": "Cool"}],
+            "multiSelect": False,
+        },
+        {
+            "question": "Which sizes?",
+            "header": "Sizes",
+            "options": [{"label": "S", "description": ""}, {"label": "M", "description": ""}, {"label": "L", "description": ""}],
+            "multiSelect": True,
+        },
+    ]
+}
+
+
+def open_dialog(claude: FakeClaudeCode, tool_name: str, tool_input: Json, **fields: str) -> int:
+    """Send the PermissionRequest hook call Claude Code makes while a dialog is open; its answer comes later."""
+    claude.next_id += 1
+    arguments = {
+        "event": "PermissionRequest",
+        "session_id": IDENTITY.session_id,
+        "tool_name": tool_name,
+        "tool_input": json.dumps(tool_input),
+        "cwd": "/work/project/sub",
+        "prompt_id": "prompt-1",
+        **fields,
+    }
+    claude.send({"id": claude.next_id, "method": "tools/call", "params": {"name": HOOK_TOOL["name"], "arguments": arguments}})
+    return claude.next_id
+
+
+async def tool_call(claude: FakeClaudeCode, tool_name: str, tool_input: Json, tool_use_id: str) -> None:
+    await hook(claude, "PreToolUse", tool_name=tool_name, tool_input=json.dumps(tool_input), tool_use_id=tool_use_id)
+
+
+async def hook_answer(claude: FakeClaudeCode, request_id: int) -> Json | None:
+    text = (await claude.take(lambda message: message.get("id") == request_id))["result"]["content"][0]["text"]
+    return json.loads(text)["hookSpecificOutput"]["decision"] if text else None
+
+
+class DialogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_command_approved_in_discord_runs_exactly_as_shown(self) -> None:
+        async with running_channel(features=FEATURES) as (claude, discord):
+            await claude.initialize()
+            hello = await discord.next("hello")
+            await tool_call(claude, "Bash", COMMAND, "toolu_1")
+            request = open_dialog(claude, "Bash", COMMAND)
+            card = await discord.next("approval_request")
+            acked = await discord.control(decision(hello, card["approval_id"], "approved"))
+            answer = await hook_answer(claude, request)
+            status = await discord.next("status_changed")
+
+        self.assertEqual(
+            (card["command_text"], card["cwd"], card["reason"], card["call_id"]),
+            ("touch notes.txt", "/work/project/sub", "Create notes.txt", "toolu_1"),
+        )
+        self.assertEqual(acked["type"], "approval_decision_ack")
+        self.assertEqual(answer, {"behavior": "allow", "updatedInput": COMMAND})
+        self.assertEqual(status["message"], CONTINUING)
+
+    async def test_a_denial_in_discord_denies_the_call(self) -> None:
+        async with running_channel(features=FEATURES) as (claude, discord):
+            await claude.initialize()
+            hello = await discord.next("hello")
+            request = open_dialog(claude, "WebFetch", {"url": "https://example.com", "prompt": "Summarize"})
+            card = await discord.next("approval_request")
+            await discord.control(decision(hello, card["approval_id"], "denied"))
+            answer = await hook_answer(claude, request)
+
+        # Any other tool shows its whole input.
+        self.assertEqual(card["approval_kind"], "tool")
+        self.assertEqual(json.loads(card["content_text"])["input"]["url"], "https://example.com")
+        self.assertEqual(answer and answer["behavior"], "deny")
+
+    async def test_questions_are_answered_from_discord_by_question_text(self) -> None:
+        async with running_channel(features=FEATURES) as (claude, discord):
+            await claude.initialize()
+            hello = await discord.next("hello")
+            request = open_dialog(claude, "AskUserQuestion", QUESTION)
+            card = await discord.next("request_user_input")
+            answers = {"q0": {"answers": ["Blue"]}, "q1": {"answers": ["S", "L"]}}
+            response = {"call_id": card["call_id"], "turn_id": card["turn_id"], "response": {"answers": answers}}
+            acked = await discord.control(command(hello, "cmd-1", "request_user_input_response", **response))
+            answer = await hook_answer(claude, request)
+
+        self.assertEqual([(q["isOther"], q["multiSelect"]) for q in card["questions"]], [(True, False), (False, True)])
+        self.assertEqual(acked["type"], "command_ack")
+        expected = {**QUESTION, "answers": {"Which color?": "Blue", "Which sizes?": ["S", "L"]}}
+        self.assertEqual(answer, {"behavior": "allow", "updatedInput": expected})
+
+    async def test_a_question_dismissed_in_discord_is_declined(self) -> None:
+        async with running_channel(features=FEATURES) as (claude, discord):
+            await claude.initialize()
+            hello = await discord.next("hello")
+            request = open_dialog(claude, "AskUserQuestion", QUESTION)
+            card = await discord.next("request_user_input")
+            response = {"call_id": card["call_id"], "turn_id": card["turn_id"], "response": {"answers": {}}}
+            await discord.control(command(hello, "cmd-1", "request_user_input_response", **response))
+            answer = await hook_answer(claude, request)
+
+        self.assertEqual(answer and answer["behavior"], "deny")
+
+    async def test_a_terminal_answer_closes_the_card(self) -> None:
+        async with running_channel(features=FEATURES) as (claude, discord):
+            await claude.initialize()
+            hello = await discord.next("hello")
+            await tool_call(claude, "Bash", COMMAND, "toolu_1")
+            request = open_dialog(claude, "Bash", COMMAND)
+            card = await discord.next("approval_request")
+            await hook(claude, "PostToolUse", tool_use_id="toolu_1")
+            resolved = await discord.next("approval_resolved")
+            status = await discord.next("status_changed")
+            answer = await hook_answer(claude, request)
+            late = await discord.control(decision(hello, card["approval_id"], "approved"))
+
+        self.assertEqual(resolved["approval_id"], card["approval_id"])
+        self.assertEqual(status["message"], CONTINUING)
+        self.assertIsNone(answer)
+        self.assertEqual(late["type"], "approval_decision_reject")
+
+    async def test_a_rejection_in_the_terminal_refuses_a_later_discord_answer(self) -> None:
+        # Rejecting in the terminal interrupts the turn, and no hook reports it; the transcript records the result.
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "session.jsonl"
+            append(transcript, said("Creating the file."))
+            async with running_channel(features=FEATURES) as (claude, discord):
+                await claude.initialize()
+                hello = await discord.next("hello")
+                await tool_call(claude, "Bash", COMMAND, "toolu_1")
+                request = open_dialog(claude, "Bash", COMMAND, transcript_path=str(transcript))
+                card = await discord.next("approval_request")
+                result = {"type": "tool_result", "tool_use_id": "toolu_1", "content": "The user doesn't want to proceed"}
+                append(transcript, record(type="user", message={"role": "user", "content": [result]}))
+                refused = await discord.control(decision(hello, card["approval_id"], "approved"))
+                resolved = await discord.next("approval_resolved")
+                answer = await hook_answer(claude, request)
+
+        self.assertEqual((refused["type"], refused["reason"]), ("approval_decision_reject", ANSWERED_IN_TERMINAL))
+        self.assertEqual(resolved["approval_id"], card["approval_id"])
+        self.assertIsNone(answer)
+
+    async def test_what_discord_cannot_show_whole_stays_in_the_terminal(self) -> None:
+        for features, tool_input in (
+            (FEATURES, {"command": "cat <<'EOF'\n```\nEOF"}),
+            (FEATURES, {"file_path": "/work/big.txt", "content": "x" * 5000}),
+            (FEATURES, {"command": "rm -rf build", "dangerouslyDisableSandbox": True, "extra": "x" * 5000}),
+            # A server that predates tool cards.
+            (["command_text", "approval_content"], {"url": "https://example.com"}),
+        ):
+            with self.subTest(tool_input=str(tool_input)[:40]):
+                async with running_channel(features=features) as (claude, discord):
+                    await claude.initialize()
+                    await discord.next("hello")
+                    tool_name = "Bash" if "command" in tool_input else "Write" if "content" in tool_input else "WebFetch"
+                    request = open_dialog(claude, tool_name, tool_input)
+                    status = await discord.next("status_changed")
+                    notice = await discord.next("notice")
+                    await hook(claude, "Stop", last_assistant_message="Done")
+                    answer = await hook_answer(claude, request)
+
+                self.assertEqual((status["message"], notice["message"]), (waiting_message(tool_name),) * 2)
+                self.assertIsNone(answer)
+
+    async def test_a_timed_out_hook_hands_the_dialog_back_to_the_terminal(self) -> None:
+        async with running_channel(features=FEATURES) as (claude, discord):
             await claude.initialize()
             await discord.next("hello")
-            claude.send({"method": PERMISSION_REQUEST, "params": request})
+            request = open_dialog(claude, "Bash", COMMAND)
+            card = await discord.next("approval_request")
+            claude.send({"method": "notifications/cancelled", "params": {"requestId": request}})
+            resolved = await discord.next("approval_resolved")
             status = await discord.next("status_changed")
-            notice = await discord.next("notice")
             leftover = await claude.settle()
 
-        self.assertEqual((status["message"], notice["message"]), (waiting_message(request), waiting_message(request)))
-        self.assertNotIn("hunter2", json.dumps([status, notice]))
-        self.assertEqual(leftover, [])
+        self.assertEqual(resolved["approval_id"], card["approval_id"])
+        self.assertEqual(status["message"], waiting_message("Bash"))
+        # A cancelled request gets no response.
+        self.assertFalse(any(message.get("id") == request for message in leftover))
 
 
 class ReplyDeliveryTests(unittest.IsolatedAsyncioTestCase):
@@ -469,41 +641,3 @@ class LaunchTests(unittest.TestCase):
         for case, (lines, expected) in cases.items():
             with self.subTest(case):
                 self.assertIs(loaded_as_channel(lines), expected)
-
-
-class PermissionStatusTests(unittest.IsolatedAsyncioTestCase):
-    async def test_parallel_tool_activity_does_not_claim_the_terminal_approval_is_resolved(self) -> None:
-        async with running_channel() as (claude, discord):
-            await claude.initialize()
-            await discord.next("hello")
-            claude.send({"method": PERMISSION_REQUEST, "params": {"tool_name": "Bash"}})
-            await discord.next("status_changed")
-            await discord.next("notice")
-            await hook(claude, "PostToolUse")
-            resumed = await discord.next("status_changed")
-            self.assertIn("unconfirmed", resumed["message"])
-            await hook(claude, "PostToolUse")  # No notification flood on every tool.
-            await hook(claude, "Stop", last_assistant_message="Finished")
-            self.assertEqual((await discord.next())["type"], "turn_complete")
-
-
-class InterruptedPermissionStatusTests(unittest.IsolatedAsyncioTestCase):
-    async def test_new_remote_prompt_clears_an_old_terminal_approval_signal(self) -> None:
-        async with running_channel() as (claude, discord):
-            await claude.initialize()
-            hello = await discord.next("hello")
-            claude.send({"method": PERMISSION_REQUEST, "params": {"tool_name": "Bash"}})
-            await discord.next("status_changed")
-            await discord.next("notice")
-            await discord.control(command(hello, "cmd-next", "reply", text="new turn"))
-            await claude.notification(CHANNEL)
-            await hook(
-                claude,
-                "UserPromptSubmit",
-                prompt='<channel source="plugin:dui:dui" command_id="cmd-next">new turn</channel>',
-            )
-            started = await discord.next("status_changed")
-            self.assertIn("started", started["message"].lower())
-            await hook(claude, "PostToolUse")
-            await hook(claude, "Stop", last_assistant_message="Finished")
-            self.assertEqual((await discord.next())["type"], "turn_complete")

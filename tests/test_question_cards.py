@@ -137,6 +137,20 @@ class QuestionCardTests(unittest.IsolatedAsyncioTestCase):
         cast(Any, view).set_answer(question.id, "Private custom answer")
         self.assertNotIn("Private custom answer", visible_view_text(view))
 
+    async def test_multi_select_sends_every_chosen_option(self) -> None:
+        question = replace(self.question(), is_other=False, multi_select=True)
+        question.options.append(RequestUserInputQuestionOption("Lint", "Style checks"))
+        view = await self.post([question])
+        select = next(item for item in view.walk_children() if isinstance(item, RequestUserInputSelect))
+        self.assertEqual(select.max_values, 3)
+        self.assertFalse(any(getattr(item, "label", None) == "Answer together" for item in view.walk_children()))
+        chosen = {"values": [select.options[0].value, select.options[2].value]}
+        select._refresh_state(cast(Any, FakeInteraction(self.fixture.thread)), cast(Any, chosen))
+        await select.callback(cast(Any, FakeInteraction(self.fixture.thread)))
+        self.assertEqual([option.default for option in select.options], [True, False, True])
+        await cast(Any, view).submit(cast(Any, FakeInteraction(self.fixture.thread)))
+        self.assertEqual(self.fixture.socket.sent_json[0]["response"], {"answers": {question.id: {"answers": ["Fast", "Lint"]}}})
+
     async def test_question_notification_is_not_suppressed_in_discord_payload(self) -> None:
         from discord.http import handle_message_parameters
 

@@ -63,7 +63,10 @@
             "tool": "dui_hook_event",
             "input": {
               "event": "PreToolUse",
-              "session_id": "${session_id}"
+              "session_id": "${session_id}",
+              "tool_name": "${tool_name}",
+              "tool_input": "${tool_input}",
+              "tool_use_id": "${tool_use_id}"
             }
           }
         ]
@@ -78,7 +81,45 @@
             "tool": "dui_hook_event",
             "input": {
               "event": "PostToolUse",
-              "session_id": "${session_id}"
+              "session_id": "${session_id}",
+              "tool_use_id": "${tool_use_id}"
+            }
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "input": {
+              "event": "PostToolUseFailure",
+              "session_id": "${session_id}",
+              "tool_use_id": "${tool_use_id}"
+            }
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:dui:dui",
+            "tool": "dui_hook_event",
+            "timeout": 86400,
+            "input": {
+              "event": "PermissionRequest",
+              "session_id": "${session_id}",
+              "tool_name": "${tool_name}",
+              "tool_input": "${tool_input}",
+              "cwd": "${cwd}",
+              "prompt_id": "${prompt_id}",
+              "transcript_path": "${transcript_path}"
             }
           }
         ]

@@ -4,11 +4,14 @@ The channel server runs inside the session's own process tree, so every event it
 sees belongs to this session. A Discord reply becomes a channel notification,
 which Claude Code queues as the next prompt.
 
-Discord cannot answer Claude Code's permission prompts. The channel's permission
-request carries only a lossy display preview and no tool-call ID, so a Discord
-decision could not be bound reliably to the call it would allow. The server still
-declares the permission capability, which leaves the terminal dialog unchanged,
-so it can post Claude Code's own (credential-masked) preview as a notice.
+Every terminal dialog, a permission prompt or a question Claude asks, reaches
+this server as the plugin's PermissionRequest hook call, with the tool's exact
+input. While the dialog is open the call waits: a Discord answer becomes the
+hook's decision, so it can only apply to that dialog, and an allow carries the
+exact input Discord showed. Anything Discord cannot show whole is answered in
+the terminal. Claude Code drops a hook's answer once the terminal answered
+first, and tells no hook when that answer was a rejection, so a Discord answer
+first checks the transcript for the call's result.
 
 The plugin's hooks call ``dui_hook_event`` on this server to mirror typed
 prompts, final answers and titles. A Discord reply goes to Claude Code at once,
@@ -21,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import re
@@ -33,20 +37,33 @@ from dataclasses import dataclass
 
 import aiohttp
 
-from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN
+from discord_blue.doodads.agent_session.protocol import (
+    LAUNCH_BRIEF_ORIGIN,
+    approval_content_displayable,
+    command_text_displayable,
+)
 from discord_blue.agent_client import PROMPT_EVENTS, SESSION_END_TIMEOUT_SECONDS, AgentSessionClient, Json, Rejected
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.claude_channel.launch import launch_prompt, matches_launch_prompt, ancestry, loaded_as_channel
-from discord_blue.codex_bridge.session import REPLY_LIMIT, TEXT_LIMIT, TURN_DONE
+from discord_blue.codex_bridge.session import REPLY_LIMIT, TEXT_LIMIT, TURN_DONE, command_argv
 from discord_blue.claude_channel.transcript import TranscriptTitles, Titles
 from discord_blue.session_titles import SessionLabel, typed_prompt
 
 logger = logging.getLogger(__name__)
 
-CAPABILITIES = ["reply", "status_request"]
+# Answering dialogs needs only the hooks; replies need the channel.
+CAPABILITIES = ["reply", "status_request", "approval_decision", "request_user_input_response"]
+DIALOG_CAPABILITIES = ["status_request", "approval_decision", "request_user_input_response"]
 CHANNEL = "notifications/claude/channel"
-PERMISSION_REQUEST = "notifications/claude/channel/permission_request"
-WAITING_LOCALLY = "Claude Code is waiting for approval in the terminal"
+WAITING_LOCALLY = "Claude Code is waiting on you in the terminal"
+ANSWERED_IN_TERMINAL = "That was already answered in the Claude Code terminal."
+CONTINUING = "Answered; continuing the turn."
+QUESTION_TOOL = "AskUserQuestion"
+# Bash fields a command card leaves unshown: Claude's own description is shown as the reason, and a timeout or
+# running in the background changes how the command runs, not what it does. Any other field shows the whole input.
+COMMAND_FIELDS = frozenset({"command", "description", "timeout", "run_in_background"})
+# PreToolUse calls remembered so a dialog can be tied to its tool call; dialogs follow their PreToolUse at once.
+TOOL_CALL_MEMORY = 64
 # Tool names Discord may show: built-in names and MCP names such as mcp__server__tool.
 TOOL_NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 LOST_CLAUDE = "Lost the Claude Code session, so delivery is uncertain. Check the terminal before retrying."
@@ -58,8 +75,6 @@ HOOK_TOOL = {
     ),
     "inputSchema": {"type": "object", "properties": {"event": {"type": "string"}}, "required": ["event"]},
 }
-# Hooks that only fire while Claude is working. Another plugin's Stop hook can keep a turn going after Stop.
-RUNNING_EVENTS = {"UserPromptSubmit", "PreToolUse", "PostToolUse"}
 # A final answer waits for the other Stop hooks' verdict. Claude going idle, a new prompt or the session ending
 # posts it at once; this bound only covers a verdict never recorded, past the hooks' 600-second default timeout.
 STOP_VERDICT_SECONDS = 660.0
@@ -117,10 +132,72 @@ def host_label() -> str:
     return f"Claude Code on {socket.gethostname().split('.')[0]}"
 
 
-def waiting_message(params: Json) -> str:
-    tool_name = params.get("tool_name")
-    shown = tool_name if isinstance(tool_name, str) and TOOL_NAME.fullmatch(tool_name) else "a tool"
+def waiting_message(tool_name: str) -> str:
+    shown = tool_name if TOOL_NAME.fullmatch(tool_name) else "a tool"
     return f"{WAITING_LOCALLY} ({shown})"
+
+
+def json_object(text: str | None) -> Json | None:
+    try:
+        value = json.loads(text) if text else None
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def question_cards(questions: object) -> list[Json] | None:
+    """AskUserQuestion's questions as Discord question cards; a multi-select question offers only its options."""
+    if not isinstance(questions, list) or not questions:
+        return None
+    cards = []
+    for index, question in enumerate(questions):
+        if not isinstance(question, dict) or not isinstance(question.get("question"), str):
+            return None
+        options = question.get("options") or []
+        if not isinstance(options, list) or not all(isinstance(o, dict) and isinstance(o.get("label"), str) for o in options):
+            return None
+        multi = question.get("multiSelect") is True
+        cards.append(
+            {
+                "id": f"q{index}",
+                "header": str(question.get("header") or ""),
+                "question": question["question"],
+                "options": [{"label": o["label"], "description": str(o.get("description") or "")} for o in options],
+                "isOther": not multi,
+                "isSecret": False,
+                "multiSelect": multi,
+            }
+        )
+    return cards
+
+
+def question_answers(questions: list[Json], response: object) -> Json | None:
+    """Discord's answers keyed by question text, as AskUserQuestion takes them; None when any is missing."""
+    raw = response.get("answers") if isinstance(response, dict) else None
+    answers: Json = {}
+    for index, question in enumerate(questions):
+        value = raw.get(f"q{index}") if isinstance(raw, dict) else None
+        picked = [str(a) for a in value.get("answers") or [] if str(a).strip()] if isinstance(value, dict) else []
+        if not picked:
+            return None
+        answers[question["question"]] = picked if question.get("multiSelect") is True else picked[0]
+    return answers
+
+
+def hook_decision(decision: Json) -> str:
+    return json.dumps({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}})
+
+
+@dataclass(slots=True)
+class Dialog:
+    """A terminal dialog whose PermissionRequest hook call waits on `answer`; Discord sets it with a decision."""
+
+    tool_name: str
+    tool_input: Json
+    tool_use_id: str | None
+    transcript_path: str
+    offset: int | None
+    answer: asyncio.Future[Json | None]
 
 
 def unflagged_notice(session_id: str) -> str:
@@ -149,8 +226,12 @@ class ClaudeSession(AgentSessionClient):
         self.pending_input: tuple[dict[str, str], str] | None = None
         self.ending: tuple[Json, asyncio.Event] | None = None
         self.conversation_id: str | None = identity.session_id
-        self.controls = CAPABILITIES if identity.channel else ["status_request"]
-        self.waiting_locally = False
+        self.controls = CAPABILITIES if identity.channel else DIALOG_CAPABILITIES
+        # Open terminal dialogs by prompt key; the ones Discord can answer are also in self.prompts.
+        self.dialogs: dict[str, Dialog] = {}
+        self.tool_calls: deque[tuple[str, Json | None, str]] = deque(maxlen=TOOL_CALL_MEMORY)
+        # Hooks run one at a time, as Claude Code sends them; only a dialog's wait for its answer runs alongside.
+        self.hook_lock = asyncio.Lock()
         self.pending_stop: asyncio.Task[None] | None = None
         self.settle = asyncio.Event()
         # Replies this server injected; their prompts are already in Discord.
@@ -173,23 +254,122 @@ class ClaudeSession(AgentSessionClient):
 
     # Claude Code -> Discord
 
-    async def on_permission_request(self, params: Json) -> None:
-        await self.flush_pending_input()
-        # Never answered from here: the terminal dialog is the only place to approve or deny. Nothing else
-        # from the request reaches Discord: Claude Code leaves some secrets in its preview unmasked.
-        self.waiting_locally = True
-        self.publish("status_changed", message=waiting_message(params))
-        # The thread also gets it as a message, since a status only changes the reaction.
-        self.publish("notice", message=waiting_message(params))
-
     async def on_hook_call(self, arguments: Json, meta: Json) -> str:
         if MODEL_CALL in meta:
             return "Ignored: this tool is internal to the dui plugin's hooks."
         # A field the hook input lacks may arrive as its unsubstituted placeholder.
         fields = {key: value for key, value in arguments.items() if isinstance(value, str) and not value.startswith("${")}
-        await self.on_hook(fields)
+        if fields.get("event") == "PermissionRequest":
+            return await self.on_dialog(fields)
+        async with self.hook_lock:
+            await self.on_hook(fields)
         # Hook output text becomes context for the model, so always return none.
         return ""
+
+    async def on_dialog(self, fields: dict[str, str]) -> str:
+        """Wait while a terminal dialog is open; return Discord's decision, or nothing to leave it to the terminal."""
+        async with self.hook_lock:
+            await self.flush_pending_input()
+            conversation = fields.get("session_id")
+            if conversation and conversation != self.conversation_id:
+                return ""
+            tool_name, tool_input = fields.get("tool_name", ""), json_object(fields.get("tool_input"))
+            path = fields.get("transcript_path", "")
+            key = uuid.uuid4().hex
+            dialog = Dialog(
+                tool_name=tool_name,
+                tool_input=tool_input or {},
+                tool_use_id=self.tool_use_id(tool_name, tool_input),
+                transcript_path=path,
+                offset=await self.transcript.size(path),
+                answer=asyncio.get_running_loop().create_future(),
+            )
+            self.dialogs[key] = dialog
+            prompt = None if tool_input is None else self.dialog_prompt(key, dialog, fields)
+            if prompt is not None and self.shows(prompt):
+                self.prompts[key] = prompt
+                self.enqueue(prompt)
+            else:
+                self.wait_locally(tool_name)
+        try:
+            decision = await dialog.answer
+        except asyncio.CancelledError:
+            # The hook timed out with the dialog still open in the terminal.
+            if (prompt := self.prompts.pop(key, None)) is not None:
+                self.retire(prompt)
+                self.wait_locally(tool_name)
+            raise
+        return "" if decision is None else hook_decision(decision)
+
+    def tool_use_id(self, tool_name: str, tool_input: Json | None) -> str | None:
+        return next((i for name, called, i in reversed(self.tool_calls) if (name, called) == (tool_name, tool_input)), None)
+
+    def dialog_prompt(self, key: str, dialog: Dialog, fields: dict[str, str]) -> Json | None:
+        """The Discord prompt for a dialog Discord can show whole, or None to keep it in the terminal."""
+        tool_input, turn_id = dialog.tool_input, fields.get("prompt_id", "")
+        if dialog.tool_name == QUESTION_TOOL:
+            questions = question_cards(tool_input.get("questions"))
+            if questions is None:
+                return None
+            return self.event("request_user_input", call_id=key, turn_id=turn_id, questions=questions)
+        command = tool_input.get("command")
+        if dialog.tool_name == "Bash" and set(tool_input) <= COMMAND_FIELDS and isinstance(command, str):
+            if not command_text_displayable(command):
+                return None
+            description = tool_input.get("description")
+            return self.event(
+                "approval_request",
+                approval_id=key,
+                call_id=dialog.tool_use_id or key,
+                turn_id=turn_id,
+                command=command_argv(command),
+                command_text=command,
+                cwd=fields.get("cwd") or self.identity.cwd,
+                reason=description if isinstance(description, str) else None,
+            )
+        text = json.dumps({"tool": dialog.tool_name, "input": tool_input}, indent=2, ensure_ascii=False)
+        if not approval_content_displayable("tool", text):
+            return None
+        return self.event(
+            "approval_request",
+            approval_id=key,
+            call_id=dialog.tool_use_id or key,
+            turn_id=turn_id,
+            approval_kind="tool",
+            content_text=text,
+        )
+
+    def shows(self, prompt: Json) -> bool:
+        """Whether the connected Discord Blue shows this prompt as sent; until one connects, assume it does."""
+        if self.server_features is None or prompt["type"] != "approval_request":
+            return True
+        return ("command_text" if prompt.get("command_text") is not None else "tool_content") in self.server_features
+
+    def on_server_features(self) -> None:
+        for key, prompt in list(self.prompts.items()):
+            if not self.shows(prompt):
+                del self.prompts[key]
+                self.wait_locally(self.dialogs[key].tool_name)
+
+    def wait_locally(self, tool_name: str) -> None:
+        message = waiting_message(tool_name)
+        self.publish("status_changed", message=message)
+        # The thread also gets it as a message, since a status only changes the reaction.
+        self.publish("notice", message=message)
+
+    def retire(self, prompt: Json) -> None:
+        """Close a Discord card that was not answered there."""
+        if prompt["type"] == "approval_request":
+            self.publish("approval_resolved", approval_id=prompt["approval_id"])
+        else:
+            self.publish("request_user_input_resolved", call_id=prompt["call_id"], turn_id=prompt["turn_id"])
+
+    def close_dialog(self, key: str) -> None:
+        dialog = self.dialogs.pop(key)
+        if not dialog.answer.done():
+            dialog.answer.set_result(None)
+        if (prompt := self.prompts.pop(key, None)) is not None:
+            self.retire(prompt)
 
     async def on_hook(self, fields: dict[str, str]) -> None:
         await self.flush_pending_input()
@@ -204,6 +384,12 @@ class ClaudeSession(AgentSessionClient):
         if event in {"SessionEnd", "UserPromptSubmit", "Notification"} or (conversation and conversation != self.conversation_id):
             # Claude waiting at its prompt or taking a new one means the last answer stood; it posts before what follows.
             await self.settle_turns()
+        if event in {"SessionEnd", "UserPromptSubmit", "Notification", "Stop", "StopFailure"} or (
+            conversation and conversation != self.conversation_id
+        ):
+            # No dialog outlives its turn.
+            for key in list(self.dialogs):
+                self.close_dialog(key)
         if event == "SessionEnd":
             # /clear or /resume ends this conversation; the next hook names the one that follows.
             await self.switch_conversation(None)
@@ -215,14 +401,16 @@ class ClaudeSession(AgentSessionClient):
             else:
                 await self.switch_conversation(conversation)
         if event == "UserPromptSubmit":
-            self.waiting_locally = False
             self.publish("status_changed", message="Turn started")
-        if event in RUNNING_EVENTS:
-            if self.waiting_locally:
-                self.waiting_locally = False
-                self.publish(
-                    "status_changed", message="Approval status unconfirmed; tools are active. Check the Claude Code terminal."
-                )
+        elif event == "PreToolUse" and (tool_use_id := fields.get("tool_use_id")):
+            self.tool_calls.append((fields.get("tool_name", ""), json_object(fields.get("tool_input")), tool_use_id))
+        elif event in {"PostToolUse", "PostToolUseFailure"} and (tool_use_id := fields.get("tool_use_id")):
+            # The terminal answered this tool call's dialog.
+            answered = [key for key, dialog in self.dialogs.items() if dialog.tool_use_id == tool_use_id]
+            for key in answered:
+                self.close_dialog(key)
+            if answered and not self.dialogs:
+                self.publish("status_changed", message=CONTINUING)
         if event == "UserPromptSubmit":
             prompt = fields.get("prompt", "")
             echo = prompt.lstrip().startswith("<channel") and any(f'command_id="{c}"' in prompt for c in self.injected)
@@ -238,7 +426,6 @@ class ClaudeSession(AgentSessionClient):
                 else:
                     self.publish("user_message", message=clip(typed))
         elif event == "Stop":
-            self.waiting_locally = False
             # Another plugin's Stop hook can reject this answer and send Claude back to rewrite it. Its verdict is
             # written only after every Stop hook returns, this one included, so it is read afterwards, in Stop order.
             offset = await self.transcript.size(fields.get("transcript_path", ""))
@@ -248,7 +435,6 @@ class ClaudeSession(AgentSessionClient):
             # Claude Code writes its own title for the session as it answers.
             await self.retitle(fields)
         elif event == "StopFailure":
-            self.waiting_locally = False
             self.publish("error", message="Claude Code ended the turn with an error; check the terminal.")
         elif event == "SessionStart":
             await self.retitle(fields)
@@ -316,7 +502,6 @@ class ClaudeSession(AgentSessionClient):
 
     async def switch_conversation(self, conversation: str | None) -> None:
         """Start a new epoch so Discord controls meant for the previous conversation are rejected."""
-        self.waiting_locally = False
         self.epoch = uuid.uuid4().hex
         self.commands.clear()
         self.prompts.clear()
@@ -354,9 +539,64 @@ class ClaudeSession(AgentSessionClient):
             await self.inject(str(message["command_id"]), text)
         elif kind == "status_request":
             self.enqueue(self.status_snapshot())
+        elif kind == "request_user_input_response":
+            key = str(message.get("call_id"))
+            prompt = self.prompts.get(key)
+            if prompt is None or prompt["type"] != "request_user_input" or prompt["turn_id"] != message.get("turn_id"):
+                raise Rejected("This prompt is no longer pending.")
+            dialog = self.dialogs[key]
+            if await self.answered_in_terminal(key, dialog):
+                raise Rejected(ANSWERED_IN_TERMINAL)
+            if key not in self.prompts:
+                raise Rejected("This prompt is no longer pending.")
+            answers = question_answers(dialog.tool_input["questions"], message.get("response"))
+            if answers is None:
+                self.answer(key, {"behavior": "deny", "message": "The user dismissed the question in Discord."})
+            else:
+                self.answer(key, {"behavior": "allow", "updatedInput": {**dialog.tool_input, "answers": answers}})
         else:
             raise Rejected("Claude Code channels cannot do this; use the Claude Code terminal.")
         return None
+
+    async def approval_decision(self, message: Json) -> Json:
+        key = str(message.get("approval_id") or "")
+        reject = self.event("approval_decision_reject", approval_id=key)
+        if not self.is_current(message):
+            return {**reject, "reason": "Stale session; the decision was not sent."}
+        prompt, decision = self.prompts.get(key), message.get("decision")
+        if prompt is None or prompt["type"] != "approval_request" or decision not in {"approved", "denied"}:
+            return {**reject, "reason": "This approval is no longer pending."}
+        dialog = self.dialogs[key]
+        if await self.answered_in_terminal(key, dialog):
+            return {**reject, "reason": ANSWERED_IN_TERMINAL}
+        if key not in self.prompts:
+            # Answered or closed while the transcript was read.
+            return {**reject, "reason": "This approval is no longer pending."}
+        if decision == "approved":
+            # Exactly the input Discord showed, whatever Claude Code would otherwise run.
+            self.answer(key, {"behavior": "allow", "updatedInput": dialog.tool_input})
+        else:
+            self.answer(key, {"behavior": "deny", "message": "The user denied this in Discord."})
+        return self.event("approval_decision_ack", approval_id=key)
+
+    async def answered_in_terminal(self, key: str, dialog: Dialog) -> bool:
+        """Whether the call already has a result, as after a rejection in the terminal; its card is then closed."""
+        if dialog.tool_use_id is None or dialog.offset is None:
+            return False
+        if not await self.transcript.tool_answered(dialog.transcript_path, dialog.offset, dialog.tool_use_id):
+            return False
+        if key in self.dialogs:
+            self.close_dialog(key)
+        return True
+
+    def answer(self, key: str, decision: Json) -> None:
+        """Hand Discord's decision to the waiting hook call; the card already shows who answered."""
+        del self.prompts[key]
+        dialog = self.dialogs.pop(key)
+        if not dialog.answer.done():
+            dialog.answer.set_result(decision)
+        if not self.dialogs:
+            self.publish("status_changed", message=CONTINUING)
 
     def failure_reason(self, exc: Exception) -> str:
         return LOST_CLAUDE

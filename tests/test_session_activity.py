@@ -201,7 +201,7 @@ class SessionActivityTests(unittest.IsolatedAsyncioTestCase):
             AsyncMock(),
         )
         with patch.object(AgentSessionClient, "publish") as publish:
-            await client.on_permission_request({"tool_name": "Bash"})
+            client.wait_locally("Bash")
             await client.on_hook({"event": "PreToolUse"})
             for call in publish.call_args_list:
                 await self.bridge.handle_event(
@@ -209,8 +209,8 @@ class SessionActivityTests(unittest.IsolatedAsyncioTestCase):
                     call.args[0],
                     {"session_id": self.session.session_id, "session_epoch": self.session.session_epoch, **call.kwargs},
                 )
-        self.assertEqual(self.thread.sent_messages, [waiting_message({"tool_name": "Bash"})])
-        self.assertEqual(self.session.display_state, "unknown")
+        self.assertEqual(self.thread.sent_messages, [waiting_message("Bash")])
+        self.assertEqual(self.session.display_state, "waiting")
         self.assertFalse(await self.typing_continues())
 
     async def test_long_and_unpostable_error_notices_keep_the_session(self) -> None:

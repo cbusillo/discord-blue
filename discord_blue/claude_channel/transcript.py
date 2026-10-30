@@ -81,6 +81,10 @@ class TranscriptTitles:
         """Whether another Stop hook rejected the answer that ends at offset, sending Claude back to rewrite it."""
         return await self.bounded(stop_verdict, path, offset)
 
+    async def tool_answered(self, path: str, offset: int, tool_use_id: str) -> bool | None:
+        """Whether the tool call has a result written after offset: it ran, failed, or was rejected in the terminal."""
+        return await self.bounded(tool_result_after, path, offset, tool_use_id)
+
     async def bounded[T](self, read: Callable[..., T | None], path: str, *args: object) -> T | None:
         if not path.endswith(".jsonl"):
             return None
@@ -159,6 +163,16 @@ def stop_verdict(path: str, offset: int) -> bool | None:
     # A hook that finished before this session's own may already be recorded before offset.
     before = read_records(path, start, offset - start, partial_first=start > 0)
     return any(continues(record, stop) for record in [*before, *after])
+
+
+def tool_result_after(path: str, offset: int, tool_use_id: str) -> bool:
+    for record in read_records(path, offset, STOP_READ_LIMIT):
+        message = record.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if record.get("type") == "user" and isinstance(content, list):
+            if any(isinstance(part, dict) and part.get("tool_use_id") == tool_use_id for part in content):
+                return True
+    return False
 
 
 def continues(record: dict[str, object], stop: str) -> bool:

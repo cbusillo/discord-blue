@@ -10,9 +10,12 @@ from urllib.parse import urlsplit
 from aiohttp import ClientError
 
 from discord_blue.agent_client import DEFERRED, AgentSessionClient, Json, Rejected
-from discord_blue.claude_channel.session import CHANNEL, MODEL_CALL, RUNNING_EVENTS, Identity, Notify
+from discord_blue.claude_channel.session import CHANNEL, MODEL_CALL, Identity, Notify
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.doodads.agent_session.conversation import FEATURE, INBOX_LIMIT, REPLY_LIMIT
+
+# Hooks that only fire while Claude is working. Another plugin's Stop hook can keep a turn going after Stop.
+RUNNING_EVENTS = {"UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure"}
 
 INSTRUCTIONS = (
     "This is the Supervisor's Cell Mechanic conversation inbox. Each channel notification contains a JSON envelope "
