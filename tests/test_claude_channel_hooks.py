@@ -617,6 +617,21 @@ class DialogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((resolved["approval_id"], later["approval_id"]), (by_call["toolu_a"], by_call["toolu_b"]))
         self.assertEqual((first_answer, second_answer), (None, None))
 
+    async def test_a_finished_call_never_lends_its_id_to_a_later_dialog(self) -> None:
+        for finish in ("PostToolUse", "Stop"):
+            with self.subTest(finish=finish):
+                async with running_channel(features=FEATURES) as (claude, discord):
+                    await claude.initialize()
+                    await discord.next("hello")
+                    # Allowed without a dialog, then the same call needs one.
+                    await tool_call(claude, "Bash", COMMAND, "toolu_old")
+                    await hook(claude, finish, tool_use_id="toolu_old", last_assistant_message="Done")
+                    await tool_call(claude, "Bash", COMMAND, "toolu_new")
+                    open_dialog(claude, "Bash", COMMAND)
+                    card = await discord.next("approval_request")
+
+                self.assertEqual(card["call_id"], "toolu_new")
+
     async def test_a_terminal_only_dialog_leaves_an_open_question_answerable(self) -> None:
         # Discord Blue retires open question cards on any status change.
         async with running_channel(features=FEATURES) as (claude, discord):

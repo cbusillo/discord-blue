@@ -397,9 +397,10 @@ class ClaudeSession(AgentSessionClient):
         if event in {"SessionEnd", "UserPromptSubmit", "Notification", "Stop", "StopFailure"} or (
             conversation and conversation != self.conversation_id
         ):
-            # No dialog outlives its turn.
+            # No dialog or tool call outlives its turn.
             for key in list(self.dialogs):
                 self.close_dialog(key)
+            self.tool_calls.clear()
         if event == "SessionEnd":
             # /clear or /resume ends this conversation; the next hook names the one that follows.
             await self.switch_conversation(None)
@@ -415,7 +416,9 @@ class ClaudeSession(AgentSessionClient):
         elif event == "PreToolUse" and (tool_use_id := fields.get("tool_use_id")):
             self.tool_calls.append((fields.get("tool_name", ""), json_object(fields.get("tool_input")), tool_use_id))
         elif event in {"PostToolUse", "PostToolUseFailure"} and (tool_use_id := fields.get("tool_use_id")):
-            # The terminal answered this tool call's dialog.
+            # A finished call can no longer open a dialog; if it had one, the terminal answered it.
+            for call in [call for call in self.tool_calls if call[2] == tool_use_id]:
+                self.tool_calls.remove(call)
             answered = [key for key, dialog in self.dialogs.items() if dialog.tool_use_id == tool_use_id]
             for key in answered:
                 self.close_dialog(key)
