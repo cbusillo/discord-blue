@@ -167,10 +167,10 @@ lane settings delivered by Launchplane:
 | `DISCORD_BLUE_SPAWNED_CHANNEL_ID` | Positive spawned-session channel ID, distinct from the main channel |
 | `DISCORD_BLUE_AUTO_JOIN_USER_IDS` | JSON list of positive user IDs, for example `[789, 987]`; use `[]` for none |
 
-Managed servers load `agent_session_doodad`, enable the bridge, listen on
-`0.0.0.0:8787`, and use the `Agent Admin` operator role by default. The main
-bridge channel follows the bot channel setting, including when old local state
-names another channel. These managed defaults override local values in memory.
+The managed doodads, bridge enablement, listener and operator role defaults live
+in [runtime_config.py](discord_blue/runtime_config.py). The main bridge channel
+follows the bot channel setting, including when old local state names another
+channel. These managed defaults override local values in memory.
 
 `DISCORD_TOKEN` supplies `[discord].token` and `AGENT_SESSION_TOKEN` supplies
 the server's `[agent_session].token`. They remain lane-managed secrets in their

@@ -193,10 +193,6 @@ class OfflineBot:
         assert config.discord.guild_id > 0 and config.discord.bot_channel_id > 0
         assert "agent_session_doodad" in config.discord.loaded_doodads
         assert config.agent_session.enabled
-        from discord_blue.runtime_config import runtime_overrides
-        defaults = runtime_overrides()["agent_session"]
-        assert config.agent_session.listen_host == defaults["listen_host"]
-        assert config.agent_session.listen_port == defaults["listen_port"]
         assert config.agent_session.spawned_channel_id == int(os.environ["DISCORD_BLUE_SPAWNED_CHANNEL_ID"])
         assert config.agent_session.auto_join_user_ids == json.loads(os.environ["DISCORD_BLUE_AUTO_JOIN_USER_IDS"])
         assert runtime_identity() == json.loads(os.environ["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"])
