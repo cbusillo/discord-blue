@@ -485,6 +485,10 @@ class DialogTests(unittest.IsolatedAsyncioTestCase):
             card = await discord.next("approval_request")
             acked = await discord.control(decision(hello, card["approval_id"], "approved"))
             answer = await hook_answer(claude, request)
+            await claude.settle()
+            # Any status before the call finishes would retire the answered card on the server.
+            early = [discord.received.get_nowait()["type"] for _ in range(discord.received.qsize())]
+            await hook(claude, "PostToolUse", tool_use_id="toolu_1")
             status = await discord.next("status_changed")
 
         self.assertEqual(
@@ -493,6 +497,7 @@ class DialogTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(acked["type"], "approval_decision_ack")
         self.assertEqual(answer, {"behavior": "allow", "updatedInput": COMMAND})
+        self.assertNotIn("status_changed", early)
         self.assertEqual(status["message"], CONTINUING)
 
     async def test_a_denial_in_discord_denies_the_call(self) -> None:

@@ -603,13 +603,15 @@ class ClaudeSession(AgentSessionClient):
         return True
 
     def answer(self, key: str, decision: Json) -> None:
-        """Hand Discord's decision to the waiting hook call; the card already shows who answered."""
+        """Hand Discord's decision to the waiting hook call; the card already shows who answered.
+
+        The dialog stays open until its tool call finishes: a status sent now could reach Discord Blue before this
+        answer's acknowledgement and retire the card as abandoned.
+        """
         del self.prompts[key]
-        dialog = self.dialogs.pop(key)
+        dialog = self.dialogs[key]
         if not dialog.answer.done():
             dialog.answer.set_result(decision)
-        if not self.dialogs:
-            self.publish("status_changed", message=CONTINUING)
 
     def failure_reason(self, exc: Exception) -> str:
         return LOST_CLAUDE
