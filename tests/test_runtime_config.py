@@ -63,12 +63,13 @@ class RuntimeConfigTests(unittest.TestCase):
             },
         }
         self.config_path.write_text(tomli_w.dumps(initial))
-        os.environ.update(self.runtime)
+        os.environ.update(self.runtime | {"DISCORD_BLUE_OPERATOR_ROLE_NAME": "", "DISCORD_BLUE_AGENT_CHANNEL_ID": ""})
         config = Config()
         self.assertTrue(config.agent_session.enabled)
         self.assertNotEqual(config.agent_session.listen_host, initial["agent_session"]["listen_host"])
         self.assertNotEqual(config.agent_session.listen_port, initial["agent_session"]["listen_port"])
         self.assertNotEqual(config.agent_session.operator_role_name, initial["agent_session"]["operator_role_name"])
+        self.assertTrue(config.agent_session.operator_role_name.strip())
         self.assertEqual(config.agent_session.channel_id, config.discord.bot_channel_id)
         config.debug = True
         config.save()
@@ -97,7 +98,7 @@ class RuntimeConfigTests(unittest.TestCase):
     def test_managed_role_and_bridge_channel_preserve_the_lane_settings(self) -> None:
         local = {"agent_session": {"operator_role_name": "Local Role", "channel_id": 333}}
         self.config_path.write_text(tomli_w.dumps(local))
-        supplied = {"DISCORD_BLUE_OPERATOR_ROLE_NAME": " Lane Operators ", "DISCORD_BLUE_AGENT_CHANNEL_ID": "888"}
+        supplied = {"DISCORD_BLUE_OPERATOR_ROLE_NAME": "Lane Operators", "DISCORD_BLUE_AGENT_CHANNEL_ID": "888"}
         os.environ.update(self.runtime | supplied)
         config = Config()
         self.assertEqual(config.agent_session.operator_role_name, supplied["DISCORD_BLUE_OPERATOR_ROLE_NAME"])

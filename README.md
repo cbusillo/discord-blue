@@ -163,7 +163,7 @@ lane settings delivered by Launchplane:
 | Setting | Value |
 | --- | --- |
 | `DISCORD_BLUE_GUILD_ID` | Positive Discord guild ID |
-| `DISCORD_BLUE_BOT_CHANNEL_ID` | Positive main agent-session channel ID |
+| `DISCORD_BLUE_BOT_CHANNEL_ID` | Positive Discord bot channel ID; also the default main bridge channel |
 | `DISCORD_BLUE_SPAWNED_CHANNEL_ID` | Positive spawned-session channel ID, distinct from the main channel |
 | `DISCORD_BLUE_AUTO_JOIN_USER_IDS` | JSON list of positive user IDs, for example `[789, 987]`; use `[]` for none |
 
