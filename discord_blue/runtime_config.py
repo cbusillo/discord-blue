@@ -3,6 +3,13 @@ import os
 from typing import Any
 
 
+def _positive_id(key: str, raw: str) -> int:
+    raw = raw.strip()
+    if not raw.isascii() or not raw.isdecimal() or int(raw) <= 0:
+        raise ValueError(f"{key} must be a positive ID")
+    return int(raw)
+
+
 def runtime_overrides() -> dict[str, dict[str, Any]]:
     settings = (
         "DISCORD_BLUE_GUILD_ID",
@@ -10,18 +17,17 @@ def runtime_overrides() -> dict[str, dict[str, Any]]:
         "DISCORD_BLUE_SPAWNED_CHANNEL_ID",
         "DISCORD_BLUE_AUTO_JOIN_USER_IDS",
     )
-    if "LAUNCHPLANE_RUNTIME_IDENTITY_JSON" not in os.environ and not any(key in os.environ for key in settings):
+    optional = ("DISCORD_BLUE_OPERATOR_ROLE_NAME", "DISCORD_BLUE_AGENT_CHANNEL_ID")
+    if "LAUNCHPLANE_RUNTIME_IDENTITY_JSON" not in os.environ and not any(key in os.environ for key in (*settings, *optional)):
         return {}
     for key in settings:
         if not os.environ.get(key, "").strip():
             raise ValueError(f"{key} must be supplied")
-    ids = []
-    for key in settings[:3]:
-        raw = os.environ[key].strip()
-        if not raw.isascii() or not raw.isdecimal() or int(raw) <= 0:
-            raise ValueError(f"{key} must be a positive ID")
-        ids.append(int(raw))
-    guild_id, bot_channel_id, spawned_channel_id = ids
+    guild_id, bot_channel_id, spawned_channel_id = (_positive_id(key, os.environ[key]) for key in settings[:3])
+    operator_role = os.environ.get(optional[0]) or "Agent Admin"
+    if not operator_role.strip() or operator_role == "from_terminal":
+        raise ValueError(f"{optional[0]} must be a nonblank role name other than from_terminal")
+    agent_channel_id = _positive_id(optional[1], os.environ.get(optional[1]) or str(bot_channel_id))
     try:
         auto_join = json.loads(os.environ[settings[3]])
     except json.JSONDecodeError:
@@ -34,8 +40,8 @@ def runtime_overrides() -> dict[str, dict[str, Any]]:
             "enabled": True,
             "listen_host": "0.0.0.0",
             "listen_port": 8787,
-            "operator_role_name": "Agent Admin",
-            "channel_id": bot_channel_id,
+            "operator_role_name": operator_role,
+            "channel_id": agent_channel_id,
             "spawned_channel_id": spawned_channel_id,
             "auto_join_user_ids": auto_join,
         },

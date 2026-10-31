@@ -168,9 +168,16 @@ lane settings delivered by Launchplane:
 | `DISCORD_BLUE_AUTO_JOIN_USER_IDS` | JSON list of positive user IDs, for example `[789, 987]`; use `[]` for none |
 
 The managed doodads, bridge enablement, listener and operator role defaults live
-in [runtime_config.py](discord_blue/runtime_config.py). The main bridge channel
-follows the bot channel setting, including when old local state names another
-channel. These managed defaults override local values in memory.
+in [runtime_config.py](discord_blue/runtime_config.py). Two optional lane settings
+preserve an existing lane's routing and operator role:
+
+| Setting | Value when supplied | Default when absent or empty |
+| --- | --- | --- |
+| `DISCORD_BLUE_OPERATOR_ROLE_NAME` | Exact existing Discord role name; whitespace-only names and the reserved `from_terminal` prompt value refuse startup | `Agent Admin` |
+| `DISCORD_BLUE_AGENT_CHANNEL_ID` | Positive main bridge channel ID, distinct from the spawned-session channel | The bot channel ID |
+
+These settings and defaults override local values in memory. Managed startup
+loads the agent-session plugin only; it does not retain the missing error plugin.
 
 `DISCORD_TOKEN` supplies `[discord].token` and `AGENT_SESSION_TOKEN` supplies
 the server's `[agent_session].token`. They remain lane-managed secrets in their
@@ -187,9 +194,13 @@ memory and are excluded from subsequent TOML saves, preserving local values.
 Without managed inputs, local TOML and interactive setup retain their behavior.
 The local development Compose file does not deliver these inputs.
 
-Before releasing this change, populate the four settings on both lanes through
-Launchplane's supported product-config dry-run/apply using each lane's existing
-values. Keep the existing settings and secrets in their current storage. There
+Before releasing this change, populate the four required settings and any role
+or bridge-channel overrides through Launchplane's supported product-config
+dry-run/apply using each lane's existing values. For production, coordinate the
+reviewed settings and corrected source under the existing [admin release hold](https://github.com/cbusillo/launchplane/blob/main/docs/release-review.md#acceptance-starts-the-release)
+before letting the accepted-release path resume. A settings-only checklist
+change can otherwise release an older reader that ignores the overrides.
+Keep the existing settings and secrets in their current storage. There
 is no fallback to the old `DISCORD_BLUE_RUNTIME_CONFIG` blob; remove that old
 setting only after the gated release is healthy. Preparing or merging source
 does not perform this migration or authorize a deployment.
@@ -240,7 +251,8 @@ candidate and lane. Source checkout must be pinned to the reviewed completing
 commit, independently of selecting the runtime image.
 
 The Compose file explicitly passes those identity inputs, the four lane settings
-and credentials described above, and `DISCORD_BLUE_STATE_DIR`. Every input must be nonempty before Compose can create a
+and credentials described above, the two optional overrides, and
+`DISCORD_BLUE_STATE_DIR`. Required inputs must be nonempty before Compose can create a
 container. Set `DISCORD_BLUE_STATE_DIR` to `/var/lib/discord-blue`, matching the
 image's home and the Compose-scoped named volume; a different state-dir input
 refuses at the image entrypoint. Keep the volume on the testing

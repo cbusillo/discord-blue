@@ -94,6 +94,19 @@ class RuntimeConfigTests(unittest.TestCase):
                             Config()
                     self.assertEqual(self.config_path.read_text(), "")
 
+    def test_managed_role_and_bridge_channel_preserve_the_lane_settings(self) -> None:
+        local = {"agent_session": {"operator_role_name": "Local Role", "channel_id": 333}}
+        self.config_path.write_text(tomli_w.dumps(local))
+        supplied = {"DISCORD_BLUE_OPERATOR_ROLE_NAME": " Lane Operators ", "DISCORD_BLUE_AGENT_CHANNEL_ID": "888"}
+        os.environ.update(self.runtime | supplied)
+        config = Config()
+        self.assertEqual(config.agent_session.operator_role_name, supplied["DISCORD_BLUE_OPERATOR_ROLE_NAME"])
+        self.assertEqual(config.agent_session.channel_id, int(supplied["DISCORD_BLUE_AGENT_CHANNEL_ID"]))
+        self.assertNotEqual(config.agent_session.channel_id, config.discord.bot_channel_id)
+        config.save()
+        stored = tomllib.loads(self.config_path.read_text())["agent_session"]
+        self.assertEqual({key: stored[key] for key in local["agent_session"]}, local["agent_session"])
+
     def test_managed_identity_requires_settings_even_with_complete_local_config(self) -> None:
         self.config_path.write_text('[discord]\ntoken="local-bot"\nguild_id=123\nbot_channel_id=456\n')
         os.environ["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"] = '{"product":"fixture"}'
@@ -114,6 +127,10 @@ class RuntimeConfigTests(unittest.TestCase):
             {"DISCORD_BLUE_BOT_CHANNEL_ID": "0"},
             {"DISCORD_BLUE_SPAWNED_CHANNEL_ID": "-1"},
             {"DISCORD_BLUE_SPAWNED_CHANNEL_ID": self.runtime["DISCORD_BLUE_BOT_CHANNEL_ID"]},
+            {"DISCORD_BLUE_AGENT_CHANNEL_ID": "0"},
+            {"DISCORD_BLUE_AGENT_CHANNEL_ID": self.runtime["DISCORD_BLUE_SPAWNED_CHANNEL_ID"]},
+            {"DISCORD_BLUE_OPERATOR_ROLE_NAME": "  "},
+            {"DISCORD_BLUE_OPERATOR_ROLE_NAME": "from_terminal"},
             *({"DISCORD_BLUE_AUTO_JOIN_USER_IDS": value} for value in ('["wrong-type"]', "[true]", "[-1]", "0", "{}", "[", "[0]")),
         )
         initial = '[discord]\ntoken="local-bot"\n'
