@@ -883,6 +883,9 @@ class QuestionReadButton(discord.ui.Button[discord.ui.LayoutView]):
         if attachment is None:
             await interaction.response.send_message(view=view, ephemeral=True, allowed_mentions=agent_session_allowed_mentions())
             return
+        container = view.children[0]
+        assert isinstance(container, discord.ui.Container)
+        container.add_item(discord.ui.File(f"attachment://{attachment.filename}"))
         try:
             await interaction.response.send_message(
                 view=view, file=attachment, ephemeral=True, allowed_mentions=agent_session_allowed_mentions()

@@ -182,6 +182,8 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         async def capture(
             *, file: discord.File, view: discord.ui.LayoutView, ephemeral: bool, allowed_mentions: discord.AllowedMentions
         ) -> None:
+            media = [item.media.url for item in view.walk_children() if isinstance(item, discord.ui.File)]
+            self.assertIn(f"attachment://{file.filename}", media)
             captured.append(file.fp.read())
             self.assertTrue(ephemeral)
             self.assertLess(len(visible_view_text(view)), 3000)
