@@ -129,10 +129,16 @@ def question_choices(body: str) -> tuple[tuple[str, bool], ...]:
     bullets: list[str] = []
     alternatives: list[str] = []
     recommended = ""
-    for _, line in top_level_lines(body.splitlines()):
+    lines = body.splitlines()
+    for index, line in top_level_lines(lines):
         if line.startswith(("    ", "\t", ">")):
             continue  # Indented code and quotes are examples, not offered answers.
-        if body.startswith("Director question: ") and (option := STRUCTURED_CHOICE.match(line)):
+        if (
+            body.startswith("Director question: ")
+            and (option := STRUCTURED_CHOICE.match(line))
+            and index + 1 < len(lines)
+            and lines[index + 1].startswith("Ongoing cost: ")
+        ):
             bullets.append(option[1])
             if option[2]:
                 recommended = option[1]

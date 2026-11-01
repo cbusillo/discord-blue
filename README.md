@@ -657,8 +657,8 @@ An answer containing a top-level bold numbered question whose first sentence end
 in a question mark, such as `**Q123.** Ship it? I recommend yes.`, puts that question in a silent **Question** card
 inside the session thread. Structured relays beginning `Director question: **Q123.`
 also create cards, with their bold option headings as answer buttons and the
-`(recommended)` option highlighted. Its recommendation, cost and alternatives stay with
-it. Surrounding prose stays chat. Each Q number keeps one card in its session,
+`(recommended)` option highlighted. Each card keeps the question
+with its recommendation, cost and alternatives. Surrounding prose stays chat. Each Q number keeps one card in its session,
 even on backfill or reconnection; the parent channel gets no question posts. Quoted, tabled,
 indented and fenced examples do not create cards. Large context is attached as
 `questions.md`. No mentions or push notifications are sent. Discord controls

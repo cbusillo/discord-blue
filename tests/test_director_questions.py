@@ -77,6 +77,11 @@ Recommendation: keep both.
         self.assertEqual([number for number, _ in detect_questions(abbreviated)], ["Q13"])
         self.assertEqual(question_excerpt(abbreviated), "Should we support e.g. CSV imports?")
 
+    def test_bold_context_labels_are_not_structured_choices(self) -> None:
+        source = (Path(__file__).parent / "fixtures/structured_question_q1160.txt").read_text()
+        source = source.replace("\n\n", "\n\n**Note:** Context is not an answer.\n\n", 1)
+        self.assertEqual(question_choices(source), (("Delete the route", True), ("Keep it for later", False)))
+
     def test_structured_question_examples_stay_prose(self) -> None:
         source = (Path(__file__).parent / "fixtures/structured_question_q1160.txt").read_text()
         for example in (f"```text\n{source}```", "> " + source.replace("\n", "\n> "), "    " + source.replace("\n", "\n    ")):
