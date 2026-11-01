@@ -18,7 +18,7 @@ ANSWER_CONTINUATION_COMPONENT_ID = 215
 ANSWER_FILENAME = "answer.md"
 ANSWER_CHUNK_LIMIT = 1800
 MAX_INLINE_ANSWER_CARDS = 10
-QUESTION_NUMBER = re.compile(r"^(?:#{1,6}[ \t]+)?(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?\*\*Q[0-9]+\b")
+QUESTION_NUMBER = re.compile(r"^(?:#{1,6}[ \t]+)?(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?:Director question: )?\*\*Q[0-9]+\b")
 DASHBOARD_PAGE_SIZE = 8
 STATUS_LABELS = {
     "working": ("🔄 Working", 0x758AFF),
