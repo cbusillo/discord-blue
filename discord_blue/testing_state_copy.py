@@ -55,8 +55,8 @@ def config_directory(root: int, *, create: bool = False, owner: int | None = Non
                     pass
             parent = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
             descriptors.append(parent)
-            if owner is not None and os.fstat(parent).st_uid != owner:
-                raise ValueError("Testing state must belong to its runtime user.")
+        if owner is not None and os.fstat(parent).st_uid != owner:
+            raise ValueError("Testing state must belong to its runtime user.")
         yield parent
         if create:
             for descriptor in reversed(descriptors):

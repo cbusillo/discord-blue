@@ -13,7 +13,9 @@ can prepare the destination's empty `.config/discord-blue` directories before
 running the utility as its runtime user. Existing files are never overwritten.
 The source must be readable by that user. A source UID/permission mismatch is a
 source-qualification prerequisite; the utility never changes source ownership.
-The destination tree must belong to that same nonroot user. Image build caches
+The destination root, writable config directory and config file must belong to
+that same nonroot user. The intermediate `.config` parent may belong to root
+when it is traversable by the runtime user. Image build caches
 and the Python installation live outside the mounted state directory.
 
 The three commands are:
