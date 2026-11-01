@@ -20,7 +20,7 @@ if [ -d "$state_dir" ]; then
       groupmod --gid "$state_gid" "$runtime_user"
     fi
     runtime_group=$(getent group "$state_gid" | cut -d: -f1)
-    usermod --uid "$state_uid" --gid "$runtime_group" --home "$state_dir" "$runtime_user"
+    usermod --uid "$state_uid" --gid "$runtime_group" --home "$state_dir" "$runtime_user" >&2
   fi
 fi
 
