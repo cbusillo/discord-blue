@@ -8,6 +8,9 @@ from pathlib import Path
 from scripts.image_metadata import image_metadata
 
 
+TESTING_STATE_COPY_COMMAND = ("/app/.venv/bin/python", "-m", "discord_blue.testing_state_copy")
+
+
 def write_manifest(*, source_commit: str, repository: str, image_reference: str, destination: Path) -> None:
     """Refuse missing publication evidence before writing a manifest."""
     image_repository, digest = publication_identity(source_commit, repository, image_reference)
@@ -16,6 +19,7 @@ def write_manifest(*, source_commit: str, repository: str, image_reference: str,
         "kind": "generic-web",
         "source_commit": source_commit,
         "image": {"repository": image_repository, "digest": digest},
+        "testing_state_copy": {"command": TESTING_STATE_COPY_COMMAND},
     }
     destination.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 

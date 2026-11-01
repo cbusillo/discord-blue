@@ -185,12 +185,14 @@ class RuntimeComposeTests(unittest.TestCase):
 
 
 STATE_COPY_PROBE = """
+import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 from discord_blue.config import Config
-from discord_blue.testing_state_copy import plan_testing_state, copy_testing_state, inspect_testing_state
+from scripts.artifact_manifest import write_manifest
 
 home = Path.home()
 assert os.geteuid() != 0
@@ -202,9 +204,21 @@ with tempfile.TemporaryDirectory() as temporary:
     original = 'debug = true\\n[discord]\\ntoken = "synthetic-production"\\nguild_id = 999\\n'
     config.write_text(original)
     (source / 'agent-sessions.json').write_text('{"live": "synthetic-production"}')
-    planned = plan_testing_state(source)
-    copied = copy_testing_state(source, home, planned.sha256)
-    assert copied == planned == inspect_testing_state(home)
+    manifest = source / 'manifest.json'
+    write_manifest(source_commit='a' * 40, repository='cbusillo/discord-blue',
+                   image_reference='ghcr.io/cbusillo/discord-blue@sha256:' + 'b' * 64,
+                   destination=manifest)
+    command = json.loads(manifest.read_text())['testing_state_copy']['command']
+    def invoke(*arguments):
+        completed = subprocess.run([*command, *arguments], capture_output=True, text=True)
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        assert 'synthetic-production' not in completed.stdout + completed.stderr
+        return json.loads(completed.stdout)
+    planned = invoke('plan', '--source', str(source))
+    copied = invoke('copy', '--source', str(source), '--destination', str(home),
+                    '--expected-sha256', planned['sha256'])
+    verified = invoke('verify', '--destination', str(home), '--expected-sha256', planned['sha256'])
+    assert copied == planned == verified
     assert config.read_text() == original
 runtime = Config()
 assert runtime.debug

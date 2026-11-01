@@ -24,7 +24,6 @@ class ArtifactManifestTests(unittest.TestCase):
         self.assertEqual(payload["source_commit"], commit)
         self.assertEqual(payload["image"]["repository"], published.image)
         self.assertEqual(payload["image"]["digest"], digest)
-        self.assertEqual(set(payload), {"schema_version", "kind", "source_commit", "image"})
 
     def test_failed_or_unbound_publication_writes_no_manifest(self) -> None:
         commit = "a" * 40

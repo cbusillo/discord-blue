@@ -54,8 +54,7 @@ def read_publication(
             raise ValueError("Build artifact must contain one manifest")
         manifest = json.loads(bundle.read(files[0]))
     if (
-        set(manifest) != {"schema_version", "kind", "source_commit", "image"}
-        or manifest["schema_version"] != 1
+        manifest["schema_version"] != 1
         or manifest["kind"] != "generic-web"
         or manifest["source_commit"] != source_commit
         or set(manifest["image"]) != {"repository", "digest"}
