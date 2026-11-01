@@ -157,6 +157,10 @@ The image exposes port `8787`, and the local Compose file binds it to
 
 ### Managed server runtime inputs
 
+For an isolated copy of saved state, use the image's
+[offline testing state interface](docs/testing-state-copy.md) before starting
+the application. Normal runtime overrides do not sanitize persisted state.
+
 An isolated server can start from an empty state volume using four non-secret
 lane settings delivered by Launchplane:
 
