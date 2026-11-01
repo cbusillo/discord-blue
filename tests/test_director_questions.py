@@ -77,6 +77,12 @@ Recommendation: keep both.
         self.assertEqual([number for number, _ in detect_questions(abbreviated)], ["Q13"])
         self.assertEqual(question_excerpt(abbreviated), "Should we support e.g. CSV imports?")
 
+    def test_structured_question_examples_stay_prose(self) -> None:
+        source = (Path(__file__).parent / "fixtures/structured_question_q1160.txt").read_text()
+        for example in (f"```text\n{source}```", "> " + source.replace("\n", "\n> "), "    " + source.replace("\n", "\n    ")):
+            with self.subTest(example=example[:30]):
+                self.assertEqual(detect_questions(example), ())
+
     def test_references_and_historical_labels_are_not_questions(self) -> None:
         for source in ("**Q12** was answered yesterday.", "**Q12 status**\nDone.", "See **Q12.** Later?", "**Q12.** Resolved."):
             with self.subTest(source=source):
@@ -121,6 +127,18 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         interaction = FakeInteraction(self.fixture.thread)
         await button.callback(cast(Any, interaction))
         return cast(QuestionAnswerModal, interaction.response.modals[0])
+
+    async def test_rendered_structured_question_has_choices_and_delivers_the_selected_answer(self) -> None:
+        source = (Path(__file__).parent / "fixtures/structured_question_q1160.txt").read_text()
+        await self.card(source)
+        view = cast(discord.ui.LayoutView, self.fixture.thread.sent_views[-1])
+        choices = [item for item in view.walk_children() if isinstance(item, QuestionChoiceButton)]
+        self.assertEqual([item.choice for item in choices], ["Delete the route", "Keep it for later"])
+        self.assertEqual(choices[0].style, discord.ButtonStyle.primary)
+        self.assertEqual(choices[1].style, discord.ButtonStyle.secondary)
+        self.assertIn("Q1160", visible_view_text(view))
+        await choices[1].callback(cast(Any, FakeInteraction(self.fixture.thread)))
+        self.assertIn("Q1160: Keep it for later", str(self.fixture.socket.sent_json[0]["text"]))
 
     async def test_questions_replace_plain_text_in_order_without_parent_posts_or_notifications(self) -> None:
         text = (

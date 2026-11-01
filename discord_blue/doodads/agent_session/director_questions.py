@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from discord_blue.doodads.agent_session.sessions import AgentSession
 
 logger = logging.getLogger(__name__)
-QUESTION_START = re.compile(r"^\*\*(Q\d+)(?:[.:](?:\*\*|\s)|\*\*[:.\s])")
+QUESTION_START = re.compile(r"^(?:Director question: )?\*\*(Q\d+)(?:[.:](?:\*\*|\s)|\*\*[:.\s])")
 # A sentence ends at ".", "?" or "!" before a space or the line's end, so "v1.2" does not end one.
 SENTENCE_END = re.compile(r"[.?!](?=\s|$)")
 # "- **On yes:** ..." bullets name the choices; otherwise Recommendation and Alternative lines do.
@@ -52,6 +52,7 @@ ALTERNATIVE = re.compile(r"^\s*(?:[-*]\s+)?\**alternatives?\**:\**\s*(.+)", re.I
 # Agents also recommend in prose: "**Q1.** Which color? I recommend blue because ...".
 INLINE_RECOMMENDATION = re.compile(r"\b(?:I recommend|my recommendation is)\s+(.+)", re.IGNORECASE)
 CHOICE_END = re.compile(r"[.;:(,]\s|[.;:]$|\s[-\u2013\u2014]\s|\s(?:because|since|so that)\s")
+STRUCTURED_CHOICE = re.compile(r"^\*\*([^*\n]+?)( \(recommended\))?:\*\*")
 CHOICE_LIMIT = 60
 MAX_CHOICES = 4
 # Discord allows 4000 characters of text in a form; leave room for the cut notice and link.
@@ -131,7 +132,11 @@ def question_choices(body: str) -> tuple[tuple[str, bool], ...]:
     for _, line in top_level_lines(body.splitlines()):
         if line.startswith(("    ", "\t", ">")):
             continue  # Indented code and quotes are examples, not offered answers.
-        if bullet := CHOICE_BULLET.match(line):
+        if body.startswith("Director question: ") and (option := STRUCTURED_CHOICE.match(line)):
+            bullets.append(option[1])
+            if option[2]:
+                recommended = option[1]
+        elif bullet := CHOICE_BULLET.match(line):
             bullets.append(bullet[1].strip())
         elif (recommendation := RECOMMENDATION.match(line) or INLINE_RECOMMENDATION.search(line)) and not recommended:
             recommended = choice_text(recommendation[1])
