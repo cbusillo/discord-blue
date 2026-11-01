@@ -214,12 +214,13 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await fixture.bridge.session_threads.thread_has_assistant_message(cast(discord.Thread, fixture.thread)))
 
     def test_huge_output_keeps_rendered_structured_questions_inline(self) -> None:
-        question = (Path(__file__).parent / "fixtures/structured_question_q1160.txt").read_text()
-        views, attached = assistant_answer_cards("Report line\n" * 10000 + "\n" + question)
-        self.assertTrue(attached)
-        displayed = "\n".join(text_in(view) for view in views)
-        self.assertIn(question.splitlines()[0], displayed)
-        self.assertNotIn("Report line", displayed)
+        for filename in ("structured_question_q1160.txt", "structured_question_q1160_bulleted.txt"):
+            question = (Path(__file__).parent / "fixtures" / filename).read_text()
+            views, attached = assistant_answer_cards("Report line\n" * 10000 + "\n" + question)
+            self.assertTrue(attached)
+            displayed = "\n".join(text_in(view) for view in views)
+            self.assertIn(question.splitlines()[0], displayed)
+            self.assertNotIn("Report line", displayed)
 
     def test_huge_output_keeps_questions_without_unrelated_report_or_inline_references(self) -> None:
         answer = "**Q901:** May we continue?\n\nRecommend yes.\n\n" + "report line\n" * 10000

@@ -130,14 +130,15 @@ def question_choices(body: str) -> tuple[tuple[str, bool], ...]:
     alternatives: list[str] = []
     recommended = ""
     lines = body.splitlines()
+    in_options = False
     for index, line in top_level_lines(lines):
         if line.startswith(("    ", "\t", ">")):
             continue  # Indented code and quotes are examples, not offered answers.
-        if (
-            body.startswith("Director question: ")
-            and (option := STRUCTURED_CHOICE.match(line))
-            and index + 1 < len(lines)
-            and lines[index + 1].startswith("Ongoing cost: ")
+        if line.startswith("- "):
+            in_options = line == "- **Options:**"
+        if (option := STRUCTURED_CHOICE.match(line.removeprefix("  - "))) and (
+            (in_options and line.startswith("  - "))
+            or (body.startswith("Director question: ") and index + 1 < len(lines) and lines[index + 1].startswith("Ongoing cost: "))
         ):
             bullets.append(option[1])
             if option[2]:
