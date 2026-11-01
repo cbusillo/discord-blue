@@ -14,6 +14,8 @@ import tomli_w
 
 MAX_CONFIG_BYTES = 1024 * 1024
 STATE_FORMAT = "discord-blue-testing-state-v1"
+MAX_RETAINED_HEARTBEAT_SECONDS = 24 * 60 * 60
+PENDING_CONFIG = "config.toml.pending"
 
 
 @dataclass(frozen=True)
@@ -41,7 +43,7 @@ def open_directory(path: Path) -> Iterator[int]:
 
 
 @contextmanager
-def config_directory(root: int, *, create: bool = False) -> Iterator[int]:
+def config_directory(root: int, *, create: bool = False, owner: int | None = None) -> Iterator[int]:
     descriptors = []
     parent = root
     try:
@@ -53,18 +55,25 @@ def config_directory(root: int, *, create: bool = False) -> Iterator[int]:
                     pass
             parent = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
             descriptors.append(parent)
+            if owner is not None and os.fstat(parent).st_uid != owner:
+                raise ValueError("Testing state must belong to its runtime user.")
         yield parent
+        if create:
+            for descriptor in reversed(descriptors):
+                os.fsync(descriptor)
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
 
 
-def read_config(root: int, *, optional: bool) -> bytes:
+def read_config(root: int, *, optional: bool, owner: int | None = None) -> bytes:
     try:
-        with config_directory(root) as directory:
+        with config_directory(root, owner=owner) as directory:
             descriptor = os.open("config.toml", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
             try:
                 before = os.fstat(descriptor)
+                if owner is not None and before.st_uid != owner:
+                    raise ValueError("Testing state must belong to its runtime user.")
                 if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_CONFIG_BYTES:
                     raise ValueError("State configuration must be a bounded regular file.")
                 with os.fdopen(descriptor, "rb", closefd=False) as stream:
@@ -86,7 +95,7 @@ def read_config(root: int, *, optional: bool) -> bytes:
 def safe_preferences(content: bytes) -> dict[str, object]:
     try:
         data = tomllib.loads(content.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError):
         raise ValueError("State configuration is not valid UTF-8 TOML.") from None
     preferences: dict[str, object] = {}
     if "debug" in data:
@@ -101,8 +110,8 @@ def safe_preferences(content: bytes) -> dict[str, object]:
         if key not in agent:
             continue
         value = agent[key]
-        if type(value) is not int or value <= 0:
-            raise ValueError("Heartbeat preferences must be positive integers.")
+        if type(value) is not int or not 0 < value <= MAX_RETAINED_HEARTBEAT_SECONDS:
+            raise ValueError("Heartbeat preferences must be positive seconds within one day.")
         timing[key] = value
     if timing:
         preferences["agent_session"] = timing
@@ -118,12 +127,19 @@ def plan_testing_state(source: Path) -> StateCopyReceipt:
         return receipt(tomli_w.dumps(safe_preferences(read_config(directory, optional=True))).encode())
 
 
-def require_empty_destination(root: int) -> None:
+def require_runtime_owner(root: int) -> int:
+    owner = os.fstat(root).st_uid
+    if owner == 0 or owner != os.geteuid():
+        raise ValueError("Testing state must belong to its nonroot runtime user.")
+    return owner
+
+
+def require_empty_destination(root: int, owner: int) -> None:
     if not os.listdir(root):
         return
     if os.listdir(root) != [".config"]:
         raise ValueError("The testing state destination contains existing data.")
-    with config_directory(root) as directory:
+    with config_directory(root, owner=owner) as directory:
         if os.listdir(directory):
             raise ValueError("The testing state destination contains existing data.")
     descriptor = os.open(".config", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
@@ -136,9 +152,10 @@ def require_empty_destination(root: int) -> None:
 
 def inspect_testing_state(destination: Path) -> StateCopyReceipt:
     with open_directory(destination) as root:
+        owner = require_runtime_owner(root)
         if os.listdir(root) != [".config"]:
             raise ValueError("Sanitized state contains unexpected files.")
-        with config_directory(root) as directory:
+        with config_directory(root, owner=owner) as directory:
             if os.listdir(directory) != ["config.toml"]:
                 raise ValueError("Sanitized state contains unexpected files.")
         descriptor = os.open(".config", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
@@ -147,7 +164,7 @@ def inspect_testing_state(destination: Path) -> StateCopyReceipt:
                 raise ValueError("Sanitized state contains unexpected files.")
         finally:
             os.close(descriptor)
-        content = read_config(root, optional=False)
+        content = read_config(root, optional=False, owner=owner)
         safe = safe_preferences(content)
         if tomllib.loads(content.decode()) != safe:
             raise ValueError("Sanitized state contains unsafe configuration.")
@@ -158,20 +175,22 @@ def copy_testing_state(source: Path, destination: Path, expected_sha256: str) ->
     if source == destination or source in destination.parents or destination in source.parents:
         raise ValueError("Source and destination must be separate state directories.")
     with open_directory(source) as original, open_directory(destination) as target:
+        owner = require_runtime_owner(target)
         source_stat, target_stat = os.fstat(original), os.fstat(target)
         if (source_stat.st_dev, source_stat.st_ino) == (target_stat.st_dev, target_stat.st_ino):
             raise ValueError("Source and destination must be separate state directories.")
         content = tomli_w.dumps(safe_preferences(read_config(original, optional=True))).encode()
         if receipt(content).sha256 != expected_sha256:
             raise ValueError("The source preferences changed after planning.")
-        require_empty_destination(target)
-        with config_directory(target, create=True) as directory:
-            descriptor = os.open("config.toml", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+        require_empty_destination(target, owner)
+        with config_directory(target, create=True, owner=owner) as directory:
+            descriptor = os.open(PENDING_CONFIG, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
             with os.fdopen(descriptor, "wb") as stream:
                 stream.write(content)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.fsync(directory)
+            os.link(PENDING_CONFIG, "config.toml", src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+            os.unlink(PENDING_CONFIG, dir_fd=directory)
         os.fsync(target)
     verified = inspect_testing_state(destination)
     if verified.sha256 != expected_sha256:

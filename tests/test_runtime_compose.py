@@ -171,6 +171,50 @@ class RuntimeComposeTests(unittest.TestCase):
         (stopped,) = json.loads(result.stdout)
         self.assertEqual(stopped["State"]["ExitCode"], 0)
 
+    def test_offline_copy_uses_image_runtime_and_independent_managed_inputs(self) -> None:
+        self.override.write_text(
+            json.dumps(
+                {"services": {"discord-blue": {"command": ["/app/.venv/bin/python", "-c", STATE_COPY_PROBE], "restart": "no"}}}
+            )
+        )
+        self.command.extend(["--file", str(self.override)])
+        result = self.compose("run", "--rm", "--no-deps", "-T", "discord-blue")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("offline-state-copy-qualified", result.stdout)
+        self.assertNotIn("synthetic-production", result.stdout + result.stderr)
+
+
+STATE_COPY_PROBE = """
+import os
+from pathlib import Path
+import sys
+import tempfile
+from discord_blue.config import Config
+from discord_blue.testing_state_copy import plan_testing_state, copy_testing_state, inspect_testing_state
+
+home = Path.home()
+assert os.geteuid() != 0
+assert not Path(sys.executable).resolve().is_relative_to(home)
+with tempfile.TemporaryDirectory() as temporary:
+    source = Path(temporary)
+    config = source / '.config/discord-blue/config.toml'
+    config.parent.mkdir(parents=True)
+    original = 'debug = true\\n[discord]\\ntoken = "synthetic-production"\\nguild_id = 999\\n'
+    config.write_text(original)
+    (source / 'agent-sessions.json').write_text('{"live": "synthetic-production"}')
+    planned = plan_testing_state(source)
+    copied = copy_testing_state(source, home, planned.sha256)
+    assert copied == planned == inspect_testing_state(home)
+    assert config.read_text() == original
+runtime = Config()
+assert runtime.debug
+assert runtime.discord.token == os.environ['DISCORD_TOKEN']
+assert runtime.discord.guild_id == int(os.environ['DISCORD_BLUE_GUILD_ID'])
+assert not runtime.conversation.enabled
+assert not (home / 'agent-sessions.json').exists()
+print('offline-state-copy-qualified')
+"""
+
 
 ENTRYPOINT_PROBE = """
 print("probe-started", flush=True)

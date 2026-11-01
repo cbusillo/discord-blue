@@ -4,6 +4,8 @@ WORKDIR /app
 
 ENV HOME=/var/lib/discord-blue
 ENV PYTHONUNBUFFERED=1
+ENV UV_CACHE_DIR=/opt/uv/cache
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
 
 COPY . ./
 RUN uv sync --frozen --no-dev --python 3.13 \

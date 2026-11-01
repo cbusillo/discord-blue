@@ -42,8 +42,11 @@ class TestingStateCopyTests(unittest.TestCase):
             "unknown": {"token": "synthetic-unknown-secret"},
         }
         self.config.write_text(tomli_w.dumps(data))
-        for name in ("agent-sessions.json", "bridge-deliveries.json", "handover.json"):
-            (self.config.parent / name).write_text('{"live":"synthetic-recovery-route"}')
+        for name in ("agent-sessions.json", ".discord-blue-handover.json", ".discord-blue-owner.lock"):
+            (self.source / name).write_text('{"live":"synthetic-recovery-route"}')
+        deliveries = self.source / ".local/share/discord-blue-bridges"
+        deliveries.mkdir(parents=True)
+        (deliveries / "codex-startup.json").write_text('{"live":"synthetic-recovery-route"}')
         return self.config.read_bytes()
 
     def test_copy_preserves_preferences_without_live_routes_or_credentials(self) -> None:
@@ -140,6 +143,50 @@ class TestingStateCopyTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     plan_testing_state(self.source)
                 self.assertEqual(list(self.destination.iterdir()), [])
+
+    def test_source_cannot_overflow_the_runtime_heartbeat_consumer(self) -> None:
+        self.config.write_text(f"[agent_session]\nheartbeat_timeout_seconds = {10**1000}\n")
+        with self.assertRaises(ValueError):
+            plan_testing_state(self.source)
+        self.assertEqual(list(self.destination.iterdir()), [])
+
+    def test_verification_requires_the_runtime_owner(self) -> None:
+        self.seed()
+        planned = plan_testing_state(self.source)
+        copy_testing_state(self.source, self.destination, planned.sha256)
+        with patch("os.geteuid", return_value=os.geteuid() + 1), self.assertRaises(ValueError):
+            inspect_testing_state(self.destination)
+
+    def test_copy_commits_each_parent_directory_before_returning(self) -> None:
+        self.seed()
+        flushed = set()
+        fsync = os.fsync
+
+        def flush(descriptor: int) -> None:
+            metadata = os.fstat(descriptor)
+            flushed.add((metadata.st_dev, metadata.st_ino))
+            fsync(descriptor)
+
+        with patch("os.fsync", side_effect=flush):
+            copy_testing_state(self.source, self.destination, plan_testing_state(self.source).sha256)
+        metadata = (self.destination / ".config").stat()
+        self.assertIn((metadata.st_dev, metadata.st_ino), flushed)
+
+    def test_interrupted_write_never_publishes_an_incomplete_config(self) -> None:
+        self.seed()
+        planned = plan_testing_state(self.source)
+        with patch("os.fsync", side_effect=OSError("fixture interrupted flush")), self.assertRaises((OSError, ValueError)):
+            copy_testing_state(self.source, self.destination, planned.sha256)
+        self.assertFalse((self.destination / ".config/discord-blue/config.toml").exists())
+        with self.assertRaises(ValueError):
+            inspect_testing_state(self.destination)
+        with self.assertRaises(ValueError):
+            copy_testing_state(self.source, self.destination, planned.sha256)
+
+    def test_deeply_nested_source_returns_a_bounded_refusal(self) -> None:
+        self.config.write_text("ignored = " + "[" * 2000 + "0" + "]" * 2000)
+        with self.assertRaises(ValueError):
+            plan_testing_state(self.source)
 
     def test_offline_module_commands_bind_the_copy_and_keep_errors_value_free(self) -> None:
         self.seed()
