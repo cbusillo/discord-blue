@@ -83,10 +83,11 @@ Recommendation: keep both.
         self.assertEqual(question_choices(source), (("Delete the route", True), ("Keep it for later", False)))
 
     def test_structured_question_examples_stay_prose(self) -> None:
-        source = (Path(__file__).parent / "fixtures/structured_question_q1160.txt").read_text()
-        for example in (f"```text\n{source}```", "> " + source.replace("\n", "\n> "), "    " + source.replace("\n", "\n    ")):
-            with self.subTest(example=example[:30]):
-                self.assertEqual(detect_questions(example), ())
+        for filename in ("structured_question_q1160.txt", "structured_question_q1160_bulleted.txt"):
+            source = (Path(__file__).parent / "fixtures" / filename).read_text()
+            for example in (f"```text\n{source}```", "> " + source.replace("\n", "\n> "), "    " + source.replace("\n", "\n    ")):
+                with self.subTest(filename=filename, example=example[:30]):
+                    self.assertEqual(detect_questions(example), ())
 
     def test_references_and_historical_labels_are_not_questions(self) -> None:
         for source in ("**Q12** was answered yesterday.", "**Q12 status**\nDone.", "See **Q12.** Later?", "**Q12.** Resolved."):
@@ -133,8 +134,8 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         await button.callback(cast(Any, interaction))
         return cast(QuestionAnswerModal, interaction.response.modals[0])
 
-    async def test_rendered_structured_question_has_choices_and_delivers_the_selected_answer(self) -> None:
-        source = (Path(__file__).parent / "fixtures/structured_question_q1160.txt").read_text()
+    async def assert_rendered_choices(self, filename: str) -> None:
+        source = (Path(__file__).parent / "fixtures" / filename).read_text()
         await self.card(source)
         view = cast(discord.ui.LayoutView, self.fixture.thread.sent_views[-1])
         choices = [item for item in view.walk_children() if isinstance(item, QuestionChoiceButton)]
@@ -144,6 +145,12 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Q1160", visible_view_text(view))
         await choices[1].callback(cast(Any, FakeInteraction(self.fixture.thread)))
         self.assertIn("Q1160: Keep it for later", str(self.fixture.socket.sent_json[0]["text"]))
+
+    async def test_rendered_structured_question_has_choices_and_delivers_the_selected_answer(self) -> None:
+        await self.assert_rendered_choices("structured_question_q1160.txt")
+
+    async def test_bulleted_structured_question_has_choices_and_delivers_the_selected_answer(self) -> None:
+        await self.assert_rendered_choices("structured_question_q1160_bulleted.txt")
 
     async def test_questions_replace_plain_text_in_order_without_parent_posts_or_notifications(self) -> None:
         text = (
