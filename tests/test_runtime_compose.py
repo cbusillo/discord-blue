@@ -174,6 +174,9 @@ class RuntimeComposeTests(unittest.TestCase):
         self.assertEqual(stopped["State"]["ExitCode"], 0)
 
     def test_offline_copy_uses_image_runtime_and_independent_managed_inputs(self) -> None:
+        runtime = self.compose("config", "--format", "json")
+        self.assertEqual(runtime.returncode, 0, runtime.stderr)
+        managed_inputs = json.loads(runtime.stdout)["services"]["discord-blue"]["environment"]
         source = self.override.parent / "source"
         config = source / ".config/discord-blue/config.toml"
         config.parent.mkdir(parents=True)
@@ -229,7 +232,7 @@ class RuntimeComposeTests(unittest.TestCase):
         self.assertEqual(planned, copied)
         self.assertEqual(planned, verified)
         self.assertEqual(config.read_text(), original)
-        service["environment"] = {key: self.env[key] for key in ("DISCORD_TOKEN", "DISCORD_BLUE_GUILD_ID")}
+        service["environment"] = managed_inputs
         result = run_command([command[0], "-c", STATE_COPY_RUNTIME_PROBE])
         self.assertIn("offline-state-copy-qualified", result.stdout)
 
