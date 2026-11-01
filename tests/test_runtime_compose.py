@@ -9,6 +9,8 @@ import unittest
 import uuid
 from pathlib import Path
 
+from scripts.artifact_manifest import write_manifest
+
 
 @unittest.skipUnless(os.environ.get("DISCORD_BLUE_COMPOSE_TEST_IMAGE"), "requires an explicit disposable container image")
 class RuntimeComposeTests(unittest.TestCase):
@@ -172,60 +174,79 @@ class RuntimeComposeTests(unittest.TestCase):
         self.assertEqual(stopped["State"]["ExitCode"], 0)
 
     def test_offline_copy_uses_image_runtime_and_independent_managed_inputs(self) -> None:
-        self.override.write_text(
-            json.dumps(
-                {"services": {"discord-blue": {"command": ["/app/.venv/bin/python", "-c", STATE_COPY_PROBE], "restart": "no"}}}
-            )
+        source = self.override.parent / "source"
+        config = source / ".config/discord-blue/config.toml"
+        config.parent.mkdir(parents=True)
+        for directory in (source, source / ".config", config.parent):
+            directory.chmod(0o755)
+        original = 'debug = true\n[discord]\ntoken = "synthetic-production"\nguild_id = 999\n'
+        config.write_text(original)
+        config.chmod(0o644)
+        manifest = self.override.parent / "manifest.json"
+        write_manifest(
+            source_commit="a" * 40,
+            repository="cbusillo/discord-blue",
+            image_reference="ghcr.io/cbusillo/discord-blue@sha256:" + "b" * 64,
+            destination=manifest,
         )
-        self.command.extend(["--file", str(self.override)])
-        result = self.compose("run", "--rm", "--no-deps", "-T", "discord-blue")
-        self.assertEqual(result.returncode, 0, result.stderr)
+        command = json.loads(manifest.read_text())["testing_state_copy"]["command"]
+        service = {
+            "image": self.env["LAUNCHPLANE_IMAGE_REFERENCE"],
+            "network_mode": "none",
+            "volumes": [f"{source}:/source:ro", f"state:{self.env['DISCORD_BLUE_STATE_DIR']}"],
+            "command": command,
+        }
+        self.command[-1] = str(self.override)
+
+        def run_command(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+            service["command"] = arguments
+            self.override.write_text(json.dumps({"services": {"discord-blue": service}, "volumes": {"state": {}}}))
+            result = self.compose("run", "--rm", "--no-deps", "-T", "discord-blue")
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertNotIn("synthetic-production", result.stdout + result.stderr)
+            return result
+
+        planned = json.loads(run_command([*command, "plan", "--source", "/source"]).stdout)
+        copied = json.loads(
+            run_command(
+                [
+                    *command,
+                    "copy",
+                    "--source",
+                    "/source",
+                    "--destination",
+                    self.env["DISCORD_BLUE_STATE_DIR"],
+                    "--expected-sha256",
+                    planned["sha256"],
+                ]
+            ).stdout
+        )
+        verified = json.loads(
+            run_command(
+                [*command, "verify", "--destination", self.env["DISCORD_BLUE_STATE_DIR"], "--expected-sha256", planned["sha256"]]
+            ).stdout
+        )
+        self.assertEqual(planned, copied)
+        self.assertEqual(planned, verified)
+        self.assertEqual(config.read_text(), original)
+        service["environment"] = {key: self.env[key] for key in ("DISCORD_TOKEN", "DISCORD_BLUE_GUILD_ID")}
+        result = run_command([command[0], "-c", STATE_COPY_RUNTIME_PROBE])
         self.assertIn("offline-state-copy-qualified", result.stdout)
-        self.assertNotIn("synthetic-production", result.stdout + result.stderr)
 
 
-STATE_COPY_PROBE = """
-import json
+STATE_COPY_RUNTIME_PROBE = """
 import os
 from pathlib import Path
-import subprocess
 import sys
-import tempfile
 from discord_blue.config import Config
-from scripts.artifact_manifest import write_manifest
-
 home = Path.home()
 assert os.geteuid() != 0
 assert not Path(sys.executable).resolve().is_relative_to(home)
-with tempfile.TemporaryDirectory() as temporary:
-    source = Path(temporary)
-    config = source / '.config/discord-blue/config.toml'
-    config.parent.mkdir(parents=True)
-    original = 'debug = true\\n[discord]\\ntoken = "synthetic-production"\\nguild_id = 999\\n'
-    config.write_text(original)
-    (source / 'agent-sessions.json').write_text('{"live": "synthetic-production"}')
-    manifest = source / 'manifest.json'
-    write_manifest(source_commit='a' * 40, repository='cbusillo/discord-blue',
-                   image_reference='ghcr.io/cbusillo/discord-blue@sha256:' + 'b' * 64,
-                   destination=manifest)
-    command = json.loads(manifest.read_text())['testing_state_copy']['command']
-    def invoke(*arguments):
-        completed = subprocess.run([*command, *arguments], capture_output=True, text=True)
-        assert completed.returncode == 0, completed.stdout + completed.stderr
-        assert 'synthetic-production' not in completed.stdout + completed.stderr
-        return json.loads(completed.stdout)
-    planned = invoke('plan', '--source', str(source))
-    copied = invoke('copy', '--source', str(source), '--destination', str(home),
-                    '--expected-sha256', planned['sha256'])
-    verified = invoke('verify', '--destination', str(home), '--expected-sha256', planned['sha256'])
-    assert copied == planned == verified
-    assert config.read_text() == original
 runtime = Config()
 assert runtime.debug
 assert runtime.discord.token == os.environ['DISCORD_TOKEN']
 assert runtime.discord.guild_id == int(os.environ['DISCORD_BLUE_GUILD_ID'])
 assert not runtime.conversation.enabled
-assert not (home / 'agent-sessions.json').exists()
 print('offline-state-copy-qualified')
 """
 

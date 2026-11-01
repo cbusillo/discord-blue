@@ -54,9 +54,11 @@ def read_publication(
             raise ValueError("Build artifact must contain one manifest")
         manifest = json.loads(bundle.read(files[0]))
     if (
-        manifest["schema_version"] != 1
-        or manifest["kind"] != "generic-web"
-        or manifest["source_commit"] != source_commit
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != 1
+        or manifest.get("kind") != "generic-web"
+        or manifest.get("source_commit") != source_commit
+        or not isinstance(manifest.get("image"), dict)
         or set(manifest["image"]) != {"repository", "digest"}
     ):
         raise ValueError("Build manifest does not bind the requested source")

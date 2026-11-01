@@ -89,6 +89,10 @@ class BuildPublicationTests(unittest.TestCase):
         ):
             with self.subTest(mutation=mutation), patch.dict(self.manifest, mutation), self.assertRaises(ValueError):
                 self.publication()
+        malformed_manifests: tuple[object, ...] = (None, [], {}, {**self.manifest, "image": None})
+        for malformed in malformed_manifests:
+            with self.subTest(manifest=malformed), patch.object(self, "manifest", malformed), self.assertRaises(ValueError):
+                self.publication()
 
     def test_waits_for_build_without_reading_artifacts_early(self) -> None:
         self.build_run["status"] = "in_progress"

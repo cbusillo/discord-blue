@@ -1,6 +1,6 @@
 # Offline testing state copies
 
-`/app/.venv/bin/python -m discord_blue.testing_state_copy` is the image's offline state-copy
+The verified artifact manifest's `testing_state_copy.command` is the image's offline state-copy
 interface. It imports no bot or session runner and makes no network requests.
 Launchplane owns source qualification, separate storage, immutable image
 selection, operation recovery and application activation. This interface does
@@ -8,8 +8,7 @@ not grant a production restore or make an unqualified source safe.
 
 Run it in the selected immutable product image with the source state mounted
 read-only and a separate, freshly allocated destination. Pass no runtime
-environment, tokens, source credentials or network access. The image entrypoint
-can prepare the destination's empty `.config/discord-blue` directories before
+environment, tokens, source credentials or network access. Run the declared command through the image entrypoint. It prepares the destination's empty `.config/discord-blue` directories before
 running the utility as its runtime user. Existing files are never overwritten.
 The source must be readable by that user. A source UID/permission mismatch is a
 source-qualification prerequisite; the utility never changes source ownership.
@@ -21,9 +20,9 @@ and the Python installation live outside the mounted state directory.
 The three commands are:
 
 ```text
-/app/.venv/bin/python -m discord_blue.testing_state_copy plan --source /source
-/app/.venv/bin/python -m discord_blue.testing_state_copy copy --source /source --destination /var/lib/discord-blue --expected-sha256 <planned-sha256>
-/app/.venv/bin/python -m discord_blue.testing_state_copy verify --destination /var/lib/discord-blue --expected-sha256 <planned-sha256>
+<manifest command> plan --source /source
+<manifest command> copy --source /source --destination /var/lib/discord-blue --expected-sha256 <planned-sha256>
+<manifest command> verify --destination /var/lib/discord-blue --expected-sha256 <planned-sha256>
 ```
 
 Each successful command returns one JSON object with `status`, `format`,
