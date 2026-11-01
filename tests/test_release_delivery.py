@@ -31,6 +31,17 @@ from scripts import reconcile_bridge_delivery as consumer
 from tests.fakes_agent_session import FakeBot
 
 
+def register_dui(home: Path, checkout: Path) -> None:
+    plugins = home / ".claude/plugins"
+    plugins.mkdir(parents=True, exist_ok=True)
+    (checkout / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (checkout / ".claude-plugin/marketplace.json").write_text(
+        json.dumps({"plugins": [{"name": "dui", "source": "./claude-plugin/dui"}]})
+    )
+    (plugins / "known_marketplaces.json").write_text(json.dumps({"discord-blue": {"installLocation": str(checkout)}}))
+    (home / ".claude/settings.json").write_text(json.dumps({"enabledPlugins": {"dui@discord-blue": True}}))
+
+
 class ReleaseDeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
@@ -188,6 +199,11 @@ class ProductionSourceTests(unittest.TestCase):
 
 
 class LocalDeliveryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        environment = patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": ""})
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def test_exact_hook_refresh_existing_command_and_fresh_startup_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -225,8 +241,6 @@ class LocalDeliveryTests(unittest.TestCase):
             installed_sources: list[str] = []
 
             def output(args: list[str], **kwargs: object) -> str | bytes:
-                if args[0] == "claude":
-                    return json.dumps([{"id": "dui@discord-blue", "enabled": True, "readFromFolder": str(hooks.parent.parent)}])
                 if args[0] == "launchctl":
                     return "state = running\n pid = 123\n"
                 if args[0] == "ps":
@@ -246,6 +260,7 @@ class LocalDeliveryTests(unittest.TestCase):
                 save_json(home / STARTUP_RECEIPT, {"pid": 123, "revision": revision})
                 return subprocess.CompletedProcess(args, 0)
 
+            register_dui(home, source)
             with (
                 patch.object(consumer.subprocess, "check_output", side_effect=output),
                 patch.object(consumer.subprocess, "run", side_effect=run),
@@ -338,6 +353,21 @@ class LocalDeliveryTests(unittest.TestCase):
                 consumer.deliver_target(registration, target)
             self.assertFalse(any("--revision" in call.args[0] for call in install.call_args_list))
             self.assertEqual(hooks.read_text(), "local work")
+
+    def test_hook_registration_reads_plugin_files_without_starting_claude(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home, checkout = base / "home", base / "source"
+            register_dui(home, checkout)
+            settings = home / ".claude/settings.json"
+            with patch.object(consumer.subprocess, "check_output") as run:
+                consumer.verify_hook_registration(checkout, home)
+                with self.assertRaisesRegex(ValueError, "not registered"):
+                    consumer.verify_hook_registration(base / "other", home)
+                settings.write_text(json.dumps({"enabledPlugins": {"dui@discord-blue": False}}))
+                with self.assertRaisesRegex(ValueError, "not registered"):
+                    consumer.verify_hook_registration(checkout, home)
+            run.assert_not_called()
 
     def test_registration_recovers_bootstrap_failure_with_another_shell_environment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

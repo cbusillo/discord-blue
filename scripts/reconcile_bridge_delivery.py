@@ -53,7 +53,7 @@ def verify_launchers(home: Path, target: dict[str, str]) -> None:
 
 
 def verify_installed(checkout: Path, home: Path, target: dict[str, str], pid: int) -> None:
-    verify_hook_registration(checkout)
+    verify_hook_registration(checkout, home)
     verify_launchers(home, target)
     if hashlib.sha256((checkout / HOOK_PATH).read_bytes()).hexdigest() != target["hooks_sha256"]:
         raise ValueError("In-place hook source is unverified")
@@ -70,17 +70,19 @@ def verify_installed(checkout: Path, home: Path, target: dict[str, str], pid: in
         raise DeliveryFailure("startup_unverified")
 
 
-def verify_hook_registration(checkout: Path) -> None:
-    plugins = json.loads(subprocess.check_output(["claude", "plugin", "list", "--json"], text=True, timeout=30))
-    if not isinstance(plugins, list) or any(not isinstance(plugin, dict) for plugin in plugins):
-        raise ValueError("DUI plugin registration is unavailable")
-    expected = (checkout / HOOK_PATH).parent.parent.resolve()
-    if not any(
-        plugin.get("id") == "dui@discord-blue"
-        and plugin.get("enabled") is True
-        and Path(plugin.get("readFromFolder", "/missing")).resolve() == expected
-        for plugin in plugins
-    ):
+def verify_hook_registration(checkout: Path, home: Path) -> None:
+    # Read Claude Code's plugin files directly: starting `claude` reads its sign-in from the
+    # login keychain, which prompts the Director every minute after the item is rewritten.
+    config = Path(os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude")
+    try:
+        enabled = read_json(config / "settings.json").get("enabledPlugins", {})
+        marketplace = read_json(config / "plugins/known_marketplaces.json").get("discord-blue", {})
+        location = Path(marketplace["installLocation"])
+        plugins = read_json(location / ".claude-plugin/marketplace.json")["plugins"]
+        folder = next(location / plugin["source"] for plugin in plugins if plugin.get("name") == "dui")
+    except (OSError, KeyError, TypeError, StopIteration, ValueError) as error:
+        raise ValueError("DUI plugin registration is unavailable") from error
+    if enabled.get("dui@discord-blue") is not True or folder.resolve() != (checkout / HOOK_PATH).parent.parent.resolve():
         raise ValueError("DUI is not registered to this in-place hook source")
 
 
@@ -142,7 +144,7 @@ def deliver_target(
     if re.fullmatch(r"[0-9a-f]{40}", target["revision"]) is None or re.fullmatch(r"[0-9a-f]{64}", target["hooks_sha256"]) is None:
         raise ValueError("Invalid release target")
     try:
-        verify_hook_registration(checkout)
+        verify_hook_registration(checkout, home)
         validate_hook_source(checkout, target)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         raise DeliveryFailure("source_unavailable") from error
@@ -254,7 +256,7 @@ def register(path: Path, checkout: Path, home: Path, build_dir: Path, bridge_con
     registration = read_json(path) if path.exists() else {"host_id": str(uuid.uuid4()), **destination}
     if any(registration.get(key) != value for key, value in destination.items()):
         raise ValueError("Preserve the existing Mac registration")
-    verify_hook_registration(checkout)
+    verify_hook_registration(checkout, home)
     if "runtime" not in registration:
         uv = shutil.which("uv")
         if uv is None:
