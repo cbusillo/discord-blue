@@ -1,0 +1,12 @@
+**Q1168. Should repository-local plan and next include every open issue, removing the plan label as an admission ticket?**
+
+- **Context:** The global reader already includes unlabeled work, but repository-local next and index still hide it. Client Buybacks and tester requests were missed. This is the existing https://github.com/cbusillo/codex-skills/issues/3166 fix; full label retirement remains the separate Q1167. Stop boundary: "acting on a Client's decision to skip or defer work, do something "for now", reverse a Director decision, change an agreed outcome in either direction, or settle a design, architecture, infrastructure or quality question". Removed: default label admission filtering only; net concepts -1; maintained lines now 0, implementation delta UNKNOWN. Status-label holds stay with Q1167, explicit label queries remain, and bounded inventory must report omissions. Reviewed proposal: https://github.com/cbusillo/codex-skills/issues/3277#issuecomment-6560423736 .
+- **In simple terms:** Show all open issues and send untriaged records to ordinary agent triage, while keeping priority, real holds and claim checks.
+- **Options:**
+  - **Approve this fix (recommended):** Show all open issues and send untriaged records to ordinary agent triage, while keeping priority, real holds and claim checks. Ongoing cost: Less filtering and no mass relabeling; ordinary intake still needs an agent to establish the next action. After this answer: Implement the bounded visibility removal on the existing issue 3166 after this approval; do not duplicate or decide Q1167.
+  - **Defer this fix:** Keep this part of the current behavior and its recorded protections. Ongoing cost: Zero implementation now; the documented friction remains. After this answer: Keep the proposal linked on the owning record and do not build it; continue only separately approved work.
+- **A senior developer would:** Use the source issue list directly and filter by actual state, because a missing decorative label should not hide a request.
+- **Recommendation:** Approve this fix. Use the source issue list directly and filter by actual state, because a missing decorative label should not hide a request.
+- **You do:** Answer only. The Supervisor presents the queued questions one at a time.
+
+Owning issue: https://github.com/cbusillo/codex-skills/issues/3277

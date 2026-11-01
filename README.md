@@ -986,8 +986,13 @@ to capitalization, spacing or trailing sentence punctuation do not rename it,
 including any fallback branch label.
 While a Codex or Claude session works, its thread shows Discord's own
 "Doug is typing…" indicator at the bottom, refreshed every few seconds and
-stopped before the answer posts. There is no status card. Anything that needs
-you is its own message: Question cards, approvals, terminal-action requests and
+stopped before the answer posts. There is no status card.
+
+Answered Director question cards keep the chosen answer and a **Read question**
+button. It opens the full question privately, including its context and options;
+oversized questions include a complete Markdown attachment.
+
+Anything that needs you is its own message: Question cards, approvals, terminal-action requests and
 errors. `/code status` shows the latest status detail, and `/code go-ahead`,
 `/code pause` and `/code end-session` replace the old card's reactions.
 Routine session closure keeps the existing archive/reopen lifecycle, without a

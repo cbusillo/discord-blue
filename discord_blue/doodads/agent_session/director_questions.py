@@ -281,6 +281,7 @@ class QuestionCards:
                 # The card is the only record of a form answer, so a long or grouped answer stays readable in full.
                 full = discord.utils.escape_markdown(question.answer.strip())[:ANSWER_CHUNK_LIMIT]
                 container.add_item(discord.ui.TextDisplay(f">>> {full}"))
+            container.add_item(discord.ui.ActionRow(QuestionReadButton(question)))
             container.accent_color = ANSWERED_STATES[question.state]
             container.id = ANSWER_CARD_COMPONENT_ID if question.complete else ANSWER_CONTINUATION_COMPONENT_ID
             return view
@@ -865,6 +866,32 @@ class QuestionCards:
                 await self.bridge.threads.bounded(edit_cards(), SESSION_STORE_WAIT_TIMEOUT_SECONDS)
             except TimeoutError:
                 logger.warning("Question card updates are still pending for session %s", session_id)
+
+
+class QuestionReadButton(discord.ui.Button[discord.ui.LayoutView]):
+    def __init__(self, question: StoredQuestion) -> None:
+        super().__init__(label="Read question", custom_id=f"dui:qread:{question.key}:{question.revision}")
+        self.question = question
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        text = "\n\n".join(body for _, body in self.question.questions)
+        attachment = None
+        if len(text.encode("utf-16-le")) // 2 > 3000:
+            attachment = discord.File(BytesIO(text.encode()), filename="questions.md")
+            text = text[:1000] + "\n\nFull question attached below."
+        view = notice_card(text)
+        if attachment is None:
+            await interaction.response.send_message(view=view, ephemeral=True, allowed_mentions=agent_session_allowed_mentions())
+            return
+        container = view.children[0]
+        assert isinstance(container, discord.ui.Container)
+        container.add_item(discord.ui.File(f"attachment://{attachment.filename}"))
+        try:
+            await interaction.response.send_message(
+                view=view, file=attachment, ephemeral=True, allowed_mentions=agent_session_allowed_mentions()
+            )
+        finally:
+            attachment.close()
 
 
 class QuestionAnswerButton(discord.ui.Button[discord.ui.LayoutView]):

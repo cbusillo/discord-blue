@@ -21,6 +21,7 @@ from discord_blue.doodads.agent_session.director_questions import (
     QuestionAnswerModal,
     QuestionCards,
     QuestionChoiceButton,
+    QuestionReadButton,
     detect_questions,
     question_choices,
     question_excerpt,
@@ -146,6 +147,53 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         await choices[1].callback(cast(Any, FakeInteraction(self.fixture.thread)))
         self.assertIn("Q1160: Keep it for later", str(self.fixture.socket.sent_json[0]["text"]))
 
+    async def test_answered_structured_question_can_be_read_in_full(self) -> None:
+        source = (Path(__file__).parent / "fixtures/structured_question_q1168_bulleted.txt").read_text()
+        modal = await self.card(source)
+        choice = next(
+            item
+            for item in cast(discord.ui.LayoutView, self.fixture.thread.sent_views[-1]).walk_children()
+            if isinstance(item, QuestionChoiceButton)
+        )
+        await choice.callback(cast(Any, FakeInteraction(self.fixture.thread)))
+        question = cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key))
+        for state in ANSWERED_STATES:
+            with self.subTest(state=state):
+                view = modal.cards.view(modal.session_id, replace(question, state=state))
+                self.assertIn(choice.choice, visible_view_text(view))
+                button = next(item for item in view.walk_children() if isinstance(item, QuestionReadButton))
+                interaction = FakeInteraction(self.fixture.thread)
+                with patch.object(interaction.response, "send_message", new_callable=AsyncMock) as send:
+                    await button.callback(cast(Any, interaction))
+                payload = send.call_args.kwargs
+                self.assertIn(source.strip(), visible_view_text(payload["view"]))
+                self.assertTrue(payload["ephemeral"])
+        self.assertEqual(len(self.fixture.socket.sent_json), 1)
+
+    async def test_reading_an_oversized_answered_question_keeps_the_full_attachment(self) -> None:
+        source = "**Q99.** Read this?\n\n" + "Context with details. " * 300
+        modal = await self.card(source)
+        question = replace(modal.question, state=QuestionState.ANSWERED, answer="Yes")
+        answered_view = modal.cards.view(modal.session_id, question)
+        button = next(item for item in answered_view.walk_children() if isinstance(item, QuestionReadButton))
+        interaction = FakeInteraction(self.fixture.thread)
+        captured: list[bytes] = []
+
+        async def capture(
+            *, file: discord.File, view: discord.ui.LayoutView, ephemeral: bool, allowed_mentions: discord.AllowedMentions
+        ) -> None:
+            media = [item.media.url for item in view.walk_children() if isinstance(item, discord.ui.File)]
+            self.assertIn(f"attachment://{file.filename}", media)
+            captured.append(file.fp.read())
+            self.assertTrue(ephemeral)
+            self.assertLess(len(visible_view_text(view)), 3000)
+            self.assertEqual(allowed_mentions.to_dict()["parse"], [])
+
+        with patch.object(interaction.response, "send_message", side_effect=capture):
+            await button.callback(cast(Any, interaction))
+        self.assertEqual(captured, [source.strip().encode()])
+        self.assertEqual(self.fixture.socket.sent_json, [])
+
     async def test_rendered_structured_question_has_choices_and_delivers_the_selected_answer(self) -> None:
         await self.assert_rendered_choices("structured_question_q1160.txt")
 
@@ -213,7 +261,10 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         anchor = self.fixture.session.pending_commands[command_id].message_id
         self.assertEqual(anchor, original.id)  # Delivery reactions show on the card itself.
         self.assertFalse(
-            any(isinstance(item, discord.ui.Button) for item in cast(discord.ui.LayoutView, original.view).walk_children())
+            any(
+                isinstance(item, (QuestionAnswerButton, QuestionChoiceButton))
+                for item in cast(discord.ui.LayoutView, original.view).walk_children()
+            )
         )
         self.assertNotEqual(
             cast(discord.ui.Container, cast(discord.ui.LayoutView, original.view).children[0]).accent_color, waiting_color
