@@ -77,6 +77,28 @@ class FakeRpc:
         return [params for name, params in self.calls if name == method]
 
 
+class InheritedSubscriptionRpc(FakeRpc):
+    def __init__(self, *threads: Json) -> None:
+        super().__init__(*threads)
+        self.subscriptions = set(self.threads)
+
+    async def request(self, method: str, params: Json | None = None) -> Json:
+        result = await super().request(method, params)
+        thread_id = str((params or {}).get("threadId") or "")
+        if method == "thread/start":
+            self.subscriptions.add(result["thread"]["id"])
+        if method == "thread/unsubscribe":
+            if thread_id not in self.subscriptions:
+                return {"status": "notSubscribed"}
+            self.subscriptions.remove(thread_id)
+            self.threads[thread_id]["status"] = {"type": "notLoaded"}
+            return {"status": "unsubscribed"}
+        if method == "thread/resume":
+            self.subscriptions.add(thread_id)
+            self.threads[thread_id]["status"] = {"type": "idle"}
+        return result
+
+
 class HeldTurnsRpc(FakeRpc):
     """Holds the next `holds` thread/turns/list calls until the test releases each, to land events between reads."""
 
@@ -157,6 +179,57 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
             ("root", "Fix the login bug", "/work/project", "fix/login", "Done.", frozenset(session_module.CAPABILITIES)),
         )
         self.assertLess(frozenset(session_module.CAPABILITIES), REMOTE_ACTIONS)
+
+    async def test_discovery_releases_inherited_children_and_reconnect_tolerates_not_subscribed(self) -> None:
+        rpc = InheritedSubscriptionRpc(thread("root"), thread("child", parentThreadId="root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            self.assertEqual(set(bridge.sessions), {"root"})
+            self.assertEqual(rpc.subscriptions, {"root"})
+            self.assertEqual(rpc.threads["child"]["status"]["type"], "notLoaded")
+            await bridge.detach_all()
+            bridge.rpc = rpc
+            rpc.threads["child"]["status"] = {"type": "idle"}
+            await bridge.discover()
+            await discord.next("hello")
+            self.assertEqual(set(bridge.sessions), {"root"})
+            self.assertEqual(rpc.subscriptions, {"root"})
+            self.assertEqual(rpc.called("thread/unsubscribe"), [{"threadId": "child"}] * 2)
+
+    async def test_child_notifications_release_only_idle_subscriptions_and_allow_followup(self) -> None:
+        rpc = InheritedSubscriptionRpc()
+        async with running_bridge(rpc) as (bridge, discord):
+            await bridge.start_session("/work/project")
+            await discord.next("hello")
+            for child_id, parent_id, method in (
+                ("child", "new-thread", "thread/started"),
+                ("grandchild", "child", "thread/status/changed"),
+                ("named-child", "new-thread", "thread/name/updated"),
+            ):
+                with self.subTest(method=method):
+                    rpc.threads[child_id] = thread(child_id, parentThreadId=parent_id)
+                    rpc.subscriptions.add(child_id)
+                    await bridge.dispatch({"method": method, "params": {"thread": {"id": child_id}, "threadId": child_id}})
+                    self.assertNotIn(child_id, rpc.subscriptions)
+                    self.assertEqual(rpc.threads[child_id]["status"]["type"], "notLoaded")
+            for flags in ([], ["waitingOnApproval"], ["waitingOnUserInput"]):
+                with self.subTest(flags=flags):
+                    rpc.threads["child"]["status"] = {"type": "active", "activeFlags": flags}
+                    rpc.subscriptions.add("child")
+                    calls = len(rpc.called("thread/unsubscribe"))
+                    await bridge.dispatch(status("child", "active"))
+                    self.assertIn("child", rpc.subscriptions)
+                    self.assertEqual(len(rpc.called("thread/unsubscribe")), calls)
+                    self.assertEqual(rpc.responses, [])
+                    rpc.threads["child"]["status"] = {"type": "idle"}
+                    await bridge.dispatch(status("child", "idle"))
+                    self.assertNotIn("child", rpc.subscriptions)
+            await rpc.request("thread/resume", {"threadId": "child"})
+            await rpc.request("turn/start", {"threadId": "child", "input": [{"type": "text", "text": "Continue"}]})
+            self.assertIn("child", rpc.subscriptions)
+            self.assertEqual(set(bridge.sessions), {"new-thread"})
+            self.assertTrue(bridge.sessions["new-thread"].subscribed)
+            self.assertIn("new-thread", rpc.subscriptions)
 
     async def test_codex_renames_and_substantial_prompts_retitle_the_thread(self) -> None:
         rpc = FakeRpc(thread("root", preview="Continue"))
