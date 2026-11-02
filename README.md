@@ -7,6 +7,109 @@ threads to local Codex app-server sessions and Claude Code channels.
 Chris Busillo (the Director) uses Discord Blue for his own agent sessions and
 is its Client.
 
+## Run your own Discord Blue
+
+You need Docker, your own Discord bot and server, and Git, Claude Code plus
+[uv](https://docs.astral.sh/uv/getting-started/installation/) on the computer
+running your sessions. No GitHub login or Launchplane is needed. The published
+image is Linux AMD64; Apple Silicon needs Docker's AMD64 emulation. The commands
+below select that platform explicitly.
+
+1. In the [Discord Developer Portal](https://discord.com/developers/applications),
+   create your own application and bot. Enable all three **Privileged Gateway
+   Intents** on its Bot page (Presence, Server Members and Message Content).
+   Install it in your server with the `bot` and `applications.commands` scopes.
+   In two text channels for ordinary and spawned sessions, give it View Channel,
+   Send Messages, Send Messages in Threads, Create Private Threads, Manage Threads,
+   Read Message History, Embed Links, Attach Files, Add Reactions, Manage Messages
+   and Manage Webhooks.
+   Create an `Agent Admin` role and assign it to the people who may control
+   sessions. They also need access to those channels. Enable Discord's Developer
+   Mode to copy your server, channel and user IDs.
+
+2. In a new directory, create `discord-blue.env`, make it private with
+   `chmod 600 discord-blue.env`, and fill in your own values:
+
+   ```dotenv
+   DISCORD_TOKEN=YOUR_BOT_TOKEN
+   AGENT_SESSION_TOKEN=YOUR_RANDOM_BRIDGE_SECRET
+   DISCORD_BLUE_GUILD_ID=YOUR_SERVER_ID
+   DISCORD_BLUE_BOT_CHANNEL_ID=YOUR_MAIN_TEXT_CHANNEL_ID
+   DISCORD_BLUE_SPAWNED_CHANNEL_ID=YOUR_OTHER_TEXT_CHANNEL_ID
+   DISCORD_BLUE_AUTO_JOIN_USER_IDS=[YOUR_USER_ID]
+   ```
+
+   Generate the bridge secret with `openssl rand -hex 32`. The two channel IDs
+   must differ; use `[]` for no automatic thread invitations, then invite operators
+   into private threads manually. For another role
+   name, add `DISCORD_BLUE_OPERATOR_ROLE_NAME=Your Role`. Keep this file private
+   and out of source control. These environment settings enable the session
+   bridge without interactive setup; they must be supplied on every start.
+
+3. Pull and start the published image:
+
+   ```sh
+   docker pull --platform linux/amd64 ghcr.io/cbusillo/discord-blue:main
+   docker run -d --name discord-blue --platform linux/amd64 \
+     --restart unless-stopped --stop-timeout 120 \
+     --env-file discord-blue.env \
+     --volume discord-blue-state:/var/lib/discord-blue \
+     --publish 127.0.0.1:8787:8787 \
+     ghcr.io/cbusillo/discord-blue:main
+   docker logs discord-blue
+   ```
+
+   `main` follows published main-branch builds; `sha-<full commit SHA>` pins a
+   build. There is no `latest` tag. The named volume keeps configuration and
+   session recovery state across container replacement; keep it when updating.
+   Run only one container per bot token and state volume. To update, pull again,
+   run `docker stop discord-blue` and `docker rm discord-blue`, then repeat the
+   run command. The bridge port is reachable only on the Docker host. From another
+   computer, use an SSH tunnel such as `ssh -N -L 8787:127.0.0.1:8787 user@host`;
+   do not publish the port on all interfaces.
+
+4. On a new session computer, install the local clients. Machines already using
+   [routine bridge delivery](#routine-bridge-delivery) keep that installation path
+   for their launchers and marketplace instead.
+
+   ```sh
+   uv tool install --python 3.13 git+https://github.com/cbusillo/discord-blue.git
+   uv tool update-shell
+   claude plugin marketplace add https://github.com/cbusillo/discord-blue.git
+   claude plugin install dui@discord-blue
+   ```
+
+   Open a new terminal if needed so `discord-blue-claude-channel` is on PATH.
+   Create `~/.config/discord-blue/codex-bridge.token` containing only the same
+   bridge secret, with mode `600`, and `~/.config/discord-blue/codex-bridge.toml`:
+
+   ```toml
+   server_url = "ws://127.0.0.1:8787/agent-session/connect"
+   token_file = "~/.config/discord-blue/codex-bridge.token"
+   ```
+
+   Start a new session with
+   `claude --dangerously-load-development-channels plugin:dui@discord-blue`
+   and accept Claude's development-channel warning. Send a prompt; a private
+   thread should appear in your main channel. Reply there and confirm Claude
+   receives it. Only configured operators can reply or answer approvals.
+   [Claude session details](#claude-code-sessions-the-dui-plugin) and
+   [Codex setup](#codex-bridge-runs-on-the-mac-next-to-codex) describe the clients further.
+
+Without a real bot token, use fictional tokens and positive numeric IDs in the
+env file and stop at this dry run:
+
+```sh
+docker run --rm --platform linux/amd64 --network none \
+  --env-file discord-blue.env \
+  ghcr.io/cbusillo/discord-blue:main \
+  /app/.venv/bin/python -c 'from discord_blue.config import get_config; c = get_config(); print("Configuration loaded; bridge enabled:", c.agent_session.enabled)'
+```
+
+The anonymous state volume is discarded with the container. This checks the
+entrypoint and settings without contacting Discord. Bot login,
+channel permissions, thread creation and a real DUI reply remain unverified.
+
 ## Standalone LXC/systemd installation
 
 This is the standalone source-install path supported by `discord-blue.service`.
@@ -110,50 +213,16 @@ maintained execution and review procedures. Repository workflow facts and
 validation commands, including setup, lint, type check and tests, live in
 `qualityGate` in [.github/github.json](.github/github.json).
 
-## Docker
+## Docker development
 
-A `Dockerfile` is provided to build a containerized version of the bot. It
-uses the [`ghcr.io/astral-sh/uv:debian`](https://github.com/astral-sh/uv) base
-image so `uv` is already available for dependency installation. The container
-starts through a small entrypoint that prepares the mounted `/var/lib/discord-blue`
-directory for the `discord-blue` runtime user, then runs the bot from that home
-directory. That keeps the container compatible with the existing LXC/systemd
-state directory during migration.
-
-Build the image:
-
-```bash
-docker build -t discord-blue .
-```
-
-For a standalone systemd-to-container migration, stop `discord-blue.service`
-before running the bot with the existing service state mounted:
-
-```bash
-docker run --rm \
-  --volume /var/lib/discord-blue:/var/lib/discord-blue \
-  --publish 127.0.0.1:8787:8787 \
-  discord-blue
-```
-
-For a new local Compose volume, first complete the bot's interactive token,
-guild and channel setup, then stop the foreground bot before starting it detached:
-
-```bash
-docker compose run --rm discord-blue
-# After setup, stop the foreground bot with Ctrl-C:
-docker compose up -d
-```
-
-Compose creates a `discord-blue-state` volume mounted at
-`/var/lib/discord-blue`. For the production LXC, Dokploy/Launchplane should bind
-the real `/var/lib/discord-blue` directory instead so
-`.config/discord-blue/config.toml` survives image replacement. Agent session
-state remains on the client host.
-
-The agent-session bridge listens on the configured `[agent_session]` host and port.
-The image exposes port `8787`, and the local Compose file binds it to
-`127.0.0.1:8787`.
+`docker compose build` builds from source using `Dockerfile` and the
+local `docker-compose.yml`. For a published image, use
+[Run your own Discord Blue](#run-your-own-discord-blue). The entrypoint prepares
+`/var/lib/discord-blue` and drops privileges before starting Python. When migrating
+from systemd, stop `discord-blue.service` first and replace the named-volume
+mount with `/var/lib/discord-blue:/var/lib/discord-blue` to keep its state.
+For a fresh local Compose volume, run `docker compose run --rm discord-blue`
+to complete interactive setup, stop it with Ctrl-C, then `docker compose up -d`.
 
 ### Managed server runtime inputs
 
@@ -571,22 +640,15 @@ becomes the session's next prompt. When Claude opens a dialog in the terminal,
 asking to use a tool or asking you a question, the thread shows the same request
 and you can answer from either place; the first answer counts. The thread archives when the session exits.
 
-One-time setup on the Mac:
-
-```sh
-uv build --wheel --clear  # initial installation only
-uv tool install --force dist/discord_blue-*.whl
-claude plugin marketplace add ~/Developer/discord-blue
-claude plugin install dui@discord-blue
-# In ~/.zshrc, add the channel flag to the existing alias:
-alias claude='claude --allow-dangerously-skip-permissions --dangerously-load-development-channels plugin:dui@discord-blue'
-```
+Follow [Run your own Discord Blue](#run-your-own-discord-blue) for client
+installation and the channel launch command.
 
 The channel reads the Codex bridge's `~/.config/discord-blue/codex-bridge.toml`
 (`server_url`, `token_file`, `allow_insecure_ws`, `hello_timeout_seconds`); its host label is always
 `Claude Code on <host>`. Each launch shows Claude Code's "Loading development
 channels" warning; press Enter. A session that is already running cannot load
-the channel: `/exit`, then `claude --resume <session id>` through the alias. It
+the channel: `/exit`, then
+`claude --resume <session id> --dangerously-load-development-channels plugin:dui@discord-blue`. It
 keeps the same session ID, name and transcript.
 
 Behaviour and limits:
