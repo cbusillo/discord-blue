@@ -40,7 +40,8 @@ below select that platform explicitly.
    ```
 
    Generate the bridge secret with `openssl rand -hex 32`. The two channel IDs
-   must differ; use `[]` for no automatic thread invitations. For another role
+   must differ; use `[]` for no automatic thread invitations, then invite operators
+   into private threads manually. For another role
    name, add `DISCORD_BLUE_OPERATOR_ROLE_NAME=Your Role`. Keep this file private
    and out of source control. These environment settings enable the session
    bridge without interactive setup; they must be supplied on every start.
@@ -67,7 +68,9 @@ below select that platform explicitly.
    computer, use an SSH tunnel such as `ssh -N -L 8787:127.0.0.1:8787 user@host`;
    do not publish the port on all interfaces.
 
-4. On the session computer, install the local clients:
+4. On a new session computer, install the local clients. Machines already using
+   [routine bridge delivery](#routine-bridge-delivery) keep that installation path
+   for their launchers and marketplace instead.
 
    ```sh
    uv tool install --python 3.13 git+https://github.com/cbusillo/discord-blue.git
@@ -99,12 +102,12 @@ env file and stop at this dry run:
 ```sh
 docker run --rm --platform linux/amd64 --network none \
   --env-file discord-blue.env \
-  --volume discord-blue-state:/var/lib/discord-blue \
   ghcr.io/cbusillo/discord-blue:main \
   /app/.venv/bin/python -c 'from discord_blue.config import get_config; c = get_config(); print("Configuration loaded; bridge enabled:", c.agent_session.enabled)'
 ```
 
-This checks image startup and settings without contacting Discord. Bot login,
+The anonymous state volume is discarded with the container. This checks the
+entrypoint and settings without contacting Discord. Bot login,
 channel permissions, thread creation and a real DUI reply remain unverified.
 
 ## Standalone LXC/systemd installation
@@ -218,6 +221,8 @@ local `docker-compose.yml`. For a published image, use
 `/var/lib/discord-blue` and drops privileges before starting Python. When migrating
 from systemd, stop `discord-blue.service` first and replace the named-volume
 mount with `/var/lib/discord-blue:/var/lib/discord-blue` to keep its state.
+For a fresh local Compose volume, run `docker compose run --rm discord-blue`
+to complete interactive setup, stop it with Ctrl-C, then `docker compose up -d`.
 
 ### Managed server runtime inputs
 
@@ -257,6 +262,21 @@ refuse startup before interactive setup or a save. Runtime overrides stay in
 memory and are excluded from subsequent TOML saves, preserving local values.
 Without managed inputs, local TOML and interactive setup retain their behavior.
 The local development Compose file does not deliver these inputs.
+
+Before releasing this change, populate the four required settings and any role
+or bridge-channel overrides through Launchplane's supported product-config
+dry-run/apply using each lane's existing values. For production, coordinate the
+reviewed settings and corrected source under the existing [admin release hold](https://github.com/cbusillo/launchplane/blob/main/docs/release-review.md#acceptance-starts-the-release)
+before letting the accepted-release path resume. A settings-only checklist
+change can otherwise release an older reader that ignores the overrides.
+Keep the existing settings and secrets in their current storage. There
+is no fallback to the old `DISCORD_BLUE_RUNTIME_CONFIG` blob; remove that old
+setting only after the gated release is healthy. Preparing or merging source
+does not perform this migration or authorize a deployment.
+
+Use each lane's existing Discord guild and available channels. Changing Discord
+access is a separate decision. Production uses the new settings only through a
+decided, gated release.
 
 The launcher supplies `DISCORD_BLUE_SESSION_KIND=spawned`. Codex's daemon
 ingress persists it as native `threadSource=spawned`; the Codex bridge sends
@@ -627,7 +647,8 @@ The channel reads the Codex bridge's `~/.config/discord-blue/codex-bridge.toml`
 (`server_url`, `token_file`, `allow_insecure_ws`, `hello_timeout_seconds`); its host label is always
 `Claude Code on <host>`. Each launch shows Claude Code's "Loading development
 channels" warning; press Enter. A session that is already running cannot load
-the channel: `/exit`, then `claude --resume <session id>` through the alias. It
+the channel: `/exit`, then
+`claude --resume <session id> --dangerously-load-development-channels plugin:dui@discord-blue`. It
 keeps the same session ID, name and transcript.
 
 Behaviour and limits:
