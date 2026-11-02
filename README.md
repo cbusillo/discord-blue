@@ -498,9 +498,10 @@ yourself. Behaviour and limits:
   or a Discord reply arrives. It unsubscribes when the turn ends. Stock
   broadcasts status changes to every client, so the bridge rejoins when a turn
   starts, and stock replays pending approvals and questions on the join.
-- Subagents are not mirrored. When a child is idle, the bridge releases its
+- Subagents are not mirrored. When a child is idle or errored, the bridge releases its
   inherited subscription so it can unload. Active children, including those
-  waiting for approval or input, keep their subscription until they go idle.
+  waiting for approval or input, are left subscribed; native Codex also prevents
+  active work from unloading if a turn starts while the bridge releases it.
 - When the TUI closes and no other client is subscribed, stock unloads the
   thread (after `thread_unload_delay_secs`, default 60) and reports `notLoaded`.
   The bridge then ends the Discord session and Discord Blue archives its thread

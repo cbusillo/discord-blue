@@ -216,7 +216,7 @@ class CodexBridge:
             skip = self.skip_reason(thread)
             if skip and not (skip == UNNAMED and thread_id in self.owned_threads):
                 logger.info("Not joining Codex thread %s: %s", thread_id, skip)
-                if thread.get("parentThreadId") and (thread.get("status") or {}).get("type") == "idle":
+                if thread.get("parentThreadId") and (thread.get("status") or {}).get("type") in {"idle", "systemError"}:
                     await rpc.request("thread/unsubscribe", {"threadId": thread_id})
                 if busy and skip == UNNAMED:
                     self.retry_join(thread_id)
