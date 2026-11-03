@@ -132,13 +132,14 @@ class SessionStatusUpdates:
             return
 
         if not hide_brief:
-            mirrored = (
-                user_message.input_origin is None
-                and is_operator_prompt(user_message.message)
-                and await self.terminal_prompts.send(channel, message)
-            )
-            if not mirrored:
-                await send_agent_session_message(channel, format_user_message(message)[:DISCORD_MESSAGE_LIMIT])
+            source: discord.Message | None = None
+            operator_prompt = user_message.input_origin is None and is_operator_prompt(user_message.message)
+            if operator_prompt:
+                source = await self.terminal_prompts.send(channel, message)
+            if source is None:
+                source = await send_agent_session_message(channel, format_user_message(message)[:DISCORD_MESSAGE_LIMIT])
+            if operator_prompt and source is not None:
+                await self.bridge.questions.decisions(session.session_id, message, url=source.jump_url)
         session.status_revision += 1
         self.bridge.controls.show_working(
             session,

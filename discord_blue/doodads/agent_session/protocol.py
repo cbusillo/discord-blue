@@ -315,6 +315,7 @@ class RemoteCommand:
     turn_id: str | None = None
     response: dict[str, Any] | None = None
     issued_by: str | None = None
+    question_sources: list[dict[str, str]] | None = None
 
     def to_message(self) -> dict[str, Any]:
         message: dict[str, Any] = {
@@ -332,4 +333,6 @@ class RemoteCommand:
             message["turn_id"] = self.turn_id
         if self.response is not None:
             message["response"] = self.response
+        if self.question_sources:
+            message["question_sources"] = self.question_sources
         return message

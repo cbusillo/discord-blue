@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import AsyncMock, patch
 
 import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+from discord_blue.codex_bridge.session import ThreadSession
+from discord_blue.codex_bridge.rpc import RpcError, TransportError
+from discord_blue.claude_channel.session import ClaudeSession
 from discord_blue.agent_client import OUTBOX_LIMIT, AgentSessionClient, Json
 from tests.fakes_discord_blue import TOKEN, FakeDiscordBlue
 
@@ -66,6 +72,71 @@ async def served(discord: FakeDiscordBlue) -> TestServer:
 
 
 class OutboxTests(unittest.IsolatedAsyncioTestCase):
+    async def test_replies_stay_ordered_during_a_slow_read_and_native_error_while_pause_works(self) -> None:
+        discord = FakeDiscordBlue()
+        reading, release = asyncio.Event(), asyncio.Event()
+
+        async def read(_sources: object) -> list[dict[str, str]]:
+            reading.set()
+            await release.wait()
+            return []
+
+        sent = []
+
+        async def native(message: Json) -> None:
+            sent.append(message["command_id"])
+            if message["command_id"] == "answer":
+                raise LookupError("Native subscription failed after sending")
+
+        async with await served(discord) as server, aiohttp.ClientSession() as http:
+            config = SimpleNamespace(
+                **asdict(Connection(f"ws://127.0.0.1:{server.port}/agent-session/connect")), question_reader=("fixture",)
+            )
+            client = DroppingClient(cast(Any, config))
+            with (
+                patch.object(client, "question_resolutions", side_effect=read),
+                patch.object(client, "run_command", side_effect=native),
+            ):
+                running = asyncio.create_task(client.run(http))
+                try:
+                    await discord.next("hello")
+                    await discord.sockets[-1].send_json(
+                        {**client.event("command"), "kind": "reply", "command_id": "answer", "question_sources": [{"key": "card"}]}
+                    )
+                    await asyncio.wait_for(reading.wait(), 5)
+                    await discord.sockets[-1].send_json({**client.event("command"), "kind": "reply", "command_id": "followup"})
+                    pause = await discord.control({**client.event("command"), "kind": "pause_current_turn", "command_id": "pause"})
+                    self.assertEqual(pause["command_id"], "pause")
+                    self.assertEqual(sent, ["pause"])
+                    await discord.sockets[-1].close()
+                    await discord.next("hello")
+                    release.set()
+                    rejected = await discord.next("command_reject")
+                    self.assertTrue(rejected["delivery_unconfirmed"])
+                    self.assertEqual((await discord.next("command_ack"))["command_id"], "followup")
+                    duplicate = await discord.control({**client.event("command"), "kind": "reply", "command_id": "answer"})
+                    self.assertEqual(duplicate, rejected)
+                    self.assertEqual(sent, ["pause", "answer", "followup"])
+                finally:
+                    release.set()
+                    await client.stop()
+                    await asyncio.wait_for(running, 5)
+
+    async def test_transport_failures_are_uncertain_but_native_refusals_are_definite(self) -> None:
+        for kind, error, uncertain in (
+            (ThreadSession, TransportError(), True),
+            (ThreadSession, RpcError(None), False),
+            (ClaudeSession, OSError(), True),
+        ):
+            with self.subTest(client=kind.__name__, error=type(error).__name__):
+                client = cast(AgentSessionClient, object.__new__(kind))
+                AgentSessionClient.__init__(client, Connection("unused"), "session-1")
+                command = {**client.event("command"), "command_id": "answer", "kind": "reply", "text": "yes"}
+                with patch.object(client, "run_command", new_callable=AsyncMock, side_effect=error):
+                    response = await client.handle_control(command)
+                assert response is not None
+                self.assertEqual(bool(response.get("delivery_unconfirmed")), uncertain)
+
     async def test_an_event_whose_send_fails_is_delivered_after_the_reconnect(self) -> None:
         discord = FakeDiscordBlue()
         async with await served(discord) as server, aiohttp.ClientSession() as http:

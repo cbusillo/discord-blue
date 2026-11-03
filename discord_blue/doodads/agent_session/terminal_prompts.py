@@ -77,31 +77,31 @@ class TerminalPrompts:
             self.webhooks[parent.id] = hook
             return hook
 
-    async def send(self, thread: discord.Thread, text: str) -> bool:
+    async def send(self, thread: discord.Thread, text: str) -> discord.WebhookMessage | None:
         parent = thread.parent
         if not isinstance(parent, discord.TextChannel):
-            return False
+            return None
         if thread.guild.me is None or not parent.permissions_for(thread.guild.me).manage_webhooks:
             self.warn_once(thread, "bot lacks Manage Webhooks")
-            return False
+            return None
         try:
             member = await self.operator(thread)
             if member is None:
-                return False
+                return None
             hook = await self.webhook(parent, thread)
         except discord.HTTPException as error:
             self.warn_once(thread, f"webhook/member lookup failed (HTTP {error.status}: {error.text})")
-            return False
+            return None
         if RESERVED_NAME.search(member.display_name):
             self.warn_once(thread, "operator display name contains a name Discord reserves")
-            return False
+            return None
         content = strip_assistant_markers(text)
         subtext = TERMINAL_SUBTEXT
         if len(content) + len(subtext) > DISCORD_MESSAGE_LIMIT:
             subtext = CLIPPED_TERMINAL_SUBTEXT
             content = content[: DISCORD_MESSAGE_LIMIT - len(subtext) - 1] + "…"
         try:
-            await hook.send(
+            return await hook.send(
                 content + subtext,
                 thread=thread,
                 username=member.display_name,
@@ -113,5 +113,4 @@ class TerminalPrompts:
         except discord.HTTPException as error:
             self.webhooks.pop(parent.id, None)
             self.warn_once(thread, f"webhook send failed (HTTP {error.status}: {error.text})")
-            return False
-        return True
+            return None

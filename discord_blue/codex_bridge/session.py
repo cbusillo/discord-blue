@@ -111,7 +111,7 @@ def user_text(item: Json) -> str:
 
 class ThreadSession(AgentSessionClient):
     capabilities = CAPABILITIES
-    command_errors = (RpcError, TransportError)
+    command_errors = (RpcError,)
 
     def __init__(
         self,
@@ -387,9 +387,7 @@ class ThreadSession(AgentSessionClient):
     # Discord -> Codex
 
     def failure_reason(self, exc: Exception) -> str:
-        if isinstance(exc, RpcError):
-            return "Codex rejected the command; check the Codex TUI."
-        return LOST_CODEX
+        return "Codex rejected the command; check the Codex TUI."
 
     async def run_command(self, message: Json) -> None:
         kind = message.get("kind")

@@ -21,6 +21,7 @@ from urllib.parse import quote
 
 import aiohttp
 
+from discord_blue.question_resolutions import read_resolutions
 from discord_blue.release_delivery import save_json
 
 Json = dict[str, Any]
@@ -80,6 +81,10 @@ class AgentSessionClient:
         self.last_status: Json | None = None
         # Features the connected Discord Blue listed in hello_ack; None until one answers.
         self.server_features: frozenset[str] | None = None
+        self.resolution_task: asyncio.Task[None] | None = None
+        self.pending_resolution_sources: object = None
+        self.replies: asyncio.Queue[Json] = asyncio.Queue()
+        self.reply_task: asyncio.Task[None] | None = None
 
     # Events to Discord
 
@@ -114,6 +119,10 @@ class AgentSessionClient:
                     await asyncio.to_thread(save_json, self.question_receipts_path, receipts)
                 except OSError:
                     logger.warning("Unable to write Question receipts for session %s", self.session_id, exc_info=True)
+                if getattr(self.config, "question_reader", ()) and message.get("question_sources"):
+                    self.pending_resolution_sources = message["question_sources"]
+                    if self.resolution_task is None or self.resolution_task.done():
+                        self.resolution_task = asyncio.create_task(self.refresh_questions())
             return None
         if message.get("type") == "approval_decision":
             return await self.approval_decision(message)
@@ -127,7 +136,34 @@ class AgentSessionClient:
         if command_id in self.commands:
             return self.commands[command_id]
         self.commands[command_id] = self.event("command_reject", command_id=command_id, reason="Command already in progress.")
+        native_started = False
         try:
+            if message.get("kind") == "reply" and message.get("question_sources") and getattr(self.config, "question_reader", ()):
+                try:
+                    resolutions = await self.question_resolutions(message["question_sources"])
+                except (OSError, ValueError, TimeoutError) as exc:
+                    logger.warning("Question check unavailable (%s): %s", type(exc).__name__, exc)
+                    response = self.event(
+                        "command_reject",
+                        command_id=command_id,
+                        question_read_failed=True,
+                        reason="The recorded answer could not be checked. Held answers send with your next thread message; "
+                        "you can also type the question number and your answer there.",
+                    )
+                    self.remember(command_id, response)
+                    return response
+                if not self.is_current(message):
+                    raise Rejected("The conversation changed while checking the recorded answer. Open its current card.")
+                if resolutions:
+                    response = self.event(
+                        "command_reject",
+                        command_id=command_id,
+                        resolutions=resolutions,
+                        reason=f"Already answered: {resolutions[0]['answer'][:1500]} {resolutions[0]['decision_url']}",
+                    )
+                    self.remember(command_id, response)
+                    return response
+            native_started = True
             if await self.run_command(message) is DEFERRED:
                 return None  # The subclass answers later with finish_command.
             response = self.event("command_ack", command_id=command_id)
@@ -135,8 +171,45 @@ class AgentSessionClient:
             response = self.event("command_reject", command_id=command_id, reason=str(exc))
         except self.command_errors as exc:
             response = self.event("command_reject", command_id=command_id, reason=self.failure_reason(exc))
+        except (Exception, asyncio.CancelledError) as exc:
+            logger.warning("Command interrupted (%s); native delivery started=%s", type(exc).__name__, native_started)
+            response = self.event(
+                "command_reject",
+                command_id=command_id,
+                delivery_unconfirmed=native_started,
+                question_read_failed=not native_started,
+                reason=(
+                    "Delivery could not be confirmed. Check the native TUI before sending again."
+                    if native_started
+                    else "The answer was not sent. Retry its card or type a reply in the thread."
+                ),
+            )
+            if isinstance(exc, asyncio.CancelledError):
+                self.remember(command_id, response)
+                self.enqueue(response)
+                raise
         self.remember(command_id, response)
         return response
+
+    async def question_resolutions(self, sources: object, *, strict: bool = True) -> list[dict[str, str]]:
+        reader = getattr(self.config, "question_reader", ())
+        if not isinstance(reader, tuple) or not reader:
+            raise ValueError("No catalog question reader is configured")
+        return await read_resolutions(reader, sources, strict=strict)
+
+    async def refresh_questions(self) -> None:
+        while self.pending_resolution_sources:
+            epoch = self.epoch
+            sources, self.pending_resolution_sources = self.pending_resolution_sources, None
+            try:
+                resolutions = await self.question_resolutions(sources, strict=False)
+            except (OSError, ValueError, TimeoutError) as error:
+                logger.warning("Question refresh unavailable (%s)", type(error).__name__)
+                continue
+            if self.epoch != epoch:
+                continue
+            if resolutions:
+                self.enqueue(self.event("question_states", resolutions=resolutions))
 
     def remember(self, command_id: str, response: Json) -> None:
         self.commands[command_id] = response
@@ -240,6 +313,9 @@ class AgentSessionClient:
                 await asyncio.sleep(self.config.heartbeat_seconds)
                 await self.send(websocket, self.event("heartbeat"))
 
+        if self.reply_task is None or self.reply_task.done():
+            self.reply_task = asyncio.create_task(self.answer_replies())
+
         async def controls() -> None:
             async for frame in websocket:
                 if frame.type != aiohttp.WSMsgType.TEXT:
@@ -248,7 +324,11 @@ class AgentSessionClient:
                     message = json.loads(frame.data)
                 except ValueError:
                     continue
-                if isinstance(message, dict) and (response := await self.handle_control(message)) is not None:
+                if not isinstance(message, dict):
+                    continue
+                if message.get("type") == "command" and message.get("kind") == "reply":
+                    self.replies.put_nowait(message)
+                elif (response := await self.handle_control(message)) is not None:
                     await self.send(websocket, response)
 
         tasks = [asyncio.create_task(fn()) for fn in (deliver, heartbeat, controls)]
@@ -261,8 +341,18 @@ class AgentSessionClient:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    async def answer_replies(self) -> None:
+        while True:
+            message = await self.replies.get()
+            if (response := await self.handle_control(message)) is not None:
+                self.enqueue(response)
+
     async def stop(self) -> None:
         self.stopped.set()
+        tasks = [task for task in (self.resolution_task, self.reply_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         if self.websocket is not None:
             await self.websocket.close()
 

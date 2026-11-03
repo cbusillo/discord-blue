@@ -12,6 +12,30 @@ Connect to `/agent-session/connect` using a WebSocket with
 `Authorization: Bearer <configured token>`. Empty server tokens deny access.
 Use TLS or a trusted private transport for deployment. `/health` needs no token.
 
+The existing `question_receipts` message can include `question_sources`: card
+key, Q number, revision and explicitly named owning issue or original question
+URL. A local client with `question_reader` configured refreshes those sources
+through the public catalog command in the background and returns `question_states`
+with resolved entries, their original `answer` text and `decision_url`. Session
+identity, epoch and the unchanged card source must match before the bot applies
+the existing answered transition. Receipts refresh after posting, reconnect and
+turn completion. No additional capability, polling timer or bot GitHub credential
+is required.
+
+Card-generated `reply` commands carry the same `question_sources`. The local
+client reads them afresh before native delivery. If any question is already
+resolved it returns `command_reject` with the recorded resolutions and answer;
+the bot redraws the cards and shows the refusal. An unavailable or ambiguous read
+also rejects that reply and restores the card's Waiting state for retry. The
+refusal offers a typed `Q123: answer` thread reply as a fallback. Ordinary thread
+replies have no such field. All replies use one ordered worker; pause, status and
+approvals remain available during reads. An unexpected native-send failure sets
+`delivery_unconfirmed` on the rejection and retains that outcome for duplicate
+command IDs. The bot shows those answers as unconfirmed rather than not delivered.
+Resolving the last waiting member of a group releases its held answers through
+the existing reply path, after the entire resolution batch is applied.
+Clients without this configuration retain the existing reply behavior.
+
 The client sends JSON text messages. Start each connection with:
 
 ```json

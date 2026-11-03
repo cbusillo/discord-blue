@@ -34,6 +34,7 @@ from discord_blue.doodads.agent_session.messages import (
     send_agent_session_message,
     send_assistant_message,
 )
+from discord_blue.question_resolutions import SOURCE
 from discord_blue.doodads.agent_session.reply_modal import answer_text, reply_context_error
 from discord_blue.doodads.agent_session.store import SESSION_STORE_WAIT_TIMEOUT_SECONDS, QuestionState, StoredQuestion
 
@@ -345,18 +346,77 @@ class QuestionCards:
                 if assistant_answer_cards(body)[1]:
                     full_text = ""
 
+    def resolution_sources(self, session_id: str, keys: tuple[str, ...] | None = None) -> list[dict[str, str]]:
+        stored = self.bridge.store.records.get(session_id)
+        session = self.bridge.sessions.get(session_id)
+        sources = []
+        for question in stored.questions if stored is not None else ():
+            if (
+                question.state in {QuestionState.ANSWERED, QuestionState.CLOSED}
+                or session is None
+                or question.epoch != session.session_epoch
+                or len(question.questions) != 1
+                or (keys is not None and question.key not in keys)
+            ):
+                continue
+            number, body = question.questions[0]
+            url = ""
+            for name in ("Original question", "Owning issue"):
+                label = rf"(?m)^[ \t]*(?:[-*][ \t]+)?(?:\*\*)?{name}:?(?:\*\*)?:?[ \t]*"
+                labeled = re.search(label + r"([^\n]+)", body)
+                if labeled is None:
+                    continue
+                link = SOURCE.search(labeled[1])
+                if link is not None:
+                    url = link[0]
+                    break
+            if url:
+                sources.append(
+                    {
+                        "key": question.key,
+                        "number": number,
+                        "url": url,
+                        "revision": str(question.revision),
+                    }
+                )
+        return sources
+
+    async def apply_resolutions(self, session: AgentSession, payload: dict[str, object]) -> None:
+        if payload.get("session_epoch") != session.session_epoch or payload.get("session_id") != session.session_id:
+            return
+        rows = payload.get("resolutions")
+        if not isinstance(rows, list):
+            return
+        sources = self.resolution_sources(session.session_id)
+        answered = []
+        for row in rows:
+            if not isinstance(row, dict) or not any(
+                all(row.get(key) == value for key, value in source.items()) for source in sources
+            ):
+                continue
+            answer, url = row.get("answer"), row.get("decision_url")
+            question = self.record(session.session_id, row["key"])
+            if question is not None and isinstance(answer, str) and answer.strip() and isinstance(url, str) and url:
+                if await self.resolve(session.session_id, question, answer, url):
+                    answered.append(question)
+        await self.drain_held(session, answered)
+
     @staticmethod
     def key(session: AgentSession, number: str) -> str:
         return hashlib.sha256(f"{session.session_id}\0{number}".encode()).hexdigest()[:32]
 
-    async def decisions(self, session_id: str, text: str, *, url: str = "", recorded: bool = False) -> bool:
+    async def decisions(self, session_id: str, text: str, *, url: str = "", recorded: bool = False, drain: bool = True) -> bool:
         stored = self.bridge.store.records.get(session_id)
         if stored is None:
             return False
-        changed = False
-        pattern = r"(?i)^(Q\d+)[.: \t]+([^\n]+)"
+        answered = []
+        pattern = r"(?i)^(?P<number>Q\d+)[.: \t]+(?P<answer>[^\n]+)"
         if recorded:
-            pattern = r"(?i)^(?:\*\*)?Director decision:(?:\*\*)?[ \t]*(?:\*\*)?(Q\d+)[.: \t*]+([^\n]+)"
+            pattern = (
+                r"(?i)^(?:\*\*)?Director decision(?:\*\*)?"
+                r"(?P<colon>:)?(?:\*\*)?[ \t]*(?:\*\*)?\(?(?P<number>Q\d+)\)?(?:\*\*)?"
+                r"(?(colon)[.:, \t—-]+|:[ \t*]+)(?P<answer>[^\n]+)"
+            )
         lines = text.splitlines()
         matches = []
         for index, line in top_level_lines(lines):
@@ -365,26 +425,69 @@ class QuestionCards:
                 matches.append((index, match))
         for index, (start, match) in enumerate(matches):
             end = matches[index + 1][0] if index + 1 < len(matches) else len(lines)
-            context = "\n".join(lines[start:end]).split("\n\n", 1)[0]
-            if not recorded and (match[2].rstrip().endswith("?") or re.search(r"(?i)\bQ\d+\b", match[2])):
+            paragraphs = "\n".join(lines[start:end]).split("\n\n", 2)
+            context = paragraphs[0]
+            if len(paragraphs) > 1 and paragraphs[1].startswith("Question: "):
+                context += f"\n{paragraphs[1].splitlines()[0]}"
+            if recorded:
+                operative = re.sub(r"https://\S+", "", match["answer"].replace("*", "")).split("<!--", 1)[0].strip()
+                if re.fullmatch(r"(?i)(?:later|not now|not yet|waiting|pending)[\s.;!—-]*", operative):
+                    continue
+            if not recorded and (match["answer"].rstrip().endswith("?") or re.search(r"(?i)\bQ\d+\b", match["answer"])):
                 continue
             link = re.search(r"https://github\.com/[^\s)]+#issuecomment-\d+", context) if recorded else None
             decision_url = link[0] if link else url
             if not decision_url:
                 continue
             for question in tuple(self.bridge.store.records[session_id].questions):
-                if match[1].upper() not in {number for number, _ in question.questions}:
+                if match["number"].upper() not in {number for number, _ in question.questions}:
                     continue
-                async with self.lock(question.key):
-                    current = self.record(session_id, question.key)
-                    if current is None or current.state == QuestionState.ANSWERED:
-                        continue
-                    answered = replace(current, state=QuestionState.ANSWERED, answer=match[2].strip(), decision_url=decision_url)
-                    self.save(session_id, answered)
-                    changed = True
-                    held = [q for q in self.members(session_id, answered) if q.state == QuestionState.HELD]
-                    await self.refresh(session_id, [answered, *held])
-        return changed
+                if await self.resolve(session_id, question, match["answer"].strip(), decision_url):
+                    answered.append(question)
+        if answered and drain and (session := self.bridge.sessions.get(session_id)) is not None:
+            await self.drain_held(session, answered)
+        return bool(answered)
+
+    async def drain_held(self, session: AgentSession, answered: list[StoredQuestion]) -> None:
+        members = {q.key: q for root in answered for q in self.members(session.session_id, root)}
+        ready = tuple(
+            q.key
+            for q in members.values()
+            if q.state == QuestionState.HELD and q.epoch == session.session_epoch and not self.open_numbers(session.session_id, q)
+        )
+        if not ready or session.thread_id is None:
+            return
+        thread = self.bridge.thread_channel(session.thread_id)
+        if not isinstance(thread, discord.Thread):
+            return
+        text, keys = await self.release_held(session, keys=ready)
+        if not keys:
+            return
+        error = await self.bridge.controls.send_reply(
+            session,
+            thread,
+            None,
+            text,
+            None,
+            question_keys=keys,
+            react=False,
+            verify_questions=True,
+        )
+        if error:
+            state = QuestionState.UNCONFIRMED if error == DELIVERY_UNCONFIRMED else QuestionState.HELD
+            await self.settle(session.session_id, keys, state)
+
+    async def resolve(self, session_id: str, question: StoredQuestion, answer: str, url: str) -> bool:
+        async with self.lock(question.key):
+            current = self.record(session_id, question.key)
+            if current is None or current.state == QuestionState.ANSWERED or current.revision != question.revision:
+                return False
+            answered = replace(current, state=QuestionState.ANSWERED, answer=answer, decision_url=url)
+            if not self.save(session_id, answered):
+                return False
+            held = [q for q in self.members(session_id, answered) if q.state == QuestionState.HELD]
+            await self.refresh(session_id, [answered, *held])
+            return True
 
     def context_error(self, interaction: discord.Interaction, session_id: str, question: StoredQuestion | None) -> str | None:
         if question is None:
@@ -402,6 +505,9 @@ class QuestionCards:
         if interaction.message is not None and interaction.message.id != question.message_id:
             return "Open the original Question card."
         if question.state != QuestionState.WAITING:
+            if question.state == QuestionState.ANSWERED and question.answer:
+                link = f" [Existing answer]({question.decision_url})" if question.decision_url else ""
+                return f"This question was already answered: {question.answer[:1500]}{link}"
             return f"This answer was already submitted: {question.state}. Check the session before replying again."
         return None
 
@@ -441,6 +547,7 @@ class QuestionCards:
                         "session_id": session.session_id,
                         "session_epoch": session.session_epoch,
                         "receipts": receipts,
+                        "question_sources": self.resolution_sources(session.session_id),
                     }
                 ),
                 SESSION_STORE_WAIT_TIMEOUT_SECONDS,
@@ -776,6 +883,7 @@ class QuestionCards:
                         question.message_id,
                         question_keys=tuple(q.key for q in sending),
                         react=False,
+                        verify_questions=True,
                     )
             except (OSError, discord.DiscordException):
                 logger.exception("Unable to confirm Question answer submission")
@@ -826,7 +934,7 @@ class QuestionCards:
                 settled.append(question)
         await self.refresh(session_id, settled)
 
-    async def release_held(self, session: AgentSession) -> tuple[str, tuple[str, ...]]:
+    async def release_held(self, session: AgentSession, *, keys: tuple[str, ...] | None = None) -> tuple[str, tuple[str, ...]]:
         """Every answer held in this conversation, now marked as sending with a typed reply.
 
         Typing in the thread is an explicit message, so answers already given go with it rather than waiting
@@ -836,7 +944,7 @@ class QuestionCards:
         ready = [
             replace(q, state=QuestionState.UNCERTAIN)
             for q in (stored.questions if stored is not None else ())
-            if q.state == QuestionState.HELD and q.epoch == session.session_epoch
+            if q.state == QuestionState.HELD and q.epoch == session.session_epoch and (keys is None or q.key in keys)
         ]
         if not all(self.save(session.session_id, question) for question in ready) or not await self.persist():
             # Without a durable sending mark, a restart could send these answers a second time.

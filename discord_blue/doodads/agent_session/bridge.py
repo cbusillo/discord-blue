@@ -42,7 +42,12 @@ from discord_blue.doodads.agent_session.session_status import SessionStatusUpdat
 from discord_blue.doodads.agent_session.handover import SessionContinuation
 
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
-from discord_blue.doodads.agent_session.store import SESSION_STORE_WAIT_TIMEOUT_SECONDS, SessionState, SessionStore, StoredSession
+from discord_blue.doodads.agent_session.store import (
+    SESSION_STORE_WAIT_TIMEOUT_SECONDS,
+    SessionState,
+    SessionStore,
+    StoredSession,
+)
 from discord_blue.doodads.agent_session.thread_worker import RenameTarget, ThreadWorkers
 from discord_blue.doodads.agent_session.threads import SessionThread
 from discord_blue.doodads.agent_session.threads import auto_join_configured_users
@@ -835,10 +840,14 @@ class AgentSessionBridge:
         match message_type:
             case "heartbeat":
                 session.touch()
+            case "question_states":
+                await self.questions.apply_resolutions(session, payload)
             case "user_message":
                 await self.status.handle_user_message(UserMessage.from_payload(payload))
             case "status_changed" | "turn_complete" | "error":
                 await self.status.handle_session_status(message_type, SessionStatus.from_payload(payload))
+                if message_type == "turn_complete":
+                    await self.questions.send_receipts(session)
             case "title_changed":
                 await self.status.handle_title_changed(session, payload.get("title"))
             case "notice" if session.thread_id is not None:

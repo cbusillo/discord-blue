@@ -66,7 +66,6 @@ COMMAND_FIELDS = frozenset({"command", "description", "timeout", "run_in_backgro
 TOOL_CALL_MEMORY = 64
 # Tool names Discord may show: built-in names and MCP names such as mcp__server__tool.
 TOOL_NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}")
-LOST_CLAUDE = "Lost the Claude Code session, so delivery is uncertain. Check the terminal before retrying."
 HOOK_TOOL = {
     "name": "dui_hook_event",
     "description": (
@@ -213,8 +212,6 @@ def clip(text: str) -> str:
 
 
 class ClaudeSession(AgentSessionClient):
-    command_errors = (OSError,)
-
     def __init__(self, config: BridgeConfig, identity: Identity, notify: Notify) -> None:
         super().__init__(config, identity.session_id)
         self.identity = identity
@@ -612,6 +609,3 @@ class ClaudeSession(AgentSessionClient):
         dialog = self.dialogs[key]
         if not dialog.answer.done():
             dialog.answer.set_result(decision)
-
-    def failure_reason(self, exc: Exception) -> str:
-        return LOST_CLAUDE

@@ -477,6 +477,7 @@ token_file = "~/.config/discord-blue/codex-bridge.token"  # mode 600; or set AGE
 # host_label = "Codex on Chris-Studio"
 # allow_insecure_ws = false  # true permits ws:// to a trusted private host
 # hello_timeout_seconds = 300  # how long to wait for Discord Blue to attach the thread
+# question_reader = ["/absolute/path/to/uv", "run", "/absolute/path/to/codex-skills/skills/supervisor/scripts/oq.py", "--owner", "DIRECTOR_LOGIN"]
 ```
 
 Keep `hello_timeout_seconds` above the server's 15-second pending-reply interval
@@ -648,7 +649,7 @@ Follow [Run your own Discord Blue](#run-your-own-discord-blue) for client
 installation and the channel launch command.
 
 The channel reads the Codex bridge's `~/.config/discord-blue/codex-bridge.toml`
-(`server_url`, `token_file`, `allow_insecure_ws`, `hello_timeout_seconds`); its host label is always
+(`server_url`, `token_file`, `allow_insecure_ws`, `hello_timeout_seconds`, `question_reader`); its host label is always
 `Claude Code on <host>`. Each launch shows Claude Code's "Loading development
 channels" warning; press Enter. A session that is already running cannot load
 the channel: `/exit`, then
@@ -759,9 +760,26 @@ no longer arrive because the bot restarted or the conversation ended. No copy of
 the answer is posted, and cards carry no delivery reactions. A typed thread
 reply, such as `Q2 round`, sends at once and takes every answer already given
 on a card in that conversation with it, ahead of its own text. A thread reply or recorded decision adds a link to the card.
-A session answer containing an explicit `Director decision:
-Q123. ...` record with a GitHub comment link also marks that question answered.
-This reads records delivered through the session, rather than polling GitHub.
+A numbered terminal answer such as `Q123: Wait` also settles its card. A session
+answer containing `Director decision Q123: ...` or `Director decision: Q123. ...`
+with a GitHub comment link marks that question answered. The link can follow in
+a separate `Question:` paragraph. When that resolves the last waiting card in a group,
+its held answers send through the existing reply path. A late answer control shows the saved answer and its link.
+With `question_reader` configured as a command array for the installed catalog's
+public `oq.py` command, both local bridges refresh cards when they are posted,
+the session reconnects, and a turn finishes. Use the Director's login after
+`--owner`, including for organization repositories. `uv`, `gh` and the existing
+automation configuration must be available to the bridge's launch environment;
+absolute executable paths help with launchd's minimal PATH. Question text must
+name its source with `Original question:` or `Owning issue:` and a GitHub URL.
+The catalog decides which records count as answers; the bridge sends their
+original text and links to the bot. GitHub credentials stay local. A card answer gets a fresh
+reader check before reaching the native session. An already resolved answer is
+refused and its recorded answer is shown. If that read is unavailable, the answer
+is refused with the card available for retry. You can also type `Q123: your answer`
+in the session thread. Replies keep their order while these reads run in the background,
+so pause and other session controls remain available. Without this optional setting, session and terminal records
+still settle cards as above. Restart the local bridges after changing the setting.
 Recording an answer does not prove delivery to the native session; normal reply
 reactions and failure notices still report that separately. A delivered answer
 shows no private confirmation; only a refusal or failure does. An unanswered question stays visible when the session
