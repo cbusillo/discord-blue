@@ -805,6 +805,7 @@ class AgentSessionBridge:
             # Heartbeats start after the ack, so the watchdog's clock starts here too.
             self.handover.reconnected(session, previous)
             session.acknowledged = True
+            await self.questions.send_receipts(session)
             await self.handover.notify()
             await self.questions.close(session.session_id, current_epoch=session.session_epoch)
             session.touch()

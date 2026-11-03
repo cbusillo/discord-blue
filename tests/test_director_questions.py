@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 import unittest
 from dataclasses import asdict, replace
@@ -13,6 +14,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import discord
 
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
+from discord_blue.agent_client import AgentSessionClient
 from discord_blue.doodads.agent_session.cleanup import SessionCleanups
 from discord_blue.doodads.agent_session.cards import STATUS_LABELS
 from discord_blue.doodads.agent_session.director_questions import (
@@ -146,6 +148,26 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Q1160", visible_view_text(view))
         await choices[1].callback(cast(Any, FakeInteraction(self.fixture.thread)))
         self.assertIn("Q1160: Keep it for later", str(self.fixture.socket.sent_json[0]["text"]))
+
+    async def test_posted_card_receipts_reach_the_local_session_and_reconnect_snapshot(self) -> None:
+        self.fixture.session.hello.question_receipts = True
+        with TemporaryDirectory() as home, patch.object(Path, "home", return_value=Path(home)):
+            client = AgentSessionClient(cast(Any, Mock()), self.fixture.session.session_id)
+            client.epoch = self.fixture.session.session_epoch
+            await self.card()
+            question = self.fixture.bridge.store.records[client.session_id].questions[0]
+            assert question.message_id is not None
+            receipt = self.fixture.socket.sent_json[-1]
+            await client.handle_control(receipt)
+            self.assertEqual(json.loads(client.question_receipts_path.read_text()), {"Q12": question.source_url})
+            self.assertEqual(question.source_url, self.fixture.thread._messages[question.message_id].jump_url)
+            client.question_receipts_path.unlink()
+            await self.fixture.bridge.questions.send_receipts(self.fixture.session)
+            await client.handle_control(self.fixture.socket.sent_json[-1])
+            self.assertEqual(json.loads(client.question_receipts_path.read_text()), {"Q12": question.source_url})
+            stale = {**receipt, "session_epoch": "another-epoch", "receipts": {"Q99": "wrong"}}
+            await client.handle_control(stale)
+            self.assertEqual(json.loads(client.question_receipts_path.read_text()), {"Q12": question.source_url})
 
     async def test_answered_structured_question_can_be_read_in_full(self) -> None:
         source = (Path(__file__).parent / "fixtures/structured_question_q1168_bulleted.txt").read_text()
