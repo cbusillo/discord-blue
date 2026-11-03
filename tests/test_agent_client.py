@@ -129,7 +129,7 @@ class OutboxTests(unittest.IsolatedAsyncioTestCase):
             (ClaudeSession, OSError(), True),
         ):
             with self.subTest(client=kind.__name__, error=type(error).__name__):
-                client = object.__new__(kind)
+                client = cast(AgentSessionClient, object.__new__(kind))
                 AgentSessionClient.__init__(client, Connection("unused"), "session-1")
                 command = {**client.event("command"), "command_id": "answer", "kind": "reply", "text": "yes"}
                 with patch.object(client, "run_command", new_callable=AsyncMock, side_effect=error):

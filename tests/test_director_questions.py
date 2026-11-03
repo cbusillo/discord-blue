@@ -1049,13 +1049,16 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.fixture.bridge.controls.handle_command_ack(self.fixture.socket.sent_json[-1])
         self.assertEqual([self.grouped(number)[0].state for number in ("Q1", "Q2")], [QuestionState.ANSWERED] * 2)
 
-    async def test_a_failed_group_check_keeps_held_answers_for_retry(self) -> None:
+    async def answer_sourced_group(self) -> dict[str, object]:
         source = "\n\nOwning issue: https://github.com/cbusillo/example/issues/1"
         self.GROUP = self.GROUP.replace("\n\n**Q2", f"{source}\n\n**Q2") + source
         await self.hold_first_answer()
         self.fixture.session.hello.question_receipts = True
         await self.answer_second(self.fixture.bridge.questions, "round")
-        command = self.fixture.socket.sent_json[-1]
+        return self.fixture.socket.sent_json[-1]
+
+    async def test_a_failed_group_check_keeps_held_answers_for_retry(self) -> None:
+        command = await self.answer_sourced_group()
         await self.fixture.bridge.handle_current_event(
             self.fixture.session, "command_reject", {**command, "question_read_failed": True, "reason": "reader unavailable"}
         )
@@ -1065,19 +1068,14 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(answer, cast(str, self.fixture.socket.sent_json[-1]["text"]))
 
     async def test_resolving_a_held_sibling_preserves_the_newly_submitted_answer(self) -> None:
-        source = "\n\nOwning issue: https://github.com/cbusillo/example/issues/1"
-        self.GROUP = self.GROUP.replace("\n\n**Q2", f"{source}\n\n**Q2") + source
-        await self.hold_first_answer()
-        self.fixture.session.hello.question_receipts = True
-        await self.answer_second(self.fixture.bridge.questions, "round")
-        command = self.fixture.socket.sent_json[-1]
+        command = await self.answer_sourced_group()
         row = next(
             row for row in self.fixture.bridge.questions.resolution_sources(self.fixture.session.session_id) if row["number"] == "Q1"
         )
         await self.fixture.bridge.controls.handle_command_reject(
             {
                 **command,
-                "resolutions": [{**row, "answer": "red", "decision_url": source.strip().split()[-1] + "#issuecomment-2"}],
+                "resolutions": [{**row, "answer": "red", "decision_url": row["url"] + "#issuecomment-2"}],
             }
         )
         self.assertEqual(self.grouped("Q1")[0].answer, "red")
