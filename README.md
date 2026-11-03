@@ -1070,6 +1070,15 @@ Answered Director question cards keep the chosen answer and a **Read question**
 button. It opens the full question privately, including its context and options;
 oversized questions include a complete Markdown attachment.
 
+Both local bridges write posted question card URLs to
+`~/.local/share/discord-blue-bridges/question-receipts/<session-id>.json`, mapping
+each Q number to its Discord message URL. Session IDs are URL-escaped in filenames.
+The server refreshes this receipt snapshot after card publication and on reconnect,
+using its existing question records. The Supervisor can read the file and pass a
+card URL to `oq.py --ack QUESTION_URL --delivery-url CARD_URL`; the receipt records
+presentation, never a decision. Update both the server and local bridge for this
+behavior. Older bridges continue without a receipt file.
+
 Anything that needs you is its own message: Question cards, approvals, terminal-action requests and
 errors. `/code status` shows the latest status detail, and `/code go-ahead`,
 `/code pause` and `/code end-session` replace the old card's reactions.

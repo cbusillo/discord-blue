@@ -46,6 +46,7 @@ from discord_blue.doodads.agent_session.formatting import format_user_message
 from discord_blue.doodads.agent_session.formatting import is_assistant_message
 from discord_blue.doodads.agent_session.formatting import mark_assistant_message
 from discord_blue.doodads.agent_session_doodad import AgentSessionDoodad
+from discord_blue.doodads.agent_session.store import SessionStore
 
 if TYPE_CHECKING:
     from discord_blue.doodads.agent_session.bridge import AgentSessionBridge as SessionBridge
@@ -529,6 +530,33 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         ack = await websocket.receive_json(timeout=2)
         self.assertEqual((ack["type"], ack["thread_id"]), ("hello_ack", 555))
         return websocket
+
+    async def test_backfilled_question_receipts_follow_hello_ack_and_reconnect(self) -> None:
+        async with self.transport() as (bridge, thread, client):
+            home = self.enterContext(tempfile.TemporaryDirectory())
+            bridge.store = SessionStore(Path(home) / "sessions.json")
+            await bridge.store.start()
+            self.addAsyncCleanup(bridge.store.close)
+            self.enterContext(patch.dict(thread.__dict__, get_partial_message=thread._messages.__getitem__))
+            for epoch in ("first", "reconnected"):
+                websocket = await client.ws_connect(
+                    "/agent-session/connect", headers={"Authorization": "Bearer transport-test-token"}
+                )
+                await websocket.send_json(
+                    {
+                        "type": "hello",
+                        "session_id": "receipt-session",
+                        "session_epoch": epoch,
+                        "client_features": ["question_receipts"],
+                        "assistant_message": "**Q12.** Ship it?",
+                    }
+                )
+                self.assertEqual((await websocket.receive_json(timeout=2))["type"], "hello_ack")
+                receipt = await websocket.receive_json(timeout=2)
+                question = bridge.store.records["receipt-session"].questions[0]
+                self.assertEqual(receipt["receipts"], {"Q12": thread._messages[question.message_id].jump_url})
+                self.assertEqual(receipt["session_epoch"], epoch)
+                await websocket.close()
 
     @staticmethod
     async def send_transport_event(bridge: SessionBridge, websocket: ClientWebSocketResponse, payload: dict[str, object]) -> None:

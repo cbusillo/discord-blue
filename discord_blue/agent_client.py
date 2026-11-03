@@ -15,12 +15,14 @@ import logging
 import uuid
 from collections import OrderedDict, deque
 from contextlib import suppress
-from typing import Any, ClassVar, Protocol
 from pathlib import Path
+from typing import Any, ClassVar, Protocol
+from urllib.parse import quote
 
 import aiohttp
 
 from discord_blue.question_resolutions import read_resolutions
+from discord_blue.release_delivery import save_json
 
 Json = dict[str, Any]
 logger = logging.getLogger(__name__)
@@ -114,6 +116,13 @@ class AgentSessionClient:
             except (OSError, ValueError, TimeoutError):
                 logger.warning("Question resolution read unavailable for session %s", self.session_id)
                 return self.event("question_states", resolutions=[])
+        if message.get("type") == "question_receipts":
+            if self.is_current(message) and isinstance(receipts := message.get("receipts"), dict):
+                try:
+                    await asyncio.to_thread(save_json, self.question_receipts_path, receipts)
+                except OSError:
+                    logger.warning("Unable to write Question receipts for session %s", self.session_id, exc_info=True)
+            return None
         if message.get("type") == "approval_decision":
             return await self.approval_decision(message)
         if message.get("type") != "command":
@@ -170,6 +179,10 @@ class AgentSessionClient:
     def is_current(self, message: Json) -> bool:
         return message.get("session_id") == self.session_id and message.get("session_epoch") == self.epoch
 
+    @property
+    def question_receipts_path(self) -> Path:
+        return Path.home() / ".local/share/discord-blue-bridges/question-receipts" / f"{quote(self.session_id, safe='')}.json"
+
     async def run_command(self, message: Json) -> object:
         """Execute a command; return DEFERRED to acknowledge or reject it later with finish_command."""
         raise NotImplementedError
@@ -197,7 +210,7 @@ class AgentSessionClient:
             try:
                 async with http.ws_connect(self.config.server_url, headers=headers, max_msg_size=1024 * 1024) as websocket:
                     self.websocket = websocket
-                    client_features = ["hello_pending"]
+                    client_features = ["hello_pending", "question_receipts"]
                     if getattr(self.config, "question_reader", None) is not None:
                         client_features.append("question_resolutions")
                     await self.send(websocket, {**self.hello(first=first), "client_features": client_features})

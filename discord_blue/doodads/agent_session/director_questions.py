@@ -505,6 +505,32 @@ class QuestionCards:
         key = self.key(session, questions[0][0])
         async with self.lock(key):
             await self.publish(session, thread, text, questions, key, complete=complete, replay=replay, group=group)
+        await self.send_receipts(session)
+
+    async def send_receipts(self, session: AgentSession) -> None:
+        if not session.acknowledged or not session.hello.question_receipts:
+            return
+        stored = self.bridge.store.records.get(session.session_id)
+        receipts = {
+            number: question.source_url
+            for question in (stored.questions if stored is not None else ())
+            if question.message_id is not None and question.source_url and question.legacy_parent_id is None
+            for number, _ in question.questions
+        }
+        try:
+            await self.bridge.threads.bounded(
+                session.websocket.send_json(
+                    {
+                        "type": "question_receipts",
+                        "session_id": session.session_id,
+                        "session_epoch": session.session_epoch,
+                        "receipts": receipts,
+                    }
+                ),
+                SESSION_STORE_WAIT_TIMEOUT_SECONDS,
+            )
+        except (OSError, TimeoutError):
+            logger.warning("Unable to send Question receipts for session %s; reconnect will refresh them", session.session_id)
 
     async def publish(
         self,

@@ -307,6 +307,17 @@ delivery; check the native TUI before retrying.
 
 ## Client events
 
+Clients opt into question delivery receipts with `"question_receipts"` in
+`hello.client_features`. After `hello_ack` and after publishing a Director question
+card, the server sends `{"type":"question_receipts", "session_id":"...",
+"session_epoch":"...", "receipts":{"Q123":"https://discord.com/channels/..."}}`.
+This is a snapshot derived from the session's existing posted question records,
+including earlier epochs; unconfirmed posts and legacy parent-channel cards are
+excluded. Clients ignore mismatched session IDs or epochs and atomically replace
+the local receipt file documented in the README. It contains URLs only, without
+question text or answers. A failed send is refreshed on reconnect. This event does
+not start a native turn or acknowledge presentation on the Supervisor's behalf.
+
 All session events carry `session_id` and `session_epoch`. Field shapes live in
 [protocol.py](../discord_blue/doodads/agent_session/protocol.py).
 The bridge ignores events before `hello`, from a replaced connection, or with
