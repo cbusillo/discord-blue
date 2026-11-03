@@ -759,8 +759,10 @@ no longer arrive because the bot restarted or the conversation ended. No copy of
 the answer is posted, and cards carry no delivery reactions. A typed thread
 reply, such as `Q2 round`, sends at once and takes every answer already given
 on a card in that conversation with it, ahead of its own text. A thread reply or recorded decision adds a link to the card.
-A session answer containing an explicit `Director decision:
-Q123. ...` record with a GitHub comment link also marks that question answered.
+A numbered terminal answer such as `Q123: Wait` also settles its card. A session
+answer containing `Director decision Q123: ...` or `Director decision: Q123. ...`
+with a GitHub comment link marks that question answered. The link can follow in
+a separate `Question:` paragraph. A late answer control shows the saved answer and its link.
 This reads records delivered through the session, rather than polling GitHub.
 Recording an answer does not prove delivery to the native session; normal reply
 reactions and failure notices still report that separately. A delivered answer
@@ -1057,9 +1059,6 @@ stopped before the answer posts. There is no status card.
 Answered Director question cards keep the chosen answer and a **Read question**
 button. It opens the full question privately, including its context and options;
 oversized questions include a complete Markdown attachment.
-Numbered terminal answers such as `Q12: Wait` settle the matching card too.
-An assistant reply that includes a linked `Director decision Q12:` record uses
-the same transition. A late answer control shows the saved answer and its link.
 
 Anything that needs you is its own message: Question cards, approvals, terminal-action requests and
 errors. `/code status` shows the latest status detail, and `/code go-ahead`,

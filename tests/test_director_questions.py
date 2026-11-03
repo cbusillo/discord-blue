@@ -350,11 +350,30 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
             f"> Director decision: Q12. Yes. {url}",
             f"| Example | Link |\n| --- | --- |\n| Director decision: Q12. Yes. | {url} |",
             "Director decision: Q12. Yes, but no record link.",
+            f"Director decision Q12 pending\n\nQuestion: {url}",
+            f"Director decision Q12: pending\n\nQuestion: {url}",
+            f"Director decision: Q12. Yes\n\nUnrelated context: {url}",
+            f"Director decision: Q12. Yes\n\n```\nQuestion: {url}\n```",
+            f"Director decision: Q12. Yes\n\n> Question: {url}",
         ):
             await modal.cards.decisions(modal.session_id, text, recorded=True)
             self.assertEqual(
                 cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key)).state, QuestionState.WAITING
             )
+
+    async def test_late_answer_refusal_preserves_delivery_state_and_fits_discord(self) -> None:
+        modal = await self.card()
+        url = "https://github.com/cbusillo/discord-blue/issues/304#issuecomment-123"
+        for state in ANSWERED_STATES:
+            question = replace(modal.question, state=state, answer="A" * 3000, decision_url=url)
+            error = modal.cards.context_error(cast(Any, FakeInteraction(self.fixture.thread)), modal.session_id, question)
+            self.assertIsNotNone(error)
+            if state == QuestionState.ANSWERED:
+                self.assertLessEqual(len(cast(str, error)), 2000)
+                self.assertIn(question.answer[:120], cast(str, error))
+                self.assertIn(url, cast(str, error))
+            else:
+                self.assertIn(state, cast(str, error))
 
     async def test_an_offline_reply_records_the_decision_without_claiming_native_delivery(self) -> None:
         modal = await self.card()
