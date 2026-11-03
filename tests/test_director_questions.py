@@ -149,7 +149,7 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         await choices[1].callback(cast(Any, FakeInteraction(self.fixture.thread)))
         self.assertIn("Q1160: Keep it for later", str(self.fixture.socket.sent_json[0]["text"]))
 
-    async def test_posted_card_receipts_reach_the_local_session_and_reconnect_snapshot(self) -> None:
+    async def test_posted_card_receipts_reach_the_local_session_and_refresh_from_the_store(self) -> None:
         self.fixture.session.hello.question_receipts = True
         with TemporaryDirectory() as home, patch.object(Path, "home", return_value=Path(home)):
             client = AgentSessionClient(cast(Any, Mock()), self.fixture.session.session_id)
@@ -168,6 +168,13 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
             stale = {**receipt, "session_epoch": "another-epoch", "receipts": {"Q99": "wrong"}}
             await client.handle_control(stale)
             self.assertEqual(json.loads(client.question_receipts_path.read_text()), {"Q12": question.source_url})
+
+    async def test_receipt_write_failure_keeps_the_session_connected(self) -> None:
+        client = AgentSessionClient(cast(Any, Mock()), self.fixture.session.session_id)
+        receipt = client.event("question_receipts", receipts={"Q12": "https://discord.com/channels/1/2/3"})
+        with patch("discord_blue.agent_client.save_json", side_effect=OSError("disk full")):
+            with self.assertLogs("discord_blue.agent_client", level="WARNING"):
+                self.assertIsNone(await client.handle_control(receipt))
 
     async def test_answered_structured_question_can_be_read_in_full(self) -> None:
         source = (Path(__file__).parent / "fixtures/structured_question_q1168_bulleted.txt").read_text()

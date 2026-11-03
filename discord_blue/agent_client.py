@@ -110,7 +110,10 @@ class AgentSessionClient:
     async def handle_control(self, message: Json) -> Json | None:
         if message.get("type") == "question_receipts":
             if self.is_current(message) and isinstance(receipts := message.get("receipts"), dict):
-                await asyncio.to_thread(save_json, self.question_receipts_path, receipts)
+                try:
+                    await asyncio.to_thread(save_json, self.question_receipts_path, receipts)
+                except OSError:
+                    logger.warning("Unable to write Question receipts for session %s", self.session_id, exc_info=True)
             return None
         if message.get("type") == "approval_decision":
             return await self.approval_decision(message)

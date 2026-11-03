@@ -424,7 +424,7 @@ class QuestionCards:
         await self.send_receipts(session)
 
     async def send_receipts(self, session: AgentSession) -> None:
-        if not session.hello.question_receipts:
+        if not session.acknowledged or not session.hello.question_receipts:
             return
         stored = self.bridge.store.records.get(session.session_id)
         receipts = {
