@@ -356,7 +356,7 @@ class QuestionCards:
         changed = False
         pattern = r"(?i)^(Q\d+)[.: \t]+([^\n]+)"
         if recorded:
-            pattern = r"(?i)^(?:\*\*)?Director decision:?(?:\*\*)?[ \t]+(?:\*\*)?\(?(Q\d+)\)?[.:][ \t*]+([^\n]+)"
+            pattern = r"(?i)^(?:\*\*)?Director decision:?(?:\*\*)?[ \t]+(?:\*\*)?\(?(Q\d+)\)?(?:\*\*)?[.:,][ \t*]+([^\n]+)"
         lines = text.splitlines()
         matches = []
         for index, line in top_level_lines(lines):

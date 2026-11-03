@@ -294,8 +294,15 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored.decision_url, url)
 
     async def test_external_answers_remove_choices_and_refuse_late_submissions_with_the_answer(self) -> None:
-        for terminal in (False, True, "webhook"):
-            with self.subTest(terminal=terminal):
+        for source in (
+            "Director decision Q12:",
+            "Director decision: **Q12**:",
+            "Director decision (Q12):",
+            "Director decision: Q12,",
+            "terminal",
+            "webhook",
+        ):
+            with self.subTest(source=source):
                 modal = await self.card()
                 choice = next(
                     item
@@ -306,20 +313,20 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
                 )
                 answer = "Wait until the migration is verified."
                 url = "https://github.com/cbusillo/discord-blue/issues/304#issuecomment-123"
-                if terminal:
+                if source in {"terminal", "webhook"}:
                     session = self.fixture.session
                     with patch.object(
                         self.fixture.bridge.status.terminal_prompts,
                         "send",
                         new_callable=AsyncMock,
-                        return_value=FakeReplyMessage(500, self.fixture.thread) if terminal == "webhook" else None,
+                        return_value=FakeReplyMessage(500, self.fixture.thread) if source == "webhook" else None,
                     ):
                         await self.fixture.bridge.status.handle_user_message(
                             UserMessage(session.session_id, session.session_epoch, f"Q12: {answer}")
                         )
                 else:
                     await self.fixture.bridge.status.post_assistant_message(
-                        self.fixture.thread.id, f"Director decision Q12: {answer}\n\nQuestion: {url}"
+                        self.fixture.thread.id, f"{source} {answer}\n\nQuestion: {url}"
                     )
                 question = cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key))
                 self.assertEqual(question.state, QuestionState.ANSWERED)
@@ -373,7 +380,7 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(question.answer[:120], cast(str, error))
                 self.assertIn(url, cast(str, error))
             else:
-                self.assertIn(state, cast(str, error))
+                self.assertNotIn(question.answer[:120], cast(str, error))
 
     async def test_an_offline_reply_records_the_decision_without_claiming_native_delivery(self) -> None:
         modal = await self.card()
