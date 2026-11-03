@@ -16,21 +16,27 @@ SOURCE = re.compile(
 async def read_item(command: tuple[str, ...], item: str) -> list[dict[str, object]]:
     process = await asyncio.create_subprocess_exec(
         *command,
-        item,
         "--include-answers",
+        "--",
+        item,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
     try:
         async with asyncio.timeout(READ_TIMEOUT_SECONDS):
-            output, _ = await process.communicate()
+            output, errors = await process.communicate()
     finally:
         if process.returncode is None:
             process.kill()
             await process.wait()
     if process.returncode:
-        raise ValueError(f"The catalog reader failed with exit {process.returncode}")
+        try:
+            failure = json.loads(output)
+        except ValueError:
+            failure = None
+        detail = failure.get("error") if isinstance(failure, dict) else None
+        raise ValueError(f"Catalog reader exit {process.returncode}: {str(detail or errors.decode(errors='replace'))[:300]}")
     result = json.loads(output)
     if not isinstance(result, dict) or result.get("item") != item or not isinstance(result.get("questions"), list):
         raise ValueError("Invalid catalog reader result")

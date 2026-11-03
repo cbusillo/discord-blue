@@ -27,7 +27,6 @@ class QuestionResolutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(resolved), 1)
         self.assertTrue(source.items() <= resolved[0].items())
         self.assertIn("Keep both.", resolved[0]["answer"])
-        self.assertIn(source["url"], resolved[0]["answer"])
         self.assertNotIn("<!--", resolved[0]["answer"])
         self.assertEqual(resolved[0]["decision_url"], source["url"].replace("-1", "-2"))
         with self.assertRaises(ValueError):

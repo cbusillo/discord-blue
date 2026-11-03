@@ -360,18 +360,22 @@ class QuestionCards:
             ):
                 continue
             number, body = question.questions[0]
-            label = r"(?m)^[ \t]*(?:[-*][ \t]+)?(?:\*\*)?{name}:?(?:\*\*)?:?[ \t]*"
-            link = None
+            url = ""
             for name in ("Original question", "Owning issue"):
-                labeled = re.search(label.format(name=name) + r"([^\n]+)", body)
-                if labeled and (link := SOURCE.search(labeled[1])):
+                label = rf"(?m)^[ \t]*(?:[-*][ \t]+)?(?:\*\*)?{name}:?(?:\*\*)?:?[ \t]*"
+                labeled = re.search(label + r"([^\n]+)", body)
+                if labeled is None:
+                    continue
+                link = SOURCE.search(labeled[1])
+                if link is not None:
+                    url = link[0]
                     break
-            if link is not None:
+            if url:
                 sources.append(
                     {
                         "key": question.key,
                         "number": number,
-                        "url": link[0],
+                        "url": url,
                         "revision": str(question.revision),
                     }
                 )
@@ -411,7 +415,7 @@ class QuestionCards:
             pattern = (
                 r"(?i)^(?:\*\*)?Director decision(?:\*\*)?"
                 r"(?P<colon>:)?(?:\*\*)?[ \t]*(?:\*\*)?\(?(?P<number>Q\d+)\)?(?:\*\*)?"
-                r"(?(colon)[.:, \t—-]+|[.:,][ \t*]+)(?P<answer>[^\n]+)"
+                r"(?(colon)[.:, \t—-]+|:[ \t*]+)(?P<answer>[^\n]+)"
             )
         lines = text.splitlines()
         matches = []
@@ -425,8 +429,10 @@ class QuestionCards:
             context = paragraphs[0]
             if len(paragraphs) > 1 and paragraphs[1].startswith("Question: "):
                 context += f"\n{paragraphs[1].splitlines()[0]}"
-            if recorded and re.fullmatch(r"(?i)(?:later|not now|not yet|waiting|pending)[\s.;!—-]*", match["answer"].strip()):
-                continue
+            if recorded:
+                operative = re.sub(r"https://\S+", "", match["answer"].replace("*", "")).split("<!--", 1)[0].strip()
+                if re.fullmatch(r"(?i)(?:later|not now|not yet|waiting|pending)[\s.;!—-]*", operative):
+                    continue
             if not recorded and (match["answer"].rstrip().endswith("?") or re.search(r"(?i)\bQ\d+\b", match["answer"])):
                 continue
             link = re.search(r"https://github\.com/[^\s)]+#issuecomment-\d+", context) if recorded else None

@@ -429,7 +429,10 @@ class SessionControls:
                     question = self.bridge.questions.record(session.session_id, key)
                     state = (
                         QuestionState.WAITING
-                        if question is not None and command.message_id is not None and question.message_id == command.message_id
+                        if payload.get("question_read_failed") is True
+                        and question is not None
+                        and command.message_id is not None
+                        and question.message_id == command.message_id
                         else QuestionState.HELD
                     )
                     await self.bridge.questions.settle(session.session_id, (key,), state)

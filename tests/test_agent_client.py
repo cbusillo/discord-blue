@@ -7,12 +7,15 @@ import unittest
 from dataclasses import asdict, dataclass
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+from discord_blue.codex_bridge.session import ThreadSession
+from discord_blue.codex_bridge.rpc import RpcError, TransportError
+from discord_blue.claude_channel.session import ClaudeSession
 from discord_blue.agent_client import OUTBOX_LIMIT, AgentSessionClient, Json
 from tests.fakes_discord_blue import TOKEN, FakeDiscordBlue
 
@@ -104,8 +107,9 @@ class OutboxTests(unittest.IsolatedAsyncioTestCase):
                     await discord.sockets[-1].send_json({**client.event("command"), "kind": "reply", "command_id": "followup"})
                     pause = await discord.control({**client.event("command"), "kind": "pause_current_turn", "command_id": "pause"})
                     self.assertEqual(pause["command_id"], "pause")
-                    self.assertFalse(release.is_set())
                     self.assertEqual(sent, ["pause"])
+                    await discord.sockets[-1].close()
+                    await discord.next("hello")
                     release.set()
                     rejected = await discord.next("command_reject")
                     self.assertTrue(rejected["delivery_unconfirmed"])
@@ -117,6 +121,21 @@ class OutboxTests(unittest.IsolatedAsyncioTestCase):
                     release.set()
                     await client.stop()
                     await asyncio.wait_for(running, 5)
+
+    async def test_transport_failures_are_uncertain_but_native_refusals_are_definite(self) -> None:
+        for kind, error, uncertain in (
+            (ThreadSession, TransportError(), True),
+            (ThreadSession, RpcError(None), False),
+            (ClaudeSession, OSError(), True),
+        ):
+            with self.subTest(client=kind.__name__, error=type(error).__name__):
+                client = object.__new__(kind)
+                AgentSessionClient.__init__(client, Connection("unused"), "session-1")
+                command = {**client.event("command"), "command_id": "answer", "kind": "reply", "text": "yes"}
+                with patch.object(client, "run_command", new_callable=AsyncMock, side_effect=error):
+                    response = await client.handle_control(command)
+                assert response is not None
+                self.assertEqual(bool(response.get("delivery_unconfirmed")), uncertain)
 
     async def test_an_event_whose_send_fails_is_delivered_after_the_reconnect(self) -> None:
         discord = FakeDiscordBlue()

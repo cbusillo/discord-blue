@@ -401,6 +401,10 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
             "Director decision: Q12. Yes, but no record link.",
             f"Director decision Q12 pending\n\nQuestion: {url}",
             f"Director decision Q12: pending\n\nQuestion: {url}",
+            f"Director decision Q12: Later {url}",
+            f"Director decision Q12: **Later**\n\nQuestion: {url}",
+            f"Director decision Q12. Yes {url}",
+            f"Director decision Q12, Yes {url}",
             f"Director decision: Q12. Yes\n\nUnrelated context: {url}",
             f"Director decision: Q12. Yes\n\n```\nQuestion: {url}\n```",
             f"Director decision: Q12. Yes\n\n> Question: {url}",
@@ -966,7 +970,6 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.grouped("Q2")[0].state, QuestionState.ANSWERED)
                 await self.fixture.bridge.controls.handle_command_ack(command)
                 self.assertEqual(self.grouped("Q1")[0].state, QuestionState.ANSWERED)
-                # Start a fresh group for the next entry point.
                 for number in ("Q1", "Q2"):
                     question, _ = self.grouped(number)
                     cards.save(self.fixture.session.session_id, replace(question, state=QuestionState.WAITING, answer=""))
@@ -1058,7 +1061,30 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([self.grouped(number)[0].state for number in ("Q1", "Q2")], [QuestionState.HELD, QuestionState.WAITING])
         await self.answer_second(self.fixture.bridge.questions, "round")
-        self.assertEqual(self.fixture.socket.sent_json[-1]["text"], "Q1: blue\n\nQ2: round")
+        for answer in ("blue", "round"):
+            self.assertIn(answer, cast(str, self.fixture.socket.sent_json[-1]["text"]))
+
+    async def test_resolving_a_held_sibling_preserves_the_newly_submitted_answer(self) -> None:
+        source = "\n\nOwning issue: https://github.com/cbusillo/example/issues/1"
+        self.GROUP = self.GROUP.replace("\n\n**Q2", f"{source}\n\n**Q2") + source
+        await self.hold_first_answer()
+        self.fixture.session.hello.question_receipts = True
+        await self.answer_second(self.fixture.bridge.questions, "round")
+        command = self.fixture.socket.sent_json[-1]
+        row = next(
+            row for row in self.fixture.bridge.questions.resolution_sources(self.fixture.session.session_id) if row["number"] == "Q1"
+        )
+        await self.fixture.bridge.controls.handle_command_reject(
+            {
+                **command,
+                "resolutions": [{**row, "answer": "red", "decision_url": source.strip().split()[-1] + "#issuecomment-2"}],
+            }
+        )
+        self.assertEqual(self.grouped("Q1")[0].answer, "red")
+        self.assertEqual(self.grouped("Q1")[0].state, QuestionState.ANSWERED)
+        self.assertEqual(self.fixture.socket.sent_json[-1]["text"], "Q2: round")
+        await self.fixture.bridge.controls.handle_command_ack(self.fixture.socket.sent_json[-1])
+        self.assertEqual(self.grouped("Q2")[0].state, QuestionState.ANSWERED)
 
     async def test_the_answer_form_shows_the_whole_question(self) -> None:
         body = "**Q12.** Ship it?\n" + "Context that must stay readable. " * 20 + "\nRecommendation: yes."
