@@ -5,6 +5,7 @@ from contextlib import AsyncExitStack
 import hashlib
 import logging
 import re
+import time
 import uuid
 from dataclasses import dataclass, replace
 from collections.abc import Iterator
@@ -55,6 +56,8 @@ CHOICE_END = re.compile(r"[.;:(,]\s|[.;:]$|\s[-\u2013\u2014]\s|\s(?:because|sinc
 STRUCTURED_CHOICE = re.compile(r"^\*\*([^*\n]+?)( \(recommended\))?:\*\*")
 CHOICE_LIMIT = 60
 MAX_CHOICES = 4
+RESOLUTION_REFRESH_SECONDS = 300
+RESOLUTION_EVENT_REFRESH_SECONDS = 5
 # Discord allows 4000 characters of text in a form; leave room for the cut notice and link.
 MODAL_TEXT_LIMIT = 3800
 # Yellow needs an answer, blue is answered and on its way, green reached the agent, red did not.
@@ -189,6 +192,7 @@ class QuestionCards:
         self.drawn: dict[str, QuestionState] = {}
         # Cards marked unconfirmed at startup, redrawn once their session attaches or ends and Discord is reachable.
         self.unconfirmed_at_start: dict[str, list[str]] = {}
+        self.last_resolution_read: dict[str, float] = {}
 
     def lock(self, key: str) -> asyncio.Lock:
         return self.locks.setdefault(key, asyncio.Lock())
@@ -344,6 +348,74 @@ class QuestionCards:
                 )
                 if assistant_answer_cards(body)[1]:
                     full_text = ""
+        await self.request_resolutions(session, force=True)
+
+    def resolution_sources(self, session_id: str, keys: tuple[str, ...] | None = None) -> list[dict[str, str]]:
+        stored = self.bridge.store.records.get(session_id)
+        sources = []
+        for question in stored.questions if stored is not None else ():
+            if (
+                question.state == QuestionState.ANSWERED
+                or len(question.questions) != 1
+                or (keys is not None and question.key not in keys)
+            ):
+                continue
+            number, body = question.questions[0]
+            pattern = (
+                r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:issues|pull)/[1-9][0-9]*(?:#issuecomment-[1-9][0-9]*)?"
+            )
+            owning = re.search(rf"(?m)^Owning issue:\s*({pattern})", body)
+            link = owning or re.search(pattern, body)
+            if link:
+                sources.append(
+                    {
+                        "key": question.key,
+                        "number": number,
+                        "url": link[1] if owning else link[0],
+                        "revision": str(question.revision),
+                    }
+                )
+        return sources
+
+    async def request_resolutions(self, session: AgentSession, *, force: bool = False) -> None:
+        if not session.hello.question_resolutions or session.websocket.closed:
+            return
+        now = time.monotonic()
+        interval = RESOLUTION_EVENT_REFRESH_SECONDS if force else RESOLUTION_REFRESH_SECONDS
+        if now - self.last_resolution_read.get(session.session_id, float("-inf")) < interval:
+            return
+        sources = self.resolution_sources(session.session_id)
+        if not sources:
+            return
+        self.last_resolution_read[session.session_id] = now
+        try:
+            await session.websocket.send_json(
+                {
+                    "type": "question_state_request",
+                    "session_id": session.session_id,
+                    "session_epoch": session.session_epoch,
+                    "question_sources": sources,
+                }
+            )
+        except (OSError, RuntimeError):
+            logger.warning("Question resolution request unavailable for session %s", session.session_id)
+
+    async def apply_resolutions(self, session: AgentSession, payload: dict[str, object]) -> None:
+        if payload.get("session_epoch") != session.session_epoch or payload.get("session_id") != session.session_id:
+            return
+        rows = payload.get("resolutions")
+        if not isinstance(rows, list):
+            return
+        sources = self.resolution_sources(session.session_id)
+        for row in rows:
+            if not isinstance(row, dict) or not any(
+                all(row.get(key) == value for key, value in source.items()) for source in sources
+            ):
+                continue
+            answer, url = row.get("answer"), row.get("decision_url")
+            question = self.record(session.session_id, row["key"])
+            if question is not None and isinstance(answer, str) and answer.strip() and isinstance(url, str) and url:
+                await self.resolve(session.session_id, question, answer, url)
 
     @staticmethod
     def key(session: AgentSession, number: str) -> str:
@@ -380,16 +452,20 @@ class QuestionCards:
             for question in tuple(self.bridge.store.records[session_id].questions):
                 if match[1].upper() not in {number for number, _ in question.questions}:
                     continue
-                async with self.lock(question.key):
-                    current = self.record(session_id, question.key)
-                    if current is None or current.state == QuestionState.ANSWERED:
-                        continue
-                    answered = replace(current, state=QuestionState.ANSWERED, answer=match[2].strip(), decision_url=decision_url)
-                    self.save(session_id, answered)
-                    changed = True
-                    held = [q for q in self.members(session_id, answered) if q.state == QuestionState.HELD]
-                    await self.refresh(session_id, [answered, *held])
+                changed = await self.resolve(session_id, question, match[2].strip(), decision_url) or changed
         return changed
+
+    async def resolve(self, session_id: str, question: StoredQuestion, answer: str, url: str) -> bool:
+        async with self.lock(question.key):
+            current = self.record(session_id, question.key)
+            if current is None or current.state == QuestionState.ANSWERED or current.revision != question.revision:
+                return False
+            answered = replace(current, state=QuestionState.ANSWERED, answer=answer, decision_url=url)
+            if not self.save(session_id, answered):
+                return False
+            held = [q for q in self.members(session_id, answered) if q.state == QuestionState.HELD]
+            await self.refresh(session_id, [answered, *held])
+            return True
 
     def context_error(self, interaction: discord.Interaction, session_id: str, question: StoredQuestion | None) -> str | None:
         if question is None:

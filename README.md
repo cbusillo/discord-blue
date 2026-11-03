@@ -477,6 +477,7 @@ token_file = "~/.config/discord-blue/codex-bridge.token"  # mode 600; or set AGE
 # host_label = "Codex on Chris-Studio"
 # allow_insecure_ws = false  # true permits ws:// to a trusted private host
 # hello_timeout_seconds = 300  # how long to wait for Discord Blue to attach the thread
+# question_reader = "/absolute/path/to/codex-skills/skills/supervisor/scripts/oq.py"
 ```
 
 Keep `hello_timeout_seconds` above the server's 15-second pending-reply interval
@@ -648,7 +649,7 @@ Follow [Run your own Discord Blue](#run-your-own-discord-blue) for client
 installation and the channel launch command.
 
 The channel reads the Codex bridge's `~/.config/discord-blue/codex-bridge.toml`
-(`server_url`, `token_file`, `allow_insecure_ws`, `hello_timeout_seconds`); its host label is always
+(`server_url`, `token_file`, `allow_insecure_ws`, `hello_timeout_seconds`, `question_reader`); its host label is always
 `Claude Code on <host>`. Each launch shows Claude Code's "Loading development
 channels" warning; press Enter. A session that is already running cannot load
 the channel: `/exit`, then
@@ -763,7 +764,16 @@ A numbered terminal answer such as `Q123: Wait` also settles its card. A session
 answer containing `Director decision Q123: ...` or `Director decision: Q123. ...`
 with a GitHub comment link marks that question answered. The link can follow in
 a separate `Question:` paragraph. A late answer control shows the saved answer and its link.
-This reads records delivered through the session, rather than polling GitHub.
+With `question_reader` set to the installed catalog's `oq.py`, both local bridges
+also refresh cards from the owning issue on session updates and every five minutes
+while connected. Question text must include its owning GitHub issue or original
+question link. The catalog decides which records count as answers; the local
+bridge sends those answers and links to the bot. Existing local automation access
+is used, and GitHub credentials stay off the bot. A card answer gets a fresh
+reader check before reaching the native session. An already resolved answer is
+refused and its recorded answer is shown. If that read is unavailable, the answer
+is refused for retry. Without this optional setting, session and terminal records
+still settle cards as above. Restart the local bridges after changing the setting.
 Recording an answer does not prove delivery to the native session; normal reply
 reactions and failure notices still report that separately. A delivered answer
 shows no private confirmation; only a refusal or failure does. An unanswered question stays visible when the session

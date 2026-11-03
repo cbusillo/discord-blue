@@ -285,6 +285,9 @@ class SessionControls:
             kind="reply",
             text=text,
             issued_by=str(user.id),
+            question_sources=self.bridge.questions.resolution_sources(session.session_id, question_keys)
+            if question_keys and session.hello.question_resolutions
+            else None,
         )
         pending = PendingRemoteCommand(
             thread_id=thread.id,

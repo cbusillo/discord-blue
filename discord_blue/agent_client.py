@@ -16,8 +16,11 @@ import uuid
 from collections import OrderedDict, deque
 from contextlib import suppress
 from typing import Any, ClassVar, Protocol
+from pathlib import Path
 
 import aiohttp
+
+from discord_blue.question_resolutions import read_resolutions
 
 Json = dict[str, Any]
 logger = logging.getLogger(__name__)
@@ -104,6 +107,13 @@ class AgentSessionClient:
     # Controls from Discord
 
     async def handle_control(self, message: Json) -> Json | None:
+        if message.get("type") == "question_state_request" and self.is_current(message):
+            try:
+                resolutions = await self.question_resolutions(message.get("question_sources"))
+                return self.event("question_states", resolutions=resolutions)
+            except (OSError, ValueError, TimeoutError):
+                logger.warning("Question resolution read unavailable for session %s", self.session_id)
+                return self.event("question_states", resolutions=[])
         if message.get("type") == "approval_decision":
             return await self.approval_decision(message)
         if message.get("type") != "command":
@@ -117,6 +127,20 @@ class AgentSessionClient:
             return self.commands[command_id]
         self.commands[command_id] = self.event("command_reject", command_id=command_id, reason="Command already in progress.")
         try:
+            if message.get("kind") == "reply" and message.get("question_sources"):
+                try:
+                    resolutions = await self.question_resolutions(message["question_sources"])
+                except (OSError, ValueError, TimeoutError):
+                    raise Rejected("The recorded answer could not be checked. Retry the question card shortly.") from None
+                if resolutions:
+                    response = self.event(
+                        "command_reject",
+                        command_id=command_id,
+                        resolutions=resolutions,
+                        reason=f"Already answered: {resolutions[0]['answer'][:1500]} {resolutions[0]['decision_url']}",
+                    )
+                    self.remember(command_id, response)
+                    return response
             if await self.run_command(message) is DEFERRED:
                 return None  # The subclass answers later with finish_command.
             response = self.event("command_ack", command_id=command_id)
@@ -126,6 +150,12 @@ class AgentSessionClient:
             response = self.event("command_reject", command_id=command_id, reason=self.failure_reason(exc))
         self.remember(command_id, response)
         return response
+
+    async def question_resolutions(self, sources: object) -> list[dict[str, str]]:
+        reader: Path | None = getattr(self.config, "question_reader", None)
+        if reader is None:
+            raise ValueError("No catalog question reader is configured")
+        return await read_resolutions(reader, sources)
 
     def remember(self, command_id: str, response: Json) -> None:
         self.commands[command_id] = response
@@ -167,7 +197,10 @@ class AgentSessionClient:
             try:
                 async with http.ws_connect(self.config.server_url, headers=headers, max_msg_size=1024 * 1024) as websocket:
                     self.websocket = websocket
-                    await self.send(websocket, {**self.hello(first=first), "client_features": ["hello_pending"]})
+                    client_features = ["hello_pending"]
+                    if getattr(self.config, "question_reader", None) is not None:
+                        client_features.append("question_resolutions")
+                    await self.send(websocket, {**self.hello(first=first), "client_features": client_features})
                     while True:
                         # A pending reply renews the inactivity deadline, rather than restarting the connection.
                         # A silent or older server still times out normally; queued events wait until hello_ack.

@@ -21,6 +21,7 @@ FIELD_TYPES: dict[str, tuple[type, ...]] = {
     "host_label": (str,),
     "allow_insecure_ws": (bool,),
     "hello_timeout_seconds": (int, float),
+    "question_reader": (str,),
 }
 TYPE_NAMES = {(str,): "a string", (bool,): "true or false", (int, float): "a number"}
 
@@ -40,6 +41,7 @@ class BridgeConfig:
     # busy thread with no name or preview yet is read again after each of these delays instead of waiting for its turn
     # to end. Stock records the prompt about 2.5 s after the turn starts.
     unnamed_retry_seconds: tuple[float, ...] = (0.5, 1, 2, 4, 8)
+    question_reader: Path | None = None
 
 
 def validate_server_url(url: str, *, allow_insecure_ws: bool) -> None:
@@ -112,4 +114,9 @@ def load_config(path: Path) -> BridgeConfig:
     )
     if "hello_timeout_seconds" in raw:
         config = replace(config, hello_timeout_seconds=float(cast(float, raw["hello_timeout_seconds"])))
+    if raw.get("question_reader"):
+        reader = Path(str(raw["question_reader"])).expanduser()
+        if not reader.is_absolute() or not reader.is_file():
+            raise ValueError("question_reader must name the installed catalog's absolute oq.py path")
+        config = replace(config, question_reader=reader)
     return config

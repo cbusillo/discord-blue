@@ -834,10 +834,14 @@ class AgentSessionBridge:
         match message_type:
             case "heartbeat":
                 session.touch()
+                await self.questions.request_resolutions(session)
+            case "question_states":
+                await self.questions.apply_resolutions(session, payload)
             case "user_message":
                 await self.status.handle_user_message(UserMessage.from_payload(payload))
             case "status_changed" | "turn_complete" | "error":
                 await self.status.handle_session_status(message_type, SessionStatus.from_payload(payload))
+                await self.questions.request_resolutions(session, force=True)
             case "title_changed":
                 await self.status.handle_title_changed(session, payload.get("title"))
             case "notice" if session.thread_id is not None:
@@ -868,6 +872,7 @@ class AgentSessionBridge:
                     self.handover.retire(session.session_id, "inputs", call_id)
             case "command_reject":
                 logger.warning("Agent session command reject: %s", payload)
+                await self.questions.apply_resolutions(session, payload)
                 await self.controls.handle_command_reject(payload)
 
     def attach_task(self, hello: SessionHello, previous: AgentSession | None) -> asyncio.Task[SessionThread]:

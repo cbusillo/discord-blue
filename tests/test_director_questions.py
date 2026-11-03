@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import discord
 
+from discord_blue.agent_client import AgentSessionClient
+
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.cleanup import SessionCleanups
 from discord_blue.doodads.agent_session.cards import STATUS_LABELS
@@ -381,6 +383,35 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(url, cast(str, error))
             else:
                 self.assertNotIn(question.answer[:120], cast(str, error))
+
+    async def test_owning_issue_resolution_refreshes_the_card_and_refuses_a_late_choice(self) -> None:
+        self.fixture.session.hello.question_resolutions = True
+        source_url = "https://github.com/cbusillo/example/issues/1#issuecomment-1"
+        modal = await self.card(f"**Q1218.** Keep both?\nRecommendation: yes.\nAlternative: no.\n\nOriginal question: {source_url}")
+        request = self.fixture.socket.sent_json.pop()
+        self.assertEqual(request["type"], "question_state_request")
+        source = cast(list[dict[str, str]], request["question_sources"])[0]
+        client = AgentSessionClient(
+            cast(Any, SimpleNamespace(question_reader=Path(__file__).parent / "fixtures/question_reader.py")), modal.session_id
+        )
+        client.epoch = self.fixture.session.session_epoch
+        payload = cast(dict[str, object], await client.handle_control(cast(dict[str, Any], request)))
+        resolution = cast(list[dict[str, str]], payload["resolutions"])[0]
+        self.assertEqual(resolution["key"], source["key"])
+        await self.fixture.bridge.handle_current_event(self.fixture.session, "question_states", {**payload, "session_epoch": "old"})
+        self.assertEqual(cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key)).state, QuestionState.WAITING)
+        await self.fixture.bridge.handle_current_event(self.fixture.session, "question_states", payload)
+        question = cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key))
+        self.assertEqual(question.state, QuestionState.ANSWERED)
+        self.assertEqual(question.answer, resolution["answer"])
+        view = cast(discord.ui.LayoutView, self.fixture.thread._messages[cast(int, question.message_id)].view)
+        self.assertIn(resolution["answer"], visible_view_text(view))
+        self.assertFalse(any(isinstance(item, QuestionChoiceButton) for item in view.walk_children()))
+        modal.fields[0]._value = "No"
+        late = FakeInteraction(self.fixture.thread)
+        await modal.on_submit(cast(Any, late))
+        self.assertIn(resolution["answer"], str(late.response.messages))
+        self.assertEqual(self.fixture.socket.sent_json, [])
 
     async def test_an_offline_reply_records_the_decision_without_claiming_native_delivery(self) -> None:
         modal = await self.card()
