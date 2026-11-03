@@ -356,7 +356,7 @@ class QuestionCards:
         changed = False
         pattern = r"(?i)^(Q\d+)[.: \t]+([^\n]+)"
         if recorded:
-            pattern = r"(?i)^(?:\*\*)?Director decision:(?:\*\*)?[ \t]*(?:\*\*)?(Q\d+)[.: \t*]+([^\n]+)"
+            pattern = r"(?i)^(?:\*\*)?Director decision:?(?:\*\*)?[ \t]+(?:\*\*)?(Q\d+)[.: \t*]+([^\n]+)"
         lines = text.splitlines()
         matches = []
         for index, line in top_level_lines(lines):
@@ -365,7 +365,7 @@ class QuestionCards:
                 matches.append((index, match))
         for index, (start, match) in enumerate(matches):
             end = matches[index + 1][0] if index + 1 < len(matches) else len(lines)
-            context = "\n".join(lines[start:end]).split("\n\n", 1)[0]
+            context = "\n".join(lines[start:end])
             if not recorded and (match[2].rstrip().endswith("?") or re.search(r"(?i)\bQ\d+\b", match[2])):
                 continue
             link = re.search(r"https://github\.com/[^\s)]+#issuecomment-\d+", context) if recorded else None
@@ -402,6 +402,9 @@ class QuestionCards:
         if interaction.message is not None and interaction.message.id != question.message_id:
             return "Open the original Question card."
         if question.state != QuestionState.WAITING:
+            if question.answer:
+                link = f" [Existing answer]({question.decision_url})" if question.decision_url else ""
+                return f"This question was already answered: {question.answer}.{link}"
             return f"This answer was already submitted: {question.state}. Check the session before replying again."
         return None
 

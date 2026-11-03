@@ -1057,6 +1057,9 @@ stopped before the answer posts. There is no status card.
 Answered Director question cards keep the chosen answer and a **Read question**
 button. It opens the full question privately, including its context and options;
 oversized questions include a complete Markdown attachment.
+Numbered terminal answers such as `Q12: Wait` settle the matching card too.
+An assistant reply that includes a linked `Director decision Q12:` record uses
+the same transition. A late answer control shows the saved answer and its link.
 
 Anything that needs you is its own message: Question cards, approvals, terminal-action requests and
 errors. `/code status` shows the latest status detail, and `/code go-ahead`,

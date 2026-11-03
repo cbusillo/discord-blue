@@ -27,6 +27,7 @@ from discord_blue.doodads.agent_session.director_questions import (
     question_excerpt,
 )
 from discord_blue.doodads.agent_session.sessions import AgentSession, PendingSessionCleanup
+from discord_blue.doodads.agent_session.protocol import UserMessage
 from discord_blue.doodads.agent_session.store import QuestionState, SessionStore, StoredQuestion
 from tests.fakes_agent_prompts import PromptFixture, prompt_fixture
 from tests.fakes_agent_session import FakeInteraction, FakeReplyMessage, FakeThread, FakeWebSocket, visible_view_text
@@ -291,6 +292,55 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         stored = cast(StoredQuestion, second.cards.record(second.session_id, second.question.key))
         self.assertEqual(stored.state, QuestionState.ANSWERED)
         self.assertEqual(stored.decision_url, url)
+
+    async def test_external_answers_remove_choices_and_refuse_late_submissions_with_the_answer(self) -> None:
+        for terminal in (False, True, "webhook"):
+            with self.subTest(terminal=terminal):
+                modal = await self.card()
+                choice = next(
+                    item
+                    for item in cast(
+                        discord.ui.LayoutView, self.fixture.thread._messages[cast(int, modal.question.message_id)].view
+                    ).walk_children()
+                    if isinstance(item, QuestionChoiceButton)
+                )
+                answer = "Wait until the migration is verified."
+                url = "https://github.com/cbusillo/discord-blue/issues/304#issuecomment-123"
+                if terminal:
+                    session = self.fixture.session
+                    with patch.object(
+                        self.fixture.bridge.status.terminal_prompts,
+                        "send",
+                        new_callable=AsyncMock,
+                        return_value=FakeReplyMessage(500, self.fixture.thread) if terminal == "webhook" else None,
+                    ):
+                        await self.fixture.bridge.status.handle_user_message(
+                            UserMessage(session.session_id, session.session_epoch, f"Q12: {answer}")
+                        )
+                else:
+                    await self.fixture.bridge.status.post_assistant_message(
+                        self.fixture.thread.id, f"Director decision Q12: {answer}\n\nQuestion: {url}"
+                    )
+                question = cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key))
+                self.assertEqual(question.state, QuestionState.ANSWERED)
+                self.assertEqual(question.answer, answer)
+                self.assertTrue(question.decision_url)
+                view = cast(discord.ui.LayoutView, self.fixture.thread._messages[cast(int, question.message_id)].view)
+                self.assertIn(answer, visible_view_text(view))
+                self.assertFalse(
+                    any(isinstance(item, (QuestionChoiceButton, QuestionAnswerButton)) for item in view.walk_children())
+                )
+                for use_modal in (False, True):
+                    modal.fields[0]._value = "Ship now"
+                    interaction = FakeInteraction(self.fixture.thread)
+                    if use_modal:
+                        await modal.on_submit(cast(Any, interaction))
+                    else:
+                        await choice.callback(cast(Any, interaction))
+                    shown = str(interaction.response.messages)
+                    self.assertIn(answer, shown)
+                    self.assertIn(question.decision_url, shown)
+                self.assertEqual(self.fixture.socket.sent_json, [])
 
     async def test_quoted_decision_examples_do_not_answer_a_question(self) -> None:
         modal = await self.card()
