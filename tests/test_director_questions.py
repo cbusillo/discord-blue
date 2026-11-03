@@ -4,19 +4,19 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 import unittest
+import sys
 from dataclasses import asdict, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 import discord
 
 from discord_blue.agent_client import AgentSessionClient
 
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
-from discord_blue.agent_client import AgentSessionClient
 from discord_blue.doodads.agent_session.cleanup import SessionCleanups
 from discord_blue.doodads.agent_session.cards import STATUS_LABELS
 from discord_blue.doodads.agent_session.director_questions import (
@@ -139,6 +139,14 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         interaction = FakeInteraction(self.fixture.thread)
         await button.callback(cast(Any, interaction))
         return cast(QuestionAnswerModal, interaction.response.modals[0])
+
+    def question_client(self) -> AgentSessionClient:
+        reader = Path(__file__).parent / "fixtures/question_reader.py"
+        config = SimpleNamespace(question_reader=(sys.executable, str(reader), "--owner", "director"))
+        client = AgentSessionClient(cast(Any, config), self.fixture.session.session_id)
+        client.epoch = self.fixture.session.session_epoch
+        self.addAsyncCleanup(client.stop)
+        return client
 
     async def assert_rendered_choices(self, filename: str) -> None:
         source = (Path(__file__).parent / "fixtures" / filename).read_text()
@@ -414,17 +422,23 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(question.answer[:120], cast(str, error))
 
     async def test_owning_issue_resolution_refreshes_the_card_and_refuses_a_late_choice(self) -> None:
-        self.fixture.session.hello.question_resolutions = True
+        self.fixture.session.hello.question_receipts = True
         source_url = "https://github.com/cbusillo/example/issues/1#issuecomment-1"
         modal = await self.card(f"**Q1218.** Keep both?\nRecommendation: yes.\nAlternative: no.\n\nOriginal question: {source_url}")
         request = self.fixture.socket.sent_json.pop()
-        self.assertEqual(request["type"], "question_state_request")
+        self.assertEqual(request["type"], "question_receipts")
         source = cast(list[dict[str, str]], request["question_sources"])[0]
-        client = AgentSessionClient(
-            cast(Any, SimpleNamespace(question_reader=Path(__file__).parent / "fixtures/question_reader.py")), modal.session_id
-        )
-        client.epoch = self.fixture.session.session_epoch
-        payload = cast(dict[str, object], await client.handle_control(cast(dict[str, Any], request)))
+        client = self.question_client()
+        with patch.object(
+            AgentSessionClient,
+            "question_receipts_path",
+            new_callable=PropertyMock,
+            return_value=self.fixture.bridge.store.path.parent / "receipts.json",
+        ):
+            await client.handle_control(cast(dict[str, Any], request))
+        assert client.resolution_task is not None
+        await client.resolution_task
+        payload = cast(dict[str, object], client.outbox.popleft())
         resolution = cast(list[dict[str, str]], payload["resolutions"])[0]
         self.assertEqual(resolution["key"], source["key"])
         await self.fixture.bridge.handle_current_event(self.fixture.session, "question_states", {**payload, "session_epoch": "old"})
@@ -441,6 +455,40 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         await modal.on_submit(cast(Any, late))
         self.assertIn(resolution["answer"], str(late.response.messages))
         self.assertEqual(self.fixture.socket.sent_json, [])
+
+    async def test_card_replies_reconcile_existing_answers_and_keep_failed_checks_retryable(self) -> None:
+        self.fixture.session.hello.question_receipts = True
+        for result in ("resolved", "unavailable", "unrelated"):
+            with self.subTest(result=result):
+                label = "Context" if result == "unrelated" else "Original question"
+                modal = await self.card(
+                    f"**Q1218.** Keep both?\n\n{label}: https://github.com/cbusillo/example/issues/1#issuecomment-1"
+                )
+                self.fixture.socket.sent_json.clear()
+                modal.fields[0]._value = "No"
+                await modal.on_submit(cast(Any, FakeInteraction(self.fixture.thread)))
+                command = self.fixture.socket.sent_json.pop()
+                client = self.question_client()
+                with patch.object(client, "run_command", new_callable=AsyncMock) as run:
+                    if result == "unavailable":
+                        with patch.object(client, "question_resolutions", new_callable=AsyncMock, side_effect=ValueError):
+                            response = await client.handle_control(command)
+                    else:
+                        response = await client.handle_control(command)
+                if result == "unrelated":
+                    run.assert_awaited_once()
+                else:
+                    run.assert_not_awaited()
+                assert response is not None
+                await self.fixture.bridge.handle_current_event(self.fixture.session, response["type"], response)
+                question = cast(StoredQuestion, modal.cards.record(modal.session_id, modal.question.key))
+                view = cast(discord.ui.LayoutView, self.fixture.thread._messages[cast(int, question.message_id)].view)
+                if result == "unavailable":
+                    self.assertEqual(question.state, QuestionState.WAITING)
+                    self.assertTrue(any(isinstance(item, QuestionAnswerButton) for item in view.walk_children()))
+                else:
+                    self.assertEqual(question.state, QuestionState.ANSWERED)
+                    self.assertEqual(question.answer, "Keep both." if result == "resolved" else modal.fields[0].value)
 
     async def test_an_offline_reply_records_the_decision_without_claiming_native_delivery(self) -> None:
         modal = await self.card()
@@ -928,11 +976,28 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.grouped("Q1")[0].state, QuestionState.HELD)
 
     async def test_a_typed_answer_carries_held_answers_with_it(self) -> None:
+        self.GROUP = self.GROUP.replace("\n\n**Q2", "\n\nOwning issue: https://github.com/cbusillo/example/issues/1\n\n**Q2")
         await self.hold_first_answer()
+        self.fixture.session.hello.question_receipts = True
         await self.fixture.bridge.controls.send_thread_reply(cast(Any, FakeReplyMessage(301, self.fixture.thread, "Q2 round")))
         self.assertEqual([command["text"] for command in self.fixture.socket.sent_json], ["Q1: blue\n\nQ2 round"])
+        self.assertNotIn("question_sources", self.fixture.socket.sent_json[-1])
         await self.fixture.bridge.controls.handle_command_ack(self.fixture.socket.sent_json[-1])
         self.assertEqual([self.grouped(number)[0].state for number in ("Q1", "Q2")], [QuestionState.ANSWERED] * 2)
+
+    async def test_a_failed_group_check_keeps_held_answers_for_retry(self) -> None:
+        source = "\n\nOwning issue: https://github.com/cbusillo/example/issues/1"
+        self.GROUP = self.GROUP.replace("\n\n**Q2", f"{source}\n\n**Q2") + source
+        await self.hold_first_answer()
+        self.fixture.session.hello.question_receipts = True
+        await self.answer_second(self.fixture.bridge.questions, "round")
+        command = self.fixture.socket.sent_json[-1]
+        await self.fixture.bridge.handle_current_event(
+            self.fixture.session, "command_reject", {**command, "question_read_failed": True, "reason": "reader unavailable"}
+        )
+        self.assertEqual([self.grouped(number)[0].state for number in ("Q1", "Q2")], [QuestionState.HELD, QuestionState.WAITING])
+        await self.answer_second(self.fixture.bridge.questions, "round")
+        self.assertEqual(self.fixture.socket.sent_json[-1]["text"], "Q1: blue\n\nQ2: round")
 
     async def test_the_answer_form_shows_the_whole_question(self) -> None:
         body = "**Q12.** Ship it?\n" + "Context that must stay readable. " * 20 + "\nRecommendation: yes."

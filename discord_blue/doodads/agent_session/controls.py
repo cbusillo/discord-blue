@@ -277,6 +277,7 @@ class SessionControls:
         *,
         question_keys: tuple[str, ...] = (),
         react: bool = True,
+        verify_questions: bool = False,
     ) -> str | None:
         command = RemoteCommand(
             command_id=str(uuid.uuid4()),
@@ -286,7 +287,7 @@ class SessionControls:
             text=text,
             issued_by=str(user.id),
             question_sources=self.bridge.questions.resolution_sources(session.session_id, question_keys)
-            if question_keys and session.hello.question_resolutions
+            if verify_questions and question_keys and session.hello.question_receipts
             else None,
         )
         pending = PendingRemoteCommand(

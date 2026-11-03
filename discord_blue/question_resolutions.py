@@ -2,78 +2,83 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
-import runpy
-import sys
-from pathlib import Path
-from typing import Any
 
+
+logger = logging.getLogger(__name__)
 READ_TIMEOUT_SECONDS = 30
+SOURCE = re.compile(
+    r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/(?:issues|pull)/([1-9][0-9]*)(?:#issuecomment-[1-9][0-9]*)?"
+)
 
 
-def catalog_resolutions(reader: Path, sources: list[dict[str, str]]) -> list[dict[str, str]]:
-    reader = reader.resolve()
-    sys.path[:0] = [str(reader.parent), str(reader.parents[2] / "github/scripts")]
-    oq = runpy.run_path(str(reader))
-    discussions = {}
-    resolved = []
-    for source in sources:
-        match = re.fullmatch(r"https://github\.com/([^/]+)/([^/]+)/(?:issues|pull)/(\d+)(?:#issuecomment-\d+)?", source["url"])
-        if match is None:
-            raise ValueError("Invalid question source")
-        owner, repo, number = match.groups()
-        item = f"{owner}/{repo}#{number}"
-        if item not in discussions:
-            comments = oq["fetch"](item)
-            questions = oq["questions"](comments, owner, oq["default_decision_authors"]())
-            discussions[item] = (comments, questions)
-        comments, questions = discussions[item]
-        matching = [q for q in questions if oq["question_records"].heading_id(q["question"]) == source["number"]]
-        if len(matching) != 1:
-            raise ValueError("Question source is missing or ambiguous")
-        question = matching[0]
-        if not question["answers"]:
-            continue
-        answer_url = question["answers"][-1]
-        answer = next(comment["body"] for comment in comments if comment["url"] == answer_url)
-        answer = answer.split("\n\n", 1)[0].strip()
-        answer = oq["DECISION_HEADING"].sub("", answer.lstrip("*"), count=1)
-        answer = re.sub(r"^Q[1-9][0-9]*[\s:*,.=—-]*", "", answer).strip("* ")
-        if answer:
-            resolved.append({**source, "answer": answer, "decision_url": answer_url})
-    return resolved
-
-
-async def read_resolutions(reader: Path, sources: object) -> list[dict[str, str]]:
-    if not isinstance(sources, list):
-        raise ValueError("Invalid question sources")
-    if not all(isinstance(source, dict) and all(isinstance(value, str) for value in source.values()) for source in sources):
-        raise ValueError("Invalid question source fields")
+async def read_item(command: tuple[str, ...], item: str) -> list[dict[str, object]]:
     process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "discord_blue.question_resolutions",
-        str(reader),
-        stdin=asyncio.subprocess.PIPE,
+        *command,
+        item,
+        "--include-answers",
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
     try:
         async with asyncio.timeout(READ_TIMEOUT_SECONDS):
-            output, _ = await process.communicate(json.dumps(sources).encode())
+            output, _ = await process.communicate()
     finally:
         if process.returncode is None:
             process.kill()
             await process.wait()
     if process.returncode:
-        raise ValueError("The catalog question reader could not verify the discussion")
-    result: Any = json.loads(output)
-    if not isinstance(result, list) or not all(
-        isinstance(row, dict) and all(isinstance(value, str) for value in row.values()) for row in result
-    ):
-        raise ValueError("Invalid question reader response")
-    return result
+        raise ValueError(f"The catalog reader failed with exit {process.returncode}")
+    result = json.loads(output)
+    if not isinstance(result, dict) or result.get("item") != item or not isinstance(result.get("questions"), list):
+        raise ValueError("Invalid catalog reader result")
+    return result["questions"]
 
 
-if __name__ == "__main__":
-    print(json.dumps(catalog_resolutions(Path(sys.argv[1]), json.load(sys.stdin))))
+async def read_resolutions(command: tuple[str, ...], sources: object, *, strict: bool = True) -> list[dict[str, str]]:
+    if not command or not isinstance(sources, list):
+        raise ValueError("Invalid question reader or sources")
+    groups: dict[str, list[dict[str, str]]] = {}
+    for source in sources:
+        if not isinstance(source, dict) or not all(isinstance(value, str) for value in source.values()):
+            raise ValueError("Invalid question source fields")
+        match = SOURCE.fullmatch(source.get("url", ""))
+        if match is None:
+            raise ValueError("Invalid question source URL")
+        groups.setdefault(f"{match[1]}#{match[2]}", []).append(source)
+    resolved = []
+    for item, group in groups.items():
+        try:
+            questions = await read_item(command, item)
+            for source in group:
+                matching = [
+                    q
+                    for q in questions
+                    if isinstance(q, dict)
+                    and q.get("number") == source.get("number")
+                    and ("#issuecomment-" not in source["url"] or q.get("url") == source["url"])
+                ]
+                if not matching:
+                    continue
+                if len(matching) != 1:
+                    raise ValueError("Question source is ambiguous")
+                answers = matching[0].get("decision_comments")
+                if not isinstance(answers, list):
+                    raise ValueError("Catalog reader does not expose accepted answers")
+                if answers:
+                    answer = answers[-1]
+                    if (
+                        not isinstance(answer, dict)
+                        or not isinstance(answer.get("body"), str)
+                        or not isinstance(answer.get("url"), str)
+                    ):
+                        raise ValueError("Invalid accepted answer")
+                    body = re.sub(r"<!--.*?-->", "", answer["body"], flags=re.DOTALL).strip()
+                    resolved.append({**source, "answer": body, "decision_url": answer["url"]})
+        except (OSError, ValueError, TimeoutError) as error:
+            if strict:
+                raise
+            logger.warning("Question refresh unavailable (%s)", type(error).__name__)
+    return resolved

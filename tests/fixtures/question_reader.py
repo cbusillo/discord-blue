@@ -1,27 +1,23 @@
-import re
-from types import SimpleNamespace
-from typing import Any
-
-DECISION_HEADING = re.compile(r"^Director decision Q\d+: ")
-question_records = SimpleNamespace(heading_id=lambda text: text)
+import argparse
+import json
 
 
-def default_decision_authors() -> list[str]:
-    return ["trusted-recorder"]
-
-
-def fetch(item: str) -> list[dict[str, str]]:
-    if item.endswith("#999"):
-        raise ValueError("discussion unavailable")
-    return [
+parser = argparse.ArgumentParser()
+parser.add_argument("item")
+parser.add_argument("--owner", required=True)
+parser.add_argument("--include-answers", action="store_true")
+args = parser.parse_args()
+if args.item.endswith("#999"):
+    raise SystemExit(1)
+source = "https://github.com/cbusillo/example/issues/1#issuecomment-1"
+print(
+    json.dumps(
         {
-            "url": "https://github.com/cbusillo/example/issues/1#issuecomment-2",
-            "body": "Director decision Q1218: Keep both.\n\nQuestion: source",
+            "item": args.item,
+            "questions": [
+                {"number": "Q1218", "url": source, "decision_comments": [{"url": source.replace("-1", "-2"), "body": "Keep both."}]},
+                {"number": "Q1219", "url": source, "decision_comments": []},
+            ],
         }
-    ]
-
-
-def questions(comments: list[dict[str, str]], owner: str, authors: list[str]) -> list[dict[str, Any]]:
-    if owner != "cbusillo" or authors != default_decision_authors():
-        raise ValueError("reader identity was not supplied")
-    return [{"question": "Q1218", "answers": [comments[0]["url"]]}, {"question": "Q1219", "answers": []}]
+    )
+)

@@ -42,7 +42,13 @@ from discord_blue.doodads.agent_session.session_status import SessionStatusUpdat
 from discord_blue.doodads.agent_session.handover import SessionContinuation
 
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
-from discord_blue.doodads.agent_session.store import SESSION_STORE_WAIT_TIMEOUT_SECONDS, SessionState, SessionStore, StoredSession
+from discord_blue.doodads.agent_session.store import (
+    SESSION_STORE_WAIT_TIMEOUT_SECONDS,
+    QuestionState,
+    SessionState,
+    SessionStore,
+    StoredSession,
+)
 from discord_blue.doodads.agent_session.thread_worker import RenameTarget, ThreadWorkers
 from discord_blue.doodads.agent_session.threads import SessionThread
 from discord_blue.doodads.agent_session.threads import auto_join_configured_users
@@ -835,14 +841,14 @@ class AgentSessionBridge:
         match message_type:
             case "heartbeat":
                 session.touch()
-                await self.questions.request_resolutions(session)
             case "question_states":
                 await self.questions.apply_resolutions(session, payload)
             case "user_message":
                 await self.status.handle_user_message(UserMessage.from_payload(payload))
             case "status_changed" | "turn_complete" | "error":
                 await self.status.handle_session_status(message_type, SessionStatus.from_payload(payload))
-                await self.questions.request_resolutions(session, force=True)
+                if message_type == "turn_complete":
+                    await self.questions.send_receipts(session)
             case "title_changed":
                 await self.status.handle_title_changed(session, payload.get("title"))
             case "notice" if session.thread_id is not None:
@@ -874,6 +880,21 @@ class AgentSessionBridge:
             case "command_reject":
                 logger.warning("Agent session command reject: %s", payload)
                 await self.questions.apply_resolutions(session, payload)
+                if (
+                    (payload.get("question_read_failed") is True or payload.get("resolutions"))
+                    and payload.get("session_id") == session.session_id
+                    and payload.get("session_epoch") == session.session_epoch
+                ):
+                    command = session.pending_commands.get(str(payload.get("command_id")))
+                    if command is not None:
+                        for key in command.question_keys:
+                            question = self.questions.record(session.session_id, key)
+                            state = (
+                                QuestionState.WAITING
+                                if question is not None and question.message_id == command.message_id
+                                else QuestionState.HELD
+                            )
+                            await self.questions.settle(session.session_id, (key,), state)
                 await self.controls.handle_command_reject(payload)
 
     def attach_task(self, hello: SessionHello, previous: AgentSession | None) -> asyncio.Task[SessionThread]:

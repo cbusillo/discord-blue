@@ -12,21 +12,21 @@ Connect to `/agent-session/connect` using a WebSocket with
 `Authorization: Bearer <configured token>`. Empty server tokens deny access.
 Use TLS or a trusted private transport for deployment. `/health` needs no token.
 
-Local clients configured with the installed catalog's `question_reader` advertise
-`question_resolutions` in `client_features`. For those clients the bot sends
-`question_state_request` with `question_sources`: card key, Q number, revision,
-and owning issue URL. The client returns `question_states` with resolved entries,
-their `answer` and `decision_url`. Session identity, epoch and the unchanged card
-source must match before the bot applies the existing answered transition.
-Session updates refresh these cards; connected sessions also refresh every five
-minutes. Reading and trusted decision matching happen in the local catalog reader.
-No GitHub credential is sent to the bot.
+The existing `question_receipts` message can include `question_sources`: card
+key, Q number, revision and explicitly named owning issue or original question
+URL. A local client with `question_reader` configured refreshes those sources
+through the public catalog command in the background and returns `question_states`
+with resolved entries, their original `answer` text and `decision_url`. Session
+identity, epoch and the unchanged card source must match before the bot applies
+the existing answered transition. Receipts refresh after posting, reconnect and
+turn completion. No additional capability, polling timer or bot GitHub credential
+is required.
 
 Card-generated `reply` commands carry the same `question_sources`. The local
 client reads them afresh before native delivery. If any question is already
 resolved it returns `command_reject` with the recorded resolutions and answer;
 the bot redraws the cards and shows the refusal. An unavailable or ambiguous read
-also rejects that reply for retry. Ordinary thread replies have no such field.
+also rejects that reply and restores the card's Waiting state for retry. Ordinary thread replies have no such field.
 Clients without this configuration retain the existing reply behavior.
 
 The client sends JSON text messages. Start each connection with:

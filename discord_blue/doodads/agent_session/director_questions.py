@@ -5,7 +5,6 @@ from contextlib import AsyncExitStack
 import hashlib
 import logging
 import re
-import time
 import uuid
 from dataclasses import dataclass, replace
 from collections.abc import Iterator
@@ -56,8 +55,6 @@ CHOICE_END = re.compile(r"[.;:(,]\s|[.;:]$|\s[-\u2013\u2014]\s|\s(?:because|sinc
 STRUCTURED_CHOICE = re.compile(r"^\*\*([^*\n]+?)( \(recommended\))?:\*\*")
 CHOICE_LIMIT = 60
 MAX_CHOICES = 4
-RESOLUTION_REFRESH_SECONDS = 300
-RESOLUTION_EVENT_REFRESH_SECONDS = 5
 # Discord allows 4000 characters of text in a form; leave room for the cut notice and link.
 MODAL_TEXT_LIMIT = 3800
 # Yellow needs an answer, blue is answered and on its way, green reached the agent, red did not.
@@ -192,7 +189,6 @@ class QuestionCards:
         self.drawn: dict[str, QuestionState] = {}
         # Cards marked unconfirmed at startup, redrawn once their session attaches or ends and Discord is reachable.
         self.unconfirmed_at_start: dict[str, list[str]] = {}
-        self.last_resolution_read: dict[str, float] = {}
 
     def lock(self, key: str) -> asyncio.Lock:
         return self.locks.setdefault(key, asyncio.Lock())
@@ -348,7 +344,6 @@ class QuestionCards:
                 )
                 if assistant_answer_cards(body)[1]:
                     full_text = ""
-        await self.request_resolutions(session, force=True)
 
     def resolution_sources(self, session_id: str, keys: tuple[str, ...] | None = None) -> list[dict[str, str]]:
         stored = self.bridge.store.records.get(session_id)
@@ -364,41 +359,19 @@ class QuestionCards:
             pattern = (
                 r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:issues|pull)/[1-9][0-9]*(?:#issuecomment-[1-9][0-9]*)?"
             )
-            owning = re.search(rf"(?m)^Owning issue:\s*({pattern})", body)
-            link = owning or re.search(pattern, body)
+            link = re.search(rf"(?m)^Original question:[ \t]*({pattern})", body) or re.search(
+                rf"(?m)^Owning issue:[ \t]*({pattern})", body
+            )
             if link:
                 sources.append(
                     {
                         "key": question.key,
                         "number": number,
-                        "url": link[1] if owning else link[0],
+                        "url": link[1],
                         "revision": str(question.revision),
                     }
                 )
         return sources
-
-    async def request_resolutions(self, session: AgentSession, *, force: bool = False) -> None:
-        if not session.hello.question_resolutions or session.websocket.closed:
-            return
-        now = time.monotonic()
-        interval = RESOLUTION_EVENT_REFRESH_SECONDS if force else RESOLUTION_REFRESH_SECONDS
-        if now - self.last_resolution_read.get(session.session_id, float("-inf")) < interval:
-            return
-        sources = self.resolution_sources(session.session_id)
-        if not sources:
-            return
-        self.last_resolution_read[session.session_id] = now
-        try:
-            await session.websocket.send_json(
-                {
-                    "type": "question_state_request",
-                    "session_id": session.session_id,
-                    "session_epoch": session.session_epoch,
-                    "question_sources": sources,
-                }
-            )
-        except (OSError, RuntimeError):
-            logger.warning("Question resolution request unavailable for session %s", session.session_id)
 
     async def apply_resolutions(self, session: AgentSession, payload: dict[str, object]) -> None:
         if payload.get("session_epoch") != session.session_epoch or payload.get("session_id") != session.session_id:
@@ -525,6 +498,7 @@ class QuestionCards:
                         "session_id": session.session_id,
                         "session_epoch": session.session_epoch,
                         "receipts": receipts,
+                        "question_sources": self.resolution_sources(session.session_id),
                     }
                 ),
                 SESSION_STORE_WAIT_TIMEOUT_SECONDS,
@@ -860,6 +834,7 @@ class QuestionCards:
                         question.message_id,
                         question_keys=tuple(q.key for q in sending),
                         react=False,
+                        verify_questions=True,
                     )
             except (OSError, discord.DiscordException):
                 logger.exception("Unable to confirm Question answer submission")

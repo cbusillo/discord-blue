@@ -114,7 +114,6 @@ class SessionHello:
     hello_pending: bool = False
     question_receipts: bool = False
     spawned: bool = False
-    question_resolutions: bool = False
 
     def supports(self, action: str) -> bool:
         return action in REMOTE_ACTIONS and (self.capabilities is None or action in self.capabilities)
@@ -138,8 +137,6 @@ class SessionHello:
             title=str(payload["title"]) if payload.get("title") else None,
             harness=payload["harness"] if isinstance(payload.get("harness"), str) else None,
             spawned=payload.get("session_kind") == "spawned",
-            question_resolutions=isinstance(payload.get("client_features"), list)
-            and "question_resolutions" in payload["client_features"],
         )
 
 
