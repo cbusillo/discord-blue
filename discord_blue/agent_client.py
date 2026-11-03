@@ -138,12 +138,16 @@ class AgentSessionClient:
             if message.get("kind") == "reply" and message.get("question_sources") and getattr(self.config, "question_reader", ()):
                 try:
                     resolutions = await self.question_resolutions(message["question_sources"])
-                except (OSError, ValueError, TimeoutError):
+                except (OSError, ValueError, TimeoutError) as exc:
+                    logger.warning("Question check unavailable (%s): %s", type(exc).__name__, exc)
                     response = self.event(
                         "command_reject",
                         command_id=command_id,
                         question_read_failed=True,
-                        reason="The recorded answer could not be checked. Retry the question card shortly.",
+                        reason=(
+                            "The recorded answer could not be checked. Retry shortly, or type "
+                            "Q12: your answer in the session thread, using its question number."
+                        ),
                     )
                     self.remember(command_id, response)
                     return response
@@ -165,11 +169,22 @@ class AgentSessionClient:
             response = self.event("command_reject", command_id=command_id, reason=str(exc))
         except self.command_errors as exc:
             response = self.event("command_reject", command_id=command_id, reason=self.failure_reason(exc))
+        except (Exception, asyncio.CancelledError) as exc:
+            logger.warning("Native command delivery unconfirmed (%s)", type(exc).__name__)
+            response = self.event(
+                "command_reject",
+                command_id=command_id,
+                delivery_unconfirmed=True,
+                reason="Delivery could not be confirmed. Check the native TUI before sending again.",
+            )
+            self.remember(command_id, response)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
         self.remember(command_id, response)
         return response
 
     async def question_resolutions(self, sources: object, *, strict: bool = True) -> list[dict[str, str]]:
-        reader: tuple[str, ...] = getattr(self.config, "question_reader", ())
+        reader = tuple(getattr(self.config, "question_reader", ()))
         if not reader:
             raise ValueError("No catalog question reader is configured")
         return await read_resolutions(reader, sources, strict=strict)
@@ -290,31 +305,30 @@ class AgentSessionClient:
                 await asyncio.sleep(self.config.heartbeat_seconds)
                 await self.send(websocket, self.event("heartbeat"))
 
-        async def controls() -> None:
-            async def answer_question(message: Json) -> None:
+        replies: asyncio.Queue[Json] = asyncio.Queue()
+
+        async def answer_replies() -> None:
+            while True:
+                message = await replies.get()
                 if (response := await self.handle_control(message)) is not None:
                     self.enqueue(response)
 
-            async with asyncio.TaskGroup() as question_commands:
-                async for frame in websocket:
-                    if frame.type != aiohttp.WSMsgType.TEXT:
-                        continue
-                    try:
-                        message = json.loads(frame.data)
-                    except ValueError:
-                        continue
-                    if not isinstance(message, dict):
-                        continue
-                    if (
-                        message.get("type") == "command"
-                        and message.get("question_sources")
-                        and getattr(self.config, "question_reader", ())
-                    ):
-                        question_commands.create_task(answer_question(message))
-                    elif (response := await self.handle_control(message)) is not None:
-                        await self.send(websocket, response)
+        async def controls() -> None:
+            async for frame in websocket:
+                if frame.type != aiohttp.WSMsgType.TEXT:
+                    continue
+                try:
+                    message = json.loads(frame.data)
+                except ValueError:
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                if message.get("type") == "command" and message.get("kind") == "reply":
+                    replies.put_nowait(message)
+                elif (response := await self.handle_control(message)) is not None:
+                    await self.send(websocket, response)
 
-        tasks = [asyncio.create_task(fn()) for fn in (deliver, heartbeat, controls)]
+        tasks = [asyncio.create_task(fn()) for fn in (deliver, heartbeat, controls, answer_replies)]
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in done:

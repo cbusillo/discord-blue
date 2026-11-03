@@ -7,7 +7,7 @@ import unittest
 from dataclasses import asdict, dataclass
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import aiohttp
 from aiohttp import web
@@ -69,7 +69,7 @@ async def served(discord: FakeDiscordBlue) -> TestServer:
 
 
 class OutboxTests(unittest.IsolatedAsyncioTestCase):
-    async def test_a_slow_question_read_does_not_hold_pause(self) -> None:
+    async def test_replies_stay_ordered_during_a_slow_read_and_native_error_while_pause_works(self) -> None:
         discord = FakeDiscordBlue()
         reading, release = asyncio.Event(), asyncio.Event()
 
@@ -78,6 +78,13 @@ class OutboxTests(unittest.IsolatedAsyncioTestCase):
             await release.wait()
             return []
 
+        sent = []
+
+        async def native(message: Json) -> None:
+            sent.append(message["command_id"])
+            if message["command_id"] == "answer":
+                raise LookupError("Native subscription failed after sending")
+
         async with await served(discord) as server, aiohttp.ClientSession() as http:
             config = SimpleNamespace(
                 **asdict(Connection(f"ws://127.0.0.1:{server.port}/agent-session/connect")), question_reader=("fixture",)
@@ -85,7 +92,7 @@ class OutboxTests(unittest.IsolatedAsyncioTestCase):
             client = DroppingClient(cast(Any, config))
             with (
                 patch.object(client, "question_resolutions", side_effect=read),
-                patch.object(client, "run_command", new_callable=AsyncMock),
+                patch.object(client, "run_command", side_effect=native),
             ):
                 running = asyncio.create_task(client.run(http))
                 try:
@@ -94,11 +101,18 @@ class OutboxTests(unittest.IsolatedAsyncioTestCase):
                         {**client.event("command"), "kind": "reply", "command_id": "answer", "question_sources": [{"key": "card"}]}
                     )
                     await asyncio.wait_for(reading.wait(), 5)
+                    await discord.sockets[-1].send_json({**client.event("command"), "kind": "reply", "command_id": "followup"})
                     pause = await discord.control({**client.event("command"), "kind": "pause_current_turn", "command_id": "pause"})
                     self.assertEqual(pause["command_id"], "pause")
                     self.assertFalse(release.is_set())
+                    self.assertEqual(sent, ["pause"])
                     release.set()
-                    self.assertEqual((await discord.next("command_ack"))["command_id"], "answer")
+                    rejected = await discord.next("command_reject")
+                    self.assertTrue(rejected["delivery_unconfirmed"])
+                    self.assertEqual((await discord.next("command_ack"))["command_id"], "followup")
+                    duplicate = await discord.control({**client.event("command"), "kind": "reply", "command_id": "answer"})
+                    self.assertEqual(duplicate, rejected)
+                    self.assertEqual(sent, ["pause", "answer", "followup"])
                 finally:
                     release.set()
                     await client.stop()

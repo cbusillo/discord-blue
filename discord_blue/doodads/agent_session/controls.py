@@ -246,7 +246,7 @@ class SessionControls:
             # The client reconnected since (for Claude Code, after /clear or /resume); never deliver it to the new epoch.
             await message.reply(REPLY_BEFORE_RECONNECT, mention_author=False)
             return True
-        await self.bridge.questions.decisions(session.session_id, text, url=message.jump_url)
+        await self.bridge.questions.decisions(session.session_id, text, url=message.jump_url, drain=False)
         if session.websocket.closed:
             await message.reply(
                 "Agent session is offline; reply was not delivered. Please try again after reconnecting.", mention_author=False
@@ -271,9 +271,9 @@ class SessionControls:
         self,
         session: AgentSession,
         thread: discord.Thread,
-        user: discord.User | discord.Member,
+        user: discord.User | discord.Member | None,
         text: str,
-        message_id: int,
+        message_id: int | None,
         *,
         question_keys: tuple[str, ...] = (),
         react: bool = True,
@@ -285,7 +285,7 @@ class SessionControls:
             session_epoch=session.session_epoch,
             kind="reply",
             text=text,
-            issued_by=str(user.id),
+            issued_by=str(user.id) if user is not None else None,
             question_sources=self.bridge.questions.resolution_sources(session.session_id, question_keys)
             if verify_questions and question_keys and session.hello.question_receipts
             else None,
@@ -302,7 +302,7 @@ class SessionControls:
         async def show_queued() -> None:
             nonlocal queued
             queued = True
-            if react:
+            if react and message_id is not None:
                 await self.set_message_reaction(thread.id, message_id, REACTION_QUEUED)
             self.show_working(session, "Your request is queued.")
 
@@ -312,7 +312,7 @@ class SessionControls:
             delivered = error is None
         finally:
             if queued and not delivered:
-                if react:
+                if react and message_id is not None:
                     await self.clear_message_transient_reactions(thread.id, message_id)
                 self.restore_command_status(session, pending)
                 self.show_activity(session)
@@ -421,7 +421,22 @@ class SessionControls:
             session.active_command_id = None
         if command is not None:
             self.restore_command_status(session, command)
-            await self.bridge.questions.settle(session.session_id, command.question_keys, QuestionState.NOT_DELIVERED)
+            retryable = (payload.get("question_read_failed") is True or payload.get("resolutions")) and payload.get(
+                "session_epoch"
+            ) == session.session_epoch
+            if retryable:
+                for key in command.question_keys:
+                    question = self.bridge.questions.record(session.session_id, key)
+                    state = (
+                        QuestionState.WAITING
+                        if question is not None and command.message_id is not None and question.message_id == command.message_id
+                        else QuestionState.HELD
+                    )
+                    await self.bridge.questions.settle(session.session_id, (key,), state)
+            else:
+                outcome = QuestionState.UNCONFIRMED if payload.get("delivery_unconfirmed") else QuestionState.NOT_DELIVERED
+                await self.bridge.questions.settle(session.session_id, command.question_keys, outcome)
+            await self.bridge.questions.apply_resolutions(session, payload)
             await self.update_command_message_reaction(session, command, REACTION_REJECTED)
             if command.message_id is not None and command.react:
                 session.rejected_command_messages.append(
@@ -436,7 +451,10 @@ class SessionControls:
                 await self.bridge.post_thread_notice(command.thread_id, f"{command.reject_notice}: {reason}")
             elif command.kind == "reply":
                 reason = payload_string(payload, "reason", "reply was rejected")
-                await self.bridge.post_thread_notice(command.thread_id, f"Reply not delivered: {reason}")
+                await self.bridge.post_thread_notice(
+                    command.thread_id,
+                    f"{'Reply delivery unconfirmed' if payload.get('delivery_unconfirmed') else 'Reply not delivered'}: {reason}",
+                )
 
     @staticmethod
     def restore_command_status(session: AgentSession, command: PendingRemoteCommand) -> None:

@@ -338,6 +338,9 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
             "Director decision: **Q12**:",
             "Director decision (Q12):",
             "Director decision: Q12,",
+            "Director decision:Q12.",
+            "Director decision: Q12",
+            "Director decision: Q12 —",
             "terminal",
             "webhook",
         ):
@@ -438,7 +441,7 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
             await client.handle_control(cast(dict[str, Any], request))
         assert client.resolution_task is not None
         await client.resolution_task
-        payload = cast(dict[str, object], client.outbox.popleft())
+        payload = client.outbox.popleft()
         resolution = cast(list[dict[str, str]], payload["resolutions"])[0]
         self.assertEqual(resolution["key"], source["key"])
         await self.fixture.bridge.handle_current_event(self.fixture.session, "question_states", {**payload, "session_epoch": "old"})
@@ -453,17 +456,16 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         modal.fields[0]._value = "No"
         late = FakeInteraction(self.fixture.thread)
         await modal.on_submit(cast(Any, late))
-        self.assertIn(resolution["answer"], str(late.response.messages))
+        self.assertIn(resolution["answer"], late.response.messages[0][0])
         self.assertEqual(self.fixture.socket.sent_json, [])
 
     async def test_card_replies_reconcile_existing_answers_and_keep_failed_checks_retryable(self) -> None:
         self.fixture.session.hello.question_receipts = True
-        for result in ("resolved", "unavailable", "unrelated"):
+        for result in ("resolved", "owning", "unavailable", "unrelated"):
             with self.subTest(result=result):
-                label = "Context" if result == "unrelated" else "Original question"
-                modal = await self.card(
-                    f"**Q1218.** Keep both?\n\n{label}: https://github.com/cbusillo/example/issues/1#issuecomment-1"
-                )
+                label = "Context" if result == "unrelated" else "**Owning issue**" if result == "owning" else "Original question"
+                url = "https://github.com/cbusillo/example/issues/1" + ("" if result == "owning" else "#issuecomment-1")
+                modal = await self.card(f"**Q1218.** Keep both?\n\n{label}: [question]({url})")
                 self.fixture.socket.sent_json.clear()
                 modal.fields[0]._value = "No"
                 await modal.on_submit(cast(Any, FakeInteraction(self.fixture.thread)))
@@ -488,7 +490,11 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(any(isinstance(item, QuestionAnswerButton) for item in view.walk_children()))
                 else:
                     self.assertEqual(question.state, QuestionState.ANSWERED)
-                    self.assertEqual(question.answer, "Keep both." if result == "resolved" else modal.fields[0].value)
+                    if result == "unrelated":
+                        self.assertEqual(question.answer, modal.fields[0].value)
+                    else:
+                        self.assertIn("Keep both.", question.answer)
+                        self.assertNotIn("<!--", question.answer)
 
     async def test_an_offline_reply_records_the_decision_without_claiming_native_delivery(self) -> None:
         modal = await self.card()
@@ -926,6 +932,54 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((held.state, self.fixture.socket.sent_json), (QuestionState.NOT_DELIVERED, []))
         self.assertIn("not sent", visible_view_text(message.view))
 
+    async def test_external_resolution_sends_only_held_siblings_after_the_whole_batch(self) -> None:
+        for route in ("terminal", "record", "reader"):
+            with self.subTest(route=route):
+                await self.hold_first_answer()
+                cards = self.fixture.bridge.questions
+                if route == "reader":
+                    second, _ = self.grouped("Q2")
+                    source = "https://github.com/cbusillo/example/issues/1"
+                    cards.save(
+                        self.fixture.session.session_id,
+                        replace(second, questions=(("Q2", second.questions[0][1] + f"\n\n**Owning issue:** [issue]({source})"),)),
+                    )
+                    row = next(row for row in cards.resolution_sources(self.fixture.session.session_id) if row["number"] == "Q2")
+                    await cards.apply_resolutions(
+                        self.fixture.session,
+                        {
+                            "session_id": self.fixture.session.session_id,
+                            "session_epoch": self.fixture.session.session_epoch,
+                            "resolutions": [{**row, "answer": "square", "decision_url": source + "#issuecomment-2"}],
+                        },
+                    )
+                else:
+                    heading = "Director decision Q2: square" if route == "record" else "Q2: square"
+                    await cards.decisions(
+                        self.fixture.session.session_id,
+                        heading,
+                        url="https://discord.com/channels/1/2/3",
+                        recorded=route == "record",
+                    )
+                command = self.fixture.socket.sent_json[-1]
+                self.assertEqual(command["text"], "Q1: blue")
+                self.assertEqual(self.grouped("Q2")[0].state, QuestionState.ANSWERED)
+                await self.fixture.bridge.controls.handle_command_ack(command)
+                self.assertEqual(self.grouped("Q1")[0].state, QuestionState.ANSWERED)
+                # Start a fresh group for the next entry point.
+                for number in ("Q1", "Q2"):
+                    question, _ = self.grouped(number)
+                    cards.save(self.fixture.session.session_id, replace(question, state=QuestionState.WAITING, answer=""))
+                self.fixture.socket.sent_json.clear()
+
+    async def test_a_resolution_batch_does_not_deliver_another_answer_it_also_resolves(self) -> None:
+        await self.hold_first_answer()
+        await self.fixture.bridge.questions.decisions(
+            self.fixture.session.session_id, "Q2: square\nQ1: red", url="https://discord.com/channels/1/2/3"
+        )
+        self.assertEqual(self.fixture.socket.sent_json, [])
+        self.assertEqual([self.grouped(n)[0].state for n in ("Q1", "Q2")], [QuestionState.ANSWERED] * 2)
+
     async def test_a_restart_keeps_held_answers_for_their_group(self) -> None:
         await self.hold_first_answer()
         recovered = await self.restarted_cards()
@@ -981,7 +1035,14 @@ class QuestionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.fixture.session.hello.question_receipts = True
         await self.fixture.bridge.controls.send_thread_reply(cast(Any, FakeReplyMessage(301, self.fixture.thread, "Q2 round")))
         self.assertEqual([command["text"] for command in self.fixture.socket.sent_json], ["Q1: blue\n\nQ2 round"])
-        self.assertNotIn("question_sources", self.fixture.socket.sent_json[-1])
+        client = self.question_client()
+        with (
+            patch.object(client, "question_resolutions", new_callable=AsyncMock) as read,
+            patch.object(client, "run_command", new_callable=AsyncMock) as native,
+        ):
+            await client.handle_control(self.fixture.socket.sent_json[-1])
+        read.assert_not_awaited()
+        native.assert_awaited_once()
         await self.fixture.bridge.controls.handle_command_ack(self.fixture.socket.sent_json[-1])
         self.assertEqual([self.grouped(number)[0].state for number in ("Q1", "Q2")], [QuestionState.ANSWERED] * 2)
 

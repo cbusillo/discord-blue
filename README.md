@@ -763,7 +763,8 @@ on a card in that conversation with it, ahead of its own text. A thread reply or
 A numbered terminal answer such as `Q123: Wait` also settles its card. A session
 answer containing `Director decision Q123: ...` or `Director decision: Q123. ...`
 with a GitHub comment link marks that question answered. The link can follow in
-a separate `Question:` paragraph. A late answer control shows the saved answer and its link.
+a separate `Question:` paragraph. When that resolves the last waiting card in a group,
+its held answers send through the existing reply path. A late answer control shows the saved answer and its link.
 With `question_reader` configured as a command array for the installed catalog's
 public `oq.py` command, both local bridges refresh cards when they are posted,
 the session reconnects, and a turn finishes. Use the Director's login after
@@ -775,7 +776,8 @@ The catalog decides which records count as answers; the bridge sends their
 original text and links to the bot. GitHub credentials stay local. A card answer gets a fresh
 reader check before reaching the native session. An already resolved answer is
 refused and its recorded answer is shown. If that read is unavailable, the answer
-is refused with the card available for retry. These reads run in the background,
+is refused with the card available for retry. You can also type `Q123: your answer`
+in the session thread. Replies keep their order while these reads run in the background,
 so pause and other session controls remain available. Without this optional setting, session and terminal records
 still settle cards as above. Restart the local bridges after changing the setting.
 Recording an answer does not prove delivery to the native session; normal reply

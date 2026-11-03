@@ -80,5 +80,5 @@ async def read_resolutions(command: tuple[str, ...], sources: object, *, strict:
         except (OSError, ValueError, TimeoutError) as error:
             if strict:
                 raise
-            logger.warning("Question refresh unavailable (%s)", type(error).__name__)
+            logger.warning("Question refresh unavailable for %s (%s): %s", item, type(error).__name__, error)
     return resolved

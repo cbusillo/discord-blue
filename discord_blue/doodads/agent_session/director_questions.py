@@ -34,6 +34,7 @@ from discord_blue.doodads.agent_session.messages import (
     send_agent_session_message,
     send_assistant_message,
 )
+from discord_blue.question_resolutions import SOURCE
 from discord_blue.doodads.agent_session.reply_modal import answer_text, reply_context_error
 from discord_blue.doodads.agent_session.store import SESSION_STORE_WAIT_TIMEOUT_SECONDS, QuestionState, StoredQuestion
 
@@ -347,27 +348,30 @@ class QuestionCards:
 
     def resolution_sources(self, session_id: str, keys: tuple[str, ...] | None = None) -> list[dict[str, str]]:
         stored = self.bridge.store.records.get(session_id)
+        session = self.bridge.sessions.get(session_id)
         sources = []
         for question in stored.questions if stored is not None else ():
             if (
-                question.state == QuestionState.ANSWERED
+                question.state in {QuestionState.ANSWERED, QuestionState.CLOSED}
+                or session is None
+                or question.epoch != session.session_epoch
                 or len(question.questions) != 1
                 or (keys is not None and question.key not in keys)
             ):
                 continue
             number, body = question.questions[0]
-            pattern = (
-                r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:issues|pull)/[1-9][0-9]*(?:#issuecomment-[1-9][0-9]*)?"
-            )
-            link = re.search(rf"(?m)^Original question:[ \t]*({pattern})", body) or re.search(
-                rf"(?m)^Owning issue:[ \t]*({pattern})", body
-            )
-            if link:
+            label = r"(?m)^[ \t]*(?:[-*][ \t]+)?(?:\*\*)?{name}:?(?:\*\*)?:?[ \t]*"
+            link = None
+            for name in ("Original question", "Owning issue"):
+                labeled = re.search(label.format(name=name) + r"([^\n]+)", body)
+                if labeled and (link := SOURCE.search(labeled[1])):
+                    break
+            if link is not None:
                 sources.append(
                     {
                         "key": question.key,
                         "number": number,
-                        "url": link[1],
+                        "url": link[0],
                         "revision": str(question.revision),
                     }
                 )
@@ -380,6 +384,7 @@ class QuestionCards:
         if not isinstance(rows, list):
             return
         sources = self.resolution_sources(session.session_id)
+        answered = []
         for row in rows:
             if not isinstance(row, dict) or not any(
                 all(row.get(key) == value for key, value in source.items()) for source in sources
@@ -388,20 +393,26 @@ class QuestionCards:
             answer, url = row.get("answer"), row.get("decision_url")
             question = self.record(session.session_id, row["key"])
             if question is not None and isinstance(answer, str) and answer.strip() and isinstance(url, str) and url:
-                await self.resolve(session.session_id, question, answer, url)
+                if await self.resolve(session.session_id, question, answer, url):
+                    answered.append(question)
+        await self.drain_held(session, answered)
 
     @staticmethod
     def key(session: AgentSession, number: str) -> str:
         return hashlib.sha256(f"{session.session_id}\0{number}".encode()).hexdigest()[:32]
 
-    async def decisions(self, session_id: str, text: str, *, url: str = "", recorded: bool = False) -> bool:
+    async def decisions(self, session_id: str, text: str, *, url: str = "", recorded: bool = False, drain: bool = True) -> bool:
         stored = self.bridge.store.records.get(session_id)
         if stored is None:
             return False
-        changed = False
-        pattern = r"(?i)^(Q\d+)[.: \t]+([^\n]+)"
+        answered = []
+        pattern = r"(?i)^(?P<number>Q\d+)[.: \t]+(?P<answer>[^\n]+)"
         if recorded:
-            pattern = r"(?i)^(?:\*\*)?Director decision:?(?:\*\*)?[ \t]+(?:\*\*)?\(?(Q\d+)\)?(?:\*\*)?[.:,][ \t*]+([^\n]+)"
+            pattern = (
+                r"(?i)^(?:\*\*)?Director decision(?:\*\*)?"
+                r"(?P<colon>:)?(?:\*\*)?[ \t]*(?:\*\*)?\(?(?P<number>Q\d+)\)?(?:\*\*)?"
+                r"(?(colon)[.:, \t—-]+|[.:,][ \t*]+)(?P<answer>[^\n]+)"
+            )
         lines = text.splitlines()
         matches = []
         for index, line in top_level_lines(lines):
@@ -414,19 +425,51 @@ class QuestionCards:
             context = paragraphs[0]
             if len(paragraphs) > 1 and paragraphs[1].startswith("Question: "):
                 context += f"\n{paragraphs[1].splitlines()[0]}"
-            if recorded and re.fullmatch(r"(?i)(?:later|not now|not yet|waiting|pending)[\s.;!—-]*", match[2].strip()):
+            if recorded and re.fullmatch(r"(?i)(?:later|not now|not yet|waiting|pending)[\s.;!—-]*", match["answer"].strip()):
                 continue
-            if not recorded and (match[2].rstrip().endswith("?") or re.search(r"(?i)\bQ\d+\b", match[2])):
+            if not recorded and (match["answer"].rstrip().endswith("?") or re.search(r"(?i)\bQ\d+\b", match["answer"])):
                 continue
             link = re.search(r"https://github\.com/[^\s)]+#issuecomment-\d+", context) if recorded else None
             decision_url = link[0] if link else url
             if not decision_url:
                 continue
             for question in tuple(self.bridge.store.records[session_id].questions):
-                if match[1].upper() not in {number for number, _ in question.questions}:
+                if match["number"].upper() not in {number for number, _ in question.questions}:
                     continue
-                changed = await self.resolve(session_id, question, match[2].strip(), decision_url) or changed
-        return changed
+                if await self.resolve(session_id, question, match["answer"].strip(), decision_url):
+                    answered.append(question)
+        if answered and drain and (session := self.bridge.sessions.get(session_id)) is not None:
+            await self.drain_held(session, answered)
+        return bool(answered)
+
+    async def drain_held(self, session: AgentSession, answered: list[StoredQuestion]) -> None:
+        members = {q.key: q for root in answered for q in self.members(session.session_id, root)}
+        ready = tuple(
+            q.key
+            for q in members.values()
+            if q.state == QuestionState.HELD and q.epoch == session.session_epoch and not self.open_numbers(session.session_id, q)
+        )
+        if not ready or session.thread_id is None:
+            return
+        thread = self.bridge.thread_channel(session.thread_id)
+        if not isinstance(thread, discord.Thread):
+            return
+        text, keys = await self.release_held(session, keys=ready)
+        if not keys:
+            return
+        error = await self.bridge.controls.send_reply(
+            session,
+            thread,
+            None,
+            text,
+            None,
+            question_keys=keys,
+            react=False,
+            verify_questions=True,
+        )
+        if error:
+            state = QuestionState.UNCONFIRMED if error == DELIVERY_UNCONFIRMED else QuestionState.HELD
+            await self.settle(session.session_id, keys, state)
 
     async def resolve(self, session_id: str, question: StoredQuestion, answer: str, url: str) -> bool:
         async with self.lock(question.key):
@@ -885,7 +928,7 @@ class QuestionCards:
                 settled.append(question)
         await self.refresh(session_id, settled)
 
-    async def release_held(self, session: AgentSession) -> tuple[str, tuple[str, ...]]:
+    async def release_held(self, session: AgentSession, *, keys: tuple[str, ...] | None = None) -> tuple[str, tuple[str, ...]]:
         """Every answer held in this conversation, now marked as sending with a typed reply.
 
         Typing in the thread is an explicit message, so answers already given go with it rather than waiting
@@ -895,7 +938,7 @@ class QuestionCards:
         ready = [
             replace(q, state=QuestionState.UNCERTAIN)
             for q in (stored.questions if stored is not None else ())
-            if q.state == QuestionState.HELD and q.epoch == session.session_epoch
+            if q.state == QuestionState.HELD and q.epoch == session.session_epoch and (keys is None or q.key in keys)
         ]
         if not all(self.save(session.session_id, question) for question in ready) or not await self.persist():
             # Without a durable sending mark, a restart could send these answers a second time.

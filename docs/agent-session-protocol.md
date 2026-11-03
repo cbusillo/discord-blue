@@ -26,7 +26,14 @@ Card-generated `reply` commands carry the same `question_sources`. The local
 client reads them afresh before native delivery. If any question is already
 resolved it returns `command_reject` with the recorded resolutions and answer;
 the bot redraws the cards and shows the refusal. An unavailable or ambiguous read
-also rejects that reply and restores the card's Waiting state for retry. Ordinary thread replies have no such field.
+also rejects that reply and restores the card's Waiting state for retry. The
+refusal offers a typed `Q123: answer` thread reply as a fallback. Ordinary thread
+replies have no such field. All replies use one ordered worker; pause, status and
+approvals remain available during reads. An unexpected native-send failure sets
+`delivery_unconfirmed` on the rejection and retains that outcome for duplicate
+command IDs. The bot shows those answers as unconfirmed rather than not delivered.
+Resolving the last waiting member of a group releases its held answers through
+the existing reply path, after the entire resolution batch is applied.
 Clients without this configuration retain the existing reply behavior.
 
 The client sends JSON text messages. Start each connection with:

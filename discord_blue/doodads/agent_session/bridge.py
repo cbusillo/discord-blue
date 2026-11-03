@@ -44,7 +44,6 @@ from discord_blue.doodads.agent_session.handover import SessionContinuation
 from discord_blue.doodads.agent_session.discovery import DiscoveryIndex
 from discord_blue.doodads.agent_session.store import (
     SESSION_STORE_WAIT_TIMEOUT_SECONDS,
-    QuestionState,
     SessionState,
     SessionStore,
     StoredSession,
@@ -879,22 +878,6 @@ class AgentSessionBridge:
                     self.handover.retire(session.session_id, "inputs", call_id)
             case "command_reject":
                 logger.warning("Agent session command reject: %s", payload)
-                await self.questions.apply_resolutions(session, payload)
-                if (
-                    (payload.get("question_read_failed") is True or payload.get("resolutions"))
-                    and payload.get("session_id") == session.session_id
-                    and payload.get("session_epoch") == session.session_epoch
-                ):
-                    command = session.pending_commands.get(str(payload.get("command_id")))
-                    if command is not None:
-                        for key in command.question_keys:
-                            question = self.questions.record(session.session_id, key)
-                            state = (
-                                QuestionState.WAITING
-                                if question is not None and question.message_id == command.message_id
-                                else QuestionState.HELD
-                            )
-                            await self.questions.settle(session.session_id, (key,), state)
                 await self.controls.handle_command_reject(payload)
 
     def attach_task(self, hello: SessionHello, previous: AgentSession | None) -> asyncio.Task[SessionThread]:

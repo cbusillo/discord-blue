@@ -15,7 +15,18 @@ print(
         {
             "item": args.item,
             "questions": [
-                {"number": "Q1218", "url": source, "decision_comments": [{"url": source.replace("-1", "-2"), "body": "Keep both."}]},
+                {
+                    "number": "Q1218",
+                    "url": source,
+                    "decision_comments": [
+                        {
+                            "url": source.replace("-1", "-2"),
+                            "body": "Director decision Q1218: Keep both.\n\nQuestion: "
+                            + source
+                            + "\n\n<!-- question-decision-record: hidden -->",
+                        }
+                    ],
+                },
                 {"number": "Q1219", "url": source, "decision_comments": []},
             ],
         }
