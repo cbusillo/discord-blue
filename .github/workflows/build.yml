@@ -77,6 +77,11 @@ jobs:
           DISCORD_BLUE_COMPOSE_TEST_IMAGE="$(docker image inspect --format '{{.Id}}' "$QUALIFICATION_IMAGE")"
           export DISCORD_BLUE_COMPOSE_TEST_IMAGE
           "$HOME/.local/bin/uv" run --python 3.13 python -m unittest tests.test_runtime_compose -v
+      - name: Remove qualification image
+        if: always()
+        env:
+          QUALIFICATION_IMAGE: ${{ steps.image.outputs.tag_sha }}
+        run: docker image rm "$QUALIFICATION_IMAGE" || true
 
   publish:
     needs: image
@@ -135,6 +140,11 @@ jobs:
           name: artifact-manifest-${{ github.run_attempt }}
           path: artifact-manifest.json
           if-no-files-found: error
+      - name: Remove published image pulled for qualification
+        if: always() && steps.push.outputs.digest != ''
+        env:
+          PUBLISHED_IMAGE: ${{ needs.image.outputs.image_repository }}@${{ steps.push.outputs.digest }}
+        run: docker image rm "$PUBLISHED_IMAGE" || true
 
   ci_gate:
     name: ci-gate
