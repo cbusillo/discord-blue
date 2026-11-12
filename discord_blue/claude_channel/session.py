@@ -6,11 +6,12 @@ which Claude Code queues as the next prompt.
 
 Every terminal dialog, a permission prompt or a question Claude asks, reaches
 this server as the plugin's PermissionRequest hook call, with the tool's exact
-input. While the dialog is open the call waits: a Discord answer becomes the
-hook's decision, so it can only apply to that dialog, and an allow carries the
-exact input Discord showed. Anything Discord cannot show whole is answered in
-the terminal. Claude Code drops a hook's answer once the terminal answered
-first, and tells no hook when that answer was a rejection, so a Discord answer
+input, before Claude Code shows it: the terminal shows nothing until the call
+returns. While a Discord card is open the call waits: a Discord answer becomes
+the hook's decision, so it can only apply to that dialog, and an allow carries
+the exact input Discord showed. Anything Discord cannot show whole returns at
+once, so Claude Code shows it in the terminal or applies its own settings.
+Claude Code tells no hook when the terminal rejected a call, so a Discord answer
 first checks the transcript for the call's result.
 
 The plugin's hooks call ``dui_hook_event`` on this server to mirror typed
@@ -281,17 +282,18 @@ class ClaudeSession(AgentSessionClient):
                 offset=await self.transcript.size(path),
                 answer=asyncio.get_running_loop().create_future(),
             )
-            self.dialogs[key] = dialog
             prompt = None if tool_input is None else self.dialog_prompt(key, dialog, fields)
-            if prompt is not None and self.shows(prompt):
-                self.prompts[key] = prompt
-                self.enqueue(prompt)
-            else:
+            if prompt is None or not self.shows(prompt):
+                # Holding the call would keep the dialog out of the terminal too.
                 self.wait_locally(tool_name)
+                return ""
+            self.dialogs[key] = dialog
+            self.prompts[key] = prompt
+            self.enqueue(prompt)
         try:
             decision = await dialog.answer
         except asyncio.CancelledError:
-            # The hook timed out with the dialog still open in the terminal.
+            # The hook timed out; Claude Code takes the dialog back.
             if (prompt := self.prompts.pop(key, None)) is not None:
                 self.retire(prompt)
                 self.wait_locally(tool_name)
@@ -354,7 +356,10 @@ class ClaudeSession(AgentSessionClient):
         for key, prompt in list(self.prompts.items()):
             if not self.shows(prompt):
                 del self.prompts[key]
-                self.wait_locally(self.dialogs[key].tool_name)
+                dialog = self.dialogs.pop(key)
+                if not dialog.answer.done():
+                    dialog.answer.set_result(None)
+                self.wait_locally(dialog.tool_name)
 
     def wait_locally(self, tool_name: str) -> None:
         message = waiting_message(tool_name)
@@ -388,11 +393,18 @@ class ClaudeSession(AgentSessionClient):
         )
         self.launch_brief_pending = False
         conversation = fields.get("session_id") or None
+        # Claude Code takes a prompt in mid-turn while a dialog's call still waits; the turn and the dialog go on.
+        mid_turn = (
+            event == "UserPromptSubmit"
+            and conversation in {None, self.conversation_id}
+            and any(not dialog.answer.done() for dialog in self.dialogs.values())
+        )
         if event in {"SessionEnd", "UserPromptSubmit", "Notification"} or (conversation and conversation != self.conversation_id):
             # Claude waiting at its prompt or taking a new one means the last answer stood; it posts before what follows.
             await self.settle_turns()
-        if event in {"SessionEnd", "UserPromptSubmit", "Notification", "Stop", "StopFailure"} or (
-            conversation and conversation != self.conversation_id
+        if not mid_turn and (
+            event in {"SessionEnd", "UserPromptSubmit", "Notification", "Stop", "StopFailure"}
+            or (conversation and conversation != self.conversation_id)
         ):
             # No dialog or tool call outlives its turn.
             for key in list(self.dialogs):
@@ -408,7 +420,7 @@ class ClaudeSession(AgentSessionClient):
                 self.publish("notice", message=f"This Claude Code session is now on conversation `{conversation}`.")
             else:
                 await self.switch_conversation(conversation)
-        if event == "UserPromptSubmit":
+        if event == "UserPromptSubmit" and not mid_turn:
             self.publish("status_changed", message="Turn started")
         elif event == "PreToolUse" and (tool_use_id := fields.get("tool_use_id")):
             self.tool_calls.append((fields.get("tool_name", ""), json_object(fields.get("tool_input")), tool_use_id))

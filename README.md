@@ -641,9 +641,9 @@ substantial typed prompt (tags such as pasted content and go-aheads such as
 "continue" don't count), else a non-default git branch. Labels are short, cut at
 a word boundary. It mirrors typed prompts and each turn's final answer; an answer
 that another Stop hook rejects, sending Claude back to rewrite it, is never posted. A Discord reply
-becomes the session's next prompt. When Claude opens a dialog in the terminal,
-asking to use a tool or asking you a question, the thread shows the same request
-and you can answer from either place; the first answer counts. The thread archives when the session exits.
+becomes the session's next prompt. When Claude asks to use a tool or asks you a
+question, the thread shows the request and you answer it there; Claude Code
+shows nothing in the terminal while the thread waits for that answer. The thread archives when the session exits.
 
 Follow [Run your own Discord Blue](#run-your-own-discord-blue) for client
 installation and the channel launch command.
@@ -670,12 +670,18 @@ Behaviour and limits:
   A reply still in that queue when you run `/clear` or `/resume` can reach the
   next conversation.
 - Each dialog reaches the channel as the plugin's `PermissionRequest` hook
-  call, which waits while the dialog is open, for up to a day. A Discord answer
-  becomes that call's decision, so it can only apply to that dialog. A command
-  shows as a command; any other tool shows its exact input. Approve allows that
-  call once with exactly the input shown; Discord never offers "always allow".
-  A request Discord cannot show whole stays in the terminal, and the thread says
-  which tool is waiting there.
+  call before Claude Code shows it, and the call waits for a Discord answer, for
+  up to a day. A Discord answer becomes that call's decision, so it can only
+  apply to that dialog, and a reply typed meanwhile leaves the card open. A
+  command shows as a command; any other tool shows its exact input. Approve
+  allows that call once with exactly the input shown; Discord never offers
+  "always allow". A request Discord cannot show whole goes back to Claude Code
+  at once, and the thread says which tool is waiting in the terminal.
+- Claude Code decides some requests itself. No hook can approve its
+  sensitive-file check, such as an edit under `~/.claude`, so Approve there is
+  refused; only the terminal can allow it. With
+  `permissions.denyInsteadOfPrompting` set, Claude Code denies any request
+  nobody answered instead of asking in the terminal.
 - Claude's questions appear as question cards. A multi-select question offers
   only its listed options in Discord; type your own answer in the terminal.
   Cancel declines the question.
