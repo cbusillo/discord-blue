@@ -594,14 +594,18 @@ class DialogTests(unittest.IsolatedAsyncioTestCase):
                     await claude.initialize()
                     await discord.next("hello")
                     tool_name = "Bash" if "command" in tool_input else "Write" if "content" in tool_input else "WebFetch"
+                    await tool_call(claude, tool_name, tool_input, "toolu_1")
                     request = open_dialog(claude, tool_name, tool_input)
                     # Claude Code shows the terminal dialog only once the hook call returns.
                     answer = await hook_answer(claude, request)
                     status = await discord.next("status_changed")
                     notice = await discord.next("notice")
+                    await hook(claude, "PostToolUse", tool_use_id="toolu_1")
+                    continuing = await discord.next("status_changed")
 
                 self.assertEqual((status["message"], notice["message"]), (waiting_message(tool_name),) * 2)
                 self.assertIsNone(answer)
+                self.assertEqual(continuing["message"], CONTINUING)
 
     async def test_a_prompt_taken_in_mid_turn_leaves_an_open_card_answerable(self) -> None:
         async with running_channel(features=FEATURES) as (claude, discord):
@@ -617,6 +621,28 @@ class DialogTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(acked["type"], "approval_decision_ack")
         self.assertEqual(answer, {"behavior": "allow", "updatedInput": COMMAND})
+
+    async def test_a_new_prompt_after_an_unreported_terminal_answer_closes_the_card(self) -> None:
+        # The hook call was never canceled, but the transcript holds the call's result.
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "session.jsonl"
+            append(transcript, said("Creating the file."))
+            async with running_channel(features=FEATURES) as (claude, discord):
+                await claude.initialize()
+                await discord.next("hello")
+                await tool_call(claude, "Bash", COMMAND, "toolu_1")
+                request = open_dialog(claude, "Bash", COMMAND, transcript_path=str(transcript))
+                card = await discord.next("approval_request")
+                result = {"type": "tool_result", "tool_use_id": "toolu_1", "content": "Interrupted by user"}
+                append(transcript, record(type="user", message={"role": "user", "content": [result]}))
+                await hook(claude, "UserPromptSubmit", prompt="next task", prompt_id="prompt-2")
+                resolved = await discord.next("approval_resolved")
+                status = await discord.next("status_changed")
+                answer = await hook_answer(claude, request)
+
+        self.assertEqual(resolved["approval_id"], card["approval_id"])
+        self.assertEqual(status["message"], "Turn started")
+        self.assertIsNone(answer)
 
     async def test_identical_parallel_calls_keep_their_own_cards(self) -> None:
         async with running_channel(features=FEATURES) as (claude, discord):

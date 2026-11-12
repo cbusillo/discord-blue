@@ -282,12 +282,13 @@ class ClaudeSession(AgentSessionClient):
                 offset=await self.transcript.size(path),
                 answer=asyncio.get_running_loop().create_future(),
             )
+            self.dialogs[key] = dialog
             prompt = None if tool_input is None else self.dialog_prompt(key, dialog, fields)
             if prompt is None or not self.shows(prompt):
-                # Holding the call would keep the dialog out of the terminal too.
+                # Holding the call would keep the dialog out of the terminal too; its tool call still closes it.
+                dialog.answer.set_result(None)
                 self.wait_locally(tool_name)
                 return ""
-            self.dialogs[key] = dialog
             self.prompts[key] = prompt
             self.enqueue(prompt)
         try:
@@ -356,7 +357,7 @@ class ClaudeSession(AgentSessionClient):
         for key, prompt in list(self.prompts.items()):
             if not self.shows(prompt):
                 del self.prompts[key]
-                dialog = self.dialogs.pop(key)
+                dialog = self.dialogs[key]
                 if not dialog.answer.done():
                     dialog.answer.set_result(None)
                 self.wait_locally(dialog.tool_name)
@@ -394,11 +395,11 @@ class ClaudeSession(AgentSessionClient):
         self.launch_brief_pending = False
         conversation = fields.get("session_id") or None
         # Claude Code takes a prompt in mid-turn while a dialog's call still waits; the turn and the dialog go on.
-        mid_turn = (
-            event == "UserPromptSubmit"
-            and conversation in {None, self.conversation_id}
-            and any(not dialog.answer.done() for dialog in self.dialogs.values())
-        )
+        mid_turn = False
+        if event == "UserPromptSubmit" and conversation in {None, self.conversation_id}:
+            for key, dialog in list(self.dialogs.items()):
+                if not dialog.answer.done() and not await self.answered_in_terminal(key, dialog):
+                    mid_turn = True
         if event in {"SessionEnd", "UserPromptSubmit", "Notification"} or (conversation and conversation != self.conversation_id):
             # Claude waiting at its prompt or taking a new one means the last answer stood; it posts before what follows.
             await self.settle_turns()
