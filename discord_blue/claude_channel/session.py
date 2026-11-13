@@ -81,6 +81,9 @@ STOP_VERDICT_SECONDS = 660.0
 STOP_VERDICT_POLL_SECONDS = 0.1
 STOP_VERDICT_SLOW_POLL_SECONDS = 1.0
 STOP_VERDICT_FAST_SECONDS = 5.0
+# Claude Code writes a prompt's record moments after its submit hook; past this, the next hook decides instead.
+PROMPT_RECORD_SECONDS = 30.0
+PROMPT_RECORD_POLL_SECONDS = 0.1
 # The `_meta` key Claude Code sets on a model's tool call; hook calls carry no tool use.
 MODEL_CALL = "claudecode/toolUseId"
 
@@ -222,6 +225,7 @@ class ClaudeSession(AgentSessionClient):
         self.transcript = TranscriptTitles()
         self.launch_brief_pending = identity.spawned and identity.launch_prompt is not None
         self.pending_input: tuple[dict[str, str], str] | None = None
+        self.prompt_watch: asyncio.Task[None] | None = None
         self.ending: tuple[Json, asyncio.Event] | None = None
         self.conversation_id: str | None = identity.session_id
         self.controls = CAPABILITIES if identity.channel else DIALOG_CAPABILITIES
@@ -445,7 +449,10 @@ class ClaudeSession(AgentSessionClient):
                     await self.retitle(fields, prompt=typed)
                     self.publish("user_message", message=clip(typed), input_origin=LAUNCH_BRIEF_ORIGIN)
                 elif fields.get("prompt_id"):
-                    self.pending_input = (fields, typed)
+                    pending = self.pending_input = (fields, typed)
+                    self.prompt_watch = asyncio.create_task(
+                        self.flush_once_recorded(pending), name=f"claude-prompt-{self.session_id}"
+                    )
                 else:
                     self.publish("user_message", message=clip(typed))
         elif event == "Stop":
@@ -493,6 +500,20 @@ class ClaudeSession(AgentSessionClient):
         finally:
             self.settle.clear()
 
+    async def flush_once_recorded(self, pending: tuple[dict[str, str], str]) -> None:
+        fields = pending[0]
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + PROMPT_RECORD_SECONDS
+        while loop.time() < deadline:
+            async with self.hook_lock:
+                if self.pending_input is not pending:
+                    return
+                titles = await self.transcript.read(fields.get("transcript_path", ""))
+                if fields["prompt_id"] in titles.recorded_prompt_ids:
+                    await self.flush_pending_input()
+                    return
+            await asyncio.sleep(PROMPT_RECORD_POLL_SECONDS)
+
     async def flush_pending_input(self) -> None:
         pending, self.pending_input = self.pending_input, None
         if pending is None:
@@ -507,10 +528,17 @@ class ClaudeSession(AgentSessionClient):
         if self.ending is not None and message is self.ending[0]:
             self.ending[1].set()
 
+    async def stop(self) -> None:
+        if self.prompt_watch is not None:
+            self.prompt_watch.cancel()
+            await asyncio.gather(self.prompt_watch, return_exceptions=True)
+        await super().stop()
+
     async def end(self) -> None:
         try:
             async with asyncio.timeout(SESSION_END_TIMEOUT_SECONDS):
-                await self.flush_pending_input()
+                async with self.hook_lock:
+                    await self.flush_pending_input()
                 await self.settle_turns()
                 if self.websocket is not None and not self.websocket.closed and not self.stopped.is_set():
                     terminal = self.event("session_end")
