@@ -97,14 +97,15 @@ class SessionHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.bot.config.agent_session.enabled = True
         doodad = AgentSessionDoodad(cast(Any, self.bridge.bot))
         doodad.bridge = self.bridge
-        for name in ("go_ahead_command", "pause_command", "new_session_command", "end_session_command"):
+        names = ("pause_command", "new_session_command")
+        for name in names:
             with self.subTest(name=name):
                 interaction = FakeInteraction(self.fixture.thread)
                 expired = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), {"code": 10062, "message": "Expired"})
                 with patch.object(interaction.response, "defer", AsyncMock(side_effect=expired)):
                     await cast(Any, getattr(doodad, name)).callback(doodad, interaction)
                 self.assertFalse(self.fixture.socket.sent_json)
-        self.assertEqual(len(self.fixture.thread.sent_messages), 4)
+        self.assertEqual(len(self.fixture.thread.sent_messages), len(names))
 
     async def test_expired_input_submission_cannot_dispatch_native_command(self) -> None:
         self.bridge.sessions.register(self.fixture.session)

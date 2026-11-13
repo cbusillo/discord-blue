@@ -55,10 +55,8 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_empty_capabilities_gate_every_command_without_queue_or_reactions(self) -> None:
         self.restrict()
         senders: tuple[Callable[[object, discord.User | discord.Member], Awaitable[str]], ...] = (
-            self.bridge.controls.send_continue_autonomously,
             self.bridge.controls.send_pause_current_turn,
             self.bridge.controls.send_new_session,
-            self.bridge.controls.send_end_session,
         )
         for send in senders:
             self.assertIn("does not support", await send(self.thread, self.user))
@@ -156,15 +154,13 @@ class CapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.socket.sent_json, [])
 
     async def test_partial_capabilities_send_supported_actions_and_reject_others(self) -> None:
-        self.restrict("reply", "status_request", "pause_current_turn", "end_session")
+        self.restrict("reply", "status_request", "pause_current_turn")
         message = FakeReplyMessage(2100, self.thread, "hello")
         self.thread.add_message(message)
         await self.bridge.controls.send_thread_reply(cast(Any, message))
         await self.bridge.controls.send_pause_current_turn(self.thread, self.user)
-        await self.bridge.controls.send_end_session(self.thread, self.user)
         self.assertIn("does not support", await self.bridge.controls.send_new_session(self.thread, self.user))
-        self.assertIn("does not support", await self.bridge.controls.send_continue_autonomously(self.thread, self.user))
-        self.assertEqual([item["kind"] for item in self.socket.sent_json], ["reply", "pause_current_turn", "end_session"])
+        self.assertEqual([item["kind"] for item in self.socket.sent_json], ["reply", "pause_current_turn"])
 
     async def test_every_failure_unwinds_input_and_approval_reservations(self) -> None:
         view = await self.fixture.prompt()
@@ -285,7 +281,7 @@ class CapabilityTransportTests(unittest.IsolatedAsyncioTestCase):
             attached = bridge.sessions.get("cleanup-session")
             assert attached is not None
             self.assertIn("offline", cast(str, bridge.controls.dispatch_error(prior, "reply")))
-            response = await bridge.controls.send_continue_autonomously(thread, cast(discord.User, FakeInteraction(thread).user))
+            response = await bridge.controls.send_pause_current_turn(thread, cast(discord.User, FakeInteraction(thread).user))
             self.assertIn("does not support", response)
             self.assertEqual(attached.pending_commands, {})
             await old.close()

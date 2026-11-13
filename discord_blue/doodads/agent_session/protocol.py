@@ -43,9 +43,7 @@ REMOTE_ACTIONS = frozenset(
         "reply",
         "status_request",
         "pause_current_turn",
-        "end_session",
         "new_session",
-        "continue_autonomously",
         "request_user_input_response",
         "approval_decision",
     }
@@ -303,10 +301,8 @@ class RemoteCommand:
     session_epoch: str
     kind: Literal[
         "reply",
-        "continue_autonomously",
         "pause_current_turn",
         "new_session",
-        "end_session",
         "request_user_input_response",
         "status_request",
     ]

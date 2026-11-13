@@ -161,7 +161,7 @@ A reused thread with uncertain input provenance keeps its input visible.
 
 A native client drop stops typing during its reconnect grace, and bridge
 shutdown saves grace before disconnecting. Reattachment shows unconfirmed state
-in `/code status` until a native event arrives. Routine closure sends no
+in `/session status` until a native event arrives. Routine closure sends no
 session-ended notice; answers and failure events remain in the transcript. The
 stored legacy `disconnect_notice` cleanup step now deletes an older release's
 card, preserving restart and residual-step recovery.
@@ -218,7 +218,7 @@ existing creation-token reconciliation.
 The connection handler unregisters its session in a finalization path, including
 when a late `hello_ack` or event handler fails. Registry removal checks the actual
 connection object, so an older connection cannot unregister its replacement.
-Closed WebSockets disappear from `/code active` and the health endpoint's
+Closed WebSockets disappear from `/session active` and the health endpoint's
 active-session count while cleanup finishes.
 
 Every change to a session thread (reopen, join, member changes, the "Session
@@ -268,7 +268,7 @@ small line naming the harness, folder and branch. The session start marker is
 kept as salted hashes in three component ids that Discord never displays: two
 for the marker without its PID (for PID-tolerant matching) and one for the full
 marker (for exact matching). Host, path, session and PID stay off the reading
-path; `/code status` remains operator-only and private. Discovery and orphan
+path; `/session status` remains operator-only and private. Discovery and orphan
 cleanup recognize these ids, the earlier spoiler container and old text markers. An unread
 candidate still blocks duplicate creation. Parent announcements are not required.
 Thread recovery matches persisted session markers; a changed PID can be tolerated only for one matching
@@ -305,7 +305,7 @@ recognized list when capabilities were supplied. Legacy acknowledgements omit it
 Capabilities apply to the current connection. They describe supported features;
 they do not grant authorization or replace session admin permission and identity checks.
 Discord filters actionable controls, preserves status indicators and local
-`/code status`, and checks every outbound action again at dispatch. Unsupported
+`/session status`, and checks every outbound action again at dispatch. Unsupported
 thread replies are handled with a visible notice and no queued reaction or
 command. Unsupported approval/input events produce a generic native-TUI notice
 without rendering their payloads or collecting answers. Stale controls cannot
@@ -401,10 +401,8 @@ A command has `type: "command"`, `command_id`, `session_id`, `session_epoch`,
 | Kind                          | Client action                                                                                           |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `reply`                       | Deliver `text` to the active session.                                                                   |
-| `continue_autonomously`       | Continue until user involvement is required.                                                            |
 | `pause_current_turn`          | Interrupt the current turn.                                                                             |
 | `new_session`                 | Start a fresh chat in the same working directory.                                                       |
-| `end_session`                 | End/disconnect this session.                                                                            |
 | `status_request`              | Publish current session status.                                                                         |
 | `request_user_input_response` | Resolve `call_id` / `turn_id` using `response.answers`, mapping question IDs to `{"answers":["text"]}`. |
 
@@ -444,8 +442,7 @@ output, and reconnect without duplicate threads or repeated command execution.
 Exercise only each client's advertised controls: Codex supports reply, pause,
 status, command/file-change/turn-scoped permission approvals, new sessions and user input; the Claude channel supports status,
 tool approvals (`approval_kind` `tool` when the server lists `tool_content`) and user input, plus replies when the
-channel is enabled. Neither client advertises end-session or autonomous continuation controls;
-new-session is supported by Codex only. The Server
+channel is enabled. New-session is supported by Codex only. The Server
 controls table describes the protocol surface, not a promise that every client
 implements it. Unit/transport tests validate the server and local clients; live
 integration acceptance is separate.

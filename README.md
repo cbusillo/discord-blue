@@ -423,7 +423,7 @@ Short answers need no attachment. Answers still
 notify normally and cannot ping people or roles. Restart recovery recognizes
 both new answer cards and older text answers, so it does not repost them.
 
-`/code active` shows operators a private dashboard snapshot, with sessions
+`/session active` shows operators a private dashboard snapshot, with sessions
 waiting on you first, then uncertain or failed sessions, working sessions and
 completed sessions. Each attached session has an **Open thread** button.
 Disconnected sessions are excluded. Status and Harness menus filter both Codex
@@ -432,7 +432,7 @@ terminal check. **Previous**, **Next**, and **Refresh** update the same
 private message from the live session list. Changing a filter returns to page
 one; Refresh preserves the current page when it still exists. The snapshot
 time shows when the list was read. Controls expire after ten minutes idle;
-run `/code active` again to open a new dashboard.
+run `/session active` again to open a new dashboard.
 
 [Phone layout preview](docs/assets/dui/answers-dashboard-preview.html) uses
 serialized component payloads. Discord controls final typography and sizing.
@@ -463,7 +463,7 @@ its Discord prompt. MCP elicitation and other requests stay in the TUI.
 Continue and end session are not advertised.
 
 To choose a repository for a new session, use the existing Codex Discord thread
-for that repository, then run /code new there. Stock starts a fresh thread in
+for that repository, then run /session new there. Stock starts a fresh thread in
 that exact folder with its configured trust and permissions; the bridge mirrors it, and its first substantive prompt supplies its title. Reply in the new Discord thread to start work. The bridge keeps
 its own new threads subscribed while running, so they stay available without
 an open TUI. Daemon reconnects rediscover them if they remain loaded.
@@ -1062,11 +1062,11 @@ Claude uses the orange eight-pointed star (✴️), and Codex uses the blue diam
 
 New threads open with one small line naming the harness, folder and branch,
 such as `Claude Code · discord-blue · main`. Host, full path, session ID and PID
-are not shown; `/code status` shows them privately to operators. The session's
+are not shown; `/session status` shows them privately to operators. The session's
 identity is kept in Discord component ids that are never displayed, so discovery
 and recovery survive a lost local store. Older threads keep their tap-to-reveal
 **Session details** card, and older text markers remain recognized. Routine parent connection announcements are no longer
-posted. Use `/code active` and **Open thread** to find sessions you can access.
+posted. Use `/session active` and **Open thread** to find sessions you can access.
 Configured users already in a thread are not added again; completed session
 cleanup still removes members, archives and locks the thread.
 
@@ -1092,14 +1092,14 @@ presentation, never a decision. Update both the server and local bridge for this
 behavior. Older bridges continue without a receipt file.
 
 Anything that needs you is its own message: Question cards, approvals, terminal-action requests and
-errors. `/code status` shows the latest status detail, and `/code go-ahead`,
-`/code pause` and `/code end-session` replace the old card's reactions.
+errors. `/session status` shows the latest status detail, and `/session pause`
+replaces the old card's reactions.
 Routine session closure keeps the existing archive/reopen lifecycle, without a
 session-ended post. A status card left by an older release is deleted when its
 session reconnects or closes; historical answers stay.
 
 A spawned session omits an automated launch brief only when its client marks
-that exact input with native launch provenance. `/code status` says where to read the full input in the native
+that exact input with native launch provenance. `/session status` says where to read the full input in the native
 terminal. Later human terminal input remains visible. Existing, resumed or uncertain inputs keep their mirrors. Codex proves the
 first turn from native pagination. Claude matches the explicit CLI launch brief against the first hook input, with a
 new transcript not yet created by Claude, or a fully read transcript containing no prior prompt.

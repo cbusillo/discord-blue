@@ -1,4 +1,4 @@
-"""The `/code` slash commands' gates: agent sessions enabled, and the caller an operator.
+"""The `/session` slash commands' gates: agent sessions enabled, and the caller an operator.
 
 Each command runs through discord.py's own command tree, from an INTERACTION_CREATE in a live session's thread, on
 the real client of `tests.discord_client`. Every command in the cog's group is covered, including any added later.
@@ -25,7 +25,7 @@ from tests.test_attach_scenarios import hello_for, marker, until
 Json = dict[str, Any]
 SESSION_ID = "gated-session"
 EPHEMERAL = discord.MessageFlags(ephemeral=True).value
-COMMANDS = [command.name for command in AgentSessionDoodad.code_group.commands]
+COMMANDS = [command.name for command in AgentSessionDoodad.session_group.commands]
 
 
 class LiveSession:
@@ -34,10 +34,10 @@ class LiveSession:
         self.frames: list[Json] = []  # Everything the server sent the session after its hello_ack.
 
     async def run(self, by: Json, name: str) -> Json:
-        """Run `/code name` as `by` in the session's thread; the response's data, once Discord has it."""
-        interaction_id = app_command(self.running.bot, self.thread, by, "code", name)
+        """Run `/session name` as `by` in the session's thread; the response's data, once Discord has it."""
+        interaction_id = app_command(self.running.bot, self.thread, by, "session", name)
         if not await until(lambda: interaction_id in self.fake.interaction_responses, timeout=5):
-            raise AssertionError(f"/code {name} was never answered")
+            raise AssertionError(f"/session {name} was never answered")
         await asyncio.sleep(0.05)  # Room for a command frame that should not be sent to arrive.
         return dict(self.fake.interaction_responses[interaction_id]["data"])
 
@@ -78,7 +78,7 @@ class SlashCommandGateTests(unittest.IsolatedAsyncioTestCase):
                     sent = len(live.frames)
                     response = await live.run(OPERATOR, name)
                     reached = SESSION_ID in str(response) or await live.sent_more_than(sent)
-                    self.assertTrue(reached, f"/code {name} did nothing for an operator: {response}")
+                    self.assertTrue(reached, f"/session {name} did nothing for an operator: {response}")
 
     async def test_a_bystander_is_answered_privately_and_reaches_nothing(self) -> None:
         async with live_session() as live:

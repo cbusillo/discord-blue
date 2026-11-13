@@ -71,7 +71,7 @@ class ActiveSessionDashboard(discord.ui.LayoutView):
             or (interaction.guild_id or 0) != self.guild_id
         ):
             await interaction.response.send_message(
-                "Run /code active as an agent session operator to open your dashboard.", ephemeral=True
+                "Run /session active as an agent session operator to open your dashboard.", ephemeral=True
             )
             return False
         return True
@@ -123,7 +123,7 @@ class ActiveSessionDashboard(discord.ui.LayoutView):
                 *(rows or [discord.ui.TextDisplay("No sessions match these filters." if sessions else "No live agent sessions.")]),
                 discord.ui.TextDisplay(
                     f"-# Page {self.page + 1} of {pages} · Snapshot <t:{int(datetime.now(UTC).timestamp())}:R>\n"
-                    "-# Controls expire after 10 minutes idle. Run /code active again."
+                    "-# Controls expire after 10 minutes idle. Run /session active again."
                 ),
                 discord.ui.ActionRow(
                     DashboardButton(self, "previous", disabled=self.page == 0),
