@@ -88,9 +88,18 @@ below select that platform explicitly.
    token_file = "~/.config/discord-blue/codex-bridge.token"
    ```
 
-   Start a new session with
-   `claude --dangerously-load-development-channels plugin:dui@discord-blue`
-   and accept Claude's development-channel warning. Send a prompt; a private
+   Approve the plugin as a channel once, in Claude Code's managed settings
+   (this needs an administrator password):
+
+   ```sh
+   sudo mkdir -p "/Library/Application Support/ClaudeCode/managed-settings.d"
+   echo '{"channelsEnabled": true, "allowedChannelPlugins": [{"plugin": "dui", "marketplace": "discord-blue"}]}' \
+     | sudo tee "/Library/Application Support/ClaudeCode/managed-settings.d/discord-blue.json"
+   ```
+
+   An approved list replaces Claude Code's default one, so add any other
+   channel plugins you use to it. Start a new session with
+   `claude --channels plugin:dui@discord-blue`. Send a prompt; a private
    thread should appear in your main channel. Reply there and confirm Claude
    receives it. Only configured operators can reply or answer approvals.
    [Claude session details](#claude-code-sessions-the-dui-plugin) and
@@ -650,17 +659,19 @@ installation and the channel launch command.
 
 The channel reads the Codex bridge's `~/.config/discord-blue/codex-bridge.toml`
 (`server_url`, `token_file`, `allow_insecure_ws`, `hello_timeout_seconds`, `question_reader`); its host label is always
-`Claude Code on <host>`. Each launch shows Claude Code's "Loading development
-channels" warning; press Enter. A session that is already running cannot load
-the channel: `/exit`, then
-`claude --resume <session id> --dangerously-load-development-channels plugin:dui@discord-blue`. It
-keeps the same session ID, name and transcript.
+`Claude Code on <host>`. With the plugin approved in managed settings,
+`--channels plugin:dui@discord-blue` loads it with no prompt, including for
+`claude --bg` background sessions. Without that approval,
+`--dangerously-load-development-channels plugin:dui@discord-blue` still works,
+but every launch shows Claude Code's "Loading development channels" warning
+and waits for Enter. A session that is already running cannot load the channel:
+`/exit`, then `claude --resume <session id> --channels plugin:dui@discord-blue`.
+It keeps the same session ID, name and transcript.
 
 Behaviour and limits:
 
-- Custom channels are a Claude Code research preview. Only the
-  `--dangerously-load-development-channels` flag enables one, the flag's
-  warning appears on every launch, and the flag and protocol may change.
+- Custom channels are a Claude Code research preview; the flags and protocol
+  may change.
 - The plugin loads in every session. A session started without the flag is
   still mirrored and its dialogs can be answered from Discord, but Claude Code
   drops channel messages, so the thread offers no replies and says how to

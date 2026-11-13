@@ -411,7 +411,7 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
 
         # Dialogs reach Discord through the hooks; replies need the channel.
         self.assertEqual(hello.capabilities, frozenset({"status_request", "approval_decision", "request_user_input_response"}))
-        self.assertIn(f"claude --resume {IDENTITY.session_id} --dangerously-load-development-channels", notice["message"])
+        self.assertIn(f"claude --resume {IDENTITY.session_id} --channels plugin:dui@discord-blue", notice["message"])
 
     async def test_a_conversation_switch_rejects_controls_meant_for_the_old_one(self) -> None:
         async with running_channel() as (claude, discord):
@@ -755,6 +755,11 @@ class LaunchTests(unittest.TestCase):
         flagged = "claude --allow-dangerously-skip-permissions --dangerously-load-development-channels plugin:dui@discord-blue"
         cases = {
             "launched with the flag": ([own, flagged, "-zsh"], True),
+            "launched as an approved channel": ([own, "claude --model opus --channels plugin:dui@discord-blue", "-zsh"], True),
+            "approved channel written with =": ([own, "claude --channels=server:x,plugin:dui@discord-blue"], True),
+            "dui named only in other text": ([own, "claude --channels server:other --append-system-prompt plugin:dui"], False),
+            "dui named only in the prompt": ([own, "claude --channels server:other -- use plugin:dui@discord-blue"], False),
+            "a different plugin with the same prefix": ([own, "claude --channels plugin:duix@discord-blue"], False),
             "launched without it": ([own, "claude --allow-dangerously-skip-permissions", "-zsh"], False),
             "flag for another channel only": ([own, "claude --dangerously-load-development-channels server:other"], False),
             "background session claimed from the daemon": ([own, "claude bg-spare --bg-spare /tmp/x.sock"], None),

@@ -2,7 +2,8 @@
 
 The plugin's MCP server and hooks load in every session, but Claude Code only
 delivers channel messages and permission prompts when the session was launched
-with the development-channels flag naming this plugin. Claude Code does not tell
+with `--channels` (the plugin approved in managed settings) or the
+development-channels flag naming this plugin. Claude Code does not tell
 the server, so the launching command line is read from the process table.
 """
 
@@ -11,7 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-CHANNEL_FLAG = "--dangerously-load-development-channels"
+CHANNEL_FLAGS = ("--channels", "--dangerously-load-development-channels")
 PLUGIN_ENTRY = "plugin:dui"
 ANCESTORS = 4
 
@@ -44,9 +45,29 @@ def loaded_as_channel(command_lines: list[str]) -> bool | None:
             continue
         if len(words) > 1 and words[1].startswith("bg-"):
             return None  # A background session the Claude Code daemon claimed; its launch flags are not in argv.
-        flagged = any(word == CHANNEL_FLAG or word.startswith(f"{CHANNEL_FLAG}=") for word in words)
-        return flagged and PLUGIN_ENTRY in line
+        return any(is_plugin_entry(entry) for entry in channel_entries(words[1:]))
     return None
+
+
+def channel_entries(words: list[str]) -> list[str]:
+    entries: list[str] = []
+    collecting = False
+    for word in words:
+        if word == "--":
+            break
+        flag, has_value, value = word.partition("=")
+        if flag in CHANNEL_FLAGS:
+            collecting = not has_value
+            entries.extend(value.split(",") if has_value else ())
+        elif word.startswith("-"):
+            collecting = False
+        elif collecting:
+            entries.extend(word.split(","))
+    return entries
+
+
+def is_plugin_entry(entry: str) -> bool:
+    return entry == PLUGIN_ENTRY or entry.startswith(f"{PLUGIN_ENTRY}@")
 
 
 def launch_prompt(command_lines: list[str]) -> str | None:
