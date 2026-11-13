@@ -15,7 +15,7 @@ from discord_blue.agent_client import Rejected
 from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.codex_bridge.rpc import RpcError, TransportError
-from discord_blue.doodads.agent_session.launcher import HARNESSES, LAUNCHER_PATH
+from discord_blue.doodads.agent_session.launcher import HARNESSES, LAUNCHER_PATH, REPLACED_CLOSE_CODE
 
 logger = logging.getLogger(__name__)
 CLAUDE_TIMEOUT_SECONDS = 30
@@ -72,10 +72,10 @@ async def run_command(argv: list[str], cwd: Path) -> CommandResult:
     try:
         async with asyncio.timeout(CLAUDE_TIMEOUT_SECONDS):
             output, _ = await process.communicate()
-    except TimeoutError:
-        process.kill()
-        await process.wait()
-        raise
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
     return CommandResult(process.returncode or 0, output.decode(errors="replace"))
 
 
@@ -170,6 +170,9 @@ class MacLauncher:
             try:
                 async with http.ws_connect(url, headers=headers, heartbeat=self.config.heartbeat_seconds) as websocket:
                     await self.serve(websocket)
+                if websocket.close_code == REPLACED_CLOSE_CODE:
+                    logger.warning("Another session launcher replaced this one; this one stops")
+                    return
             except aiohttp.WSServerHandshakeError as exc:
                 logger.warning("Discord Blue refused the session launcher (HTTP %s)", exc.status)
             except (aiohttp.ClientError, TimeoutError, OSError, ValueError, TypeError) as exc:

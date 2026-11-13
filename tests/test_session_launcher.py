@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import tempfile
 import unittest
 from collections.abc import AsyncIterator
@@ -14,7 +15,7 @@ import aiohttp
 
 from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.config import BridgeConfig
-from discord_blue.codex_bridge.launcher import CommandResult, LiveBridge, MacLauncher, find_repositories
+from discord_blue.codex_bridge.launcher import CommandResult, LiveBridge, MacLauncher, find_repositories, run_command
 from discord_blue.doodads.agent_session.launcher import NOT_CONNECTED
 from tests.discord_client import BYSTANDER, OPERATOR, TOKEN, RunningCog, app_command, running_cog
 from tests.fake_discord import FakeDiscord
@@ -108,6 +109,20 @@ class MacLauncherTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("error: unknown plugin", outcome.message)
 
 
+class RunCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_cancelled_launch_leaves_no_process_running(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            pid_file = Path(folder) / "pid"
+            argv = ["/bin/sh", "-c", f'echo $$ > "{pid_file}"; exec sleep 30']
+            launch = asyncio.create_task(run_command(argv, Path(folder)))
+            self.assertTrue(await until(lambda: pid_file.exists() and pid_file.read_text().strip() != "", timeout=5))
+            launch.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await launch
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(pid_file.read_text()), 0)
+
+
 class Launcher:
     def __init__(self, websocket: aiohttp.ClientWebSocketResponse) -> None:
         self.websocket = websocket
@@ -195,6 +210,14 @@ class SlashStartTests(unittest.IsolatedAsyncioTestCase):
         reply = await self.answer(self.start(OPERATOR, "../alpha", "codex"))
         self.assertIn("no repository", reply)
         self.assertEqual(launcher.frames, [])
+
+    async def test_a_replaced_mac_launcher_stops_instead_of_taking_over_again(self) -> None:
+        older = asyncio.create_task(mac_launcher(self.root, self.running.url).run_forever(self.http))
+        self.addCleanup(older.cancel)
+        self.assertTrue(await until(lambda: self.running.cog.bridge.launcher.hello is not None, timeout=5))
+        await self.connect_launcher(["beta"])
+        await asyncio.wait_for(older, 5)
+        self.assertEqual(self.running.cog.bridge.launcher.repository_choices(""), ["beta"])
 
     async def test_a_newer_launcher_replaces_the_older(self) -> None:
         older = await self.connect_launcher(["alpha"])

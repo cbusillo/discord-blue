@@ -10,6 +10,7 @@ from aiohttp import WSMsgType, web
 
 logger = logging.getLogger(__name__)
 LAUNCHER_PATH = "/agent-session/launcher"
+REPLACED_CLOSE_CODE = 4001
 HARNESSES = ("codex", "claude")
 HELLO_TIMEOUT_SECONDS = 15
 LAUNCH_TIMEOUT_SECONDS = 60
@@ -78,7 +79,7 @@ class SessionLauncher:
         self.websocket, self.hello = websocket, hello
         logger.info("Session launcher connected from %s with %s repositories", hello.host_label, len(hello.repositories))
         if previous is not None and not previous.closed:
-            await previous.close(message=b"replaced by a newer launcher")
+            await previous.close(code=REPLACED_CLOSE_CODE, message=b"replaced by a newer launcher")
 
     def accept_result(self, websocket: web.WebSocketResponse, data: str) -> None:
         try:
