@@ -207,7 +207,7 @@ def unflagged_notice(session_id: str) -> str:
     return (
         "This Claude Code session was started without the dui channel, so Discord replies cannot reach it; "
         "prompts and answers are still mirrored here. To enable them, exit and run "
-        f"`claude --resume {session_id} --dangerously-load-development-channels plugin:dui@discord-blue`."
+        f"`claude --resume {session_id} --channels plugin:dui@discord-blue`."
     )
 
 

@@ -2,7 +2,8 @@
 
 The plugin's MCP server and hooks load in every session, but Claude Code only
 delivers channel messages and permission prompts when the session was launched
-with the development-channels flag naming this plugin. Claude Code does not tell
+with `--channels` (the plugin approved in managed settings) or the
+development-channels flag naming this plugin. Claude Code does not tell
 the server, so the launching command line is read from the process table.
 """
 
@@ -11,7 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-CHANNEL_FLAG = "--dangerously-load-development-channels"
+CHANNEL_FLAGS = ("--channels", "--dangerously-load-development-channels")
 PLUGIN_ENTRY = "plugin:dui"
 ANCESTORS = 4
 
@@ -44,7 +45,7 @@ def loaded_as_channel(command_lines: list[str]) -> bool | None:
             continue
         if len(words) > 1 and words[1].startswith("bg-"):
             return None  # A background session the Claude Code daemon claimed; its launch flags are not in argv.
-        flagged = any(word == CHANNEL_FLAG or word.startswith(f"{CHANNEL_FLAG}=") for word in words)
+        flagged = any(word.split("=", 1)[0] in CHANNEL_FLAGS for word in words)
         return flagged and PLUGIN_ENTRY in line
     return None
 
