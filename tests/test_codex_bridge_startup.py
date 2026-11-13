@@ -107,10 +107,10 @@ class NativeStartupTests(unittest.IsolatedAsyncioTestCase):
             recorder.chmod(0o700)
             mirrored: set[Path] = set()
 
-            async def mirror(config: BridgeConfig) -> None:
+            async def mirror(home_config: BridgeConfig, _live: object = None) -> None:
                 starts = [json.loads(line)[0] for line in record.read_text().splitlines()]
-                self.assertIn(str(config.socket_path.parent.parent), starts)
-                mirrored.add(config.socket_path)
+                self.assertIn(str(home_config.socket_path.parent.parent), starts)
+                mirrored.add(home_config.socket_path)
 
             homes = [base / "broken", base / "healthy"]
             config = BridgeConfig("ws://localhost/agent-session/connect", "fake", Path("/unused.sock"), "test")

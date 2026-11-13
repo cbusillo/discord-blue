@@ -26,6 +26,8 @@ Json = dict[str, Any]
 SESSION_ID = "gated-session"
 EPHEMERAL = discord.MessageFlags(ephemeral=True).value
 COMMANDS = [command.name for command in AgentSessionDoodad.session_group.commands]
+OPTIONS = {"start": {"repository": "discord-blue", "harness": "codex"}}
+LAUNCHER_COMMANDS = set(OPTIONS)
 
 
 class LiveSession:
@@ -35,7 +37,7 @@ class LiveSession:
 
     async def run(self, by: Json, name: str) -> Json:
         """Run `/session name` as `by` in the session's thread; the response's data, once Discord has it."""
-        interaction_id = app_command(self.running.bot, self.thread, by, "session", name)
+        interaction_id = app_command(self.running.bot, self.thread, by, "session", name, OPTIONS.get(name))
         if not await until(lambda: interaction_id in self.fake.interaction_responses, timeout=5):
             raise AssertionError(f"/session {name} was never answered")
         await asyncio.sleep(0.05)  # Room for a command frame that should not be sent to arrive.
@@ -73,7 +75,7 @@ class SlashCommandGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_an_operator_reaches_the_session_with_every_command(self) -> None:
         """The other tests' gates are only meaningful if the same calls get through without them."""
         async with live_session() as live:
-            for name in COMMANDS:
+            for name in (name for name in COMMANDS if name not in LAUNCHER_COMMANDS):
                 with self.subTest(command=name):
                     sent = len(live.frames)
                     response = await live.run(OPERATOR, name)
