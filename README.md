@@ -462,8 +462,18 @@ patches and session-wide file grants stay in the TUI. A changed patch retires
 its Discord prompt. MCP elicitation and other requests stay in the TUI.
 Continue and end session are not advertised.
 
-To choose a repository for a new session, use the existing Codex Discord thread
-for that repository, then run /session new there. Stock starts a fresh thread in
+To start a session in any repository, run `/session start` anywhere in the
+server: pick a repository (type to filter the folders under `~/Developer` that
+contain `.git`) and `codex` or `claude`. The bridge on the Mac starts it, and
+its Discord thread opens through the session's own connection; type the first
+message there. Codex starts in the bridge's configured (or first) Codex home.
+Claude starts as a background Opus session named after the repository with the
+`dui` channel, so the plugin must be approved in managed settings. Only
+operators can start sessions, the bridge must be running, and the repository
+list refreshes when the bridge reconnects.
+
+To start a fresh chat in the folder of an existing Codex Discord thread, run
+/session new there. Stock starts a fresh thread in
 that exact folder with its configured trust and permissions; the bridge mirrors it, and its first substantive prompt supplies its title. Reply in the new Discord thread to start work. The bridge keeps
 its own new threads subscribed while running, so they stay available without
 an open TUI. Daemon reconnects rediscover them if they remain loaded.
@@ -646,7 +656,9 @@ question, the thread shows the request and you answer it there; Claude Code
 shows nothing in the terminal while the thread waits for that answer. The thread archives when the session exits.
 
 Follow [Run your own Discord Blue](#run-your-own-discord-blue) for client
-installation and the channel launch command.
+installation and the channel launch command. `/session start` with `claude`
+starts a background session from Discord; see the
+[Codex bridge](#codex-bridge-runs-on-the-mac-next-to-codex).
 
 The channel reads the Codex bridge's `~/.config/discord-blue/codex-bridge.toml`
 (`server_url`, `token_file`, `allow_insecure_ws`, `hello_timeout_seconds`, `question_reader`); its host label is always

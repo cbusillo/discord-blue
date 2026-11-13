@@ -38,6 +38,7 @@ from discord_blue.doodads.agent_session.cleanup import (
 from discord_blue.doodads.agent_session.session_threads import SessionThreads
 from discord_blue.doodads.agent_session.controls import REACTION_APPROVAL_APPROVE, REACTION_APPROVAL_DENY, SessionControls
 from discord_blue.doodads.agent_session.interactions import SessionInteractions
+from discord_blue.doodads.agent_session.launcher import LAUNCHER_PATH, SessionLauncher
 from discord_blue.doodads.agent_session.session_status import SessionStatusUpdates
 from discord_blue.doodads.agent_session.handover import SessionContinuation
 
@@ -121,6 +122,7 @@ class AgentSessionBridge:
 
         self.questions = QuestionCards(self)
         self.status = SessionStatusUpdates(self)
+        self.launcher = SessionLauncher()
         self._monitor_started_at = time.monotonic()
         self._monitor_last_progress = self._monitor_started_at
         self._monitor_has_run = False
@@ -197,6 +199,7 @@ class AgentSessionBridge:
         app.router.add_get("/health", self.handle_health)
         app.router.add_get(AGENT_SESSION_CONNECT_PATH, self.handle_connect)
         app.router.add_get("/agent-session/conversation", self.handle_conversation_connect)
+        app.router.add_get(LAUNCHER_PATH, self.handle_launcher_connect)
         app.router.add_get("/agent-session/delivery", self.handle_delivery)
         app.router.add_post("/agent-session/delivery", self.handle_delivery)
         app.router.add_delete("/agent-session/delivery", self.handle_delivery)
@@ -241,6 +244,21 @@ class AgentSessionBridge:
         finally:
             if not websocket.closed:
                 await websocket.close(message=b"conversation disconnected", drain=False)
+        return websocket
+
+    async def handle_launcher_connect(self, request: web.Request) -> web.WebSocketResponse:
+        if not self._authorized(request):
+            raise web.HTTPUnauthorized()
+        websocket = web.WebSocketResponse(max_msg_size=65536, heartbeat=30)
+        await websocket.prepare(request)
+        try:
+            if not self._stopping:
+                await self.launcher.serve(websocket)
+        except (ValueError, TypeError, TimeoutError, ConnectionError):
+            pass
+        finally:
+            if not websocket.closed:
+                await websocket.close(message=b"launcher disconnected", drain=False)
         return websocket
 
     async def handle_health(self, _request: web.Request) -> web.Response:
@@ -377,6 +395,7 @@ class AgentSessionBridge:
         except TimeoutError:
             complete = False
         self.threads.stop()
+        await self.launcher.close()
         try:
             if self._runner is not None:
                 await self.threads.bounded(self._runner.cleanup(), max(SESSION_STORE_WAIT_TIMEOUT_SECONDS, deadline - loop.time()))
