@@ -504,13 +504,14 @@ class ClaudeSession(AgentSessionClient):
         fields = pending[0]
         loop = asyncio.get_running_loop()
         deadline = loop.time() + PROMPT_RECORD_SECONDS
-        while self.pending_input is pending and loop.time() < deadline:
-            titles = await self.transcript.read(fields.get("transcript_path", ""))
-            if fields["prompt_id"] in titles.recorded_prompt_ids:
-                async with self.hook_lock:
-                    if self.pending_input is pending:
-                        await self.flush_pending_input()
-                return
+        while loop.time() < deadline:
+            async with self.hook_lock:
+                if self.pending_input is not pending:
+                    return
+                titles = await self.transcript.read(fields.get("transcript_path", ""))
+                if fields["prompt_id"] in titles.recorded_prompt_ids:
+                    await self.flush_pending_input()
+                    return
             await asyncio.sleep(PROMPT_RECORD_POLL_SECONDS)
 
     async def flush_pending_input(self) -> None:
@@ -536,7 +537,8 @@ class ClaudeSession(AgentSessionClient):
     async def end(self) -> None:
         try:
             async with asyncio.timeout(SESSION_END_TIMEOUT_SECONDS):
-                await self.flush_pending_input()
+                async with self.hook_lock:
+                    await self.flush_pending_input()
                 await self.settle_turns()
                 if self.websocket is not None and not self.websocket.closed and not self.stopped.is_set():
                     terminal = self.event("session_end")
