@@ -16,7 +16,7 @@ import aiohttp
 from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.codex_bridge.launcher import CommandResult, LiveBridge, MacLauncher, find_repositories, run_command
-from discord_blue.doodads.agent_session.launcher import NOT_CONNECTED
+from discord_blue.doodads.agent_session.launcher import BUSY_CLOSE_CODE, NOT_CONNECTED
 from tests.discord_client import BYSTANDER, OPERATOR, TOKEN, RunningCog, app_command, running_cog
 from tests.fake_discord import FakeDiscord
 from tests.test_attach_scenarios import until
@@ -211,24 +211,25 @@ class SlashStartTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("no repository", reply)
         self.assertEqual(launcher.frames, [])
 
-    async def test_a_replaced_mac_launcher_stops_instead_of_taking_over_again(self) -> None:
-        older = asyncio.create_task(mac_launcher(self.root, self.running.url).run_forever(self.http))
-        self.addCleanup(older.cancel)
-        self.assertTrue(await until(lambda: self.running.cog.bridge.launcher.hello is not None, timeout=5))
-        await self.connect_launcher(["beta"])
-        await asyncio.wait_for(older, 5)
-        self.assertEqual(self.running.cog.bridge.launcher.repository_choices(""), ["beta"])
+    async def test_a_second_launcher_is_turned_away_while_the_first_is_connected(self) -> None:
+        first = await self.connect_launcher(["alpha"])
+        second = await self.http.ws_connect(self.launcher_url, headers={"Authorization": f"Bearer {TOKEN}"})
+        await second.send_json({"type": "launcher_hello", "host_label": "Mac", "repositories": ["beta"], "harnesses": ["codex"]})
+        self.assertEqual((await second.receive()).type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(second.close_code, BUSY_CLOSE_CODE)
+        self.assertEqual(self.running.cog.bridge.launcher.repository_choices(""), ["alpha"])
+        self.assertFalse(first.websocket.closed)
 
-    async def test_a_newer_launcher_replaces_the_older(self) -> None:
-        older = await self.connect_launcher(["alpha"])
-        newer = await self.connect_launcher(["beta"])
-        await asyncio.wait_for(older.reader, 2)
-        interaction_id = self.start(OPERATOR, "beta", "codex")
-        self.assertTrue(await until(lambda: bool(newer.frames), timeout=5))
-        launch = newer.frames[0]
-        self.assertEqual((launch["type"], launch["repository"], launch["harness"]), ("launch", "beta", "codex"))
-        await newer.websocket.send_json({"type": "launch_result", "launch_id": launch["launch_id"], "ok": False, "message": "nope"})
-        self.assertEqual(await self.answer(interaction_id), "Launch failed: nope")
+    async def test_a_waiting_mac_launcher_takes_over_when_the_first_leaves(self) -> None:
+        first = await self.connect_launcher(["beta"])
+        waiting = mac_launcher(self.root, self.running.url)
+        waiting.busy_retry_seconds = 0.05
+        task = asyncio.create_task(waiting.run_forever(self.http))
+        self.addCleanup(task.cancel)
+        await asyncio.sleep(0.2)
+        self.assertEqual(self.running.cog.bridge.launcher.repository_choices(""), ["beta"])
+        await first.websocket.close()
+        self.assertTrue(await until(lambda: "alpha" in self.running.cog.bridge.launcher.repository_choices(""), timeout=5))
 
 
 if __name__ == "__main__":

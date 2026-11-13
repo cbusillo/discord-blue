@@ -10,7 +10,7 @@ from aiohttp import WSMsgType, web
 
 logger = logging.getLogger(__name__)
 LAUNCHER_PATH = "/agent-session/launcher"
-REPLACED_CLOSE_CODE = 4001
+BUSY_CLOSE_CODE = 4001
 HARNESSES = ("codex", "claude")
 HELLO_TIMEOUT_SECONDS = 15
 LAUNCH_TIMEOUT_SECONDS = 60
@@ -59,7 +59,11 @@ class SessionLauncher:
             hello = parse_hello(await websocket.receive_json())
         if hello is None:
             return
-        await self.replace_connection(websocket, hello)
+        if self.websocket is not None and not self.websocket.closed:
+            await websocket.close(code=BUSY_CLOSE_CODE, message=b"another launcher is connected")
+            return
+        self.websocket, self.hello = websocket, hello
+        logger.info("Session launcher connected from %s with %s repositories", hello.host_label, len(hello.repositories))
         try:
             async for frame in websocket:
                 if frame.type is WSMsgType.TEXT:
@@ -73,13 +77,6 @@ class SessionLauncher:
         for launch in self.pending.values():
             if launch.websocket is websocket and not launch.future.done():
                 launch.future.set_result("The Mac's session launcher disconnected before reporting the launch.")
-
-    async def replace_connection(self, websocket: web.WebSocketResponse, hello: LauncherHello) -> None:
-        previous = self.websocket
-        self.websocket, self.hello = websocket, hello
-        logger.info("Session launcher connected from %s with %s repositories", hello.host_label, len(hello.repositories))
-        if previous is not None and not previous.closed:
-            await previous.close(code=REPLACED_CLOSE_CODE, message=b"replaced by a newer launcher")
 
     def accept_result(self, websocket: web.WebSocketResponse, data: str) -> None:
         try:

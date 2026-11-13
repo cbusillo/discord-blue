@@ -15,10 +15,11 @@ from discord_blue.agent_client import Rejected
 from discord_blue.codex_bridge.bridge import CodexBridge
 from discord_blue.codex_bridge.config import BridgeConfig
 from discord_blue.codex_bridge.rpc import RpcError, TransportError
-from discord_blue.doodads.agent_session.launcher import HARNESSES, LAUNCHER_PATH, REPLACED_CLOSE_CODE
+from discord_blue.doodads.agent_session.launcher import HARNESSES, LAUNCHER_PATH, BUSY_CLOSE_CODE
 
 logger = logging.getLogger(__name__)
 CLAUDE_TIMEOUT_SECONDS = 30
+BUSY_RETRY_SECONDS = 60.0
 CLAUDE_CHANNEL = "plugin:dui@discord-blue"
 CLOSED_MESSAGES = {aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR}
 
@@ -86,6 +87,7 @@ class MacLauncher:
     developer_root: Path = field(default_factory=lambda: Path.home() / "Developer")
     run: RunCommand = run_command
     find_claude: Callable[[], str] = claude_binary
+    busy_retry_seconds: float = BUSY_RETRY_SECONDS
 
     def hello(self) -> dict[str, object]:
         return {
@@ -167,17 +169,18 @@ class MacLauncher:
         headers = {"Authorization": f"Bearer {self.config.token}"}
         url = launcher_url(self.config.server_url)
         while True:
+            retry = self.config.reconnect_seconds
             try:
                 async with http.ws_connect(url, headers=headers, heartbeat=self.config.heartbeat_seconds) as websocket:
                     await self.serve(websocket)
-                if websocket.close_code == REPLACED_CLOSE_CODE:
-                    logger.warning("Another session launcher replaced this one; this one stops")
-                    return
+                if websocket.close_code == BUSY_CLOSE_CODE:
+                    logger.info("Another session launcher is connected; trying again in %s seconds", self.busy_retry_seconds)
+                    retry = self.busy_retry_seconds
             except aiohttp.WSServerHandshakeError as exc:
                 logger.warning("Discord Blue refused the session launcher (HTTP %s)", exc.status)
             except (aiohttp.ClientError, TimeoutError, OSError, ValueError, TypeError) as exc:
                 logger.warning("Session launcher connection ended: %s", type(exc).__name__)
-            await asyncio.sleep(self.config.reconnect_seconds)
+            await asyncio.sleep(retry)
 
 
 async def run_launcher(config: BridgeConfig, live: LiveBridge) -> None:
