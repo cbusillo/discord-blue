@@ -467,8 +467,9 @@ server: pick a repository (type to filter the folders under `~/Developer` that
 contain `.git`) and `codex` or `claude`. The bridge on the Mac starts it, and
 its Discord thread opens through the session's own connection; type the first
 message there. Codex starts in the bridge's configured (or first) Codex home.
-Claude starts as a background Opus session named after the repository with the
-`dui` channel, so the plugin must be approved in managed settings. Only
+Claude starts as a background Opus session with the `dui` channel, so the
+plugin must be approved in managed settings; its first message names the
+thread. Only
 operators can start sessions, the bridge must be running, and the repository
 list refreshes when the bridge reconnects.
 

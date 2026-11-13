@@ -475,8 +475,9 @@ in the [Codex bridge guide](../README.md#codex-bridge-runs-on-the-mac-next-to-co
 The Codex bridge also keeps one connection to `/agent-session/launcher`, with
 the same bearer token, so `/session start` can start a session on the Mac. It
 creates no thread itself: the new session connects through its own normal
-client and gets its thread as usual. A newer launcher connection replaces the
-older one.
+client and gets its thread as usual. The first launcher connected keeps the
+slot: a second one is closed with code 4001 after its hello and tries again
+every 60 seconds, so it takes over once the first leaves.
 
 After connecting, the Mac sends:
 
@@ -500,8 +501,8 @@ and answers:
 ```
 
 `codex` starts a thread through the bridge's current app-server connection
-(the same path as `new_session`). `claude` runs `claude --bg --model opus -n
-<repository> --channels plugin:dui@discord-blue` in the folder and reports
+(the same path as `new_session`). `claude` runs `claude --bg --model opus
+--channels plugin:dui@discord-blue` in the folder and reports
 its first output line. The bot waits 60 seconds for a result.
 
 ## External CM conversation capability
