@@ -1108,9 +1108,12 @@ the input visible. Claude scheduled wakeups also stay out of the conversation an
 thread labels when the current hook's prompt ID matches a native transcript record
 marked as scheduled system input. Human input with the same words stays visible.
 Claude writes transcript records asynchronously, so identified input waits locally
-until the next native hook or permission event before its mirror and fallback label
-are decided. The agent starts immediately; visible input still precedes its answer.
-Missing IDs or provenance still unavailable at that next event keep the input visible.
+until its own transcript record appears, normally within moments, before its mirror
+and fallback label are decided. A typed answer such as `Q12: Wait` reaches its card
+then, not at Claude's next tool call. If the record has not appeared by the next
+native hook or permission event, that event decides. The agent starts immediately;
+visible input still precedes its answer. Missing IDs or provenance still unavailable
+at that next event keep the input visible.
 On clean exit, pending input is decided and queued before session closure, within
 the existing bounded shutdown. A crash or unavailable connection can still lose
 unsent mirrors; the native transcript remains the record. The DUI

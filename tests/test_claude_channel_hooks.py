@@ -170,6 +170,22 @@ class ClaudeChannelHookTests(unittest.IsolatedAsyncioTestCase):
                 events = await mirrored(claude, discord)
         self.assertEqual(events, [("turn_complete", "Build passed")])
 
+    async def test_typed_prompt_reaches_discord_once_recorded_without_waiting_for_another_hook(self) -> None:
+        prompt = "Q12 agree"
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "session.jsonl"
+            transcript.write_text("")
+            async with running_channel() as (claude, discord):
+                await claude.initialize()
+                await discord.next("hello")
+                await hook(claude, "UserPromptSubmit", prompt=prompt, prompt_id="human-1", transcript_path=str(transcript))
+                append(
+                    transcript,
+                    record(type="user", promptId="human-1", promptSource="typed", message={"role": "user", "content": prompt}),
+                )
+                typed = await asyncio.wait_for(discord.next("user_message"), timeout=2)
+        self.assertEqual(typed["message"], prompt)
+
     async def test_clean_eof_decides_pending_input_before_ending_the_session(self) -> None:
         prompt = "Human request interrupted before a tool"
         for scheduled in (False, True):
