@@ -158,7 +158,7 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
             (parsed.session_id, parsed.title, parsed.cwd, parsed.branch, parsed.assistant_message, parsed.capabilities),
             ("root", "Fix the login bug", "/work/project", "fix/login", "Done.", frozenset(session_module.CAPABILITIES)),
         )
-        self.assertLess(frozenset(session_module.CAPABILITIES), REMOTE_ACTIONS)
+        self.assertLessEqual(frozenset(session_module.CAPABILITIES), REMOTE_ACTIONS)
 
     async def test_discovery_releases_idle_children_and_reconnect_tolerates_not_subscribed(self) -> None:
         rpc = FakeRpc(thread("root"), thread("child", parentThreadId="root"))
@@ -420,7 +420,7 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
             await discord.next("hello")
             session = bridge.sessions["root"]
             for message in (
-                command(session, "a", "end_session"),
+                command(session, "a", "status_request_unknown"),
                 command(session, "b", "pause_current_turn"),
                 {**command(session, "c", "reply", text="hi"), "session_epoch": "old"},
             ):

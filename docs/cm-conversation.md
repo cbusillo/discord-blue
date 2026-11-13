@@ -143,7 +143,7 @@ observed-message memory are not reconstructed.
 4. With Chris present, verify an allowed staff exchange and confirmed GitHub
    answer, an unknown sender, wrong channel, spoofed approval, non-CM request,
    idle/reconnect behavior and private home-session output. Confirm CM has no
-   `/code`, `/setup`, `/clear` or `/sync` commands. Source tests do not replace
+   `/session`, `/setup`, `/clear` or `/sync` commands. Source tests do not replace
    this observed channel acceptance.
 5. To remove it, Justin opens CM's **Server Settings → Members**, finds **Doug** and **kicks/removes** the bot (also remove its CM app integration if
    Discord still lists it under **Integrations**). This removes only its CM

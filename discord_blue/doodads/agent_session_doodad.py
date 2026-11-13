@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class AgentSessionDoodad(commands.Cog):
-    code_group = app_commands.Group(name="code", description="Agent session controls")
+    session_group = app_commands.Group(name="session", description="Agent session controls")
 
     def __init__(self, bot: BlueBot) -> None:
         self.bot = bot
@@ -96,24 +96,7 @@ class AgentSessionDoodad(commands.Cog):
                 payload.user_id,
             )
 
-    @code_group.command(
-        name="go-ahead",
-        description="Ask this agent session to continue until it needs you.",
-    )
-    async def go_ahead_command(self, interaction: discord.Interaction[BlueBot]) -> None:
-        if not self.bot.config.agent_session.enabled:
-            await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
-            return
-
-        if not await defer_control(interaction, ephemeral=True):
-            return
-        response = await self.bridge.controls.send_continue_autonomously(
-            interaction.channel,
-            interaction.user,
-        )
-        await interaction.followup.send(response, ephemeral=True)
-
-    @code_group.command(
+    @session_group.command(
         name="active",
         description="Show live agent sessions.",
     )
@@ -134,7 +117,7 @@ class AgentSessionDoodad(commands.Cog):
         view = ActiveSessionDashboard(self.bridge, interaction.user.id, interaction.guild_id or 0)
         await interaction.response.send_message(view=view, ephemeral=True, allowed_mentions=agent_session_allowed_mentions())
 
-    @code_group.command(
+    @session_group.command(
         name="status",
         description="Show the current agent session status.",
     )
@@ -148,7 +131,7 @@ class AgentSessionDoodad(commands.Cog):
             ephemeral=True,
         )
 
-    @code_group.command(
+    @session_group.command(
         name="pause",
         description="Ask this agent session to pause its current turn.",
     )
@@ -165,7 +148,7 @@ class AgentSessionDoodad(commands.Cog):
         )
         await interaction.followup.send(response, ephemeral=True)
 
-    @code_group.command(
+    @session_group.command(
         name="new",
         description="Ask this agent session to start a fresh chat in the same folder.",
     )
@@ -177,23 +160,6 @@ class AgentSessionDoodad(commands.Cog):
         if not await defer_control(interaction, ephemeral=True):
             return
         response = await self.bridge.controls.send_new_session(
-            interaction.channel,
-            interaction.user,
-        )
-        await interaction.followup.send(response, ephemeral=True)
-
-    @code_group.command(
-        name="end-session",
-        description="Ask this agent session to disconnect.",
-    )
-    async def end_session_command(self, interaction: discord.Interaction[BlueBot]) -> None:
-        if not self.bot.config.agent_session.enabled:
-            await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
-            return
-
-        if not await defer_control(interaction, ephemeral=True):
-            return
-        response = await self.bridge.controls.send_end_session(
             interaction.channel,
             interaction.user,
         )

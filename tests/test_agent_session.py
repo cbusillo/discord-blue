@@ -266,12 +266,12 @@ class ProtocolTests(unittest.TestCase):
             },
         )
 
-    def test_continue_command_serializes_bridge_message(self) -> None:
+    def test_pause_command_serializes_bridge_message(self) -> None:
         command = RemoteCommand(
             command_id="cmd-1",
             session_id="session-1",
             session_epoch="epoch-1",
-            kind="continue_autonomously",
+            kind="pause_current_turn",
             issued_by="123",
         )
 
@@ -282,7 +282,7 @@ class ProtocolTests(unittest.TestCase):
                 "command_id": "cmd-1",
                 "session_id": "session-1",
                 "session_epoch": "epoch-1",
-                "kind": "continue_autonomously",
+                "kind": "pause_current_turn",
                 "text": None,
                 "issued_by": "123",
             },
@@ -1670,7 +1670,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(websocket.sent_json, [])
         self.assertEqual(len(message.replies), 1)
 
-    async def test_continue_autonomously_routes_to_registered_session_websocket(self) -> None:
+    async def test_rejected_control_reports_in_thread(self) -> None:
         config = Config()
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
@@ -1679,34 +1679,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        response = await bridge.controls.send_continue_autonomously(thread, SimpleNamespace(id=123))
-
-        self.assertEqual(response, "Asked the agent session to go ahead until it needs you.")
-        self.assertEqual(len(websocket.sent_json), 1)
-        sent = websocket.sent_json[0]
-        self.assertEqual(sent["type"], "command")
-        self.assertEqual(sent["session_id"], "session-1")
-        self.assertEqual(sent["session_epoch"], "epoch-1")
-        self.assertEqual(sent["kind"], "continue_autonomously")
-        self.assertIsNone(sent["text"])
-        self.assertEqual(sent["issued_by"], "123")
-        command_id = sent["command_id"]
-        self.assertIsInstance(command_id, str)
-        pending = session.pending_commands[command_id]
-        self.assertEqual(pending.thread_id, 555)
-        self.assertIsNone(pending.message_id)
-        self.assertEqual(pending.reject_notice, "Agent session could not go ahead")
-
-    async def test_continue_autonomously_reports_reject_in_thread(self) -> None:
-        config = Config()
-        thread = FakeThread(555)
-        bridge = AgentSessionBridge(FakeBot(config, thread))
-        websocket = FakeWebSocket()
-        session = AgentSession(hello=make_hello(), websocket=websocket, thread_id=555, acknowledged=True)
-        bridge.sessions.register(session)
-        bridge.sessions.bind_thread("session-1", 555)
-
-        await bridge.controls.send_continue_autonomously(thread, SimpleNamespace(id=123))
+        await bridge.controls.send_pause_current_turn(thread, SimpleNamespace(id=123))
         command_id = websocket.sent_json[0]["command_id"]
         self.assertIsInstance(command_id, str)
         await bridge.controls.handle_command_reject(
@@ -1714,16 +1687,16 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 "command_id": command_id,
                 "session_id": "session-1",
                 "session_epoch": "epoch-1",
-                "reason": "Auto Drive is already running",
+                "reason": "No turn is running",
             }
         )
 
         self.assertEqual(
             thread.sent_messages,
-            ["Agent session could not go ahead: Auto Drive is already running"],
+            ["Agent session could not pause the current turn: No turn is running"],
         )
 
-    async def test_continue_autonomously_reports_default_reject_reason_for_empty_reason(self) -> None:
+    async def test_rejected_control_reports_default_reason_for_empty_reason(self) -> None:
         config = Config()
         thread = FakeThread(555)
         bridge = AgentSessionBridge(FakeBot(config, thread))
@@ -1732,7 +1705,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         bridge.sessions.register(session)
         bridge.sessions.bind_thread("session-1", 555)
 
-        await bridge.controls.send_continue_autonomously(thread, SimpleNamespace(id=123))
+        await bridge.controls.send_pause_current_turn(thread, SimpleNamespace(id=123))
         command_id = websocket.sent_json[0]["command_id"]
         self.assertIsInstance(command_id, str)
         await bridge.controls.handle_command_reject(
@@ -1746,7 +1719,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             thread.sent_messages,
-            ["Agent session could not go ahead: command was rejected"],
+            ["Agent session could not pause the current turn: command was rejected"],
         )
         self.assertNotIn(command_id, session.pending_commands)
 

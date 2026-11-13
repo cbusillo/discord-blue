@@ -37,13 +37,12 @@ REPLY_BEFORE_RECONNECT = (
     "This reply was written before the agent session reconnected (for example after `/clear` or `/resume`), "
     "so it was not delivered. Send it again if it still applies."
 )
-CONTINUE_AUTONOMOUSLY_DELIVERED = "Asked the agent session to go ahead until it needs you."
 PAUSE_CURRENT_TURN_DELIVERED = "Asked the agent session to pause what it is doing now."
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class SessionControl:
-    kind: Literal["continue_autonomously", "pause_current_turn", "new_session", "end_session"]
+    kind: Literal["pause_current_turn", "new_session"]
     slash_command: str
     operator_action: str
     offline_reply: str
@@ -52,15 +51,6 @@ class SessionControl:
     pending_status: str | None = None
 
 
-GO_AHEAD_CONTROL = SessionControl(
-    kind="continue_autonomously",
-    slash_command="go-ahead",
-    operator_action="ask a session to continue",
-    offline_reply="Agent session is offline; go-ahead was not delivered. Please try again after reconnecting.",
-    reject_notice="Agent session could not go ahead",
-    delivered=CONTINUE_AUTONOMOUSLY_DELIVERED,
-    pending_status="Your request is queued.",
-)
 PAUSE_CONTROL = SessionControl(
     kind="pause_current_turn",
     slash_command="pause",
@@ -77,15 +67,6 @@ NEW_SESSION_CONTROL = SessionControl(
     offline_reply="Agent session is offline; new session was not started. Please try again after reconnecting.",
     reject_notice="Agent session could not start a new session",
     delivered="Asked the agent session to start a new session in this folder.",
-)
-END_SESSION_CONTROL = SessionControl(
-    kind="end_session",
-    slash_command="end-session",
-    operator_action="end a session",
-    offline_reply="Agent session is already offline.",
-    reject_notice="Agent session could not end the session",
-    delivered="Asked the agent session to end this session.",
-    pending_status="Session end requested; waiting for the native session.",
 )
 REACTION_QUEUED = "⏳"
 REACTION_DELIVERED = "📬"
@@ -163,9 +144,7 @@ class SessionControls:
                 "reply": "replies",
                 "status_request": "status requests",
                 "pause_current_turn": "pausing turns",
-                "end_session": "ending sessions",
                 "new_session": "starting new sessions",
-                "continue_autonomously": "autonomous continuation",
                 "request_user_input_response": "answering prompts",
                 "approval_decision": "approval decisions",
             }.get(action, "this action")
@@ -318,17 +297,11 @@ class SessionControls:
                 self.show_activity(session)
         return error
 
-    async def send_continue_autonomously(self, channel: object, user: discord.User | discord.Member) -> str:
-        return await self.send_session_control(channel, user, GO_AHEAD_CONTROL)
-
     async def send_pause_current_turn(self, channel: object, user: discord.User | discord.Member) -> str:
         return await self.send_session_control(channel, user, PAUSE_CONTROL)
 
     async def send_new_session(self, channel: object, user: discord.User | discord.Member) -> str:
         return await self.send_session_control(channel, user, NEW_SESSION_CONTROL)
-
-    async def send_end_session(self, channel: object, user: discord.User | discord.Member) -> str:
-        return await self.send_session_control(channel, user, END_SESSION_CONTROL)
 
     async def send_session_control(
         self,
@@ -337,7 +310,7 @@ class SessionControls:
         control: SessionControl,
     ) -> str:
         if not isinstance(channel, discord.Thread):
-            return f"Use `/code {control.slash_command}` inside an agent session thread."
+            return f"Use `/session {control.slash_command}` inside an agent session thread."
         if not self.bridge.is_operator(user):
             return f"Only agent session operators can {control.operator_action}."
 
@@ -371,7 +344,7 @@ class SessionControls:
         user: discord.User | discord.Member,
     ) -> str:
         if not isinstance(channel, discord.Thread):
-            return "Use `/code status` inside an agent session thread."
+            return "Use `/session status` inside an agent session thread."
         if not self.bridge.is_operator(user):
             return "Only agent session operators can inspect session status."
 

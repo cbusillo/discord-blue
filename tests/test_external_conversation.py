@@ -464,7 +464,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(notify.await_args.args[0], CHANNEL)
         self.assertEqual(json.loads(notify.await_args.args[1]["content"]), item["envelope"])
         for control in (
-            {**local.event("command"), "command_id": "control", "kind": "continue_autonomously"},
+            {**local.event("command"), "command_id": "control", "kind": "pause_current_turn"},
             local.event("approval_decision", approval_id="approval"),
         ):
             response = await local.handle_control(control)

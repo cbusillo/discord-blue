@@ -395,7 +395,7 @@ class AnswerDashboardTests(unittest.IsolatedAsyncioTestCase):
                 response=SimpleNamespace(send_message=AsyncMock()),
                 followup=SimpleNamespace(send=AsyncMock()),
             )
-            command = AgentSessionDoodad.code_group.get_command("active")
+            command = AgentSessionDoodad.session_group.get_command("active")
             assert isinstance(command, discord.app_commands.Command)
             await cast(Callable[[AgentSessionDoodad, discord.Interaction], Awaitable[None]], command.callback)(
                 cast(AgentSessionDoodad, cast(object, cog)), cast(discord.Interaction, cast(object, interaction))
