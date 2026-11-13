@@ -189,7 +189,13 @@ def reaction_add(bot: BlueBot, channel_id: int, message_id: int, emoji: str, by:
     bot._connection.parse_message_reaction_add(cast(Any, data))
 
 
-def app_command(bot: BlueBot, thread: FakeThreadState, by: Json, group: str, name: str) -> int:
+def string_options(options: dict[str, str]) -> list[Json]:
+    return [{"name": key, "type": 3, "value": value} for key, value in options.items()]
+
+
+def app_command(
+    bot: BlueBot, thread: FakeThreadState, by: Json, group: str, name: str, options: dict[str, str] | None = None
+) -> int:
     """Deliver INTERACTION_CREATE for `/group name`, run by the guild member `by` in `thread`; returns its ID.
 
     The thread's own payload rides along, as Discord sends it, so discord.py builds the channel without its cache.
@@ -205,7 +211,12 @@ def app_command(bot: BlueBot, thread: FakeThreadState, by: Json, group: str, nam
         "channel_id": str(thread.id),
         "channel": thread.payload(),
         "member": {**by, "permissions": "0"},
-        "data": {"id": "1", "name": group, "type": 1, "options": [{"name": name, "type": 1, "options": []}]},
+        "data": {
+            "id": "1",
+            "name": group,
+            "type": 1,
+            "options": [{"name": name, "type": 1, "options": string_options(options or {})}],
+        },
         "app_permissions": "0",
         "attachment_size_limit": 8 * 1024 * 1024,
         "locale": "en-US",
