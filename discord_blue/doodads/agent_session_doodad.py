@@ -10,6 +10,7 @@ from discord.ext import commands
 
 from discord_blue.doodads.agent_session.bridge import AgentSessionBridge
 from discord_blue.doodads.agent_session.controls import defer_control
+from discord_blue.doodads.agent_session.launcher import MESSAGE_LIMIT
 from discord_blue.plugs.discord_plug import BlueBot
 
 logger = logging.getLogger(__name__)
@@ -167,19 +168,49 @@ class AgentSessionDoodad(commands.Cog):
         )
         await interaction.followup.send(response, ephemeral=True)
 
+    @session_group.command(
+        name="end",
+        description="End this agent session if it was started from Discord.",
+    )
+    async def end_command(self, interaction: discord.Interaction[BlueBot]) -> None:
+        if not self.bot.config.agent_session.enabled:
+            await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
+            return
+        if not await defer_control(interaction, ephemeral=True):
+            return
+        response = await self.bridge.controls.send_end_session(interaction.channel, interaction.user, self.bridge.launcher.end)
+        await interaction.followup.send(response, ephemeral=True)
+
     async def repository_autocomplete(self, interaction: discord.Interaction[BlueBot], current: str) -> list[Choice[str]]:
         if not self.bridge.is_operator(interaction.user):
             return []
         return [Choice[str](name=name, value=name) for name in self.bridge.launcher.repository_choices(current)]
 
+    async def account_autocomplete(self, interaction: discord.Interaction[BlueBot], current: str) -> list[Choice[str]]:
+        if not self.bridge.is_operator(interaction.user):
+            return []
+        harness = getattr(interaction.namespace, "harness", None)
+        choices = self.bridge.launcher.account_choices(harness if isinstance(harness, str) else None, current)
+        return [Choice[str](name=name, value=name) for name in choices]
+
     @session_group.command(
         name="start",
         description="Start a new Codex or Claude Code session on the Mac.",
     )
-    @app_commands.describe(repository="A repository folder under ~/Developer", harness="Which agent to start")
-    @app_commands.autocomplete(repository=repository_autocomplete)
+    @app_commands.describe(
+        repository="A repository folder under ~/Developer",
+        harness="Which agent to start",
+        account="Which account to run it under (default: the usual one)",
+        message="The session's first prompt",
+    )
+    @app_commands.autocomplete(repository=repository_autocomplete, account=account_autocomplete)
     async def start_command(
-        self, interaction: discord.Interaction[BlueBot], repository: str, harness: Literal["codex", "claude"]
+        self,
+        interaction: discord.Interaction[BlueBot],
+        repository: str,
+        harness: Literal["codex", "claude"],
+        account: str | None = None,
+        message: app_commands.Range[str, 1, MESSAGE_LIMIT] | None = None,
     ) -> None:
         if not self.bot.config.agent_session.enabled:
             await interaction.response.send_message("Agent sessions are not enabled.", ephemeral=True)
@@ -189,7 +220,7 @@ class AgentSessionDoodad(commands.Cog):
             return
         if not await defer_control(interaction, ephemeral=True):
             return
-        response = await self.bridge.launcher.launch(repository, harness)
+        response = await self.bridge.launcher.launch(repository, harness, account, message)
         await interaction.followup.send(response, ephemeral=True)
 
     async def cog_unload(self) -> None:

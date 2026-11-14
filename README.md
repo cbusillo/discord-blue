@@ -469,18 +469,32 @@ change kinds and diffs; permissions show the full request and grant only for
 the current turn. Oversized or fenced content, unknown fields, unavailable
 patches and session-wide file grants stay in the TUI. A changed patch retires
 its Discord prompt. MCP elicitation and other requests stay in the TUI.
-Continue and end session are not advertised.
+Continue is not advertised.
 
 To start a session in any repository, run `/session start` anywhere in the
 server: pick a repository (type to filter the folders under `~/Developer` that
 contain `.git`) and `codex` or `claude`. The bridge on the Mac starts it, and
-its Discord thread opens through the session's own connection; type the first
-message there. Codex starts in the bridge's configured (or first) Codex home.
+its Discord thread opens through the session's own connection. Optional
+`message` becomes the session's first prompt, so it starts working at once;
+without it, type the first message in the new thread. Optional `account` picks
+a named account from the bridge's `--supervisor-config` (type-ahead lists only
+names, for the chosen harness). Without it, Codex starts in the bridge's
+configured (or first) Codex home and Claude uses the default `~/.claude`. A
+Claude account runs `claude` with that account's `CLAUDE_CONFIG_DIR`; a Codex
+account starts the thread through the bridge for that account's home.
 Claude starts as a background Opus session with the `dui` channel, so the
 plugin must be approved in managed settings; its first message names the
 thread. Only
 operators can start sessions, the bridge must be running, and the repository
-list refreshes when the bridge reconnects.
+and account lists refresh when the bridge reconnects.
+
+To end a session started from Discord, run `/session end` in its thread. For
+Codex, the bridge stops keeping the thread loaded (interrupting a running turn
+first), and Codex closes it about a minute later, which archives the Discord
+thread. For Claude, the bridge runs `claude stop` for the session under the
+default account and then each named Claude account. A session started in a
+terminal is not ended from Discord: the command says to end it there. Only
+operators can end sessions.
 
 To start a fresh chat in the folder of an existing Codex Discord thread, run
 /session new there. Stock starts a fresh thread in

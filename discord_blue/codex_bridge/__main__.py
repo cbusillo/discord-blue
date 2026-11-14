@@ -17,7 +17,7 @@ from discord_blue.codex_bridge.accounts import supervisor_homes
 from discord_blue.bridge_version import bridge_version
 from discord_blue.codex_bridge.config import DEFAULT_CONFIG_PATH, BridgeConfig, load_config, socket_for_home
 from discord_blue.codex_bridge.daemon import start_daemon
-from discord_blue.codex_bridge.launcher import LiveBridge, run_launcher
+from discord_blue.codex_bridge.launcher import LiveBridges, run_launcher
 from discord_blue.release_delivery import STARTUP_RECEIPT, save_json
 
 logger = logging.getLogger(__name__)
@@ -30,14 +30,14 @@ def codex_home(value: str) -> Path:
     return Path(value)
 
 
-async def run_bridge(config: BridgeConfig, live: LiveBridge | None = None) -> None:
+async def run_bridge(config: BridgeConfig, live: LiveBridges | None = None) -> None:
     delay = config.reconnect_seconds
     while True:
         started = monotonic()
         try:
             bridge = CodexBridge(config)
             if live is not None:
-                live.bridge = bridge
+                live.by_socket[config.socket_path] = bridge
             await bridge.run()
             return
         except Exception as exc:
@@ -53,7 +53,7 @@ async def run_bridge(config: BridgeConfig, live: LiveBridge | None = None) -> No
             delay = min(delay * 2, max(config.reconnect_seconds, FAILURE_RESET_SECONDS))
 
 
-async def run_home(config: BridgeConfig, home: Path | None, codex_bin: str, live: LiveBridge | None) -> None:
+async def run_home(config: BridgeConfig, home: Path | None, codex_bin: str, live: LiveBridges | None) -> None:
     if home is not None:
         await start_daemon(home, codex_bin)
     await run_bridge(config, live)
@@ -65,7 +65,8 @@ async def run_bridges(
     codex_bin: str = "codex",
     *,
     include_configured_socket: bool = False,
-    launcher: LiveBridge | None = None,
+    launcher: LiveBridges | None = None,
+    supervisor_config: Path | None = None,
 ) -> None:
     # A connection failure is retried by its own bridge, without detaching other homes.
     sockets = [socket_for_home(home.expanduser().resolve()) for home in homes]
@@ -76,13 +77,12 @@ async def run_bridges(
     launch_socket = launch_socket if launch_socket in sockets else sockets[0]
     async with asyncio.TaskGroup() as group:
         if launcher is not None:
-            group.create_task(run_launcher(config, launcher))
+            launcher.default_socket = launch_socket
+            group.create_task(run_launcher(config, launcher, supervisor_config))
         for path in sockets:
             # Explicit custom sockets remain supported, but cannot identify a native daemon home.
             home = path.parent.parent if path == socket_for_home(path.parent.parent) else None
-            # The server's durable thread lookup includes host_label: keep it stable across home ordering changes.
-            live = launcher if path == launch_socket else None
-            group.create_task(run_home(replace(config, socket_path=path), home, codex_bin, live))
+            group.create_task(run_home(replace(config, socket_path=path), home, codex_bin, launcher))
 
 
 def startup_config(args: argparse.Namespace) -> tuple[BridgeConfig, list[Path]]:
@@ -124,7 +124,8 @@ def main() -> None:
                 homes,
                 args.codex_bin,
                 include_configured_socket=args.supervisor_config is not None,
-                launcher=LiveBridge(),
+                launcher=LiveBridges(),
+                supervisor_config=args.supervisor_config,
             )
         )
 

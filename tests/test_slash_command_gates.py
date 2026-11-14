@@ -27,7 +27,7 @@ SESSION_ID = "gated-session"
 EPHEMERAL = discord.MessageFlags(ephemeral=True).value
 COMMANDS = [command.name for command in AgentSessionDoodad.session_group.commands]
 OPTIONS = {"start": {"repository": "discord-blue", "harness": "codex"}}
-LAUNCHER_COMMANDS = set(OPTIONS)
+LAUNCHER_COMMANDS = {*OPTIONS, "end"}
 
 
 class LiveSession:

@@ -135,6 +135,32 @@ class SliceTwoTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(created.subscribed)
             self.assertNotIn({"threadId": "new-thread"}, rpc.called("thread/unsubscribe"))
 
+    async def test_end_session_releases_a_thread_the_bridge_started_so_codex_unloads_it(self) -> None:
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            created = await bridge.start_session("/work/project")
+            await discord.next("hello")
+            self.assertTrue(await until(lambda: created.server_features is not None, 2))
+            result = await discord.control(command(created, "end", "end_session"))
+            self.assertEqual(result["type"], "command_ack")
+            self.assertIn({"threadId": "new-thread"}, rpc.called("thread/unsubscribe"))
+            self.assertNotIn("new-thread", bridge.owned_threads)
+            await bridge.dispatch(
+                {"method": "thread/status/changed", "params": {"threadId": "new-thread", "status": {"type": "idle"}}}
+            )
+            self.assertFalse(created.subscribed)
+
+    async def test_end_session_leaves_a_codex_tui_thread_to_its_terminal(self) -> None:
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            self.assertTrue(await until(lambda: bridge.sessions["root"].server_features is not None, 2))
+            result = await discord.control(command(bridge.sessions["root"], "end", "end_session"))
+            self.assertEqual(result["type"], "command_reject")
+            self.assertIn("terminal", result["reason"])
+            self.assertNotIn({"threadId": "root"}, rpc.called("thread/unsubscribe"))
+
     async def test_replayed_patch_is_read_from_the_exact_turn_and_item(self) -> None:
         class ReplayRpc(FakeRpc):
             async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:

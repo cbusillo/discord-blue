@@ -173,7 +173,7 @@ class CodexBridge:
             session.on_server_request_resolved(params.get("requestId"))  # type: ignore[arg-type]
             await session.release()
 
-    async def start_session(self, cwd: str) -> None:
+    async def start_session(self, cwd: str) -> ThreadSession:
         assert self.rpc is not None
         rpc = self.rpc
         # Stock applies its configured permissions and trust policy; no sandbox or approval overrides.
@@ -190,6 +190,7 @@ class CodexBridge:
                 raise Rejected("The new thread could not be mirrored.")
             session.owned = True
             session.subscribed = True  # thread/start already subscribed this RPC client.
+            return session
         except (Rejected, RpcError, TransportError):
             self.owned_threads.discard(thread_id)
             await self.detach(thread_id)
@@ -240,6 +241,7 @@ class CodexBridge:
             thread,
             latest_turn(page),
             start_session=self.start_session,
+            disown=self.owned_threads.discard,
             owned=thread_id in self.owned_threads,
             initial_turn_id=str(latest_turn(page).get("id") or "") if "nextCursor" in page and page["nextCursor"] is None else None,
         )

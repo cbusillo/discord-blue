@@ -32,7 +32,15 @@ from discord_blue.session_titles import SessionLabel
 Json = dict[str, Any]
 logger = logging.getLogger(__name__)
 
-CAPABILITIES = ["new_session", "approval_decision", "pause_current_turn", "reply", "request_user_input_response", "status_request"]
+CAPABILITIES = [
+    "new_session",
+    "end_session",
+    "approval_decision",
+    "pause_current_turn",
+    "reply",
+    "request_user_input_response",
+    "status_request",
+]
 COMMAND_APPROVAL = "item/commandExecution/requestApproval"
 USER_INPUT = "item/tool/requestUserInput"
 WAITING_LOCALLY = "Waiting on a decision in the Codex TUI"
@@ -62,6 +70,8 @@ TEXT_LIMIT = 32_000
 REPLY_LIMIT = 16_000
 SEEN_LIMIT = 256
 TURN_DONE = "Turn complete. Replies here will start the next turn."
+ENDING = "Ending this session; its thread closes within about a minute."
+NOT_OWNED = "This Codex thread belongs to a Codex TUI; end it in its terminal."
 LOST_CODEX = "Lost the Codex connection, so delivery is uncertain. Check the Codex TUI before retrying."
 
 
@@ -120,7 +130,8 @@ class ThreadSession(AgentSessionClient):
         thread: Json,
         latest: Json,
         *,
-        start_session: Callable[[str], Awaitable[None]] | None = None,
+        start_session: Callable[[str], Awaitable[object]] | None = None,
+        disown: Callable[[str], None] | None = None,
         owned: bool = False,
         initial_turn_id: str | None = None,
     ) -> None:
@@ -128,6 +139,7 @@ class ThreadSession(AgentSessionClient):
         self.config: BridgeConfig = config
         self.rpc = rpc
         self.start_session = start_session
+        self.disown = disown
         self.owned = owned
         self.file_items: dict[tuple[str, str], Json] = {}
         self.approval_responses: dict[RequestId, Json] = {}
@@ -395,16 +407,9 @@ class ThreadSession(AgentSessionClient):
             text = message.get("text")
             if not isinstance(text, str) or not text.strip() or len(text) > REPLY_LIMIT:
                 raise Rejected(f"Replies must contain 1 to {REPLY_LIMIT} characters.")
-            client_id = f"discord-blue-{uuid.uuid4().hex}"
-            self.echo_ids.append(client_id)
-            await self.subscribe()
-            # Stock turn/start steers the active turn or starts a new one.
-            params = {"threadId": self.thread_id, "input": [{"type": "text", "text": text}], "clientUserMessageId": client_id}
-            try:
-                await self.rpc.request("turn/start", params)
-            except RpcError:
-                await self.release()
-                raise
+            await self.start_turn(text, already_in_discord=True)
+        elif kind == "end_session":
+            await self.end_owned_thread()
         elif kind == "new_session":
             if self.start_session is None or not self.cwd:
                 raise Rejected("This bridge cannot start a session in this folder.")
@@ -432,6 +437,33 @@ class ThreadSession(AgentSessionClient):
             await self.rpc.respond(request_id, {"answers": answers})
         else:
             raise Rejected("The Codex bridge does not support this action; use the Codex TUI.")
+
+    async def start_turn(self, text: str, *, already_in_discord: bool) -> None:
+        client_id = f"discord-blue-{uuid.uuid4().hex}"
+        if already_in_discord:
+            self.echo_ids.append(client_id)
+        await self.subscribe()
+        # Stock turn/start steers the active turn or starts a new one.
+        params = {"threadId": self.thread_id, "input": [{"type": "text", "text": text}], "clientUserMessageId": client_id}
+        try:
+            await self.rpc.request("turn/start", params)
+        except RpcError:
+            await self.release()
+            raise
+
+    async def end_owned_thread(self) -> None:
+        if not self.owned:
+            raise Rejected(NOT_OWNED)
+        if self.active_turn_id is not None:
+            await self.rpc.request("turn/interrupt", {"threadId": self.thread_id, "turnId": self.active_turn_id})
+        async with self.membership:
+            self.owned = False
+            if self.disown is not None:
+                self.disown(self.thread_id)
+            if self.subscribed:
+                self.subscribed = False
+                await self.rpc.request("thread/unsubscribe", {"threadId": self.thread_id})
+        self.publish("notice", message=ENDING)
 
     async def approval_decision(self, message: Json) -> Json:
         approval_id = str(message.get("approval_id") or "")
