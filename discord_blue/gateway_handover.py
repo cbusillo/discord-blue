@@ -28,7 +28,6 @@ _STATE_LOCKS: dict[Path, int] = {}
 SHUTDOWN_TIMEOUT_SECONDS = 90.0
 CHECKPOINT_MAX_AGE_SECONDS = 60.0
 RESUME_TIMEOUT_SECONDS = 30.0
-REPLAY_ENABLED = False
 INTERACTION_REPLAY_BUDGET_SECONDS = 2.0
 EXPIRED_INTERACTION_NOTICE = "That control expired. Please try again."
 logger = logging.getLogger(__name__)
@@ -183,10 +182,6 @@ class GatewayHandover:
         except OSError:
             self.status = "unreplayed"
             logger.warning("Unable to take Gateway checkpoint; earlier work cannot be replayed", exc_info=True)
-            return None
-        if continuation is not None and not REPLAY_ENABLED:
-            self.status = "unreplayed"
-            logger.info("Gateway checkpoint consumed; replay is disabled for the checkpoint-only release")
             return None
         return continuation
 

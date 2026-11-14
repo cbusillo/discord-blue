@@ -48,6 +48,7 @@ class ConversationRouter:
         self.replay_until = 0.0
         self.changed = asyncio.Condition()
         self.continuation: dict[str, Any] | None = None
+        self.replay_epoch: str | None = None
 
     def export(self) -> dict[str, Any]:
         connection = self.connection
@@ -79,6 +80,7 @@ class ConversationRouter:
         if any(len(values) > MEMORY_LIMIT for values in (seen, observed, replies)) or len(pending) > INBOX_LIMIT:
             raise ValueError("Conversation continuation exceeds its bounds")
         self.continuation = saved
+        self.replay_epoch = saved["epoch"]
         self.seen = seen
         self.observed = observed
 
@@ -171,9 +173,9 @@ class ConversationRouter:
                             max(0, self.replay_until - asyncio.get_running_loop().time()),
                         )
             async with self.connection_lock:
-                return await self.deliver_envelope(command_id, envelope)
+                return await self.deliver_envelope(command_id, envelope, replaying=replaying)
 
-    async def deliver_envelope(self, command_id: str, envelope: dict[str, Any]) -> bool:
+    async def deliver_envelope(self, command_id: str, envelope: dict[str, Any], *, replaying: bool) -> bool:
         channel, binding, connection = self.channel(), self.binding(), self.connection
         if channel is None:
             return False
@@ -184,6 +186,7 @@ class ConversationRouter:
             or connection.websocket.closed
             or connection.binding != binding
             or connection.session_id != self.bot.config.conversation.session_id
+            or (replaying and connection.epoch != self.replay_epoch)
         ):
             await channel.send(
                 "The CM conversation is offline. Please resend when it is connected.",

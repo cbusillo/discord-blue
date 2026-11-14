@@ -1017,14 +1017,12 @@ atomic checkpoint only after cleanup succeeds. The socket closes without
 invalidating its Discord session. Startup sends no Connected or Loaded-command
 notice.
 
-Rollout has two releases. This first release saves and consumes checkpoints but
-keeps replay disabled. After it is accepted, a second source change enables
-replay. Each startup reads and deletes the checkpoint before using it; deletion
+Each startup reads and deletes the checkpoint before using it; deletion
 failure prevents replay. Checkpoints older than one minute are ignored. No
-Launchplane predecessor-identity contract is needed. Rolling back from release 2
-to release 1 skips catch-up for that transition.
+Launchplane predecessor-identity contract is needed. Rolling back to a release
+without replay skips catch-up for that transition.
 
-With replay enabled, the successor rebuilds the SDK cache and resumes the
+The successor rebuilds the SDK cache and resumes the
 Gateway session. Replies and approval reactions wait for the matching native
 session and request. Changed epochs cannot inherit old replies or approval
 authority. Native clients resend their pending requests; the bot retains only
@@ -1040,7 +1038,7 @@ can become healthy once Discord and the bridge recover. A failed planned resume
 or cache rebuild also falls back to IDENTIFY but remains failed catch-up, as
 does a replay error. A fresh IDENTIFY does not qualify that planned handover.
 
-With replay enabled, the CM conversation retains unacknowledged input, reply
+The CM conversation retains unacknowledged input, reply
 deduplication and observed-message context, bound to its configured destination
 and native epoch. Reconnection flushes older pending input before new sends. Native waits
 are bounded, with one CM reconnect budget for the catch-up backlog; an offline
@@ -1061,7 +1059,7 @@ the continuation is saved before the provider ends the process.
 The first installation over an older image has no usable checkpoint. An unclean
 kill, missing shared state, session expiry or provider stop timeout can also
 prevent catch-up. Use the existing gated release and rollback paths. The first
-normal release after replay is enabled supplies the single-owner, catch-up and
+normal release after replay was enabled supplies the single-owner, catch-up and
 no-red-flip proof on [launchplane#5352](https://github.com/cbusillo/launchplane/issues/5352).
 
 - CI proves the Docker image builds for every PR and push with read-only permissions.

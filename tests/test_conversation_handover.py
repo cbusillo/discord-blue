@@ -85,6 +85,26 @@ class ConversationHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deletion["envelope"]["event"], "deletion")
         self.assertEqual(deletion["envelope"]["message_id"], original.id)
 
+    async def test_replayed_input_never_reaches_a_new_epoch(self) -> None:
+        old = AgentSessionBridge(cast(Any, self.bot))
+        await self.connect(await self.endpoint(old))
+        saved = json.loads(json.dumps(old.conversations.export()))
+        await old.conversations.stop()
+        successor = AgentSessionBridge(cast(Any, self.bot))
+        successor.conversations.restore(saved)
+        socket = await self.connect(await self.endpoint(successor), session_epoch="inert-new-epoch")
+        replayed = asyncio.create_task(successor.conversations.receive_message(message(message_id=501)))
+        self.bot.handover.replay = {replayed}
+        try:
+            self.assertFalse(await asyncio.wait_for(replayed, 2))
+        finally:
+            self.bot.handover.replay.clear()
+        self.assertEqual(self.destination.send.await_count, 1)
+        self.assertTrue(await successor.conversations.receive_message(message(message_id=502)))
+        delivered = await socket.receive_json(timeout=2)
+        self.assertEqual(delivered["envelope"]["message_id"], 502)
+        self.assertEqual(delivered["session_epoch"], "inert-new-epoch")
+
     async def test_changed_binding_does_not_inherit_pending_external_input(self) -> None:
         bridge = AgentSessionBridge(cast(Any, self.bot))
         saved = json.loads(json.dumps(bridge.conversations.export()))
@@ -201,6 +221,7 @@ class ConversationHandoverTests(unittest.IsolatedAsyncioTestCase):
         await bridge.conversations.receive_message(old_message)
         command = await old.receive_json(timeout=2)
         await old.close()
+        bridge.conversations.restore(json.loads(json.dumps(bridge.conversations.export())))
         replayed = asyncio.create_task(bridge.conversations.receive_message(replay_message))
         self.bot.handover.replay = {replayed}
         await asyncio.sleep(0)

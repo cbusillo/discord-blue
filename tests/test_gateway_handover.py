@@ -31,7 +31,6 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.folder = Path(self.enterContext(TemporaryDirectory()))
         self.enterContext(patch("pathlib.Path.home", return_value=self.folder))
-        self.enterContext(patch("discord_blue.gateway_handover.REPLAY_ENABLED", True, create=True))
         self.bot = BlueBot(cast(Any, SimpleNamespace(discord=SimpleNamespace(guild_id=1, bot_channel_id=2))))
         await self.bot._async_setup_hook()
         self.addAsyncCleanup(self.bot.close)
@@ -408,10 +407,6 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         self.bot.handover.path.write_text(json.dumps(value))
         await self.identify_without_replay()
 
-    async def test_checkpoint_only_release_consumes_checkpoint_and_identifies(self) -> None:
-        with patch("discord_blue.gateway_handover.REPLAY_ENABLED", False):
-            await self.identify_without_replay()
-
     async def test_cache_discord_failure_falls_back_to_identify(self) -> None:
         with patch.object(self.bot, "fetch_guild", side_effect=discord.DiscordException("inert cache failure")):
             task = self.begin()
@@ -475,13 +470,13 @@ class GatewayHandoverTests(unittest.IsolatedAsyncioTestCase):
         await self.finish(task)
 
     async def test_identified_runtime_can_reidentify_after_a_later_invalid_session(self) -> None:
-        with patch("discord_blue.gateway_handover.REPLAY_ENABLED", False):
-            task = self.begin()
-            await asyncio.wait_for(self.identified_event.wait(), 1)
-            self.bot.handover.observe({"op": DiscordWebSocket.INVALIDATE_SESSION, "d": False})
-            self.bot.handover.observe({"op": DiscordWebSocket.DISPATCH, "t": "READY"})
-            self.assertTrue(self.bot.handover.healthy())
-            await self.finish(task)
+        self.bot.handover.path.unlink()
+        task = self.begin()
+        await asyncio.wait_for(self.identified_event.wait(), 1)
+        self.bot.handover.observe({"op": DiscordWebSocket.INVALIDATE_SESSION, "d": False})
+        self.bot.handover.observe({"op": DiscordWebSocket.DISPATCH, "t": "READY"})
+        self.assertTrue(self.bot.handover.healthy())
+        await self.finish(task)
 
     async def test_resume_timeout_stops_at_resumed_before_slow_startup(self) -> None:
         entered, release = asyncio.Event(), asyncio.Event()
