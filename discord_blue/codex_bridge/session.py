@@ -293,11 +293,12 @@ class ThreadSession(AgentSessionClient):
         async with self.membership:
             if self.owned or not self.subscribed or self.active_turn_id is not None or self.prompts:
                 return
-            self.subscribed = False
             try:
                 await self.rpc.request("thread/unsubscribe", {"threadId": self.thread_id})
             except RpcError as exc:
                 logger.warning("Could not unsubscribe from Codex thread %s: %s", self.thread_id, exc)
+                return
+            self.subscribed = False
 
     def on_request(self, request_id: RequestId, method: str, params: Json) -> None:
         if request_id in self.prompts:
@@ -457,12 +458,12 @@ class ThreadSession(AgentSessionClient):
         if self.active_turn_id is not None:
             await self.rpc.request("turn/interrupt", {"threadId": self.thread_id, "turnId": self.active_turn_id})
         async with self.membership:
+            if self.subscribed:
+                await self.rpc.request("thread/unsubscribe", {"threadId": self.thread_id})
+                self.subscribed = False
             self.owned = False
             if self.disown is not None:
                 self.disown(self.thread_id)
-            if self.subscribed:
-                self.subscribed = False
-                await self.rpc.request("thread/unsubscribe", {"threadId": self.thread_id})
         self.publish("notice", message=ENDING)
 
     async def approval_decision(self, message: Json) -> Json:
