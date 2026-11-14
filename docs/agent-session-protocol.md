@@ -194,7 +194,6 @@ and observed-message context, bound to its destination and native epoch. It
 can contain private conversation text; keep it on the private HOME volume and
 out of logs and exported health evidence. Startup consumes it before replay,
 refuses replay when deletion fails, and ignores records older than one minute.
-The initial checkpoint-only release keeps replay disabled until its acceptance.
 
 Server shutdown keeps live threads, members and notifications intact and closes
 only their WebSockets. On startup, live, attaching and grace records receive

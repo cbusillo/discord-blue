@@ -103,16 +103,16 @@ cannot choose a guild/channel. Replies suppress all mentions and link previews,
 use the existing splitter, and require the active session/epoch/binding.
 Reuse the same reply ID and text after uncertain delivery. Successful chunks
 are remembered for same-process reconnects; Discord's nonce deduplication also
-covers recent uncertain sends. In the checkpoint-only release, a bot restart
-ends this memory, so check the channel before retrying an old uncertain reply.
-Once replay is enabled, a valid checkpoint preserves pending input and reply
+covers recent uncertain sends. A valid checkpoint preserves pending input and reply
 deduplication across a restart for the same epoch and configured destination.
+Without one, a restart ends this memory, so check the channel before retrying
+an old uncertain reply.
 
 The inbox is bounded. A connected same-epoch client receives unacknowledged
 input again and deduplicates it; a new epoch never inherits old pending input.
 When offline/full, an allowed sender in the configured channel receives a
 resend notice. Historical catch-up is limited to a valid, resumed Gateway
-checkpoint once replay is enabled. Edits and observed
+checkpoint. Edits and observed
 message deletions arrive as separate amendments with provenance; they do not
 silently replace a confirmed fact. Deletions of messages outside the bounded
 observed-message memory are not reconstructed.
