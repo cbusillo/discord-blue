@@ -709,7 +709,10 @@ Behaviour and limits:
   next conversation.
 - Each dialog reaches the channel as the plugin's `PermissionRequest` hook
   call before Claude Code shows it, and the call waits for a Discord answer, for
-  up to a day. A Discord answer becomes that call's decision, so it can only
+  up to a day. A worker the Supervisor launched has nobody at its terminal, so
+  after two minutes without an answer its card closes and Claude Code is told
+  no; the worker reports what it needed and goes on. Its cards' first line
+  names the issue the worker was launched for and the command. A Discord answer becomes that call's decision, so it can only
   apply to that dialog, and a reply typed meanwhile leaves the card open. A
   command shows as a command; any other tool shows its exact input. Approve
   allows that call once with exactly the input shown; Discord never offers

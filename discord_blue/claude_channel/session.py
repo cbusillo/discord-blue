@@ -9,7 +9,8 @@ this server as the plugin's PermissionRequest hook call, with the tool's exact
 input, before Claude Code shows it: the terminal shows nothing until the call
 returns. While a Discord card is open the call waits: a Discord answer becomes
 the hook's decision, so it can only apply to that dialog, and an allow carries
-the exact input Discord showed. Anything Discord cannot show whole returns at
+the exact input Discord showed. A spawned worker's dialog nobody answers is
+denied after two minutes. Anything Discord cannot show whole returns at
 once, so Claude Code shows it in the terminal or applies its own settings.
 Claude Code tells no hook when the terminal rejected a call, so a Discord answer
 first checks the transcript for the call's result.
@@ -59,6 +60,19 @@ CHANNEL = "notifications/claude/channel"
 WAITING_LOCALLY = "Claude Code is waiting on you in the terminal"
 ANSWERED_IN_TERMINAL = "That was already answered in the Claude Code terminal."
 CONTINUING = "Answered; continuing the turn."
+# A spawned worker has nobody at its terminal: a dialog nobody answers in Discord is denied after this long,
+# so the worker can report what it needed and go on instead of waiting out the hook's day-long timeout.
+UNATTENDED_DIALOG_SECONDS = 120.0
+UNANSWERED = (
+    "Nobody answered this permission request in Discord within two minutes, so it was denied. "
+    "Do not retry it; report what you needed and continue with other work."
+)
+UNANSWERED_NOTICE = "Nobody answered within two minutes, so Claude Code was told no"
+# The issue a Supervisor brief names first as its anchor, as the launcher reads it.
+ANCHOR = re.compile(
+    r"(?mi)^\s*(?:[-*] )?(?:\*\*)?(?:Read-only anchor|Anchor(?: and claim)?):(?:\*\*)?[^\S\n]*"
+    r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/(\d+)\b"
+)
 QUESTION_TOOL = "AskUserQuestion"
 # Bash fields a command card leaves unshown: Claude's own description is shown as the reason, and a timeout or
 # running in the background changes how the command runs, not what it does. Any other field shows the whole input.
@@ -203,6 +217,12 @@ class Dialog:
     answer: asyncio.Future[Json | None]
 
 
+def brief_anchor(brief: str | None) -> str | None:
+    """The brief's first anchor issue as OWNER/REPO#N, so each worker's cards say whose they are."""
+    match = ANCHOR.search(brief or "")
+    return f"{match[1]}#{match[2]}" if match else None
+
+
 def unflagged_notice(session_id: str) -> str:
     return (
         "This Claude Code session was started without the dui channel, so Discord replies cannot reach it; "
@@ -224,6 +244,7 @@ class ClaudeSession(AgentSessionClient):
         self.label = SessionLabel()
         self.transcript = TranscriptTitles()
         self.launch_brief_pending = identity.spawned and identity.launch_prompt is not None
+        self.anchor = brief_anchor(identity.launch_prompt) if identity.spawned else None
         self.pending_input: tuple[dict[str, str], str] | None = None
         self.prompt_watch: asyncio.Task[None] | None = None
         self.ending: tuple[Json, asyncio.Event] | None = None
@@ -296,7 +317,10 @@ class ClaudeSession(AgentSessionClient):
             self.prompts[key] = prompt
             self.enqueue(prompt)
         try:
-            decision = await dialog.answer
+            wait = UNATTENDED_DIALOG_SECONDS if self.identity.spawned else None
+            decision = await asyncio.wait_for(asyncio.shield(dialog.answer), wait)
+        except TimeoutError:
+            decision = self.unanswered(key, dialog)
         except asyncio.CancelledError:
             # The hook timed out; Claude Code takes the dialog back.
             if (prompt := self.prompts.pop(key, None)) is not None:
@@ -304,6 +328,16 @@ class ClaudeSession(AgentSessionClient):
                 self.wait_locally(tool_name)
             raise
         return "" if decision is None else hook_decision(decision)
+
+    def unanswered(self, key: str, dialog: Dialog) -> Json:
+        """Deny a spawned worker's dialog nobody answered, and close its card; the denial lets the turn go on."""
+        decision: Json = {"behavior": "deny", "message": UNANSWERED}
+        dialog.answer.set_result(decision)
+        if (prompt := self.prompts.pop(key, None)) is not None:
+            self.retire(prompt)
+        shown = dialog.tool_name if TOOL_NAME.fullmatch(dialog.tool_name) else "a tool"
+        self.publish("notice", message=f"{UNANSWERED_NOTICE} ({shown}).")
+        return decision
 
     def tool_use_id(self, tool_name: str, tool_input: Json | None) -> str | None:
         """The oldest unclaimed matching call, so identical parallel calls each keep their own ID."""
@@ -335,6 +369,7 @@ class ClaudeSession(AgentSessionClient):
                 command_text=command,
                 cwd=fields.get("cwd") or self.identity.cwd,
                 reason=description if isinstance(description, str) else None,
+                **({"anchor": self.anchor} if self.anchor else {}),
             )
         text = json.dumps({"tool": dialog.tool_name, "input": tool_input}, indent=2, ensure_ascii=False)
         if not approval_content_displayable("tool", text):
@@ -346,6 +381,7 @@ class ClaudeSession(AgentSessionClient):
             turn_id=turn_id,
             approval_kind="tool",
             content_text=text,
+            **({"anchor": self.anchor} if self.anchor else {}),
         )
 
     def shows(self, prompt: Json) -> bool:
