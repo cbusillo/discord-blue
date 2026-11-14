@@ -42,7 +42,7 @@ PAUSE_CURRENT_TURN_DELIVERED = "Asked the agent session to pause what it is doin
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class SessionControl:
-    kind: Literal["pause_current_turn", "new_session"]
+    kind: Literal["pause_current_turn", "new_session", "end_session"]
     slash_command: str
     operator_action: str
     offline_reply: str
@@ -67,6 +67,14 @@ NEW_SESSION_CONTROL = SessionControl(
     offline_reply="Agent session is offline; new session was not started. Please try again after reconnecting.",
     reject_notice="Agent session could not start a new session",
     delivered="Asked the agent session to start a new session in this folder.",
+)
+END_SESSION_CONTROL = SessionControl(
+    kind="end_session",
+    slash_command="end",
+    operator_action="end a session",
+    offline_reply="Agent session is offline; it was not ended. Please try again after reconnecting.",
+    reject_notice="Agent session could not end",
+    delivered="Asked the agent session to end.",
 )
 REACTION_QUEUED = "⏳"
 REACTION_DELIVERED = "📬"
@@ -145,6 +153,7 @@ class SessionControls:
                 "status_request": "status requests",
                 "pause_current_turn": "pausing turns",
                 "new_session": "starting new sessions",
+                "end_session": "ending sessions",
                 "request_user_input_response": "answering prompts",
                 "approval_decision": "approval decisions",
             }.get(action, "this action")
@@ -302,6 +311,14 @@ class SessionControls:
 
     async def send_new_session(self, channel: object, user: discord.User | discord.Member) -> str:
         return await self.send_session_control(channel, user, NEW_SESSION_CONTROL)
+
+    async def send_end_session(
+        self, channel: object, user: discord.User | discord.Member, end_claude: Callable[[str], Awaitable[str]]
+    ) -> str:
+        session = self.bridge.sessions.get_by_thread(channel.id) if isinstance(channel, discord.Thread) else None
+        if session is not None and session.hello.harness == "claude" and self.bridge.is_operator(user):
+            return await end_claude(session.session_id)
+        return await self.send_session_control(channel, user, END_SESSION_CONTROL)
 
     async def send_session_control(
         self,

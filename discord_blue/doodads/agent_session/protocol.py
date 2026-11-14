@@ -44,6 +44,7 @@ REMOTE_ACTIONS = frozenset(
         "status_request",
         "pause_current_turn",
         "new_session",
+        "end_session",
         "request_user_input_response",
         "approval_decision",
     }
@@ -303,6 +304,7 @@ class RemoteCommand:
         "reply",
         "pause_current_turn",
         "new_session",
+        "end_session",
         "request_user_input_response",
         "status_request",
     ]

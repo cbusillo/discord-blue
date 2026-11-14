@@ -404,6 +404,7 @@ A command has `type: "command"`, `command_id`, `session_id`, `session_epoch`,
 | `reply`                       | Deliver `text` to the active session.                                                                   |
 | `pause_current_turn`          | Interrupt the current turn.                                                                             |
 | `new_session`                 | Start a fresh chat in the same working directory.                                                       |
+| `end_session`                 | End a session the client started itself; reject one owned by a terminal.                               |
 | `status_request`              | Publish current session status.                                                                         |
 | `request_user_input_response` | Resolve `call_id` / `turn_id` using `response.answers`, mapping question IDs to `{"answers":["text"]}`. |
 
@@ -482,15 +483,19 @@ every 60 seconds, so it takes over once the first leaves.
 After connecting, the Mac sends:
 
 ```json
-{"type": "launcher_hello", "host_label": "Codex on Mac", "repositories": ["discord-blue"], "harnesses": ["codex", "claude"]}
+{"type": "launcher_hello", "host_label": "Codex on Mac", "repositories": ["discord-blue"], "harnesses": ["codex", "claude"], "accounts": [{"name": "claude-info", "harness": "claude"}]}
 ```
 
 `repositories` are the names of the direct children of `~/Developer` that
-contain `.git`, read on every connection. The bot offers them for
-autocomplete and sends only a listed name and harness:
+contain `.git`, read on every connection. `accounts` lists only the names and
+harnesses of the `anthropic` and `openai` entries in the bridge's
+`--supervisor-config`, never their homes; it is empty without one. The bot
+offers repositories and accounts for autocomplete and sends only listed names,
+plus an optional `account` and an optional `message` of at most 4000
+characters:
 
 ```json
-{"type": "launch", "launch_id": "<hex>", "repository": "discord-blue", "harness": "claude"}
+{"type": "launch", "launch_id": "<hex>", "repository": "discord-blue", "harness": "claude", "account": "claude-info", "message": "Fix the login bug"}
 ```
 
 The Mac maps the name to a folder it found itself, never a path from the bot,
@@ -500,10 +505,26 @@ and answers:
 {"type": "launch_result", "launch_id": "<hex>", "ok": true, "message": "backgrounded · 4622a28e · discord-blue (idle — send a prompt to start)"}
 ```
 
-`codex` starts a thread through the bridge's current app-server connection
-(the same path as `new_session`). `claude` runs `claude --bg --model opus
---channels plugin:dui@discord-blue` in the folder and reports
-its first output line. The bot waits 60 seconds for a result.
+`codex` starts a thread through the current app-server connection for the
+account's home, or the default one (the same path as `new_session`), then
+sends `message` as its first turn the way a Discord reply is sent. `claude`
+runs `claude --bg --model opus --channels plugin:dui@discord-blue`, followed by
+`--` and `message` when given, in the folder, with the account's
+`CLAUDE_CONFIG_DIR` (none for the default `~/.claude`), and reports its first
+output line. The bot waits 60 seconds for a result.
+
+`/session end` in a Claude Code thread sends the session ID the bot already
+holds:
+
+```json
+{"type": "end", "end_id": "<hex>", "session_id": "<claude session id>"}
+```
+
+The Mac runs `claude stop <first 8 characters>` under the default account and
+then each named Claude account until one stops it, and answers
+`{"type": "end_result", "end_id": "<hex>", "ok": false, "message": "..."}`. When
+no account knows the session, it was started in a terminal and the message says
+to end it there. Codex threads are ended with the `end_session` command instead.
 
 ## External CM conversation capability
 

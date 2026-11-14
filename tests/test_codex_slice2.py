@@ -4,6 +4,7 @@ import json
 from typing import Any
 import unittest
 
+from discord_blue.codex_bridge.rpc import RpcError
 from discord_blue.doodads.agent_session.protocol import RemoteApprovalRequest
 from discord_blue.doodads.agent_session.interactions import SessionInteractions
 from tests.test_attach_scenarios import until
@@ -134,6 +135,56 @@ class SliceTwoTests(unittest.IsolatedAsyncioTestCase):
             await created.release()
             self.assertTrue(created.subscribed)
             self.assertNotIn({"threadId": "new-thread"}, rpc.called("thread/unsubscribe"))
+
+    async def test_end_session_releases_a_thread_the_bridge_started_so_codex_unloads_it(self) -> None:
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            created = await bridge.start_session("/work/project")
+            await discord.next("hello")
+            self.assertTrue(await until(lambda: created.server_features is not None, 2))
+            result = await discord.control(command(created, "end", "end_session"))
+            self.assertEqual(result["type"], "command_ack")
+            self.assertIn({"threadId": "new-thread"}, rpc.called("thread/unsubscribe"))
+            self.assertNotIn("new-thread", bridge.owned_threads)
+            await bridge.dispatch(
+                {"method": "thread/status/changed", "params": {"threadId": "new-thread", "status": {"type": "idle"}}}
+            )
+            self.assertFalse(created.subscribed)
+
+    async def test_a_rejected_unsubscribe_keeps_the_thread_so_end_session_can_be_retried(self) -> None:
+        class RejectOnceRpc(FakeRpc):
+            rejected = False
+
+            async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+                if method == "thread/unsubscribe" and not self.rejected:
+                    self.rejected = True
+                    self.calls.append((method, params))
+                    raise RpcError(None)
+                return await super().request(method, params)
+
+        rpc = RejectOnceRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            created = await bridge.start_session("/work/project")
+            await discord.next("hello")
+            self.assertTrue(await until(lambda: created.server_features is not None, 2))
+            self.assertEqual((await discord.control(command(created, "first", "end_session")))["type"], "command_reject")
+            self.assertTrue(created.owned and created.subscribed)
+            self.assertIn("new-thread", bridge.owned_threads)
+            self.assertEqual((await discord.control(command(created, "second", "end_session")))["type"], "command_ack")
+            self.assertFalse(created.owned or created.subscribed)
+            self.assertNotIn("new-thread", bridge.owned_threads)
+
+    async def test_end_session_leaves_a_codex_tui_thread_to_its_terminal(self) -> None:
+        rpc = FakeRpc(thread("root"))
+        async with running_bridge(rpc) as (bridge, discord):
+            await discord.next("hello")
+            self.assertTrue(await until(lambda: bridge.sessions["root"].server_features is not None, 2))
+            result = await discord.control(command(bridge.sessions["root"], "end", "end_session"))
+            self.assertEqual(result["type"], "command_reject")
+            self.assertIn("terminal", result["reason"])
+            self.assertNotIn({"threadId": "root"}, rpc.called("thread/unsubscribe"))
 
     async def test_replayed_patch_is_read_from_the_exact_turn_and_item(self) -> None:
         class ReplayRpc(FakeRpc):
