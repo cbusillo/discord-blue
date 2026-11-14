@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -9,6 +10,8 @@ from discord_blue.doodads.agent_session.chunks import DISCORD_MESSAGE_LIMIT
 # Discord shows at most this many characters of an approval's shell-joined command.
 # Clients must not offer a Discord approval for a command longer than this.
 APPROVAL_COMMAND_DISPLAY_LIMIT = 1600
+# The part of a command a card's first line repeats; the whole command shows below it.
+APPROVAL_HEAD_LIMIT = 60
 
 
 # What this server supports beyond the base protocol, listed in hello_ack as `features`. A client must not
@@ -21,11 +24,16 @@ def command_text_displayable(text: str) -> bool:
     return bool(text) and len(text) <= APPROVAL_COMMAND_DISPLAY_LIMIT and "```" not in text
 
 
-def format_content_approval(kind: str, text: str) -> str:
+# An issue as OWNER/REPO#N, the only form a card's first line shows.
+ISSUE_REFERENCE = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}#[0-9]{1,10}")
+
+
+def format_content_approval(kind: str, text: str, anchor: str | None = None) -> str:
     label = {"file_change": "File change", "permissions": "Permissions (this turn only)", "tool": "Tool call"}.get(
         kind, "Unsupported"
     )
-    return f"**{label} approval requested**\nQuick review: `✅` approve · `✖️` deny\n\n```json\n{text}\n```"
+    title = f"{label} approval requested" + (f" · {anchor}" if anchor else "")
+    return f"**{title}**\nQuick review: `✅` approve · `✖️` deny\n\n```json\n{text}\n```"
 
 
 def approval_content_displayable(kind: str, text: str) -> bool:
@@ -257,6 +265,8 @@ class RemoteApprovalRequest:
 
     approval_kind: str = "command"
     content_text: str | None = None
+    # The issue the requesting worker was launched for, so the Director can tell workers' cards apart.
+    anchor: str | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "RemoteApprovalRequest":
@@ -275,6 +285,7 @@ class RemoteApprovalRequest:
             command_text=payload["command_text"] if isinstance(payload.get("command_text"), str) else None,
             approval_kind=str(payload.get("approval_kind") or "command"),
             content_text=payload["content_text"] if isinstance(payload.get("content_text"), str) else None,
+            anchor=anchor if isinstance(anchor := payload.get("anchor"), str) and ISSUE_REFERENCE.fullmatch(anchor) else None,
         )
 
 

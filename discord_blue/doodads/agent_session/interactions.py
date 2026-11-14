@@ -28,6 +28,7 @@ from discord_blue.doodads.agent_session.messages import (
 )
 from discord_blue.doodads.agent_session.protocol import (
     APPROVAL_COMMAND_DISPLAY_LIMIT,
+    APPROVAL_HEAD_LIMIT,
     RemoteApprovalDecision,
     RemoteApprovalRequest,
     RemoteCommand,
@@ -424,6 +425,10 @@ class SessionInteractions:
                 await self.stays_native(session, "Action required in the native TUI; Discord cannot show this request in full.")
                 return
         content = self.format_approval_request(approval)
+        if approval.anchor is not None and len(content.encode("utf-16-le")) // 2 > DISCORD_MESSAGE_LIMIT:
+            # The request itself must show whole; the anchor is only a label.
+            approval = dataclasses.replace(approval, anchor=None)
+            content = self.format_approval_request(approval)
         if approval.command_text is not None and (
             not command_text_displayable(approval.command_text)
             # The reason may be cut short; the command and directory may not.
@@ -845,13 +850,19 @@ class SessionInteractions:
     def format_approval_request(approval: RemoteApprovalRequest) -> str:
         """The approval message, untruncated; a raw command_text is shown verbatim instead of the re-quoted argv."""
         if approval.content_text is not None:
-            return format_content_approval(approval.approval_kind, approval.content_text)
+            return format_content_approval(approval.approval_kind, approval.content_text, approval.anchor)
         if approval.command_text is not None:
             command = approval.command_text
         else:
             command = shlex.join(approval.command) if approval.command else ""
+        title = "**Approval requested**"
+        if approval.anchor is not None:
+            # A phone notification shows only the first line; say whose request it is and what it runs.
+            head = command.strip().splitlines()[0].replace("`", "'") if command.strip() else ""
+            head = head if len(head) <= APPROVAL_HEAD_LIMIT else head[: APPROVAL_HEAD_LIMIT - 1] + "…"
+            title = f"**Approval requested · {approval.anchor}**" + (f" `{head}`" if head else "")
         parts = [
-            "**Approval requested**",
+            title,
             "Quick review: `✅` approve · `✖️` deny",
             "",
             f"```sh\n{command[:APPROVAL_COMMAND_DISPLAY_LIMIT]}\n```",

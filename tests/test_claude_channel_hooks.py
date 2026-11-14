@@ -18,10 +18,12 @@ from discord_blue.claude_channel.session import (
     CONTINUING,
     HOOK_TOOL,
     MODEL_CALL,
+    UNANSWERED,
     ClaudeSession,
     waiting_message,
 )
-from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN, SERVER_FEATURES, SessionHello
+from discord_blue.doodads.agent_session.interactions import SessionInteractions
+from discord_blue.doodads.agent_session.protocol import LAUNCH_BRIEF_ORIGIN, SERVER_FEATURES, RemoteApprovalRequest, SessionHello
 from tests.fakes_discord_blue import FakeDiscordBlue
 from tests.test_thread_titles import HARNESS_PROMPTS
 from tests.test_claude_channel import IDENTITY, FakeClaudeCode, command, decision, running_channel
@@ -530,6 +532,46 @@ class DialogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(card["content_text"])["input"]["url"], "https://example.com")
         self.assertEqual(answer and answer["behavior"], "deny")
 
+    async def test_an_unanswered_worker_dialog_is_denied_and_its_card_says_whose_it_is(self) -> None:
+        brief = "Do the work.\nAnchor and claim: https://github.com/owner/repo/issues/412\nMore."
+        worker = dataclasses.replace(IDENTITY, spawned=True, launch_prompt=brief)
+        with patch("discord_blue.claude_channel.session.UNATTENDED_DIALOG_SECONDS", 0.05):
+            async with running_channel(identity=worker, features=FEATURES) as (claude, discord):
+                await claude.initialize()
+                hello = await discord.next("hello")
+                request = open_dialog(claude, "Bash", {"command": "uv run helper.py queue\n--more"})
+                card = await discord.next("approval_request")
+                answer = await hook_answer(claude, request)
+                retired = await discord.next("approval_resolved")
+                notice = await discord.next("notice")
+                late = await discord.control(decision(hello, card["approval_id"], "approved"))
+
+        first_line = SessionInteractions.format_approval_request(RemoteApprovalRequest.from_payload(card)).splitlines()[0]
+        self.assertEqual(first_line, "**Approval requested · owner/repo#412** `uv run helper.py queue`")
+        self.assertEqual(answer, {"behavior": "deny", "message": UNANSWERED})
+        self.assertEqual(retired["approval_id"], card["approval_id"])
+        self.assertIn("(Bash)", notice["message"])
+        self.assertEqual(late["type"], "approval_decision_reject")
+
+    async def test_a_director_dialog_keeps_waiting_for_discord(self) -> None:
+        with patch("discord_blue.claude_channel.session.UNATTENDED_DIALOG_SECONDS", 0.05):
+            async with running_channel(features=FEATURES) as (claude, discord):
+                await claude.initialize()
+                hello = await discord.next("hello")
+                request = open_dialog(claude, "Bash", COMMAND)
+                card = await discord.next("approval_request")
+                await asyncio.sleep(0.2)
+                await discord.control(decision(hello, card["approval_id"], "approved"))
+                answer = await hook_answer(claude, request)
+
+        self.assertNotIn("anchor", card)
+        self.assertEqual(answer, {"behavior": "allow", "updatedInput": COMMAND})
+
+    def test_a_card_shows_only_a_well_formed_anchor(self) -> None:
+        card = {"approval_id": "a", "session_id": "s", "session_epoch": "e", "command_text": "ls", "anchor": "**x** @here"}
+        first_line = SessionInteractions.format_approval_request(RemoteApprovalRequest.from_payload(card)).splitlines()[0]
+        self.assertEqual(first_line, "**Approval requested**")
+
     async def test_questions_are_answered_from_discord_by_question_text(self) -> None:
         async with running_channel(features=FEATURES) as (claude, discord):
             await claude.initialize()
@@ -730,9 +772,13 @@ class DialogTests(unittest.IsolatedAsyncioTestCase):
             resolved = await discord.next("approval_resolved")
             status = await discord.next("status_changed")
             leftover = await claude.settle()
+            await hook(claude, "UserPromptSubmit", prompt="Next task")
+            next_turn = await discord.next("status_changed")
 
         self.assertEqual(resolved["approval_id"], card["approval_id"])
         self.assertEqual(status["message"], waiting_message("Bash"))
+        # The abandoned dialog does not hold the next prompt in its turn.
+        self.assertEqual(next_turn["message"], "Turn started")
         # A cancelled request gets no response.
         self.assertFalse(any(message.get("id") == request for message in leftover))
 
