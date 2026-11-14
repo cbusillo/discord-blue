@@ -425,7 +425,7 @@ class SessionInteractions:
                 await self.stays_native(session, "Action required in the native TUI; Discord cannot show this request in full.")
                 return
         content = self.format_approval_request(approval)
-        if approval.anchor is not None and len(content) > DISCORD_MESSAGE_LIMIT:
+        if approval.anchor is not None and len(content.encode("utf-16-le")) // 2 > DISCORD_MESSAGE_LIMIT:
             # The request itself must show whole; the anchor is only a label.
             approval = dataclasses.replace(approval, anchor=None)
             content = self.format_approval_request(approval)

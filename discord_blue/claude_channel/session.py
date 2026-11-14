@@ -320,9 +320,12 @@ class ClaudeSession(AgentSessionClient):
             wait = UNATTENDED_DIALOG_SECONDS if self.identity.spawned else None
             decision = await asyncio.wait_for(asyncio.shield(dialog.answer), wait)
         except TimeoutError:
-            decision = self.unanswered(key, dialog)
+            # An answer that arrived as the wait ran out still stands.
+            decision = dialog.answer.result() if dialog.answer.done() else self.unanswered(key, dialog)
         except asyncio.CancelledError:
-            # The hook timed out; Claude Code takes the dialog back.
+            # The hook timed out; Claude Code takes the dialog back, and no later prompt waits on it.
+            if not dialog.answer.done():
+                dialog.answer.cancel()
             if (prompt := self.prompts.pop(key, None)) is not None:
                 self.retire(prompt)
                 self.wait_locally(tool_name)

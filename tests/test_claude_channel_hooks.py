@@ -772,9 +772,13 @@ class DialogTests(unittest.IsolatedAsyncioTestCase):
             resolved = await discord.next("approval_resolved")
             status = await discord.next("status_changed")
             leftover = await claude.settle()
+            await hook(claude, "UserPromptSubmit", prompt="Next task")
+            next_turn = await discord.next("status_changed")
 
         self.assertEqual(resolved["approval_id"], card["approval_id"])
         self.assertEqual(status["message"], waiting_message("Bash"))
+        # The abandoned dialog does not hold the next prompt in its turn.
+        self.assertEqual(next_turn["message"], "Turn started")
         # A cancelled request gets no response.
         self.assertFalse(any(message.get("id") == request for message in leftover))
 
