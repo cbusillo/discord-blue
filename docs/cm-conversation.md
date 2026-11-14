@@ -112,7 +112,8 @@ The inbox is bounded. A connected same-epoch client receives unacknowledged
 input again and deduplicates it; a new epoch never inherits old pending input.
 When offline/full, an allowed sender in the configured channel receives a
 resend notice. Historical catch-up is limited to a valid, resumed Gateway
-checkpoint. Edits and observed
+checkpoint and to the epoch it recorded; a new epoch gets the resend notice
+instead. Edits and observed
 message deletions arrive as separate amendments with provenance; they do not
 silently replace a confirmed fact. Deletions of messages outside the bounded
 observed-message memory are not reconstructed.
